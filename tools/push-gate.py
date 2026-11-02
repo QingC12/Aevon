@@ -464,7 +464,7 @@ def check_audit_tokens():
     # 所以「ring: trash 」这种短标记在 dylib 里 grep 不到，审计必挂 —— 而且
     # 本地看不出、只在 CI 里挂。这条把它挡在推送之前：标记必须够长。
     for token in sorted(tokens):
-        if token.startswith(("ring: ", "prefs: ", "scene: ", "scene2: ")) and len(token.encode()) < 16:
+        if token.startswith(("ring: ", "prefs: ", "scene: ", "scene2: ", "calls: ")) and len(token.encode()) < 16:
             bad(f"audit: 标记「{token}」只有 {len(token.encode())} 字节，"
                 f"Swift 会把它编成立即数，二进制里搜不到 —— 至少再加几个字")
 

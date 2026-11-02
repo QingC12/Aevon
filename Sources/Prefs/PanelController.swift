@@ -203,6 +203,12 @@ final class PanelController: PSListController {
         SceneActions.probeSurface(from: self)
     }
 
+    /// 窗口与场景 · 调用点核对. Every call the master makes, resolved to the
+    /// class that defines it here. Runs in SpringBoard, never in this bundle.
+    @objc func sceneCalls(_ specifier: PSSpecifier) {
+        SceneActions.probeCalls(from: self)
+    }
+
     /// Keys driven by a slider. A drag produces a value per touch event, so
     /// these are coalesced; a switch produces exactly one and is written at
     /// once.

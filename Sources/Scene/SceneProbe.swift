@@ -41,10 +41,10 @@ enum SceneProbe {
         guard FileManager.default.fileExists(atPath: Aevon.probePath) else { return false }
         let mode = (try? String(contentsOfFile: Aevon.probePath, encoding: .utf8)) ?? ""
         try? FileManager.default.removeItem(atPath: Aevon.probePath)
-        if mode.trimmingCharacters(in: .whitespacesAndNewlines) == "api" {
-            runSurface()
-        } else {
-            run()
+        switch mode.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "api":   runSurface()
+        case "calls": runCalls()
+        default:      run()
         }
         return true
     }
@@ -222,9 +222,16 @@ enum SceneProbe {
 
     /// A full method list would be unreadable and mostly irrelevant; this keeps
     /// only the selectors that could possibly be part of the carrier.
+    ///
+    /// "Context" / "Host" / "resiz" were added after the first real run: the
+    /// master's `setResizesHostedContext:` matches none of the original needles,
+    /// so a class that defines it printed as if it did not — a gap that reads
+    /// as a negative result. The 123-selector dump does not filter at all, but
+    /// this one should still not lie.
     private static let surfaceNeedles = [
         "init", "scene", "Scene", "handle", "Handle", "present", "Present",
         "activat", "Activat", "layer", "Layer", "view", "View",
+        "Context", "host", "Host", "resiz", "Resiz",
     ]
 
     private static let applicationSelectors = [
@@ -407,6 +414,262 @@ enum SceneProbe {
         }
         Log.write("scene2: fbs scene found " + NSStringFromClass(type(of: scene)) + " "
                   + matrix(scene, sceneSurfaceSelectors))
+    }
+
+    // MARK: - Call table (the master's own calls, asked of iOS 17.3.1)
+
+    /// Every selector the reverse notes found in Stheno's `__objc_methname`,
+    /// one per line, minus the three entries in that dump that only look like
+    /// selectors: an https URL, a dyld rpath, and a stray type encoding.
+    ///
+    /// One string literal rather than an array of literals because Swift stores
+    /// it as a single cstring, and this file shares a 320 KB budget with the
+    /// carrier. Sorted, so a diff between two dumps is a real diff.
+    private static let callSelectors = """
+__swift_objectForKeyedSubscript:
+_activateBundleID:requestID:isTrusted:options:source:originalSource:withResult:
+_addAppLayoutToFront:
+_applicationIconImageForBundleIdentifier:format:scale:
+_createSceneWithDefinition:settings:initialClientSettings:transitionContext:fromRemnant:usingClientProvider:completion:
+_didExitWithContext:
+_dismissPresentable:withReason:animated:userInfo:
+_handleClickAndDragHomeGesture:
+_handleDeckSwitcherPanGesture:
+_handlePan:
+_handlePullGesture:
+_handleTapOnView:
+_killForReason:andReport:withDescription:completion:
+_scene:interceptUpdateWithNewSettings:
+_setDeactivationReasons:onScene:withSettings:reason:
+addObserverForName:object:queue:usingBlock:
+applicationDidFinishLaunching:
+applicationProxyForIdentifier:
+applicationWithBundleIdentifier:
+bezierPathWithRoundedRect:cornerRadius:
+client:didUpdateClientSettings:withDiff:transitionContext:
+closeAndReturnError:
+conformsToProtocol:
+containsPoint:
+createFileAtPath:contents:attributes:
+createPresenterWithIdentifier:priority:
+dataWithJSONObject:options:error:
+deactivateWithTransitionContext:
+dictionaryWithObject:forKey:
+displayItemWithType:bundleIdentifier:uniqueIdentifier:
+enumerateApplicationsOfType:block:
+enumerateScenesWithBlock:
+fileExistsAtPath:
+fileHandleForWritingAtPath:
+frontDisplayDidChange:
+functionWithName:
+gestureRecognizer:shouldBeRequiredToFailByGestureRecognizer:
+gestureRecognizer:shouldReceiveEvent:
+gestureRecognizer:shouldReceivePress:
+gestureRecognizer:shouldReceiveTouch:
+gestureRecognizer:shouldRecognizeSimultaneouslyWithGestureRecognizer:
+gestureRecognizer:shouldRequireFailureOfGestureRecognizer:
+gestureRecognizerShouldBegin:
+handleTransitionRequestForGestureComplete:
+hasSuffix:
+hitTest:withEvent:
+iconManager:launchIconForIconView:withActions:
+impactOccurredWithIntensity:
+initWithArray:
+initWithCGImage:scale:orientation:
+initWithCoder:
+initWithFrame:
+initWithImage:
+initWithItemsForLayoutRoles:configuration:environment:preferredDisplayOrdinal:
+initWithPath:
+initWithSceneLayer:
+initWithString:
+initWithStyle:
+initWithSuiteName:
+initWithTarget:
+initWithURL:
+initWithURL:workspaceOriginatingProcess:
+initWithWindowScene:
+insertSubview:atIndex:
+isApplicationForeground:
+isApplicationRunningAsViewService:
+isEqual:
+isKindOfClass:
+isMemberOfClass:
+launchApplicationWithIdentifier:suspended:
+loadNibNamed:owner:options:
+localizedStringForKey:value:table:
+locationInView:
+materialViewWithRecipe:configuration:initialWeighting:
+noteActiveInterfaceOrientationWillChangeToOrientation:
+numberWithInt:
+objectAtIndexedSubscript:
+objectForInfoDictionaryKey:
+pathForResource:ofType:
+performSelector:
+performSelector:withObject:
+performSelector:withObject:withObject:
+presentPresentable:withOptions:userInfo:
+removePersistentDomainForName:
+respondsToSelector:
+setAnimationSettings:
+setAutoresizingMask:
+setBackgroundColor:
+setCancelsTouchesInView:
+setClipsToBounds:
+setContentMode:
+setContentScaleFactor:
+setDateFormat:
+setForeground:
+setFrame:
+setHandleClick:
+setHidden:
+setImage:
+setInterfaceOrientation:
+setInterfaceOrientationMode:
+setResizesHostedContext:
+setRootViewController:
+setState:
+setUserInteractionEnabled:
+setUserInterfaceStyle:
+setWindowLevel:
+setWindowScene:
+settingsWithDuration:timingFunction:
+storyboardWithName:bundle:
+stringFromDate:
+stringWithFormat:
+stringWithUTF8String:
+touchesBegan:withEvent:
+touchesCancelled:withEvent:
+touchesEnded:withEvent:
+touchesMoved:withEvent:
+translationInView:
+uninstallApplication:
+updateSettings:withTransitionContext:completion:
+valueForKey:
+velocityInView:
+writeData:
+zStackParticipantDidChange:
+"""
+
+    private struct CallOwner {
+        let name: String
+        let encoding: String
+    }
+
+    /// A dictionary of tuples would do the same job, but a named type means the
+    /// `??` fallback site needs no type inference — and that site cannot be
+    /// compiled on this machine, only in CI. `count` is every definition found;
+    /// `owners` is capped, because a selector like `addSubview:` has dozens and
+    /// the log is read by a human.
+    private struct CallHit {
+        var count: Int
+        var owners: [CallOwner]
+    }
+
+    private static var callTargets = Set<String>()
+    private static var callHits: [String: CallHit] = [:]
+    private static var callQueue: [AnyClass] = []
+    private static var callCursor = 0
+    private static var callStart = Date()
+
+    /// SpringBoard side, third dump. The first two answered "does the class
+    /// exist" and "what does this named class answer". Neither answers the
+    /// question that decides whether P1 can be written at all: for each
+    /// selector the master *actually uses*, which class on this iOS defines it,
+    /// and with which type encoding.
+    ///
+    /// Ownership is the part that moves between releases — `setResizesHostedContext:`
+    /// is on the carrier controller here, not on `_UIScenePresenter` — so it is
+    /// measured, never assumed. A selector with `n=0` is the strongest possible
+    /// negative: nobody in the process defines it, so it cannot be called.
+    static func runCalls() {
+        callTargets = Set(callSelectors.split(separator: "\n").map(String.init))
+        callHits = [:]
+        callQueue = allClasses()
+        callCursor = 0
+        callStart = Date()
+        Log.write("calls: definition begin v1 targets=" + String(callTargets.count)
+                  + " classes=" + String(callQueue.count))
+        guard !callQueue.isEmpty else {
+            Log.write("calls: definition end v1 empty")
+            return
+        }
+        scanStep()
+    }
+
+    /// Walked in slices, on the main thread. A single pass over ~99k classes is
+    /// read-only, but it is also long enough to be visible as a hitch, and the
+    /// watchdog does not care that the work is honest.
+    private static func scanStep() {
+        let total = callQueue.count
+        let end = min(callCursor + 600, total)
+        while callCursor < end {
+            let cls = callQueue[callCursor]
+            callCursor += 1
+            collectMethods(of: cls, meta: false)
+            collectMethods(of: cls, meta: true)
+        }
+        if callCursor < total {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { scanStep() }
+            return
+        }
+        emitCallTable()
+    }
+
+    /// Own methods only, instance and class side separately. Inherited hits are
+    /// deliberately not counted: on a previous run 3197 of 3198 classes
+    /// "answered" `responds(to:)` for a selector only one class defined, which
+    /// is exactly the kind of evidence that reads as success and means nothing.
+    ///
+    /// The name comes through `NSStringFromSelector`, the same call the second
+    /// dump already compiles, rather than through `sel_getName` + `String(cString:)`.
+    /// One extra bridge per method, but this file cannot be compiled here and a
+    /// known-good spelling is worth more than a known-marginal saving.
+    private static func collectMethods(of cls: AnyClass, meta: Bool) {
+        // Two statements rather than one ternary: a ternary mixing AnyClass and
+        // AnyClass? is legal but reads as a coin flip when nobody can compile
+        // this locally.
+        let holder: AnyClass? = meta ? object_getClass(cls) : cls
+        guard let holder = holder else { return }
+        var count: UInt32 = 0
+        guard let list = class_copyMethodList(holder, &count) else { return }
+        defer { free(list) }
+        let side = meta ? "+" : "-"
+        let ownerName = NSStringFromClass(cls) + side
+        for index in 0..<Int(count) {
+            let name = NSStringFromSelector(method_getName(list[index]))
+            guard callTargets.contains(name) else { continue }
+            let encoding = method_getTypeEncoding(list[index]).map { String(cString: $0) } ?? "?"
+            var hit = callHits[name] ?? CallHit(count: 0, owners: [])
+            hit.count += 1
+            if hit.owners.count < 10 {
+                if !hit.owners.contains(where: { $0.name == ownerName }) {
+                    hit.owners.append(CallOwner(name: ownerName, encoding: encoding))
+                }
+            }
+            callHits[name] = hit
+        }
+    }
+
+    private static func emitCallTable() {
+        var missing = 0
+        var multi = 0
+        for selector in callTargets.sorted() {
+            guard let hit = callHits[selector] else {
+                missing += 1
+                Log.write("calls: defined by " + selector + " n=0")
+                continue
+            }
+            if hit.count > hit.owners.count { multi += 1 }
+            var line = "calls: defined by " + selector + " n=" + String(hit.count)
+            for owner in hit.owners {
+                line += " " + owner.name + "|" + owner.encoding
+            }
+            Log.write(line)
+        }
+        Log.write("calls: definition end v1 missing=" + String(missing)
+                  + " capped=" + String(multi)
+                  + " secs=" + String(Int(Date().timeIntervalSince(callStart))))
     }
 
     // MARK: - Runtime helpers

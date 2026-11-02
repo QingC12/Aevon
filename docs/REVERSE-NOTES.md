@@ -67,3 +67,61 @@ Swift 方法体已被 strip，**不存在逐指令复刻的可能**。
 
 授权体系（`inject.stheno.com` / `validKey`）属于第三方商业资产，不复刻。
 81 键里两个激活相关项保留键位、功能隐藏。
+
+## 八、iOS 17.3.1 真机核对（2026-11-02，第二段探针）
+
+设备 iPhone 15 Pro Max / 17.3.1 / roothide。进程内注册类 **99,374** 个，与逆向记录的
+99,398 一致（差值来自 respring 后的加载顺序）。
+
+### 8.1 已坐实（归属 + 类型编码都实测）
+
+| 类 | 方法 | encoding | 说明 |
+|---|---|---|---|
+| `UIScenePresentationManager` | `-createPresenterWithIdentifier:priority:` | `@32@0:8@16q24` | 与逆向一致，呈现入口 |
+| `_UIContextLayerHostView` | `-initWithSceneLayer:` | `@24@0:8@16` | 归属由本次实测坐实 |
+| `FBSceneManager` | `-enumerateScenesWithBlock:` | `v24@0:8@?16` | 归属坐实 |
+| `FBSceneManager` | `-_createSceneWithDefinition:settings:initialClientSettings:transitionContext:fromRemnant:usingClientProvider:completion:` | `@72@0:8@16@24@32@40@48@56@?64` | **7 参 + 尾部 block**，编码为新数据 |
+| `FBScene` | `-deactivateWithTransitionContext:` | `v24@0:8@16` | 归属坐实 |
+| `SBDeviceApplicationSceneViewController` | `-initWithSceneHandle:` | `@24@0:8@16` | 承载控制器入口 |
+| `SBDeviceApplicationSceneViewController` | `-setSceneResizesHostedContext:` | `v20@0:8B16` | 见 8.3，注意与母本那条不是同一个 |
+| `SBDeviceApplicationSceneViewController` | `-sceneContentView` / `-backgroundView` | `@16@0:8` | 真正装内容的 view |
+
+`FBSceneManager` 有 `+sharedInstance`，实例答应
+`[sceneWithIdentifier:,enumerateScenesWithBlock:,_createSceneWithDefinition:…,createSceneWithDefinition:]`；
+按名查 `com.apple.springboard` 拿到 `FBScene`，其答应
+`[identifier,specification,clientProcess,settings,definition]`。
+
+### 8.2 否定结论（同样有价值）
+
+- **`SBApplication` 不实现 `-mainSceneHandle`，也不实现 `-sceneHandleForSceneIdentifier:`。**
+  3 个样本（`com.apple.FCAuthenticationUI` / `com.apple.Health` / `com.haier.uhome.Uplus`）在
+  `responds(to:)` 上完全一致，所以是**类级缺席**，不是样本没跑起来。
+  台账里 262 个应用对象全部是 `SBApplication`。
+  ⇒ 「从 bundle id 直接取 App 主场景 handle」这条路在 17.3.1 上不成立，要另找入口。
+  （这条来自多浮窗项目的方案，不是母本的调用；记下来是为了不再重复试。）
+- SpringBoard 进程里的 `UIApplication` 实例子类是 **`SpringBoard`**，它答应
+  `[_windowScene,_mainScene,connectedScenes]`，不答应任何 presentation manager 取值器。
+  这正是我们圆盘宿主取「第一个 connectedScene」会落到 SystemAperture 场景的原因。
+
+### 8.3 两个容易混淆的选择子（写错过一次）
+
+| 选择子 | 归属 | 备注 |
+|---|---|---|
+| `setResizesHostedContext:` | 未知（母本 123 条之一） | 17.3.1 上未解析到；候选 `_UIContextLayerHostView`（11 个自有方法只打了 2 个）或 `UIScenePresentationContext` |
+| `setSceneResizesHostedContext:` | `SBDeviceApplicationSceneViewController` `v20@0:8B16` | 多一个 `Scene`，是宿主侧那条 |
+
+两者**不能互相顶替**。`tools/compare-calls.py` 上一版把前者归属写成了后者的类，已删。
+
+### 8.4 这一段的覆盖盲区（已修）
+
+第二段探针按关键词过滤方法名，原白名单只有 `init/scene/handle/present/activat/layer/view`，
+`setResizesHostedContext:` 一个都不含 ⇒ 即使某个被 dump 的类定义了它，也不会打印，
+**读起来像「不存在」**。已补 `Context / host / Host / resiz / Resiz`。
+此外类名普查命中 663 个但只打印 80 个、每类方法最多打 90 条 —— 都是刻意的上限，
+完整覆盖靠第三段（母本 123 条逐个全进程解析，不过滤）。
+
+### 8.5 与母本的对照状态
+
+123 条里目前**已坐实 5 条、另有 1 条承载关键等待解析**，其余 117 条尚未覆盖 ——
+第二段是为「19 个承载类」写的，不是为母本调用表写的。逐条对齐要等第三段 dump，
+用 `python tools/compare-calls.py <log>` 出表，退出码 0 才算调用点全部清晰。

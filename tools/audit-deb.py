@@ -395,10 +395,13 @@ def main():
             bad("probe: the 探针 group lost its label")
         elif "sceneSurface:" not in window_actions:
             bad("probe: no sceneSurface: row — the carrier call surface stays a guess")
+        elif "sceneCalls:" not in window_actions:
+            bad("probe: no sceneCalls: row — the master's calls never get resolved to a class")
         else:
-            ok("probe: 窗口与场景 has the 探针 group and both of its buttons")
+            ok("probe: 窗口与场景 has the 探针 group and all three of its buttons")
 
-    for token in (b"sceneProbe:", b"sceneSurface:", b"prefs: scene probe requested"):
+    for token in (b"sceneProbe:", b"sceneSurface:", b"sceneCalls:",
+                  b"prefs: scene probe requested"):
         if token not in prefs:
             bad(f"probe: {token.decode()} missing from the bundle binary")
 
@@ -418,6 +421,15 @@ def main():
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the surface dump would come back half empty")
+
+    # The call table is the gate on building a window: if its markers or the
+    # per-line prefix fall out of the stripped binary, the log comes back empty
+    # and looks like 'nothing answered' instead of 'the dump never ran'.
+    for token in (b"calls: definition begin v1 targets=", b"calls: defined by ",
+                  b"calls: definition end v1 missing="):
+        if token not in dylib_early:
+            bad(f"probe: {token.decode()} missing from Aevon.dylib — "
+                "the call table would come back empty and read as a negative")
 
     probe_path = b"/var/mobile/Library/Logs/Aevon/probe.request"
     if probe_path not in prefs or probe_path not in dylib_early:

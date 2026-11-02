@@ -27,6 +27,14 @@ enum SceneActions {
         request("api", from: controller, title: "已请求接口面探针")
     }
 
+    /// Third dump: the master's own calls, resolved to a defining class on this
+    /// iOS. This is the one that has to match the reverse notes before a window
+    /// is created — a call that lands on the wrong class is worse than a call
+    /// that is missing, because it can still return something.
+    static func probeCalls(from controller: UIViewController) {
+        request("calls", from: controller, title: "已请求调用点核对")
+    }
+
     private static func request(_ mode: String, from controller: UIViewController, title: String) {
         // The file is written here, not through SceneProbe: that type lives in
         // the tweak target only, and asking Settings to reach into SpringBoard's
