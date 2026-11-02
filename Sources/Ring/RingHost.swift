@@ -140,14 +140,27 @@ final class RingHost: NSObject {
     /// re-creates its hierarchy on rotation and on app exit, and anything added
     /// straight to it disappears with the next layout pass.
     private func makeWindow() -> UIWindow {
-        if #available(iOS 13.0, *),
-           let scene = UIApplication.shared.connectedScenes
-            .compactMap({ $0 as? UIWindowScene }).first {
+        if #available(iOS 13.0, *), let scene = mainScene() {
             let window = PassthroughWindow(windowScene: scene)
             window.frame = scene.coordinateSpace.bounds
             return window
         }
         return PassthroughWindow(frame: UIScreen.main.bounds)
+    }
+
+    /// `UIApplication.shared` is a force-unwrapped accessor. Inside SpringBoard
+    /// it is normally valid, but "normally" is not a guarantee worth crashing a
+    /// phone over: go through the runtime and return nil when there is no app
+    /// object yet, so the worst case is a fallback window instead of a crash.
+    private func mainScene() -> UIWindowScene? {
+        let selector = NSSelectorFromString("sharedApplication")
+        guard let meta = NSClassFromString("UIApplication") as? NSObject.Type,
+              meta.responds(to: selector),
+              let unmanaged = meta.perform(selector),
+              let application = unmanaged.takeUnretainedValue() as? UIApplication else {
+            return nil
+        }
+        return application.connectedScenes.compactMap { $0 as? UIWindowScene }.first
     }
 
     private func observe() {

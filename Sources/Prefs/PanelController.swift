@@ -89,7 +89,12 @@ final class PanelController: PSListController {
         }
         if key == "@ring.host" {
             let config = RingConfig.loadRuntime()
-            return config.desktop ? "已挂载 · \(config.summary)" : "未挂载（开关关闭）"
+            // Says what this side knows: the switch state and the geometry the
+            // host will read. It cannot claim "mounted" — only SpringBoard's
+            // log line can prove that.
+            return config.desktop
+                ? "开关已开启 · \(config.summary)"
+                : "开关已关闭（桌面无握把）"
         }
         return super.readPreferenceValue(specifier)
     }
