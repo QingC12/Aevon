@@ -684,7 +684,10 @@ zStackParticipantDidChange:
     /// `ftruncate` on a handle that is opened once: no allocation, no bridge,
     /// no log line, and it survives the SIGKILL that a signal handler cannot.
     private static func mark(_ cls: AnyClass, index: Int) {
-        guard callStateFD >= 0, let name = class_getName(cls) else { return }
+        // `class_getName` is imported non-optional in this SDK, so there is no
+        // optional to bind here — the guard is on the handle only.
+        guard callStateFD >= 0 else { return }
+        let name = class_getName(cls)
         let length = strlen(name)
         var slot = UInt32(truncatingIfNeeded: index)
         _ = lseek(callStateFD, 0, SEEK_SET)
