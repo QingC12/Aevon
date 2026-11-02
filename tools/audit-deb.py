@@ -286,11 +286,14 @@ def main():
                    "Notify", "Jump", "Listen", "Apps"]
     signatures = {}
     for name in panel_names:
-        blob = files.get(f"{BUNDLE_DIR}/{name}.plist")
-        if blob is None:
+        # Deliberately NOT `blob`: that name holds the .deb itself and is used
+        # by the size check at the end. Reusing it here made the report print
+        # the size of the last plist (842 B) instead of the package.
+        panel_blob = files.get(f"{BUNDLE_DIR}/{name}.plist")
+        if panel_blob is None:
             bad(f"panels: {name}.plist missing")
             continue
-        entries = plistlib.loads(blob).get("items", [])
+        entries = plistlib.loads(panel_blob).get("items", [])
         if len(entries) < 3:
             bad(f"panels: {name} has only {len(entries)} rows")
         signatures[name] = tuple(
