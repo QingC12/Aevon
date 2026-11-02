@@ -1,18 +1,38 @@
 #!/bin/sh
-# aevon-disable — 立刻停用 Aevon，不需要重装、不需要重启。
-# 可以在 SSH、NewTerm、或任何能执行命令的地方运行。
+# aevon-disable — 立刻停用 Aevon。设置里的「紧急停止 (G0)」与它等价。
 set -u
-export PATH="/var/jb/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-P="/var/mobile/Library/Preferences/com.aevon.panic"
 
-mkdir -p "$(dirname "$P")" 2>/dev/null
+# roothide: bootstrap 在随机路径；rootless: /var/jb。
+JB=""
+for d in /var/containers/Bundle/Application/.jbroot-*; do
+    [ -d "$d" ] && JB="$d" && break
+done
+if [ -z "$JB" ] && [ -d /var/jb ]; then JB="/var/jb"; fi
+[ -n "$JB" ] && PATH="$JB/usr/bin:$PATH"
+export PATH
+
+# libvroot 环境下 "/" 是 jbroot，真实根在 /rootfs。
+DATA="/var/mobile"
+if [ -d /rootfs/var/mobile ]; then DATA="/rootfs/var/mobile"; fi
+AEV="$DATA/Library/Logs/Aevon"
+P="$AEV/panic"
+
+mkdir -p "$AEV" 2>/dev/null
 {
-  echo "disabled by rescue"
-  date
+    echo "disabled by rescue"
+    date
 } > "$P" 2>/dev/null || echo "warn: cannot write $P"
 chmod 644 "$P" 2>/dev/null
 
-echo "[aevon] panic flag: $P"
-echo "[aevon] Aevon will not install a single hook while this file exists."
+# 偏好通道：桌面读的就是它，即使上面写文件失败也能生效。
+command -v defaults >/dev/null 2>&1 && \
+    defaults write com.aevon.aevon panic -bool YES 2>/dev/null
+
+echo "[aevon] panic flag : $P"
+echo "[aevon] 只要这个文件存在，Aevon 一个 hook 都不会装。"
 echo "[aevon] reloading SpringBoard..."
-killall -9 SpringBoard 2>/dev/null || echo "warn: killall failed, reboot manually"
+if command -v sbreload >/dev/null 2>&1; then
+    sbreload
+else
+    killall -9 SpringBoard 2>/dev/null || echo "warn: 请用越狱工具的重启按钮"
+fi

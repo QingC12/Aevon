@@ -307,7 +307,7 @@ def build_root():
                   "file": "Apps", "File": "Apps"})
 
     items.append({"cell": "PSGroupCell", "label": "关于",
-                  "footerText": "Aevon 0.1.0 · 设置界面 64/64 项已就位，功能 0/64 已接通。"
+                  "footerText": "Aevon 0.0.2 · 设置界面 64/64 项已就位，功能 0/64 已接通。"
                                 "所有改动只写 com.aevon.aevon，不触碰系统文件。"})
 
     return {"title": "Aevon", "items": items}

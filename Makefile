@@ -1,6 +1,12 @@
 export TARGET := iphone:clang:16.5:15.0
-export ARCHS := arm64 arm64e
-export THEOS_PACKAGE_SCHEME := rootless
+
+# The device runs a roothide jailbreak: bootstrap lives in a randomised
+# /var/containers/Bundle/Application/.jbroot-XXXXXXXX directory, so the package
+# must be built with the roothide scheme and be iphoneos-arm64e. Both binaries
+# are therefore arm64e-only, which is what actually loads in SpringBoard and
+# Settings on an arm64e device (A12 and newer).
+export ARCHS := arm64e
+export THEOS_PACKAGE_SCHEME := roothide
 
 include $(THEOS)/makefiles/common.mk
 

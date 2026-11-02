@@ -1,16 +1,18 @@
 name: build
 
+# 只在 main 上构建，且只产出一个 deb。
+# 不打 tag、不建 Release：产物从 Actions 的 artifact 下载后本地留存。
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*' ]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
+# 连续 push 只保留最后一次，避免浪费额度。
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-main
   cancel-in-progress: true
 
 jobs:
@@ -23,18 +25,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 缓存 key 必须随工具链变化：这里是 roothide 的 theos 分支，
+      # 不能复用旧 rootless 那套缓存，否则会拿到错的 makefiles。
       - name: Restore Theos + SDK cache
         id: cache
         uses: actions/cache@v4
         with:
           path: .theos
-          key: theos-macos14-sdk16.5-v1
+          key: theos-roothide-macos14-sdk16.5-v1
 
-      - name: Install Theos
+      - name: Install Theos (roothide branch)
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           set -euxo pipefail
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          git clone --recursive --depth 1 https://github.com/roothide/theos.git "$THEOS"
           mkdir -p "$THEOS/sdks"
           git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git /tmp/sdks
           git -C /tmp/sdks sparse-checkout set iPhoneOS16.5.sdk
@@ -45,8 +49,10 @@ jobs:
           set -euxo pipefail
           test -d "$THEOS/makefiles"
           test -d "$THEOS/sdks/iPhoneOS16.5.sdk"
+          # roothide 的打包规则必须存在，缺了说明克隆到了错的仓库
+          test -e "$THEOS/makefiles/package" -o -e "$THEOS/makefiles/instance"
+          ls "$THEOS/makefiles/package" 2>/dev/null || true
           echo "THEOS=$THEOS"
-          ls "$THEOS/sdks"
 
       - name: Install packaging deps
         run: |
@@ -58,13 +64,26 @@ jobs:
           xcodebuild -version
           clang --version | head -2
 
-      - name: Build rootless deb
+      - name: Version consistency
+        run: |
+          set -euxo pipefail
+          V="$(awk -F': ' '/^Version:/{print $2; exit}' control)"
+          A="$(awk -F': ' '/^Architecture:/{print $2; exit}' control)"
+          echo "control: $V / $A"
+          grep -q "kAevonVersion = @\"$V\"" Sources/Aevon.mm
+          test "$A" = "iphoneos-arm64e"
+          echo "version + arch consistent"
+
+      - name: Build roothide deb (single package)
         run: |
           set -euxo pipefail
           make clean || true
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
           echo "--- packages ---"
-          ls -la packages/ || true
+          ls -la packages/
+          N="$(ls packages/*.deb | wc -l | tr -d ' ')"
+          test "$N" -eq 1
+          echo "exactly one deb: $(ls packages/*.deb)"
 
       - name: Gate — audit package payload
         run: |
@@ -79,10 +98,3 @@ jobs:
           path: packages/*.deb
           if-no-files-found: error
           retention-days: 30
-
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: packages/*.deb
-          generate_release_notes: true

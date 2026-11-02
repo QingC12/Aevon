@@ -29,12 +29,23 @@
 #define AEVON_UNUSED __attribute__((unused))
 
 static AEVON_UNUSED NSString *const kAevonDomain     = @"com.aevon.aevon";
-static AEVON_UNUSED NSString *const kAevonStatePath  = @"/var/mobile/Library/Preferences/com.aevon.state.plist";
-static AEVON_UNUSED NSString *const kAevonPanicPath  = @"/var/mobile/Library/Preferences/com.aevon.panic";
+
+// State lives under Logs/, not under Library/Preferences/.
+// Reason: a roothide jailbreak redirects /var/mobile/Library/Preferences to a
+// randomised per-boot path for jailbreak-related processes. SpringBoard and
+// Settings may therefore disagree about what that file contains. Logs/ is not
+// on roothide's redirect list, so both sides always see the same bytes.
 static AEVON_UNUSED NSString *const kAevonLogDir     = @"/var/mobile/Library/Logs/Aevon";
 static AEVON_UNUSED NSString *const kAevonLogPath    = @"/var/mobile/Library/Logs/Aevon/aevon.log";
 static AEVON_UNUSED NSString *const kAevonProbeTxt   = @"/var/mobile/Library/Logs/Aevon/probe.txt";
 static AEVON_UNUSED NSString *const kAevonProbePlist = @"/var/mobile/Library/Logs/Aevon/probe.plist";
+static AEVON_UNUSED NSString *const kAevonStatePath  = @"/var/mobile/Library/Logs/Aevon/state.plist";
+static AEVON_UNUSED NSString *const kAevonPanicPath  = @"/var/mobile/Library/Logs/Aevon/panic";
+
+// Pre-0.0.2 location, still honoured on read so an upgrade never loses the
+// crash counter or the panic file.
+static AEVON_UNUSED NSString *const kAevonStateLegacy = @"/var/mobile/Library/Preferences/com.aevon.state.plist";
+static AEVON_UNUSED NSString *const kAevonPanicLegacy = @"/var/mobile/Library/Preferences/com.aevon.panic";
 
 // Darwin notifications: the only channel between Settings and SpringBoard.
 static AEVON_UNUSED NSString *const kAevonNoteReprobe   = @"com.aevon.reprobe";
@@ -70,10 +81,52 @@ static inline void AevonSetPref(NSString *key, id value) {
     CFPreferencesAppSynchronize((__bridge CFStringRef)kAevonDomain);
 }
 
+#pragma mark - Jailbreak root (rootless / roothide)
+
+// roothide keeps the bootstrap in a random directory:
+//   /var/containers/Bundle/Application/.jbroot-XXXXXXXXXXXXXXXX
+// Rootless keeps it at /var/jb. We never hardcode either: we look, once, and
+// cache the answer for this process.
+static inline NSString *AevonBootstrapRoot(void) {
+    static NSString *cached = nil;
+    static BOOL looked = NO;
+    if (looked) return cached;
+    looked = YES;
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *base = @"/var/containers/Bundle/Application";
+    for (NSString *name in [fm contentsOfDirectoryAtPath:base error:NULL]) {
+        if ([name hasPrefix:@".jbroot-"]) {
+            cached = [base stringByAppendingPathComponent:name];
+            return cached;
+        }
+    }
+    if ([fm fileExistsAtPath:@"/var/jb"]) cached = @"/var/jb";
+    return cached;
+}
+
+// Ordered list of argv arrays that can restart SpringBoard.
+// Bootstrap helpers come first because on roothide they are the real ones.
+static inline NSArray<NSArray<NSString *> *> *AevonRespringCandidates(void) {
+    NSMutableArray<NSArray<NSString *> *> *out = [NSMutableArray array];
+    NSString *root = AevonBootstrapRoot();
+    if (root.length) {
+        [out addObject:@[[root stringByAppendingPathComponent:@"usr/bin/sbreload"]]];
+        [out addObject:@[[root stringByAppendingPathComponent:@"usr/bin/killall"],
+                         @"-9", @"SpringBoard"]];
+    }
+    [out addObject:@[@"/usr/bin/sbreload"]];
+    [out addObject:@[@"/usr/bin/killall", @"-9", @"SpringBoard"]];
+    return out;
+}
+
 #pragma mark - State file
 
 static inline NSDictionary *AevonReadState(void) {
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kAevonStatePath];
+    if (![d isKindOfClass:[NSDictionary class]]) {
+        d = [NSDictionary dictionaryWithContentsOfFile:kAevonStateLegacy];
+    }
     return [d isKindOfClass:[NSDictionary class]] ? d : @{};
 }
 
@@ -91,7 +144,9 @@ static inline BOOL AevonWriteState(NSDictionary *state) {
 #pragma mark - Gates
 
 static inline BOOL AevonPanicActive(void) {
-    if ([[NSFileManager defaultManager] fileExistsAtPath:kAevonPanicPath]) return YES;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if ([fm fileExistsAtPath:kAevonPanicPath])   return YES;
+    if ([fm fileExistsAtPath:kAevonPanicLegacy]) return YES;
     return AevonPrefBool(@"panic");
 }
 
@@ -109,6 +164,7 @@ static inline void AevonSetPanic(BOOL on) {
         [[NSData data] writeToFile:kAevonPanicPath atomically:YES];  // best effort
     } else {
         [fm removeItemAtPath:kAevonPanicPath error:NULL];
+        [fm removeItemAtPath:kAevonPanicLegacy error:NULL];   // upgrade path
     }
 }
 

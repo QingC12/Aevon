@@ -1,24 +1,24 @@
 # 构建与安装
 
-## 一、构建（GitHub Actions，推荐）
+目标环境：**roothide 越狱**（bootstrap 在 `/var/containers/Bundle/Application/.jbroot-XXXXXXXX`），
+设备为 arm64e，所以包是 `iphoneos-arm64e`，二进制是 arm64e。
 
-仓库是 public，Actions 不消耗额度。推送到 `main` 自动构建，产物在 Actions 的 **Artifacts → aevon-deb**。
+## 一、构建（GitHub Actions）
 
-打 tag 会自动发 Release：
+仓库是 public，Actions 不消耗额度。推送到 `main` 自动构建**一次**，产物在 **Actions → Artifacts → aevon-deb**。
 
-```bash
-git tag v0.0.1 && git push origin v0.0.1
-```
-
-构建流程：
+- 不打 tag，也不建 Release：每次构建只出一个 deb，下载后本地留存。
+- 连续 push 会取消上一次未完成的构建（`concurrency`），不浪费额度。
 
 ```
 macOS 14 runner
-  ├─ clone theos/theos（递归）
+  ├─ clone roothide/theos（递归）        ← 必须用这个分支，原版 theos 没有 roothide scheme
   ├─ sparse-checkout theos/sdks → iPhoneOS16.5.sdk
   ├─ brew install ldid
-  ├─ make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
-  ├─ tools/audit-deb.sh  ← 安全闸门，不过就红
+  ├─ 校验 control 的 Version 与源码 kAevonVersion 一致、Architecture=iphoneos-arm64e
+  ├─ make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+  ├─ 断言只产出 1 个 deb
+  ├─ tools/audit-deb.sh  ← 安全闸门：结构 / 白名单 / arm64e / 无 Description
   └─ upload artifact
 ```
 
@@ -31,62 +31,32 @@ export THEOS=~/theos
 export PATH=$THEOS/bin:$PATH
 
 # 只需要一次
-git clone --recursive https://github.com/theos/theos.git $THEOS
+git clone --recursive https://github.com/roothide/theos.git $THEOS
 git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git /tmp/sdks
 (cd /tmp/sdks && git sparse-checkout set iPhoneOS16.5.sdk)
 cp -R /tmp/sdks/iPhoneOS16.5.sdk $THEOS/sdks/
 
 # 每次
 cd Aevon
-make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
 ./tools/audit-deb.sh packages/*.deb
 ```
 
-产物：`packages/com.aevon.aevon_0.0.1_iphoneos-arm64.deb`
+产物：`packages/com.aevon.aevon_0.0.2_iphoneos-arm64e.deb`
 
 ## 三、安装
 
-**前提**：rootless 越狱（Dopamine / palera1n rootless），已装 ElleKit 或 MobileSubstrate。
+**前提**：roothide 越狱，已装 ElleKit（roothide 自带）与 PreferenceLoader。
 
-在设备上（NewTerm / SSH）：
+在 Sileo / Zebra 里直接打开 deb 安装即可。装完**不会**自动重启桌面（`postinst` 故意不重启）。
 
-```sh
-dpkg -i /var/mobile/com.aevon.aevon_0.0.1_iphoneos-arm64.deb
-sbreload
-```
-
-或者在 Sileo/Zebra 里添加本地源/直接打开 deb。
-
-> `postinst` **故意不重启 SpringBoard**。装完之后什么都不会发生，直到你手动 `sbreload`。
-> 这个空窗期就是留给你确认"panic 文件可写、SSH 可用"的时间。
-
-安装后立刻验证：
-
-```sh
-/var/jb/usr/libexec/aevon/aevon-status
-```
-
-期望看到：
-
-```
-panic flag : absent
-state file : /var/mobile/Library/Preferences/com.aevon.state.plist
-  attempts = 1
-  version  = 0.0.1
-```
-
-约 60 秒后再看一次，`attempts` 应该变成 `0`、并出现 `stableSince`。这就是 Stage 0 的验收标准。
+> 这个空窗期就是留给你确认"设置里能看到 Aevon 一行"的时间。
 
 ## 四、回退
 
-```sh
-dpkg -i 旧版.deb          # 降级
-# 或
-dpkg -r com.aevon.aevon   # 卸载
-sbreload
-```
+在 Sileo 里卸载 `Aevon`，然后用越狱工具重启一次桌面。
 
-状态文件会保留（避免"重装即重新武装"），需要彻底重置用 `aevon-enable`。
+状态文件会保留（避免"重装即重新武装"），需要彻底重置就在设置里点「清除崩溃计数」。
 
 ## 五、常见构建失败
 
@@ -94,5 +64,6 @@ sbreload
 |---|---|---|
 | `error: SDK "iphoneos16.5" cannot be located` | SDK 没放对位置 | 确认 `$THEOS/sdks/iPhoneOS16.5.sdk` 存在 |
 | `ldid: command not found` | 缺签名工具 | macOS `brew install ldid`，Linux `apt install ldid` |
-| `audit: Architecture 应为 iphoneos-arm64` | 忘了 rootless scheme | `make package THEOS_PACKAGE_SCHEME=rootless` |
+| `audit: payload 仍带 var/jb 前缀` | 用了原版 theos，scheme 没生效 | 换成 `roothide/theos` |
+| `audit: 不含 arm64e 切片` | ARCHS 没设成 arm64e | `export ARCHS := arm64e` |
 | `audit: 白名单外文件` | layout 里加了新文件 | 同时更新 `tools/audit-deb.sh` 白名单，这是刻意的二次确认 |

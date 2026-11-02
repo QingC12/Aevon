@@ -4,10 +4,24 @@
 #   用法（设备上，root）:
 #       sh /var/mobile/preflight.sh
 #
-# 它做三件事：确认环境是 rootless、确认救援通道可用、把当前状态存一份快照。
+# 它做三件事：确认环境是 roothide（或 rootless）、确认救援通道可用、把当前状态存一份快照。
 # 任何一项不对，就别装。
 set -u
-export PATH="/var/jb/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+# roothide 的 bootstrap 在随机路径，不能写死 /var/jb。
+JB=""
+for d in /var/containers/Bundle/Application/.jbroot-*; do
+    if [ -d "$d" ]; then JB="$d"; break; fi
+done
+if [ -z "$JB" ] && [ -d /var/jb ]; then
+    JB="/var/jb"
+fi
+
+if [ -n "$JB" ]; then
+    export PATH="$JB/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+else
+    export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+fi
 
 OUT_DIR="/var/mobile/Library/Logs/Aevon"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -21,25 +35,28 @@ echo "== Aevon preflight =="
 echo "date: $(date)"
 echo ""
 
-# 1. rootless 环境
-if [ -d /var/jb ]; then
-    say ok "/var/jb 存在（rootless）"
+# 1. 越狱环境
+if [ -z "$JB" ]; then
+    bad "没找到 .jbroot-* 也没有 /var/jb，装 iphoneos-arm64e 包不会生效"
 else
-    bad "没有 /var/jb，这不是 rootless 环境，装 iphoneos-arm64 包会失败"
+    case "$JB" in
+        *.jbroot-*) say ok "roothide 环境: $JB" ;;
+        *)          say ok "rootless 环境: $JB" ;;
+    esac
 fi
 
 # 2. 注入器
-if [ -d /var/jb/usr/lib/ellekit ] || [ -f /var/jb/usr/lib/libellekit.dylib ]; then
+if [ -n "$JB" ] && { [ -d "$JB/usr/lib/ellekit" ] || [ -f "$JB/usr/lib/libellekit.dylib" ]; }; then
     say ok "ElleKit 存在"
-elif [ -f /var/jb/usr/lib/libsubstrate.dylib ]; then
+elif [ -n "$JB" ] && [ -f "$JB/usr/lib/libsubstrate.dylib" ]; then
     say ok "MobileSubstrate 存在"
 else
     bad "没找到 ElleKit / MobileSubstrate，注入不会生效"
 fi
 
 # 3. 动态库目录
-DL="/var/jb/Library/MobileSubstrate/DynamicLibraries"
-if [ -d "$DL" ]; then
+DL="$JB/Library/MobileSubstrate/DynamicLibraries"
+if [ -n "$JB" ] && [ -d "$DL" ]; then
     say ok "注入目录存在，现有 $(ls -1 "$DL" 2>/dev/null | grep -c '\.dylib$') 个 dylib"
 else
     bad "$DL 不存在"
@@ -64,18 +81,18 @@ else
     bad "/var 可用空间不足 50 MB"
 fi
 
-# 6. 救援通道：panic 文件必须可写
-mkdir -p /var/mobile/Library/Preferences 2>/dev/null
-P="/var/mobile/Library/Preferences/com.aevon.panic.probe"
+# 6. 救援通道：状态目录必须可写（panic 文件与 state.plist 都落在这里）
+P="$OUT_DIR/.probe"
+mkdir -p "$OUT_DIR" 2>/dev/null
 if ( : > "$P" ) 2>/dev/null; then
     rm -f "$P"
-    say ok "panic 文件路径可写（救援通道成立）"
+    say ok "救援目录可写（$OUT_DIR）"
 else
-    bad "/var/mobile/Library/Preferences 不可写，救援开关会失效，禁止安装"
+    bad "$OUT_DIR 不可写，救援开关会失效，禁止安装"
 fi
 
 # 7. SSH（可选但强烈建议）
-if [ -x /var/jb/usr/sbin/sshd ] || [ -x /usr/sbin/sshd ]; then
+if [ -x /usr/sbin/sshd ] || { [ -n "$JB" ] && [ -x "$JB/usr/sbin/sshd" ]; }; then
     say ok "sshd 已安装"
 else
     say warn "没装 OpenSSH，出事就只能靠 Filza 建 panic 文件了"
@@ -86,9 +103,10 @@ mkdir -p "$OUT_DIR" 2>/dev/null
 {
     echo "# Aevon baseline $STAMP"
     echo "## uname"; uname -a
+    echo "## jbroot"; echo "$JB"
     echo "## dpkg -l"; dpkg -l 2>/dev/null
     echo "## dynamic libraries"; ls -l "$DL" 2>/dev/null
-    echo "## aevon state"; ls -l /var/mobile/Library/Preferences/com.aevon.* 2>/dev/null
+    echo "## aevon state"; ls -l "$OUT_DIR" 2>/dev/null
 } > "$BASELINE" 2>/dev/null
 say ok "快照已存: $BASELINE"
 

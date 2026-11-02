@@ -22,7 +22,7 @@ aevon-status       # 看当前状态
 aevon-uninstall    # 彻底卸载
 ```
 
-完整路径：`/var/jb/usr/libexec/aevon/`
+完整路径：`/var/containers/Bundle/Application/.jbroot-*/usr/libexec/aevon/`
 
 ---
 
@@ -46,6 +46,6 @@ aevon-uninstall    # 彻底卸载
 
 ## 三条不要做
 
-- 不要 `rm -rf /var/jb`（那是越狱环境本体）
+- 不要 `rm -rf .jbroot-*` 或 `rm -rf /var/jb`（那是越狱环境本体）
 - 不要在崩溃循环中反复"再装一次试试"
 - 不要在没确认 SSH 可用之前装下一期

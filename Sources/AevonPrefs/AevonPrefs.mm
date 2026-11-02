@@ -71,13 +71,7 @@ static BOOL AevonSpawn(NSString *path, NSArray<NSString *> *args) {
 // Settings runs sandboxed on some jailbreaks, so an exec may simply be refused.
 // We try the usual suspects and let the caller decide what to say when all fail.
 static BOOL AevonTryRespringExec(void) {
-    NSArray<NSArray<NSString *> *> *candidates = @[
-        @[@"/var/jb/usr/bin/sbreload"],
-        @[@"/usr/bin/sbreload"],
-        @[@"/var/jb/usr/bin/killall", @"-9", @"SpringBoard"],
-        @[@"/usr/bin/killall", @"-9", @"SpringBoard"],
-    ];
-    for (NSArray<NSString *> *c in candidates) {
+    for (NSArray<NSString *> *c in AevonRespringCandidates()) {
         if (AevonSpawn(c.firstObject, [c subarrayWithRange:NSMakeRange(1, c.count - 1)])) {
             return YES;
         }

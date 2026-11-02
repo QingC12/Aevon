@@ -10,14 +10,18 @@
 #
 set +e
 
-MOBILE_ROOT="/var/mobile"
-LOG_DIR="$MOBILE_ROOT/Library/Logs/Aevon"
-
-mkdir -p "$LOG_DIR" 2>/dev/null
-chown -R mobile:mobile "$LOG_DIR" 2>/dev/null
+# roothide 的维护脚本跑在 libvroot 里："/" 是 jbroot，真实根在 /rootfs。
+# 两个都试一次；失败也无所谓，插件加载时会自己建目录。
+for ROOT in /rootfs/var/mobile /var/mobile; do
+    LOG_DIR="$ROOT/Library/Logs/Aevon"
+    if mkdir -p "$LOG_DIR" 2>/dev/null; then
+        chown -R mobile:mobile "$LOG_DIR" 2>/dev/null
+        break
+    fi
+done
 
 echo ""
-echo "  Aevon installed (Stage 1 — settings surface, zero hooks)."
+echo "  Aevon 0.0.2 installed (roothide / arm64e, zero hooks)."
 echo ""
 echo "  Everything is operated from the GUI. No terminal needed:"
 echo "      Settings > Aevon"

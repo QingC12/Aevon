@@ -112,6 +112,37 @@ echo "== Aevon package audit =="
 echo "file: $DEB"
 echo ""
 
+# 读 Mach-O 的架构列表（fat 与 thin 都支持）。roothide 要求 arm64e。
+macho_archs() {
+    python3 - "$1" <<'PY'
+import struct, sys
+blob = open(sys.argv[1], 'rb').read()
+names = {0: 'arm64', 1: 'arm64v8', 2: 'arm64e', 3: 'arm64_32'}
+def kind(cputype, sub):
+    if cputype != 0x0100000c:
+        return None
+    return names.get(sub & 0x00ffffff, 'arm64?')
+out = []
+magic = blob[:4]
+if magic in (b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf'):
+    wide = magic == b'\xca\xfe\xba\xbf'
+    n = struct.unpack('>I', blob[4:8])[0]
+    off = 8
+    for _ in range(n):
+        cputype, cpusub = struct.unpack('>ii', blob[off:off + 8])
+        off += 32 if wide else 20
+        k = kind(cputype, cpusub)
+        if k:
+            out.append(k)
+elif magic == b'\xcf\xfa\xed\xfe':
+    cputype, cpusub = struct.unpack('<ii', blob[4:12])
+    k = kind(cputype, cpusub)
+    if k:
+        out.append(k)
+print(' '.join(out))
+PY
+}
+
 FILES_TXT="$WORK/files.txt"
 ( cd "$WORK/root" && find . -type f | sed 's|^\./||' | sort ) > "$FILES_TXT"
 COUNT="$(wc -l < "$FILES_TXT" | tr -d ' ')"
@@ -119,6 +150,16 @@ COUNT="$(wc -l < "$FILES_TXT" | tr -d ' ')"
 if [ "$COUNT" -eq 0 ]; then
     echo "FAIL: 包是空的" >&2
     exit 1
+fi
+
+# ---------------------------------------------------------------- 0. 包结构
+# roothide 包按 rootful 结构打包，dpkg 自己把文件放随机 jbroot。
+# 如果还带 var/jb 前缀，说明 THEOS_PACKAGE_SCHEME 没生效，装上去是错位的。
+if grep -q '^var/jb/' "$FILES_TXT"; then
+    note FAIL "payload 仍带 var/jb 前缀 → scheme 没生效，roothide 下会装错位置"
+    fail=1
+else
+    note ok "结构: roothide（rootful 布局，无 var/jb 前缀）"
 fi
 
 # ---------------------------------------------------------------- 1. 高危目录
@@ -184,6 +225,18 @@ DYL_B="$WORK/root/var/jb/Library/MobileSubstrate/DynamicLibraries/Aevon.dylib"
 FILTER="$PLIST_A"; [ -f "$FILTER" ] || FILTER="$PLIST_B"
 DYLIB="$DYL_A";    [ -f "$DYLIB" ]  || DYLIB="$DYL_B"
 
+check_macho_arm64e() {
+    local f="$1" label="$2" archs
+    [ -f "$f" ] || return 0
+    archs="$(macho_archs "$f" 2>/dev/null || true)"
+    if printf '%s' "$archs" | grep -q 'arm64e'; then
+        note ok "$label 含 arm64e（${archs}）"
+    else
+        note FAIL "$label 不含 arm64e 切片（${archs:-解析失败}）"
+        fail=1
+    fi
+}
+
 if [ ! -f "$DYLIB" ]; then
     note FAIL "缺少 Aevon.dylib"
     fail=1
@@ -192,10 +245,11 @@ elif [ ! -s "$DYLIB" ]; then
     fail=1
 else
     note ok "Aevon.dylib $(wc -c < "$DYLIB" | tr -d ' ') 字节"
-    if command -v lipo >/dev/null 2>&1; then
-        note info "arch: $(lipo -archs "$DYLIB" 2>/dev/null || echo unknown)"
-    fi
+    check_macho_arm64e "$DYLIB" "Aevon.dylib"
 fi
+
+PREFS_BIN="$WORK/root/Library/PreferenceBundles/AevonPrefs.bundle/AevonPrefs"
+check_macho_arm64e "$PREFS_BIN" "AevonPrefs"
 
 if [ ! -f "$FILTER" ]; then
     note FAIL "缺少 Aevon.plist 注入过滤器"
@@ -235,14 +289,25 @@ done
 
 # ---------------------------------------------------------------- 5. 元数据
 ARCH=""
+VER=""
 if [ -f "$WORK/ctrl/control" ]; then
     ARCH="$(grep -i '^Architecture:' "$WORK/ctrl/control" | head -1 | awk '{print $2}')"
+    VER="$(grep -i '^Version:' "$WORK/ctrl/control" | head -1 | awk '{print $2}')"
 fi
-if [ "$ARCH" = "iphoneos-arm64" ]; then
-    note ok "Architecture: $ARCH (rootless)"
+if [ "$ARCH" = "iphoneos-arm64e" ]; then
+    note ok "Architecture: $ARCH (roothide) version $VER"
 else
-    note FAIL "Architecture 应为 iphoneos-arm64，实际: ${ARCH:-missing}"
+    note FAIL "Architecture 应为 iphoneos-arm64e（roothide），实际: ${ARCH:-missing}"
     fail=1
+fi
+
+# 按要求：control 里不写描述，Sileo 的插件页就不显示描述。
+# dpkg-deb 对缺描述只给 warning，不会拒绝打包。
+if [ -f "$WORK/ctrl/control" ] && grep -qi '^Description:' "$WORK/ctrl/control"; then
+    note FAIL "control 仍有 Description 字段（Sileo 会显示描述）"
+    fail=1
+else
+    note ok "control 无 Description（Sileo 不显示描述）"
 fi
 
 echo ""

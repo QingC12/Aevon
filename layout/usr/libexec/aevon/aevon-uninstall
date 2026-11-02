@@ -1,13 +1,30 @@
 #!/bin/sh
 # aevon-uninstall — 彻底卸载，并把状态清干净。越狱环境不动。
 set -u
-export PATH="/var/jb/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+JB=""
+for d in /var/containers/Bundle/Application/.jbroot-*; do
+    [ -d "$d" ] && JB="$d" && break
+done
+if [ -z "$JB" ] && [ -d /var/jb ]; then JB="/var/jb"; fi
+[ -n "$JB" ] && PATH="$JB/usr/bin:$PATH"
+export PATH
+
+DATA="/var/mobile"
+if [ -d /rootfs/var/mobile ]; then DATA="/rootfs/var/mobile"; fi
+AEV="$DATA/Library/Logs/Aevon"
 
 echo "[aevon] removing package..."
-dpkg -r com.aevon.aevon 2>/dev/null || apt-get remove -y com.aevon.aevon 2>/dev/null || echo "warn: dpkg failed, use Sileo/Zebra to remove 'Aevon'"
+dpkg -r com.aevon.aevon 2>/dev/null || echo "warn: dpkg 失败，请在 Sileo 里卸载 Aevon"
 
-rm -f /var/mobile/Library/Preferences/com.aevon.panic 2>/dev/null
-rm -f /var/mobile/Library/Preferences/com.aevon.state.plist 2>/dev/null
+rm -f "$AEV/panic" 2>/dev/null
+rm -f "$AEV/state.plist" 2>/dev/null
+rm -f "$DATA/Library/Preferences/com.aevon.panic" 2>/dev/null
+rm -f "$DATA/Library/Preferences/com.aevon.state.plist" 2>/dev/null
 
 echo "[aevon] reloading SpringBoard..."
-killall -9 SpringBoard 2>/dev/null || echo "warn: reboot manually"
+if command -v sbreload >/dev/null 2>&1; then
+    sbreload
+else
+    killall -9 SpringBoard 2>/dev/null || echo "warn: 请用越狱工具的重启按钮"
+fi

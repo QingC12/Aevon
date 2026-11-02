@@ -19,7 +19,7 @@
 |---|---|---|
 | 改系统分区文件 | 替换 `/System/Library/...`、改 `MobileSubstrate.dylib` | **否**，包体白名单外一律构建失败 |
 | 装开机自启的守护进程 | `/Library/LaunchDaemons/*.plist` 写坏、死循环 | **否**，从不安装任何 LaunchDaemon / LaunchAgent |
-| 破坏越狱环境本身 | 动 `/var/jb` 的 dpkg 数据库、动 bootstrap | **否**，只往两个目录写自己的文件 |
+| 破坏越狱环境本身 | 动 jbroot（`.jbroot-*`）里的 dpkg 数据库、动 bootstrap | **否**，只往 `Library/` 下自己的三个位置写文件 |
 
 Aevon 只做一件事：**作为 SpringBoard 的一个动态库被加载**。
 
@@ -67,10 +67,10 @@ dylib 每次加载做的第一件事，是把自己这次的加载写进 `attemp
 `tools/audit-deb.sh` 会对每个 deb 做五项检查，任一失败即**拒绝发布**：
 
 1. 高危目录零容忍：`System/`、`private/`、`bin/`、`usr/bin/`、`usr/lib/`、`Library/LaunchDaemons/`、`Library/LaunchAgents/`、`PreferenceLoader/`、`MobileSubstrate.dylib`；
-2. 逐文件白名单：只允许 5 个路径（dylib、过滤 plist、4 个救援脚本）；
+2. 逐文件白名单：dylib、过滤 plist、PreferenceLoader 入口、4 个救援脚本、设置面板 bundle 的 12 个文件，多一个就失败；
 3. 注入范围：Stage 0 只允许注入 `com.apple.springboard` **一个**进程，多一个就失败；
 4. 控制脚本：`postinst`/`prerm` 里出现 `rm -rf /`、`nvram`、`launchctl`、`dpkg --force`、`/System/` 即失败；
-5. 架构必须是 `iphoneos-arm64`（rootless），避免装到错误环境。
+5. 架构必须是 `iphoneos-arm64e`（roothide），且 dylib 与设置面板必须含 arm64e 切片，避免装到错误环境；
 
 ### G4 · 阶段闸门（人为，但写死验收标准）
 
@@ -84,7 +84,7 @@ dylib 每次加载做的第一件事，是把自己这次的加载写进 `attemp
 ### 级别 0 · 一切正常，只是想关掉
 
 ```sh
-/var/jb/usr/libexec/aevon/aevon-disable
+/var/containers/Bundle/Application/.jbroot-*/usr/libexec/aevon/aevon-disable
 ```
 
 作用：写 panic 文件 + 重启 SpringBoard。**10 秒内回到干净状态。**
@@ -155,7 +155,7 @@ aevon-uninstall       # 卸载
    ```sh
    sh /var/mobile/preflight.sh
    ```
-   它会检查 rootless 环境、ElleKit/Substrate、dpkg 健康、可用空间、**panic 文件是否真的可写**，并把当前状态存成 `/var/mobile/Library/Logs/Aevon/baseline-*.txt`。
+   它会检查 roothide 环境（自动定位 `.jbroot-*`）、ElleKit、dpkg 健康、可用空间、**panic 文件是否真的可写**，并把当前状态存成 `/var/mobile/Library/Logs/Aevon/baseline-*.txt`。
    最后一行不是 `PREFLIGHT: PASS` 就不要装。
 
 2. **确认安全模式可用**：装任何东西之前先试一次"按住音量上键重新越狱"，确认你能进去。

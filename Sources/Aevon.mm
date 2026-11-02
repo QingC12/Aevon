@@ -4,8 +4,8 @@
 //
 //  Design invariant (DO NOT BREAK):
 //    This dylib must never be able to prevent the device from booting.
-//    It only ever touches /var/mobile/Library/{Preferences,Logs}/com.aevon.*
-//    and it installs ZERO hooks.
+//    It only ever touches /var/mobile/Library/Logs/Aevon/* on disk, plus the
+//    com.aevon.aevon preference domain through cfprefsd. Zero hooks.
 //
 //  Gate order (all must pass before anything is executed):
 //    G0  panic      file exists  OR  pref "panic"    == true
@@ -35,7 +35,7 @@ extern char **environ;
 #define AEVON_STAGE 0
 #endif
 
-static NSString *const kAevonVersion = @"0.1.0";
+static NSString *const kAevonVersion = @"0.0.2";
 
 // ---------------------------------------------------------------------------
 // Tunables. A false positive only means "tweak switched itself off";
@@ -257,12 +257,14 @@ static NSString *AevonBuildProbeReport(void) {
     [s appendFormat:@"系统: %@ %@\n\n", dev.systemName, dev.systemVersion];
 
     [s appendString:@"[环境]\n"];
-    [s appendFormat:@"  /var/jb 存在        : %@\n",
-        [[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"] ? @"是" : @"否"];
-    [s appendFormat:@"  Preferences 可写    : %@\n",
-        AevonWritable(@"/var/mobile/Library/Preferences") ? @"是" : @"否"];
-    [s appendFormat:@"  日志目录可写        : %@\n\n",
+    NSString *jbroot = AevonBootstrapRoot();
+    [s appendFormat:@"  越狱根（jbroot）    : %@\n", jbroot ?: @"未检测到"];
+    [s appendFormat:@"  环境类型            : %@\n",
+        ([jbroot.lastPathComponent hasPrefix:@".jbroot"]) ? @"roothide（随机路径）"
+                                                          : (jbroot ? @"rootless（/var/jb）" : @"未知")];
+    [s appendFormat:@"  日志目录可写        : %@\n",
         AevonWritable(kAevonLogDir) ? @"是" : @"否"];
+    [s appendFormat:@"  状态文件            : %@\n\n", kAevonStatePath];
 
     [s appendString:@"[承载模型 · 方法签名]\n"];
     struct { const char *cls; const char *sel; } probe[] = {
@@ -345,13 +347,7 @@ static void AevonRunProbes(BOOL announce) {
 #pragma mark - Darwin notifications (the Settings <-> SpringBoard channel)
 
 static void AevonRespringNow(void) {
-    NSArray<NSArray<NSString *> *> *candidates = @[
-        @[@"/var/jb/usr/bin/sbreload"],
-        @[@"/usr/bin/sbreload"],
-        @[@"/var/jb/usr/bin/killall", @"-9", @"SpringBoard"],
-        @[@"/usr/bin/killall", @"-9", @"SpringBoard"],
-    ];
-    for (NSArray<NSString *> *c in candidates) {
+    for (NSArray<NSString *> *c in AevonRespringCandidates()) {
         NSString *path = c.firstObject;
         if (![[NSFileManager defaultManager] isExecutableFileAtPath:path]) continue;
 
