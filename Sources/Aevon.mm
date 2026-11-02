@@ -1,49 +1,51 @@
 //
 //  Aevon.mm
-//  Aevon — Stage 0 safety skeleton
+//  Aevon — Stage 1: settings surface + probe harness. Still ZERO hooks.
 //
 //  Design invariant (DO NOT BREAK):
 //    This dylib must never be able to prevent the device from booting.
 //    It only ever touches /var/mobile/Library/{Preferences,Logs}/com.aevon.*
-//    and it installs ZERO hooks at Stage 0.
+//    and it installs ZERO hooks.
 //
 //  Gate order (all must pass before anything is executed):
-//    G0  panic file        /var/mobile/Library/Preferences/com.aevon.panic
-//    G1  auto-disable flag  state.plist -> disabled = true
-//    G2  crash-loop breaker state.plist -> attempts > kMaxAttempts
+//    G0  panic      file exists  OR  pref "panic"    == true
+//    G1  disabled   state.plist  OR  pref "disabled" == true
+//    G2  crash-loop breaker (attempts > kMaxAttempts)
 //
-//  If any gate blocks, this constructor returns without doing anything.
-//  That means: no hooks, no swizzles, no timers, no windows. Zero effect.
+//  Why the probes live here and not in the settings bundle:
+//    The two unknowns blocking P1 (method signature of
+//    _scene:interceptUpdateWithNewSettings: and the live scene tree) can only be
+//    read from inside the SpringBoard process. Running them here means one
+//    install answers every question at once, and the answers are published back
+//    through preferences so Settings can show them without a terminal.
 //
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#import <notify.h>
+#import <spawn.h>
+#import <sys/wait.h>
 #import <unistd.h>
+#import "AevonPaths.h"
+
+extern char **environ;
 
 #ifndef AEVON_STAGE
 #define AEVON_STAGE 0
 #endif
 
-static NSString *const kAevonVersion = @"0.0.1";
+static NSString *const kAevonVersion = @"0.1.0";
 
 // ---------------------------------------------------------------------------
-// Paths. Under a rootless jailbreak the process still sees the real /var,
-// so these are absolute device paths, not jailbreak-root-relative ones.
+// Tunables. A false positive only means "tweak switched itself off";
+// a false negative means "one more crash loop".
 // ---------------------------------------------------------------------------
-static NSString *const kPrefsDir  = @"/var/mobile/Library/Preferences";
-static NSString *const kStatePath = @"/var/mobile/Library/Preferences/com.aevon.state.plist";
-static NSString *const kPanicPath = @"/var/mobile/Library/Preferences/com.aevon.panic";
-static NSString *const kLogDir    = @"/var/mobile/Library/Logs/Aevon";
-static NSString *const kLogPath   = @"/var/mobile/Library/Logs/Aevon/aevon.log";
-
-// ---------------------------------------------------------------------------
-// Tunables. Keep these conservative: a false positive only means "tweak
-// switched itself off", a false negative means "one more crash loop".
-// ---------------------------------------------------------------------------
-static const int      kMaxAttempts   = 3;      // consecutive unstable loads
-static const double   kCrashWindow   = 300.0;  // seconds; older attempts expire
-static const double   kStableDelay   = 60.0;   // seconds alive => considered OK
-static const unsigned long long kLogCap = 96ULL * 1024ULL;
+static const int      kMaxAttempts = 3;
+static const double   kCrashWindow = 300.0;
+static const double   kStableDelay = 60.0;
+static const double   kProbeDelay  = 4.0;    // let SpringBoard settle first
+static const NSUInteger kLogCap    = 96 * 1024;
 
 typedef NS_ENUM(NSInteger, AevonGate) {
     AevonGatePass = 0,
@@ -64,13 +66,14 @@ static void AevonLog(NSString *format, ...) {
     NSLog(@"[Aevon] %@", message);
 
     NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:kLogDir]) {
-        [fm createDirectoryAtPath:kLogDir withIntermediateDirectories:YES attributes:nil error:NULL];
+    if (![fm fileExistsAtPath:kAevonLogDir]) {
+        [fm createDirectoryAtPath:kAevonLogDir
+      withIntermediateDirectories:YES attributes:nil error:NULL];
     }
 
-    NSDictionary *attrs = [fm attributesOfItemAtPath:kLogPath error:NULL];
+    NSDictionary *attrs = [fm attributesOfItemAtPath:kAevonLogPath error:NULL];
     if (attrs && [attrs fileSize] > kLogCap) {
-        [fm removeItemAtPath:kLogPath error:NULL];
+        [fm removeItemAtPath:kAevonLogPath error:NULL];
     }
 
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
@@ -79,7 +82,7 @@ static void AevonLog(NSString *format, ...) {
     NSString *line = [NSString stringWithFormat:@"%@ [%@] %@\n",
                       [df stringFromDate:[NSDate date]], kAevonVersion, message];
 
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:kLogPath];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:kAevonLogPath];
     if (fh) {
         @try {
             [fh seekToEndOfFile];
@@ -89,58 +92,34 @@ static void AevonLog(NSString *format, ...) {
             // never let logging take the process down
         }
     } else {
-        [line writeToFile:kLogPath atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+        [line writeToFile:kAevonLogPath atomically:NO
+                 encoding:NSUTF8StringEncoding error:NULL];
     }
-}
-
-#pragma mark - State
-
-static NSMutableDictionary *AevonLoadState(void) {
-    NSDictionary *raw = [NSDictionary dictionaryWithContentsOfFile:kStatePath];
-    if ([raw isKindOfClass:[NSDictionary class]]) {
-        return [raw mutableCopy];
-    }
-    return [NSMutableDictionary dictionary];
-}
-
-static BOOL AevonSaveState(NSDictionary *state) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:kPrefsDir]) {
-        [fm createDirectoryAtPath:kPrefsDir withIntermediateDirectories:YES attributes:nil error:NULL];
-    }
-    return [state writeToFile:kStatePath atomically:YES];
 }
 
 #pragma mark - Gates
 
-// Returns AevonGatePass when it is safe to continue. Writes the attempt counter
-// as the very first side effect so that a crash *after* this point is still
-// counted on the next load.
 static AevonGate AevonPassGates(void) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-
-    // G0 — hard kill switch. Any file manager can create this file.
-    if ([fm fileExistsAtPath:kPanicPath]) {
-        AevonLog(@"gate G0: panic file present, standing down (zero hooks)");
+    // G0 — hard kill switch (file or preference; either one is enough).
+    if (AevonPanicActive()) {
+        AevonLog(@"gate G0: panic active, standing down (zero hooks)");
         return AevonGateBlockedPanic;
     }
 
-    NSMutableDictionary *state = AevonLoadState();
-
     // G1 — operator/auto disable flag.
-    if ([state[@"disabled"] boolValue]) {
-        AevonLog(@"gate G1: disabled, reason=%@", state[@"disabledReason"] ?: @"unknown");
+    if (AevonDisabledActive()) {
+        AevonLog(@"gate G1: disabled, reason=%@",
+                 AevonReadState()[@"disabledReason"] ?: @"unknown");
         return AevonGateBlockedDisabled;
     }
 
     // G2 — crash-loop breaker.
     double now = [NSDate date].timeIntervalSince1970;
+    NSMutableDictionary *state = [AevonReadState() mutableCopy];
     double last = [state[@"lastAttempt"] doubleValue];
     int attempts = [state[@"attempts"] intValue];
 
-    if (last <= 0.0 || (now - last) > kCrashWindow) {
-        attempts = 0;  // previous failure window expired, start clean
-    }
+    if (last <= 0.0 || (now - last) > kCrashWindow) attempts = 0;
     attempts += 1;
 
     state[@"attempts"] = @(attempts);
@@ -148,42 +127,277 @@ static AevonGate AevonPassGates(void) {
     state[@"version"] = kAevonVersion;
     state[@"lastLoad"] = @(now);
 
-    BOOL saved = AevonSaveState(state);
-    if (!saved) {
+    if (!AevonWriteState(state)) {
         // We cannot count attempts, so we cannot guarantee the breaker works.
-        // Fail safe: log and stand down rather than risk an uncountable loop.
-        AevonLog(@"gate G2: state not writable, standing down to avoid an uncountable crash loop");
+        // Fail safe: stand down rather than risk an uncountable crash loop.
+        AevonLog(@"gate G2: state not writable, standing down");
         return AevonGateBlockedUnwritable;
     }
 
     if (attempts > kMaxAttempts) {
-        NSMutableDictionary *off = AevonLoadState();
+        NSMutableDictionary *off = [AevonReadState() mutableCopy];
         off[@"disabled"] = @YES;
         off[@"disabledReason"] = @"auto:crash-loop";
         off[@"disabledAt"] = @(now);
-        AevonSaveState(off);
-        AevonLog(@"gate G2: %d unstable loads within %.0fs, self-disabled", attempts, kCrashWindow);
+        AevonWriteState(off);
+        AevonLog(@"gate G2: %d unstable loads within %.0fs, self-disabled",
+                 attempts, kCrashWindow);
         return AevonGateBlockedCrashLoop;
     }
 
     return AevonGatePass;
 }
 
-// Once we survive long enough in a live SpringBoard, the counter is cleared.
-// Nothing breaks if this never fires — it only means gate G2 keeps a shorter
-// memory of past attempts.
 static void AevonScheduleStableReset(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kStableDelay * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSMutableDictionary *state = AevonLoadState();
-        if ([state[@"disabled"] boolValue]) {
-            return;  // never resurrect ourselves behind the operator's back
-        }
+        if (AevonDisabledActive()) return;   // never resurrect behind the operator's back
+        NSMutableDictionary *state = [AevonReadState() mutableCopy];
         state[@"attempts"] = @0;
         state[@"stableSince"] = @([NSDate date].timeIntervalSince1970);
-        AevonSaveState(state);
+        AevonWriteState(state);
         AevonLog(@"heartbeat: %.0fs uptime reached, attempt counter cleared", kStableDelay);
     });
+}
+
+#pragma mark - Probe kit (read-only, no hooks)
+
+static NSString *AevonEncodingOf(Class cls, NSString *selName) {
+    if (!cls || !selName.length) return nil;
+    Method m = class_getInstanceMethod(cls, NSSelectorFromString(selName));
+    if (!m) return nil;
+    const char *enc = method_getTypeEncoding(m);
+    return enc ? @(enc) : @"?";
+}
+
+// Direct implementors only — inherited copies would list every subclass and
+// tell us nothing about which class actually owns the method.
+static NSArray<NSString *> *AevonDirectImplementors(NSString *selName, NSUInteger limit) {
+    SEL sel = NSSelectorFromString(selName);
+    int total = objc_getClassList(NULL, 0);
+    if (total <= 0) return @[];
+
+    Class *classes = (Class *)calloc((size_t)total, sizeof(Class));
+    if (!classes) return @[];
+    total = objc_getClassList(classes, total);
+
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    for (int i = 0; i < total && out.count < limit; i++) {
+        unsigned int n = 0;
+        Method *methods = class_copyMethodList(classes[i], &n);
+        if (!methods) continue;
+        for (unsigned int j = 0; j < n; j++) {
+            if (method_getName(methods[j]) == sel) {
+                [out addObject:NSStringFromClass(classes[i])];
+                break;
+            }
+        }
+        free(methods);
+    }
+    free(classes);
+    return out;
+}
+
+static NSArray<NSString *> *AevonScenesDump(void) {
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    @try {
+        UIApplication *app = [UIApplication sharedApplication];
+        NSSet<UIScene *> *scenes = app.connectedScenes;
+        [lines addObject:[NSString stringWithFormat:@"场景总数: %lu", (unsigned long)scenes.count]];
+
+        NSInteger idx = 0;
+        for (UIScene *scene in scenes) {
+            idx++;
+            NSString *cls = NSStringFromClass([scene class]);
+            NSString *ident = @"?";
+            id v = [scene valueForKey:@"_sceneIdentifier"];
+            if ([v isKindOfClass:[NSString class]]) ident = v;
+
+            NSUInteger windows = 0;
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                windows = ((UIWindowScene *)scene).windows.count;
+            }
+
+            NSString *role = @"?";
+            @try {
+                id r = [scene.session valueForKey:@"role"];
+                if ([r isKindOfClass:[NSString class]]) role = r;
+            } @catch (__unused NSException *e) {}
+
+            [lines addObject:[NSString stringWithFormat:
+                @"%ld. %@  state=%ld  windows=%lu  role=%@\n     id=%@",
+                (long)idx, cls, (long)scene.activationState,
+                (unsigned long)windows, role, ident]];
+        }
+    } @catch (NSException *e) {
+        [lines addObject:[NSString stringWithFormat:@"场景枚举失败: %@", e.reason]];
+    }
+    return lines;
+}
+
+static BOOL AevonWritable(NSString *dir) {
+    NSString *probe = [dir stringByAppendingPathComponent:@".aevon-wtest"];
+    NSData *d = [@"ok" dataUsingEncoding:NSUTF8StringEncoding];
+    BOOL ok = [d writeToFile:probe atomically:YES];
+    if (ok) [[NSFileManager defaultManager] removeItemAtPath:probe error:NULL];
+    return ok;
+}
+
+static NSString *AevonBuildProbeReport(void) {
+    NSMutableString *s = [NSMutableString string];
+
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+    df.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+
+    UIDevice *dev = [UIDevice currentDevice];
+    [s appendFormat:@"Aevon 探测报告\n"];
+    [s appendFormat:@"生成: %@\n", [df stringFromDate:[NSDate date]]];
+    [s appendFormat:@"版本: %@   进程: pid %d\n", kAevonVersion, getpid()];
+    [s appendFormat:@"系统: %@ %@\n\n", dev.systemName, dev.systemVersion];
+
+    [s appendString:@"[环境]\n"];
+    [s appendFormat:@"  /var/jb 存在        : %@\n",
+        [[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"] ? @"是" : @"否"];
+    [s appendFormat:@"  Preferences 可写    : %@\n",
+        AevonWritable(@"/var/mobile/Library/Preferences") ? @"是" : @"否"];
+    [s appendFormat:@"  日志目录可写        : %@\n\n",
+        AevonWritable(kAevonLogDir) ? @"是" : @"否"];
+
+    [s appendString:@"[承载模型 · 方法签名]\n"];
+    struct { const char *cls; const char *sel; } probe[] = {
+        {"UIWindowScene", "_scene:interceptUpdateWithNewSettings:"},
+        {"UIScene",       "_scene:interceptUpdateWithNewSettings:"},
+        {"UIWindowScene", "_setDeactivationReasons:onScene:withSettings:reason:"},
+        {"UIScene",       "_setDeactivationReasons:onScene:withSettings:reason:"},
+        {"UIScenePresentationManager", "createPresenterWithIdentifier:priority:"},
+        {"UIScenePresentationManager", "createPresenterWithIdentifier:"},
+        {"UIWindowScene", "remoteKeyboardWindowForScreen:"},
+        {"UIWindowScene", "_setShouldDeactivate:"},
+        {"UIWindowScene", "setAnimationSettings:"},
+    };
+    for (size_t i = 0; i < sizeof(probe) / sizeof(probe[0]); i++) {
+        NSString *selStr = @(probe[i].sel);
+        Class c = NSClassFromString(@(probe[i].cls));
+        NSString *enc = AevonEncodingOf(c, selStr);
+        if (!c) {
+            [s appendFormat:@"  %-28s %@ → 类不存在\n", probe[i].cls, selStr];
+        } else if (enc) {
+            [s appendFormat:@"  %-28s %@\n      ✓ %@\n", probe[i].cls, selStr, enc];
+        } else {
+            [s appendFormat:@"  %-28s %@\n      ✗ 未实现\n", probe[i].cls, selStr];
+        }
+    }
+    [s appendFormat:@"  _UIContextLayerHostView 类     : %@\n",
+        NSClassFromString(@"_UIContextLayerHostView") ? @"存在" : @"不存在"];
+    [s appendFormat:@"  BSAnimationSettings 类        : %@\n\n",
+        NSClassFromString(@"BSAnimationSettings") ? @"存在" : @"不存在"];
+
+    [s appendString:@"[谁定义了这些方法]\n"];
+    for (NSString *sel in @[@"_scene:interceptUpdateWithNewSettings:",
+                            @"_setDeactivationReasons:onScene:withSettings:reason:",
+                            @"remoteKeyboardWindowForScreen:",
+                            @"createPresenterWithIdentifier:priority:"]) {
+        NSArray *who = AevonDirectImplementors(sel, 6);
+        [s appendFormat:@"  %@\n      %@\n", sel,
+            who.count ? [who componentsJoinedByString:@", "] : @"（无）"];
+    }
+    [s appendString:@"\n"];
+
+    [s appendString:@"[场景树]\n"];
+    for (NSString *line in AevonScenesDump()) {
+        [s appendFormat:@"  %@\n", line];
+    }
+    [s appendFormat:@"\n"];
+
+    [s appendString:@"[判定]\n"];
+    Class ws = NSClassFromString(@"UIWindowScene");
+    BOOL hasIntercept = AevonEncodingOf(ws, @"_scene:interceptUpdateWithNewSettings:") != nil;
+    [s appendFormat:@"  P1 直连是否可行 : %@\n",
+        hasIntercept ? @"可以，签名见上（P1 开工前用它定 hook 返回值）"
+                     : @"UIWindowScene 上没有该方法，需要另找承载入口"];
+    [s appendFormat:@"  P1 父子关系线索 : 见场景树 windows 计数，App 主场景 windows=1 即已挂载\n"];
+
+    return s;
+}
+
+static void AevonRunProbes(BOOL announce) {
+    @autoreleasepool {
+        NSString *report = AevonBuildProbeReport();
+
+        [[NSFileManager defaultManager] createDirectoryAtPath:kAevonLogDir
+                                  withIntermediateDirectories:YES attributes:nil error:NULL];
+        [report writeToFile:kAevonProbeTxt atomically:YES
+                   encoding:NSUTF8StringEncoding error:NULL];
+
+        // Also publish through preferences: Settings is sandboxed on some
+        // jailbreaks and cannot read /var/mobile directly. cfprefsd always works.
+        AevonSetPref(@"probeText", report);
+        AevonSetPref(@"probeTime", @([NSDate date].timeIntervalSince1970));
+
+        AevonLog(@"probe: report generated (%lu lines)", (unsigned long)
+                 [report componentsSeparatedByString:@"\n"].count);
+
+        if (announce) notify_post(kAevonNoteProbeDone.UTF8String);
+    }
+}
+
+#pragma mark - Darwin notifications (the Settings <-> SpringBoard channel)
+
+static void AevonRespringNow(void) {
+    NSArray<NSArray<NSString *> *> *candidates = @[
+        @[@"/var/jb/usr/bin/sbreload"],
+        @[@"/usr/bin/sbreload"],
+        @[@"/var/jb/usr/bin/killall", @"-9", @"SpringBoard"],
+        @[@"/usr/bin/killall", @"-9", @"SpringBoard"],
+    ];
+    for (NSArray<NSString *> *c in candidates) {
+        NSString *path = c.firstObject;
+        if (![[NSFileManager defaultManager] isExecutableFileAtPath:path]) continue;
+
+        NSMutableArray *argv = [NSMutableArray arrayWithObject:path];
+        [argv addObjectsFromArray:[c subarrayWithRange:NSMakeRange(1, c.count - 1)]];
+        const char **cargv = calloc(argv.count + 1, sizeof(char *));
+        if (!cargv) continue;
+        for (NSUInteger i = 0; i < argv.count; i++) cargv[i] = [argv[i] UTF8String];
+        pid_t pid = 0;
+        int rc = posix_spawn(&pid, path.UTF8String, NULL, NULL, (char **)cargv, environ);
+        free(cargv);
+        if (rc == 0) {
+            AevonLog(@"respring requested via %@", path);
+            return;
+        }
+    }
+    AevonLog(@"respring request failed: no usable helper");
+}
+
+static void AevonNoteCallback(__unused CFNotificationCenterRef center,
+                              __unused void *observer,
+                              CFStringRef name,
+                              __unused const void *object,
+                              __unused CFDictionaryRef userInfo) {
+    NSString *n = (__bridge NSString *)name;
+
+    if ([n isEqualToString:kAevonNoteReprobe]) {
+        AevonRunProbes(YES);
+    } else if ([n isEqualToString:kAevonNoteRespring]) {
+        AevonRespringNow();
+    } else if ([n isEqualToString:kAevonNoteReset]) {
+        NSMutableDictionary *st = [AevonReadState() mutableCopy];
+        st[@"attempts"] = @0;
+        [st removeObjectForKey:@"disabledReason"];
+        AevonWriteState(st);
+        AevonLog(@"reset: attempt counter cleared from Settings");
+    }
+}
+
+static void AevonObserveCommands(void) {
+    CFNotificationCenterRef c = CFNotificationCenterGetDarwinNotifyCenter();
+    for (NSString *n in @[kAevonNoteReprobe, kAevonNoteRespring, kAevonNoteReset]) {
+        CFNotificationCenterAddObserver(c, NULL, AevonNoteCallback,
+                                        (__bridge CFStringRef)n, NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
+    }
 }
 
 #pragma mark - Entry point
@@ -198,12 +412,19 @@ static void AevonConstructor(void) {
         AevonLog(@"boot ok: stage %d, version %@, pid %d",
                  AEVON_STAGE, kAevonVersion, getpid());
 
+        AevonObserveCommands();
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kProbeDelay * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            AevonRunProbes(NO);
+        });
+
         // ------------------------------------------------------------------
-        // Stage 0: intentionally empty. The only job of this build is to prove
-        // that injection works and that every gate behaves, without touching
-        // SpringBoard's behaviour in any way.
+        // Stage 1: still zero hooks. This build exists so the whole settings
+        // surface is reachable from the GUI and so one install answers every
+        // P1 question at once.
         // ------------------------------------------------------------------
-#if AEVON_STAGE >= 1
+#if AEVON_STAGE >= 2
         // P1 (scene mounting) is added here, never above the gate check.
 #endif
 

@@ -127,6 +127,11 @@ DENY='^(System|private|Applications|bin|sbin|usr/bin|usr/sbin|usr/lib|Library/La
 
 while IFS= read -r f; do
     norm="${f#var/jb/}"
+    # 唯一的例外：我们自己的 PreferenceLoader 入口。
+    # 这是 Settings 里出现「Aevon」那一行的必要条件，且它只描述一个 bundle。
+    if [ "$norm" = "Library/PreferenceLoader/Preferences/Aevon.plist" ]; then
+        continue
+    fi
     if printf '%s' "$norm" | grep -Eq "$DENY"; then
         note FAIL "危险路径: $f"
         fail=1
@@ -138,10 +143,23 @@ is_allowed() {
     case "$1" in
         Library/MobileSubstrate/DynamicLibraries/Aevon.dylib) return 0 ;;
         Library/MobileSubstrate/DynamicLibraries/Aevon.plist) return 0 ;;
+        Library/PreferenceLoader/Preferences/Aevon.plist)     return 0 ;;
         usr/libexec/aevon/aevon-disable)   return 0 ;;
         usr/libexec/aevon/aevon-enable)    return 0 ;;
         usr/libexec/aevon/aevon-status)    return 0 ;;
         usr/libexec/aevon/aevon-uninstall) return 0 ;;
+        # 设置面板：只允许这一个 bundle 目录，且文件类型受限（见下）
+        Library/PreferenceBundles/AevonPrefs.bundle/AevonPrefs)      return 0 ;;
+        Library/PreferenceBundles/AevonPrefs.bundle/Info.plist)      return 0 ;;
+        Library/PreferenceBundles/AevonPrefs.bundle/Root.plist)      return 0 ;;
+        Library/PreferenceBundles/AevonPrefs.bundle/Window.plist)    return 0 ;;
+        Library/PreferenceBundles/AevonPrefs.bundle/Ring.plist)      return 0 ;;
+        Library/PreferenceBundles/AevonPrefs.bundle/Gesture.plist)   return 0 ;;
+        Library/PreferenceBundles/AevonPrefs.bundle/Keyboard.plist)  return 0 ;;
+        Library/PreferenceBundles/AevonPrefs.bundle/Notify.plist)    return 0 ;;
+        Library/PreferenceBundles/AevonPrefs.bundle/Jump.plist)      return 0 ;;
+        Library/PreferenceBundles/AevonPrefs.bundle/Listen.plist)    return 0 ;;
+        Library/PreferenceBundles/AevonPrefs.bundle/Apps.plist)      return 0 ;;
         *) return 1 ;;
     esac
 }

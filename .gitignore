@@ -1,5 +1,6 @@
 .theos/
 packages/
 dist/
+build/
 *.deb
 .DS_Store

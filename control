@@ -1,9 +1,9 @@
 Package: com.aevon.aevon
 Name: Aevon
-Version: 0.0.1
+Version: 0.1.0
 Architecture: iphoneos-arm64
-Description: Floating-window / Smart-Island style tweak for rootless jailbreaks. Stage 0 ships a safety skeleton only: zero hooks, three kill gates, crash-loop breaker.
+Description: Floating-window / Smart-Island style tweak for rootless jailbreaks. Stage 1 ships the complete settings surface (64 items, key-for-key with the reference) plus a read-only probe harness. Still zero hooks.
 Maintainer: QingC
 Author: QingC
 Section: Tweaks
-Depends: firmware (>= 15.0), mobilesubstrate | ellekit
+Depends: firmware (>= 15.0), mobilesubstrate | ellekit, preferenceloader

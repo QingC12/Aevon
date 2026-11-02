@@ -17,17 +17,16 @@ mkdir -p "$LOG_DIR" 2>/dev/null
 chown -R mobile:mobile "$LOG_DIR" 2>/dev/null
 
 echo ""
-echo "  Aevon installed (Stage 0 — safety skeleton, zero hooks)."
+echo "  Aevon installed (Stage 1 — settings surface, zero hooks)."
 echo ""
-echo "  SpringBoard was NOT restarted on purpose."
-echo "  Nothing happens until you reload SpringBoard:"
-echo "      sbreload        (or: killall -9 SpringBoard)"
+echo "  Everything is operated from the GUI. No terminal needed:"
+echo "      Settings > Aevon"
 echo ""
-echo "  Emergency stop at any time:"
-echo "      touch /var/mobile/Library/Preferences/com.aevon.panic"
-echo "      killall -9 SpringBoard"
+echo "  SpringBoard was NOT restarted on purpose. Nothing happens until you"
+echo "  reload it once (Settings > Aevon > Reload Desktop, or your jailbreak"
+echo "  app's respring button)."
 echo ""
-echo "  Full status:  /var/jb/usr/libexec/aevon/aevon-status"
+echo "  Emergency stop, from the GUI:"
+echo "      Settings > Aevon > Emergency stop (G0)  ->  Reload Desktop"
 echo ""
-
 exit 0
