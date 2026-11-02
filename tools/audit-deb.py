@@ -426,10 +426,16 @@ def main():
     # per-line prefix fall out of the stripped binary, the log comes back empty
     # and looks like 'nothing answered' instead of 'the dump never ran'.
     for token in (b"calls: definition begin v1 targets=", b"calls: defined by ",
-                  b"calls: definition end v1 missing="):
+                  b"calls: definition end v1 missing=", b"calls: scan reached "):
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the call table would come back empty and read as a negative")
+
+    # 0.0.7 crashed SpringBoard mid-scan with nothing written. The progress line
+    # is what turns the next crash from "somewhere" into "class N", so its
+    # absence from the binary would be a silent regression to blind guessing.
+    if b"calls: scan reached " not in dylib_early:
+        bad("probe: the progress line is gone — a crash would again be unattributable")
 
     probe_path = b"/var/mobile/Library/Logs/Aevon/probe.request"
     if probe_path not in prefs or probe_path not in dylib_early:

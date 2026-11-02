@@ -40,6 +40,9 @@ enum SceneProbe {
     static func consumeRequest() -> Bool {
         guard FileManager.default.fileExists(atPath: Aevon.probePath) else { return false }
         let mode = (try? String(contentsOfFile: Aevon.probePath, encoding: .utf8)) ?? ""
+        // Deleted before anything runs. The 0.0.7 attempt proved why that order
+        // matters: the scan took SpringBoard down and this file was already
+        // gone, so the crash could not replay itself on the next launch.
         try? FileManager.default.removeItem(atPath: Aevon.probePath)
         switch mode.trimmingCharacters(in: .whitespacesAndNewlines) {
         case "api":   runSurface()
@@ -570,7 +573,17 @@ zStackParticipantDidChange:
     private static var callHits: [String: CallHit] = [:]
     private static var callQueue: [AnyClass] = []
     private static var callCursor = 0
+    private static var callCeiling = 0
     private static var callStart = Date()
+    private static var callBusy = false
+
+    /// The second attempt runs off the main thread. The first one walked the
+    /// same classes in 600-class slices on the main thread and SpringBoard died
+    /// six seconds in, before a single line of output was written — and from
+    /// the log alone a killed main thread, a jetsam kill and one bad class look
+    /// exactly the same. Going off-thread removes the first; `calls: scan
+    /// reached` lines remove the guesswork about the other two.
+    private static let callWorker = DispatchQueue(label: "com.aevon.calls", qos: .utility)
 
     /// SpringBoard side, third dump. The first two answered "does the class
     /// exist" and "what does this named class answer". Neither answers the
@@ -583,37 +596,60 @@ zStackParticipantDidChange:
     /// measured, never assumed. A selector with `n=0` is the strongest possible
     /// negative: nobody in the process defines it, so it cannot be called.
     static func runCalls() {
+        if callBusy {
+            Log.write("calls: scan already running, request ignored")
+            return
+        }
         callTargets = Set(callSelectors.split(separator: "\n").map(String.init))
         callHits = [:]
         callQueue = allClasses()
         callCursor = 0
+        callCeiling = callQueue.count
         callStart = Date()
         Log.write("calls: definition begin v1 targets=" + String(callTargets.count)
                   + " classes=" + String(callQueue.count))
         guard !callQueue.isEmpty else {
-            Log.write("calls: definition end v1 empty")
+            Log.write("calls: definition end v1 missing=" + String(callTargets.count)
+                      + " upto=0 of 0 no classes")
             return
         }
-        scanStep()
+        callBusy = true
+        callWorker.async { scanAll() }
     }
 
-    /// Walked in slices, on the main thread. A single pass over ~99k classes is
-    /// read-only, but it is also long enough to be visible as a hitch, and the
-    /// watchdog does not care that the work is honest.
-    private static func scanStep() {
-        let total = callQueue.count
-        let end = min(callCursor + 600, total)
-        while callCursor < end {
-            let cls = callQueue[callCursor]
-            callCursor += 1
-            collectMethods(of: cls, meta: false)
-            collectMethods(of: cls, meta: true)
+    /// Straight through, on the worker queue, one autorelease pool per 250
+    /// classes. There is nothing to yield to here — the run loop belongs to
+    /// somebody else — and the pool is the part that matters: `NSStringFromSelector`
+    /// runs once per method in the process, and without a pool those strings
+    /// pile up until the process ends.
+    private static func scanAll() {
+        var reason = ""
+        while callCursor < callCeiling {
+            // A probe that never finishes is a probe that cannot be trusted to
+            // leave the phone alone. Two minutes is far past the expected few,
+            // and past it we stop and say so in the end line — a partial dump
+            // the reader can see is worth more than a process that never ends.
+            if Date().timeIntervalSince(callStart) > 120 {
+                reason = " stopped on the two minute limit"
+                break
+            }
+            autoreleasepool {
+                let end = min(callCursor + 250, callCeiling)
+                while callCursor < end {
+                    let cls = callQueue[callCursor]
+                    callCursor += 1
+                    collectMethods(of: cls, meta: false)
+                    collectMethods(of: cls, meta: true)
+                }
+            }
+            if callCursor < callCeiling {
+                Log.write("calls: scan reached " + String(callCursor) + " "
+                          + NSStringFromClass(callQueue[callCursor])
+                          + " rss=" + String(residentMegabytes()) + "mb")
+            }
         }
-        if callCursor < total {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { scanStep() }
-            return
-        }
-        emitCallTable()
+        emitCallTable(reason: reason)
+        callBusy = false
     }
 
     /// Own methods only, instance and class side separately. Inherited hits are
@@ -651,7 +687,16 @@ zStackParticipantDidChange:
         }
     }
 
-    private static func emitCallTable() {
+    /// Resident size, so the next log can tell a memory kill from a bad class:
+    /// a number that climbs steadily means the walk itself is the problem, a
+    /// flat number means it died on one particular class.
+    private static func residentMegabytes() -> Int {
+        var usage = rusage()
+        guard getrusage(RUSAGE_SELF, &usage) == 0 else { return -1 }
+        return Int(usage.ru_maxrss) / (1024 * 1024)
+    }
+
+    private static func emitCallTable(reason: String) {
         var missing = 0
         var multi = 0
         for selector in callTargets.sorted() {
@@ -667,9 +712,14 @@ zStackParticipantDidChange:
             }
             Log.write(line)
         }
+        // `upto` is not decoration: a scan that stopped early makes every
+        // `n=0` above it a lie, and tools/compare-calls.py refuses to read a
+        // partial dump as a verdict for exactly that reason.
         Log.write("calls: definition end v1 missing=" + String(missing)
                   + " capped=" + String(multi)
-                  + " secs=" + String(Int(Date().timeIntervalSince(callStart))))
+                  + " upto=" + String(callCursor) + " of " + String(callQueue.count)
+                  + " secs=" + String(Int(Date().timeIntervalSince(callStart)))
+                  + reason)
     }
 
     // MARK: - Runtime helpers

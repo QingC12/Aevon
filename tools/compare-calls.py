@@ -218,9 +218,21 @@ END = "calls: definition end"
 LINE = re.compile(r"calls: defined by (.+?) n=(\d+)(.*)$")
 
 
+PROGRESS = re.compile(r"calls: scan reached (\d+) (\S+) rss=(-?\d+)mb")
+COVERAGE = re.compile(r"upto=(\d+) of (\d+)")
+
+
 def parse(path):
-    """取日志里最后一段完整 dump：begin 之后、end 之前。"""
+    """取日志里最后一段 dump：begin 之后、end 之前。
+
+    另外两样东西也一起取：最后一次 `calls: scan reached` 进度行，和结束行里的
+    `upto=X of Y`。0.0.7 那次 SpringBoard 死在第六秒、一行输出都没有 —— 单看
+    日志分不清「主线程被杀」「内存被杀」「某一个类有毒」。进度行 + upto 就是为了
+    让下一次死掉的时候能说出来是哪一种。
+    """
     dump, inside, found_any = {}, False, False
+    progress = None
+    coverage = None
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         for raw in handle:
             line = raw.strip()
@@ -229,6 +241,14 @@ def parse(path):
                 continue
             if END in line:
                 inside = False
+                hit = COVERAGE.search(line)
+                if hit:
+                    coverage = (int(hit.group(1)), int(hit.group(2)))
+                continue
+            hit_progress = PROGRESS.search(line)
+            if hit_progress:
+                progress = (int(hit_progress.group(1)), hit_progress.group(2),
+                            int(hit_progress.group(3)))
                 continue
             if not inside:
                 continue
@@ -242,7 +262,7 @@ def parse(path):
                     name, encoding = chunk.split("|", 1)
                     owners.append((name.rstrip("+-"), encoding))
             dump[selector] = (count, owners)
-    return dump, found_any
+    return dump, found_any, progress, coverage
 
 
 def verdicts(dump):
@@ -300,10 +320,23 @@ def main():
         print("找不到日志文件：%s" % path)
         return 2
 
-    dump, found_any = parse(path)
+    dump, found_any, progress, coverage = parse(path)
+    if progress:
+        print("最后一次进度：扫到第 %d 个类（%s），rss=%d MB"
+              % (progress[0], progress[1], progress[2]))
+
     if not found_any:
         print("日志里没有 calls: 段 —— 请求没到 SpringBoard，或转储还没跑完。")
         return 2
+
+    # 扫到一半就结束的 dump，比没有 dump 更危险：它会把「还没扫到」印成 n=0，
+    # 而 n=0 的读法是「这台 iOS 上没有它」。所以先拦这一种。
+    if coverage and coverage[0] < coverage[1]:
+        print("\n[PARTIAL] 这一趟只扫了 %d / %d 个类就停了 —— 排在后面的 n=0 不是结论。"
+              % (coverage[0], coverage[1]))
+        print("  看结束行里的 secs：接近 60 是时间上限，明显更小是被系统杀掉的。")
+        return 2
+
     if not dump:
         print("找到了 calls: 段但一行也解析不出来 —— 转储中途断了，重跑一次。")
         return 2
@@ -326,7 +359,10 @@ def main():
         print("\n[NOT-IN-DUMP] dump 里没有这些行 —— 日志被截断了，不是调用不存在")
         print("  这一段的 begin/end 之间应当有 %d 行，实际只解析出 %d 行。"
               % (len(SELECTORS), len(dump)))
-        print("  先重跑一次（按钮 → 等两三秒 → 重新导出日志），再谈对齐。")
+        print("  先重跑一次（按钮 → 等十几秒 → 重新导出日志），再谈对齐。")
+        if progress:
+            print("  这一趟死在：第 %d 个类（%s），rss=%d MB"
+                  % (progress[0], progress[1], progress[2]))
         for selector, want, got, enc in buckets["NOT-IN-DUMP"][:5]:
             print("  缺行: %s" % selector)
         return 2

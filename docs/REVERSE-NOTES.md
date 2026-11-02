@@ -125,3 +125,31 @@ Swift 方法体已被 strip，**不存在逐指令复刻的可能**。
 123 条里目前**已坐实 5 条、另有 1 条承载关键等待解析**，其余 117 条尚未覆盖 ——
 第二段是为「19 个承载类」写的，不是为母本调用表写的。逐条对齐要等第三段 dump，
 用 `python tools/compare-calls.py <log>` 出表，退出码 0 才算调用点全部清晰。
+
+### 8.6 123 条里有 5 条不是「调用」，是母本自己的方法
+
+母本类转储（`stheno-classdump-arm64e.txt`，11 个类）的自有方法与那 123 条求交集，得到 5 条：
+
+| 选择子 | 母本里属于 |
+|---|---|
+| `-init` | `SthenoWindow` |
+| `-initWithCoder:` | `SthenoWindow` |
+| `-initWithFrame:` | `SthenoWindow` |
+| `-initWithWindowScene:` | `SthenoWindow` |
+| `-hitTest:withEvent:` | `SthenoWindow` |
+| `-gestureRecognizerShouldBegin:` | `FullScreenBackGesture.Coordinator` |
+
+（6 行 / 5 条选择子中的 `-init` 一族按家族计。）
+
+它们出现在 `__objc_methname` 里是因为母本**自己实现或覆写**了它们，不代表它把同名消息
+发给了系统类。所以本机查不到它们不是「缺失」，是意料之中 —— 把这两件事混为一谈，
+会得到 5 条假缺失。
+
+⇒ **123 − 5 = 118 条真正的系统调用需要逐条解析。**
+
+`initWithWindowScene:` 要特别记一笔：它既是母本自有方法（`SthenoWindow` 用它建窗口），
+又是承载关键（`tools/compare-calls.py` 的 `CARRIER_CRITICAL`）。两个身份同时成立，
+不能因为归入自有方法就把它从承载判定里摘掉。
+
+`tools/compare-calls.py` 的 `OWN_METHODS` 集合就是这 5 条：标记出来、不计入硬失败，
+但照常输出它的实测归属。
