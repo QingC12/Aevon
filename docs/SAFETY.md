@@ -64,13 +64,14 @@ dylib 每次加载做的第一件事，是把自己这次的加载写进 `attemp
 
 ### G3 · 构建闸门（CI 强制）
 
-`tools/audit-deb.sh` 会对每个 deb 做五项检查，任一失败即**拒绝发布**：
+`tools/audit-deb.sh`（逻辑在 `audit-deb.py`）对每个 deb 逐条断言，任一失败即**拒绝发布**：
 
-1. 高危目录零容忍：`System/`、`private/`、`bin/`、`usr/bin/`、`usr/lib/`、`Library/LaunchDaemons/`、`Library/LaunchAgents/`、`PreferenceLoader/`、`MobileSubstrate.dylib`；
-2. 逐文件白名单：dylib、过滤 plist、PreferenceLoader 入口、4 个救援脚本、设置面板 bundle 的 12 个文件，多一个就失败；
-3. 注入范围：Stage 0 只允许注入 `com.apple.springboard` **一个**进程，多一个就失败；
-4. 控制脚本：`postinst`/`prerm` 里出现 `rm -rf /`、`nvram`、`launchctl`、`dpkg --force`、`/System/` 即失败；
-5. 架构必须是 `iphoneos-arm64e`（roothide），且 dylib 与设置面板必须含 arm64e 切片，避免装到错误环境；
+1. `control`：`Package: com.aevon`、`Architecture: iphoneos-arm64e`、**没有 `Description`**；
+2. 载荷白名单：只允许 dylib、过滤 plist、PreferenceLoader 入口、设置面板 bundle；出现 `var/jb` 前缀或 `usr/` 即失败（0.0.3 已删掉四个终端脚本）；
+3. Mach-O：必须是 **thin arm64e**（不是 fat、不是 arm64），两个二进制都查；
+4. Swift 实证：二进制里必须含 `libswiftCore`，否则说明构建偷偷退回了 ObjC；
+5. 设置入口自洽：`entry.bundle` = `CFBundleExecutable`、`detail` 指向 RootListController、`Root.plist` 引用的 8 个子面板全部在包里；
+6. 体积预算：deb ≤ 520 KB、tweak ≤ 320 KB、bundle ≤ 400 KB。
 
 ### G4 · 阶段闸门（人为，但写死验收标准）
 
@@ -83,26 +84,22 @@ dylib 每次加载做的第一件事，是把自己这次的加载写进 `attemp
 
 ### 级别 0 · 一切正常，只是想关掉
 
-```sh
-/var/containers/Bundle/Application/.jbroot-*/usr/libexec/aevon/aevon-disable
-```
+**设置 → Aevon → 紧急停止（G0）** 打开，再点 **重载桌面（应用闸门变更）**。
 
-作用：写 panic 文件 + 重启 SpringBoard。**10 秒内回到干净状态。**
+作用：写 panic 文件 + 写偏好域，然后重启桌面。**10 秒内回到干净状态**，不需要终端、不需要电脑。
 
 ### 级别 1 · 桌面能用，但 Aevon 一加载就崩
 
 不需要你做任何事——G2 会自动在第 3 次失败后停用它。想手动立刻确认：
 
-```sh
-touch /var/mobile/Library/Preferences/com.aevon.panic
-killall -9 SpringBoard
-```
+在 Filza 里新建空文件 `/var/mobile/Library/Logs/Aevon/panic`，然后在设置里点「重载桌面」。
+（旧路径 `/var/mobile/Library/Preferences/com.aevon.panic` 仍然有效。）
 
 ### 级别 2 · 桌面起不来（SpringBoard 崩溃循环）
 
 设备**没有变砖**，只是桌面在反复重启。三条路任选，都不需要 Aevon 参与：
 
-1. **Filza 建文件**：进 `var/mobile/Library/Preferences/` → 新建空文件 `com.aevon.panic` → 重启设备。
+1. **Filza 建文件**：进 `var/mobile/Library/Logs/Aevon/` → 新建空文件 `panic` → 重启设备。
 2. **SSH / USB 终端**（见下节）：执行 `aevon-disable`。
 3. **安全模式**：Dopamine 用户按住**音量上键**重新越狱 → 进入无插件安全模式 → 在 Sileo 里卸载 Aevon。
 
@@ -115,7 +112,7 @@ killall -9 SpringBoard
 - 强制重启（音量+、音量−、长按电源）；
 - 用 Dopamine 重新越狱时按住音量上键；
 - 仍失败 → 用电脑上的 Dopamine/palera1n 走 recovery，或 `--force-revert` 后重越狱；
-- 越狱环境重装后再 `dpkg -r com.aevon.aevon`。
+- 越狱环境重装后再在 Sileo 里卸载 Aevon（包 id 是 `com.aevon`）。
 
 ---
 
@@ -136,12 +133,9 @@ ssh root@127.0.0.1 -p 2222
 
 进设备后：
 
-```sh
-aevon-status          # 一眼看清是否生效、为什么停用
-aevon-disable         # 立刻停用
-aevon-enable          # 清状态重新开始
-aevon-uninstall       # 卸载
-```
+0.0.3 起**不再提供命令行工具**（`aevon-disable` 等已从包里移除，见体积预算那一节）。
+SSH 通道现在的用途只有一个：在桌面临时起不来时，用 `touch /var/mobile/Library/Logs/Aevon/panic`
+建闸门文件，或用 `killall -9 SpringBoard` 让桌面重新加载。所有日常操作都在设置里。
 
 如果没装 OpenSSH，装一个（Sileo 搜 OpenSSH），这是所有救援里性价比最高的一件事。
 
@@ -151,16 +145,13 @@ aevon-uninstall       # 卸载
 
 每次装新 deb 之前做这四步，不要跳：
 
-1. **体检 + 快照**（把仓库里的 `tools/preflight.sh` 拷到设备上，root 执行）：
-   ```sh
-   sh /var/mobile/preflight.sh
-   ```
-   它会检查 roothide 环境（自动定位 `.jbroot-*`）、ElleKit、dpkg 健康、可用空间、**panic 文件是否真的可写**，并把当前状态存成 `/var/mobile/Library/Logs/Aevon/baseline-*.txt`。
-   最后一行不是 `PREFLIGHT: PASS` 就不要装。
+1. **确认能建文件**：随便用 Filza 在 `/var/mobile/` 下新建一个空文件再删掉。
+   能建，说明 panic 文件那条腿成立 —— 这是所有救援里唯一必须提前确认的事。
+   （仓库里的 `tools/preflight.sh` 仍然可用，但它需要在设备上跑终端，你现在的手机没有终端，跳过它不影响安全。）
 
 2. **确认安全模式可用**：装任何东西之前先试一次"按住音量上键重新越狱"，确认你能进去。
 
-3. **保留上一版 deb**：仓库 Release 里每个 tag 都有，回退就是 `dpkg -i 旧包.deb`。
+3. **保留上一版 deb**：本项目不建 Release、不打 tag，旧包只存在你本地的 `dist/` 里，别删。
 
 4. **一次只装一个阶段**：不要"顺手"把 P2 和 P3 一起推上去。
 

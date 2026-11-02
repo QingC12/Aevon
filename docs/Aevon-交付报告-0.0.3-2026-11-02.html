@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aevon 0.0.3 交付报告 — Swift / arm64e</title>
+<style>
+  :root{
+    --bg:#0a0d13; --bg2:#0f131c; --card:#121722; --card2:#161c28;
+    --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.13);
+    --tx:#e8edf6; --tx2:#9aa7bd; --tx3:#6b7688;
+    --cy:#4dd4e8; --vi:#9d8cff; --am:#f0b45f; --gr:#5fd6a4; --rd:#ff7a86;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:radial-gradient(1200px 600px at 15% -10%,rgba(77,212,232,.09),transparent 60%),
+               radial-gradient(1000px 500px at 90% 0%,rgba(157,140,255,.08),transparent 55%),
+               var(--bg);
+    color:var(--tx);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased; line-height:1.65; padding:44px 28px 80px;
+  }
+  .wrap{max-width:1120px;margin:0 auto}
+  .eyebrow{font-size:12px;letter-spacing:.22em;color:var(--cy);text-transform:uppercase;font-weight:600}
+  h1{font-size:33px;line-height:1.28;font-weight:650;margin:12px 0 10px;letter-spacing:-.01em}
+  h1 em{font-style:normal;background:linear-gradient(92deg,var(--cy),var(--vi));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--tx2);font-size:14.5px;max-width:900px}
+  .meta{margin-top:18px;display:flex;gap:10px;flex-wrap:wrap}
+  .chip{font-size:12px;color:var(--tx2);border:1px solid var(--line2);border-radius:999px;padding:5px 12px;background:rgba(255,255,255,.02)}
+  .chip b{color:var(--tx);font-weight:600}
+  .kpi{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:34px 0 8px}
+  .k{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:16px 14px}
+  .k .n{font-size:22px;font-weight:650;letter-spacing:-.02em;line-height:1.2}
+  .k .n span{font-size:12px;color:var(--tx3);font-weight:500;margin-left:2px}
+  .k .l{font-size:11.5px;color:var(--tx3);margin-top:4px;letter-spacing:.02em}
+  .k.c1 .n{color:var(--cy)} .k.c2 .n{color:var(--vi)} .k.c3 .n{color:var(--am)}
+  .k.c4 .n{color:var(--gr)} .k.c5 .n{color:#c9d4e8} .k.c6 .n{color:#8fa3bf}
+  section{margin-top:44px}
+  .sh{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:22px}
+  .sh .num{font-size:12px;color:var(--cy);font-weight:700;letter-spacing:.12em}
+  .sh h2{font-size:19px;font-weight:600;letter-spacing:-.01em}
+  .sh .note{margin-left:auto;font-size:12px;color:var(--tx3)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-weight:600;color:var(--tx3);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;padding:9px 10px;border-bottom:1px solid var(--line2)}
+  td{padding:10px;border-bottom:1px solid var(--line);color:var(--tx2);vertical-align:top}
+  td b{color:var(--tx);font-weight:600}
+  tr:hover td{background:rgba(255,255,255,.017)}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+  .sm{font-size:11.5px}
+  .num{font-variant-numeric:tabular-nums}
+  .tag{display:inline-block;font-size:10.5px;padding:1.5px 7px;border-radius:5px;border:1px solid;line-height:1.5;white-space:nowrap}
+  .tA{color:var(--gr);border-color:rgba(95,214,164,.35);background:rgba(95,214,164,.08)}
+  .tB{color:var(--am);border-color:rgba(240,180,95,.35);background:rgba(240,180,95,.08)}
+  .tC{color:var(--rd);border-color:rgba(255,122,134,.35);background:rgba(255,122,134,.08)}
+  .tN{color:#8fa3bf;border-color:rgba(143,163,191,.35);background:rgba(143,163,191,.08)}
+  .tV{color:var(--vi);border-color:rgba(157,140,255,.35);background:rgba(157,140,255,.08)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .card{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:18px}
+  .card h3{font-size:14px;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .card p{font-size:13px;color:var(--tx2)}
+  .card ul{margin:8px 0 0 2px;list-style:none;display:flex;flex-direction:column;gap:6px}
+  .card li{font-size:12.8px;color:var(--tx2);padding-left:14px;position:relative}
+  .card li::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;border-radius:50%;background:var(--cy);opacity:.7}
+  .hl{color:var(--tx);font-weight:600}
+  pre{background:#0b0f17;border:1px solid var(--line2);border-radius:12px;padding:16px 18px;overflow-x:auto;
+      font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.75;color:#c7d3e6}
+  pre .k{color:var(--cy)} pre .c{color:var(--tx3)} pre .g{color:var(--gr)}
+  .steps{display:flex;flex-direction:column;gap:12px}
+  .step{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:16px 18px;display:grid;grid-template-columns:38px 1fr;gap:14px}
+  .step .no{width:30px;height:30px;border-radius:9px;background:rgba(77,212,232,.1);border:1px solid rgba(77,212,232,.3);
+            color:var(--cy);font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .step h4{font-size:14px;font-weight:600;margin-bottom:4px}
+  .step h4 .restart{font-size:10.5px;font-weight:500;color:var(--am);border:1px solid rgba(240,180,95,.35);
+            background:rgba(240,180,95,.08);border-radius:5px;padding:1px 7px;margin-left:8px}
+  .step p{font-size:13px;color:var(--tx2)}
+  .expect,.fail{margin-top:10px;font-size:12.6px;padding:9px 12px;border-radius:9px;line-height:1.7}
+  .expect{background:rgba(95,214,164,.07);border-left:2px solid var(--gr);color:#b9e9d4}
+  .fail{background:rgba(255,122,134,.06);border-left:2px solid var(--rd);color:#ffc6cb}
+  .expect b,.fail b{color:#fff}
+  footer{margin-top:52px;padding-top:18px;border-top:1px solid var(--line);color:var(--tx3);font-size:12px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+  @media(max-width:900px){
+    .kpi{grid-template-columns:repeat(3,1fr)}
+    .grid2{grid-template-columns:1fr}
+    body{padding:28px 16px 60px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="eyebrow">AEVON · DELIVERY 0.0.3</div>
+  <h1>底座一次定型：<em>Swift</em> 重写、只出 arm64e<br>并把「装了看不到设置」修掉</h1>
+  <p class="sub">
+    0.0.2 的问题不是功能，是底座：语言是 ObjC++、入口依赖 Settings 的进程缓存、日志散在两级目录、
+    交付名和包 id 都要手写。这一版按你的 9 条要求把它们一次性钉死，再往下只剩「接功能」。
+  </p>
+
+  <div class="meta">
+    <span class="chip">版本 <b>0.0.3</b></span>
+    <span class="chip">架构 <b>iphoneos-arm64e</b></span>
+    <span class="chip">包体 <b>42,436 B</b></span>
+    <span class="chip">载荷 <b>14 文件 / 251,819 B</b></span>
+    <span class="chip">审计 <b>10 项 PASS</b></span>
+    <span class="chip">钩子 <b>0</b></span>
+  </div>
+
+  <div class="kpi">
+    <div class="k c1"><div class="n">2<span>个</span></div><div class="l">二进制均为 thin arm64e</div></div>
+    <div class="k c2"><div class="n">121,664<span>B</span></div><div class="l">Aevon.dylib（Swift）</div></div>
+    <div class="k c3"><div class="n">122,896<span>B</span></div><div class="l">AevonPrefs（Swift）</div></div>
+    <div class="k c4"><div class="n">42,436<span>B</span></div><div class="l">交付 deb</div></div>
+    <div class="k c5"><div class="n">−4</div><div class="l">终端脚本（已删）</div></div>
+    <div class="k c6"><div class="n">108<span>s</span></div><div class="l">本次构建实测</div></div>
+  </div>
+
+  <section>
+    <div class="sh"><span class="num">01</span><h2>你提的 9 条，逐条落地</h2><span class="note">每一条都能被审计脚本机械验证</span></div>
+    <table>
+      <thead><tr><th style="width:24%">要求</th><th style="width:46%">做法</th><th>证据</th></tr></thead>
+      <tbody>
+        <tr><td><b>只要 arm64e</b></td>
+            <td><span class="mono">Makefile</span> 里 <span class="mono">export ARCHS := arm64e</span>，且 CI 的 preflight 会断言这行没被改掉</td>
+            <td>两个二进制 <span class="mono">cpusubtype=0x80000002</span>，审计逐个数</td></tr>
+        <tr><td><b>体积最小化，做完的模块即使移除</b></td>
+            <td>探针整套（约 120 行）已从包内移除；4 个 <span class="mono">/usr/libexec</span> 终端脚本删除（你的手机没终端，它们只占体积）；审计加体积预算当棘轮</td>
+            <td>载荷 18 → <b>14</b> 个文件；预算 deb ≤ 520 KB</td></tr>
+        <tr><td><b>像母本一样用 Swift</b></td>
+            <td>tweak 与设置包都重写为 Swift。只剩一个 3 行 C 文件，因为 Swift 无法声明 dylib 的构造函数（母本、Orion 也是这个做法）</td>
+            <td>审计强制：二进制必须含 <span class="mono">libswiftCore</span>，退回 ObjC 直接构建失败</td></tr>
+        <tr><td><b>日志固定 /var/mobile/Aevon.log</b></td>
+            <td>单一常量 <span class="mono">Aevon.logPath</span>，两个进程共用同一个文件；写入前 stat 判大小，超 512 KB 自动重开</td>
+            <td>审计在 dylib 里搜这个字符串</td></tr>
+        <tr><td><b>设置里要能看到 Aevon</b></td>
+            <td>根因是 Settings 进程把入口列表缓存在内存里，<span class="mono">postinst</span> 又故意不重启任何东西（见 02 节）。现在装完自动让 Settings 重新读一次；入口 plist 补齐 <span class="mono">isController</span></td>
+            <td>入口三件套自洽性由审计校验：<span class="mono">bundle ↔ CFBundleExecutable ↔ detail</span></td></tr>
+        <tr><td><b>兼容 Shuffle 聚合</b></td>
+            <td>入口仍是标准 PreferenceLoader 格式（与母本一致：<span class="mono">PSLinkCell + bundle + detail + isController</span>），Shuffle 读的就是这份</td>
+            <td>8 个子面板全部能被 <span class="mono">Root.plist</span> 解析到</td></tr>
+        <tr><td><b>标识 com.Aevon_0.0.xx-arm64e.deb</b></td>
+            <td>交付名由 <span class="mono">tools/name-deb.sh</span> 从 <span class="mono">control</span> 读版本号生成，永远不用手写；包 id 用全小写 <span class="mono">com.aevon</span>（dpkg 规定 id 不能有大写）</td>
+            <td>本次产物：<span class="mono">com.Aevon_0.0.3-arm64e.deb</span></td></tr>
+        <tr><td><b>构建别越来越久</b></td>
+            <td>只改文档的提交不再触发构建；theos 与 SDK 走缓存；ldid 走独立下载缓存；不跑 <span class="mono">make clean</span>；只出一个包</td>
+            <td>见 05 节的实测拆解</td></tr>
+        <tr><td><b>一开始就设好，以后别改</b></td>
+            <td>架构、包 id、交付名、日志路径、体积预算全部写进仓库里的固定位置，CI preflight 每次校验；文档只在这些位置取值</td>
+            <td><span class="mono">canonical-settings</span> 见 03 节表格</td></tr>
+      </tbody>
+    </table>
+    <p class="sub" style="margin-top:14px">
+      一处拼写选择：你写的是 <span class="mono">Aevom.log</span>，我按产品名落地成
+      <span class="mono">/var/mobile/Aevon.log</span>。确实要 <span class="mono">m</span> 的话，
+      改 <span class="mono">Sources/Core/Paths.swift</span> 里一行、跑一次构建即可，其它地方都是引用它。
+    </p>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">02</span><h2>0.0.2 装了却看不到 Aevon：根因与修法</h2><span class="note">不是包坏了，是缓存</span></div>
+    <div class="grid2">
+      <div class="card">
+        <h3>根因</h3>
+        <p>
+          「设置」进程在启动时会把 <span class="mono">Library/PreferenceLoader/Preferences/</span>
+          读一遍，然后<b>一直存在内存里</b>。0.0.2 的 <span class="mono">postinst</span> 为了"不碰任何东西"，
+          连 <span class="mono">Preferences</span> 都没重启，于是：
+        </p>
+        <ul>
+          <li>你装完时，设置其实还在用旧列表（没有 Aevon 那一行）</li>
+          <li>它也不会自己退出：iOS 会把 <span class="mono">Preferences</span> 常驻</li>
+          <li>所以"装成功了"和"看不到"同时成立</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>修法（两条腿）</h3>
+        <ul>
+          <li><span class="mono">postinst</span> 结束后 <span class="mono">killall -9 Preferences</span>：只杀设置 App，
+              不动 SpringBoard，下次打开就是新列表</li>
+          <li>入口 plist 与 bundle 信息补齐：<span class="mono">isController=true</span>、
+              <span class="mono">CFBundleShortVersionString</span> 与包版本一致、类名与
+              <span class="mono">detail</span> 完全对齐</li>
+          <li>审计把这三者的自洽性变成构建闸门，以后不会再悄悄错位</li>
+        </ul>
+      </div>
+    </div>
+    <p class="sub" style="margin-top:14px">
+      顺带纠正一处旧数据的错误：0.0.2 的 bundle 里写着 <span class="mono">CFBundleShortVersionString = 0.1.0</span>，
+      而包版本是 0.0.2。现在三处（control / Swift 常量 / Info.plist）版本一致，CI 每次校验。
+    </p>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">03</span><h2>Swift 重写后的结构</h2><span class="note">共享核心，编进两个二进制</span></div>
+    <pre><span class="c">// 编译单元</span>
+Sources/
+  AevonBoot.m          <span class="c">3 行 C：dylib 构造函数 → 调用 Swift</span>
+  Boot.swift           <span class="c">闸门 → 日志 → Darwin 命令通道 → 心跳 <span class="g">(P1 的 hook 只能写在这之后)</span></span>
+  Core/Paths.swift     <span class="c">路径 / jbroot 定位 / posix_spawn / 通知</span>
+  Core/Log.swift       <span class="c">/var/mobile/Aevon.log，512 KB 上限自轮转</span>
+  Core/Gate.swift      <span class="c">G0 / G1 / G2 + 状态文件 + 控制通道</span>
+  Prefs/RootListController.swift  <span class="c">PSListController 子类（Swift，@objc 具名）</span>
+
+<span class="c">// 两个二进制共用 Core 三个文件 —— 桌面与设置从此不可能对路径/闸门有分歧</span>
+Aevon.dylib           = AevonBoot.m + Boot.swift + Core/*
+AevonPrefs            = Core/* + Prefs/RootListController.swift</pre>
+    <table style="margin-top:18px">
+      <thead><tr><th style="width:26%">固定设定</th><th style="width:34%">值</th><th>写在哪（唯一来源）</th></tr></thead>
+      <tbody>
+        <tr><td>架构</td><td class="mono">arm64e（thin，永不 arm64）</td><td class="mono">Makefile: ARCHS</td></tr>
+        <tr><td>打包方案</td><td class="mono">roothide（装到 /Library，无 var/jb）</td><td class="mono">Makefile: THEOS_PACKAGE_SCHEME</td></tr>
+        <tr><td>包 id</td><td class="mono">com.aevon</td><td class="mono">control: Package</td></tr>
+        <tr><td>交付文件名</td><td class="mono">com.Aevon_&lt;version&gt;-arm64e.deb</td><td class="mono">tools/name-deb.sh</td></tr>
+        <tr><td>版本号</td><td class="mono">0.0.3</td><td class="mono">control / Paths.swift / Info.plist（三处一致）</td></tr>
+        <tr><td>日志</td><td class="mono">/var/mobile/Aevon.log</td><td class="mono">Paths.swift: logPath</td></tr>
+        <tr><td>闸门状态</td><td class="mono">/var/mobile/Library/Logs/Aevon/state.plist</td><td class="mono">Paths.swift: statePath</td></tr>
+        <tr><td>偏好域</td><td class="mono">com.aevon（旧域仍读，升级不丢闸门）</td><td class="mono">Paths.swift: domain</td></tr>
+        <tr><td>体积预算</td><td class="mono">deb ≤ 520 KB / tweak ≤ 320 KB / bundle ≤ 400 KB</td><td class="mono">tools/audit-deb.py</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">04</span><h2>包体：删了什么，涨在哪</h2><span class="note">Swift 一定比 ObjC 大，但要大得明白</span></div>
+    <div class="grid2">
+      <div class="card">
+        <h3>0.0.2 → 0.0.3</h3>
+        <table style="margin-top:6px">
+          <tbody>
+            <tr><td>载荷文件</td><td class="mono num">18 → 14</td></tr>
+            <tr><td>Aevon.dylib</td><td class="mono num">88,416 → 121,664 B</td></tr>
+            <tr><td>AevonPrefs</td><td class="mono num">71,904 → 122,896 B</td></tr>
+            <tr><td>载荷合计</td><td class="mono num">172,199 → 251,819 B</td></tr>
+            <tr><td>deb（lzma）</td><td class="mono num">25,658 → 42,436 B</td></tr>
+          </tbody>
+        </table>
+        <p style="margin-top:10px">多出来的 50 KB 是 Swift 运行时元数据，是"用 Swift"的固定成本；压缩后只多 16 KB。</p>
+      </div>
+      <div class="card">
+        <h3>删掉的（净减）</h3>
+        <ul>
+          <li>探针整套：类型编码扫描、类实现者枚举、场景树 dump、报告渲染 —— 已从包内移除，需要取证时再单独编一版</li>
+          <li><span class="mono">aevon-disable / enable / status / uninstall</span> 四个 shell 脚本：四条命令你都用不上，全部能量在设置里</li>
+          <li>源码不再有 <span class="mono">AevonPaths.h</span> 里那一份"两处各抄一遍"的常量</li>
+        </ul>
+      </div>
+    </div>
+    <pre style="margin-top:16px"><span class="c">$ bash tools/audit-deb.sh dist/com.Aevon_0.0.3-arm64e.deb</span>
+  [PASS] control: iphoneos-arm64e
+  [PASS] control: no Description
+  [PASS] control: Package com.aevon
+  [PASS] payload: 14 files, all inside Aevon's own paths
+  [PASS] Aevon.dylib: thin arm64e, Swift, 121,664 B (37% of budget)
+  [PASS] AevonPrefs: thin arm64e, Swift, 122,896 B (30% of budget)
+  [PASS] entry: Aevon -> AevonRootListController (bundle AevonPrefs)
+  [PASS] panes: 8 child panes all resolve
+  [PASS] log: /var/mobile/Aevon.log
+  [PASS] size: deb 42,436 B (7% of budget)
+<span class="g">AUDIT: PASS</span></pre>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">05</span><h2>构建时间：实测拆解</h2><span class="note">本次 run 41421460596</span></div>
+    <table>
+      <thead><tr><th style="width:34%">步骤</th><th style="width:14%">耗时</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>排队 → 开始</td><td class="mono num">23 s</td><td>GitHub 侧，我们控制不了</td></tr>
+        <tr><td>checkout</td><td class="mono num">1 s</td><td>40 个文件</td></tr>
+        <tr><td>克隆 theos + SDK</td><td class="mono num">27 s</td><td><b>本次缓存未命中</b>（cache key 换代）；下一次这一步是 0 s</td></tr>
+        <tr><td>preflight</td><td class="mono num">5 s</td><td>版本三处一致 / 架构承诺 / swiftc 可用</td></tr>
+        <tr><td><b>编译 + 打包</b></td><td class="mono num">60 s</td><td>Swift 整模块编译是主要开销；ObjC 时约 35 s</td></tr>
+        <tr><td>审计 + 改名 + 上传</td><td class="mono num">4 s</td><td>纯断言与拷贝</td></tr>
+        <tr><td><b>job 合计</b></td><td class="mono num">108 s</td><td>run 端到端 131 s</td></tr>
+      </tbody>
+    </table>
+    <div class="grid2" style="margin-top:16px">
+      <div class="card">
+        <h3>这一版做的减法</h3>
+        <ul>
+          <li><b>文档提交不再构建</b>：<span class="mono">paths-ignore</span> 挡住 docs/md/dist —— 省下的不是秒，是整次构建</li>
+          <li><b>theos/SDK 缓存</b>：命中后 27 s 变 0 s</li>
+          <li><b>ldid 下载缓存</b>：不再每次 <span class="mono">brew install</span></li>
+          <li><b>不跑 make clean</b>：小工程没有收益，只有耗时</li>
+          <li><b>连续 push 只留最后一次</b>：<span class="mono">concurrency</span></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>为什么不可能回到 60 秒以内</h3>
+        <p>
+          Swift 必须整模块编译，UIKit/Foundation 的模块加载本身就要几十秒，
+          这是语言的成本而不是配置的问题。稳态预期：<b>命中缓存后 75–85 秒</b>。
+          真正的节省在"不必要地触发构建"，那条已经堵住了。
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">06</span><h2>真机实测流程（全在界面里，不需要终端）</h2><span class="note">按顺序做，每步都有"看到什么算过"</span></div>
+    <div class="steps">
+
+      <div class="step"><div class="no">1</div><div>
+        <h4>装包</h4>
+        <p>Sileo 打开 <span class="mono">com.Aevon_0.0.3-arm64e.deb</span> 安装。
+           0.0.2 与 0.0.3 的包 id 不同，control 里带 <span class="mono">Replaces/Conflicts</span>，dpkg 会自动先卸旧包。</p>
+        <div class="expect"><b>通过：</b>安装结束没有报"文件冲突 / 依赖不满足"；终端输出最后一段是 <span class="mono">Aevon 0.0.3 installed (roothide / arm64e / swift, zero hooks)</span>。</div>
+        <div class="fail"><b>不过：</b>报 <span class="mono">trying to overwrite ... com.aevon.aevon</span> → 先在 Sileo 里手动卸载旧的 Aevon，再装一次。</div>
+      </div></div>
+
+      <div class="step"><div class="no">2</div><div>
+        <h4>打开设置，第一屏找 Aevon<span class="restart">不重启桌面</span></h4>
+        <p>装完<b>不要</b>重载桌面。直接打开「设置」，从第一屏往下看（如果你用 Shuffle 聚合，就去它给 Aevon 分的那组找）。</p>
+        <div class="expect"><b>通过：</b>能看到 <b>Aevon</b> 一行，点进去有「状态 / 安全闸门 / 功能设置 / 关于」。</div>
+        <div class="fail"><b>不过：</b>还没有 → 把设置从后台彻底划掉，再打开一次（这是进程缓存，不是包的问题）。仍然没有 → 把 sileo 的安装日志截图给我。</div>
+      </div></div>
+
+      <div class="step"><div class="no">3</div><div>
+        <h4>看状态区<span class="restart">不重启桌面</span></h4>
+        <p>「状态」里应有五行：注入状态 / 版本 / 启动次数 / 最近一次加载 / 日志文件。</p>
+        <div class="expect"><b>通过：</b>日志文件显示 <span class="mono">/var/mobile/Aevon.log</span>；注入状态是 <b>未加载</b>（还没重载桌面，这是对的）。</div>
+        <div class="fail"><b>不过：</b>日志行是空白或显示别的路径 → 说明装的是旧包，回到第 1 步确认版本。</div>
+      </div></div>
+
+      <div class="step"><div class="no">4</div><div>
+        <h4>第一次重载桌面<span class="restart">桌面重启一次</span></h4>
+        <p>点「重载桌面（应用闸门变更）」→ 确认。桌面会重启 5–10 秒。</p>
+        <div class="expect"><b>通过：</b>重新进设置，注入状态变成 <b>运行中</b>，版本 <span class="mono">0.0.3</span>，启动次数 ≥ 1；<b>60 秒后再看</b>，启动次数回到 0（心跳清计数）。</div>
+        <div class="fail"><b>不过：</b>状态一直是"未加载" → 桌面没加载 dylib：确认越狱是 roothide、ElleKit 在，然后把 Filza 里 <span class="mono">/var/mobile/Aevon.log</span> 的内容发我。</div>
+      </div></div>
+
+      <div class="step"><div class="no">5</div><div>
+        <h4>闸门 G0 / G1 双向验证<span class="restart">每次都要重载</span></h4>
+        <p>打开「紧急停止（G0）」→ 点「重载桌面」→ 回来看状态。</p>
+        <div class="expect"><b>通过：</b>状态变 <b>已紧急停止（G0）</b>，桌面行为与没装时完全一样；关掉 G0 再重载 → 回到 <b>运行中</b>。G1 同样来回一次。</div>
+        <div class="fail"><b>不过：</b>开关拨了状态不变 → 是开关没有写进闸门，把状态截图发我（这一条是 0.0.3 必须过的安全底线）。</div>
+      </div></div>
+
+      <div class="step"><div class="no">6</div><div>
+        <h4>最后一条腿：文件闸门<span class="restart">桌面重启一次</span></h4>
+        <p>Filza 进 <span class="mono">/var/mobile/Library/Logs/Aevon/</span>，新建空文件 <span class="mono">panic</span>，然后重载桌面。</p>
+        <div class="expect"><b>通过：</b>状态变 <b>已紧急停止（G0）</b> —— 说明即使设置打不开，你也能用 Filza 停掉它。删掉 <span class="mono">panic</span> 再重载即恢复。</div>
+        <div class="fail"><b>不过：</b>建了文件仍显示运行中 → 文件没落在真实路径（可能建在 jbroot 里），换 <span class="mono">/rootfs/var/mobile/Library/Logs/Aevon/</span> 再试。</div>
+      </div></div>
+
+    </div>
+    <p class="sub" style="margin-top:16px">
+      第 4–6 步一共只会重启桌面 4 次；不需要重启设备，也不需要在电脑上做任何事。
+    </p>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">07</span><h2>这一版没做的，和下一步</h2><span class="note">说明白比藏着好</span></div>
+    <div class="grid2">
+      <div class="card">
+        <h3>明确没做</h3>
+        <ul>
+          <li><b>P1 的场景挂载</b>：仍然是 0 个 hook。闸门必须先被真机验证过，才允许写第一行 hook</li>
+          <li><b>64 个功能开关</b>：界面与键位都在，但还没接通（面板里每个都是"未接通"）</li>
+          <li><b>探针</b>：已从包里移除。P1 开工前需要两项取证，届时应一次性构建取证版，而不是让它常驻</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>你回传这三件事，我就能开 P1</h3>
+        <ul>
+          <li>第 2 步是否在第一屏看到 Aevon（这条决定 0.0.3 算不算过）</li>
+          <li>第 5 步 G0/G1 开关是否真的改变了状态</li>
+          <li>第 4 步 60 秒后启动次数是否归零</li>
+        </ul>
+        <p style="margin-top:10px">三条都过，下一版就进 P1：先建立空 Scene，先不碰任何 App。</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Aevon 0.0.3 · roothide / arm64e / Swift · 零 hook</span>
+    <span class="mono">AUDIT PASS · run 41421460596</span>
+  </footer>
+
+</div>
+</body>
+</html>

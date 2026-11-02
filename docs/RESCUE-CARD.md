@@ -1,28 +1,26 @@
 # 应急卡（存到手机相册，或打印）
 
-## 出事第一反应：建一个空文件
+> 0.0.3 起不再提供任何终端命令脚本：你的手机没有终端，写了也用不上。
+> 下面所有操作都能在**设置**或**Filza**里完成。
 
-**路径**
+## 出事第一反应：开一个开关
 
-```
-/var/mobile/Library/Preferences/com.aevon.panic
-```
+**设置 → Aevon → 紧急停止（G0）** 打开，然后点 **重载桌面（应用闸门变更）**。
 
-- Filza / 文件 App → 进 `var/mobile/Library/Preferences/` → 新建空文件 → 命名 `com.aevon.panic`
-- 建完重启设备。Aevon 从此**一行代码都不执行**。
+G0 一开，Aevon 在桌面进程里**一行代码都不执行**（连日志都不写）。开完不回弹、不需要开机。
 
 ---
 
-## 命令版（SSH / NewTerm）
+## 如果「设置」已经打不开
 
-```sh
-aevon-disable      # 停用 + 重启桌面
-aevon-enable       # 清状态重新开始
-aevon-status       # 看当前状态
-aevon-uninstall    # 彻底卸载
+用 Filza（或文件 App）新建一个空文件：
+
+```
+/var/mobile/Library/Logs/Aevon/panic
 ```
 
-完整路径：`/var/containers/Bundle/Application/.jbroot-*/usr/libexec/aevon/`
+建完重启设备。这个文件和 G0 开关是**同一个闸门的两条腿**，任一条成立就停。
+（旧路径 `/var/mobile/Library/Preferences/com.aevon.panic` 仍然有效，升级不丢。）
 
 ---
 
@@ -30,9 +28,9 @@ aevon-uninstall    # 彻底卸载
 
 设备**没有变砖**，只是桌面在反复重启。按顺序试：
 
-1. Filza 建上面的 panic 文件 → 重启
-2. `iproxy 2222 22` + `ssh root@127.0.0.1 -p 2222` → `aevon-disable`
-3. 按住**音量上键**重新越狱 → 安全模式 → Sileo 卸载 Aevon
+1. Filza 建上面的 `panic` 空文件 → 重启
+2. 按住**音量上键**重新越狱 → 安全模式 → 在 Sileo 里卸载 Aevon
+3. 安全模式里也可以先不卸载，改 `panic` 文件后正常重启，看是否恢复
 
 ---
 
@@ -48,4 +46,4 @@ aevon-uninstall    # 彻底卸载
 
 - 不要 `rm -rf .jbroot-*` 或 `rm -rf /var/jb`（那是越狱环境本体）
 - 不要在崩溃循环中反复"再装一次试试"
-- 不要在没确认 SSH 可用之前装下一期
+- 不要在没有 Filza（或任何能建文件的工具）的情况下装下一期
