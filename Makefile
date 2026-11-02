@@ -24,6 +24,10 @@ AevonPrefs_FILES := Sources/AevonPrefs/AevonPrefs.mm
 AevonPrefs_INSTALL_PATH := /Library/PreferenceBundles
 AevonPrefs_CFLAGS := -fobjc-arc -Wall -I$(THEOS_PROJECT_DIR)/Sources
 AevonPrefs_FRAMEWORKS := Foundation UIKit
+# PSListController is resolved from the Settings process at runtime, so the
+# bundle must be allowed to carry undefined symbols. Linking Preferences.framework
+# would also work but adds an install-time dependency for no benefit.
+AevonPrefs_LDFLAGS := -Wl,-undefined,dynamic_lookup
 
 include $(THEOS_MAKE_PATH)/bundle.mk
 
