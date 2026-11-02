@@ -113,28 +113,24 @@ static BOOL AevonSaveState(NSDictionary *state) {
 
 #pragma mark - Gates
 
-// Returns YES when it is safe to continue. Writes the attempt counter as the
-// very first side effect so that a crash *after* this point is still counted
-// on the next load.
-static BOOL AevonPassGates(AevonGate *gateOut) {
-    AevonGate gate = AevonGatePass;
+// Returns AevonGatePass when it is safe to continue. Writes the attempt counter
+// as the very first side effect so that a crash *after* this point is still
+// counted on the next load.
+static AevonGate AevonPassGates(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
 
     // G0 — hard kill switch. Any file manager can create this file.
     if ([fm fileExistsAtPath:kPanicPath]) {
-        *gateOut = AevonGateBlockedPanic;
         AevonLog(@"gate G0: panic file present, standing down (zero hooks)");
-        return NO;
+        return AevonGateBlockedPanic;
     }
 
     NSMutableDictionary *state = AevonLoadState();
 
     // G1 — operator/auto disable flag.
     if ([state[@"disabled"] boolValue]) {
-        *gateOut = AevonGateBlockedDisabled;
-        AevonLog(@"gate G1: disabled=%@ reason=%@",
-                 @YES, state[@"disabledReason"] ?: @"unknown");
-        return NO;
+        AevonLog(@"gate G1: disabled, reason=%@", state[@"disabledReason"] ?: @"unknown");
+        return AevonGateBlockedDisabled;
     }
 
     // G2 — crash-loop breaker.
@@ -156,9 +152,8 @@ static BOOL AevonPassGates(AevonGate *gateOut) {
     if (!saved) {
         // We cannot count attempts, so we cannot guarantee the breaker works.
         // Fail safe: log and stand down rather than risk an uncountable loop.
-        *gateOut = AevonGateBlockedUnwritable;
         AevonLog(@"gate G2: state not writable, standing down to avoid an uncountable crash loop");
-        return NO;
+        return AevonGateBlockedUnwritable;
     }
 
     if (attempts > kMaxAttempts) {
@@ -167,13 +162,11 @@ static BOOL AevonPassGates(AevonGate *gateOut) {
         off[@"disabledReason"] = @"auto:crash-loop";
         off[@"disabledAt"] = @(now);
         AevonSaveState(off);
-        *gateOut = AevonGateBlockedCrashLoop;
         AevonLog(@"gate G2: %d unstable loads within %.0fs, self-disabled", attempts, kCrashWindow);
-        return NO;
+        return AevonGateBlockedCrashLoop;
     }
 
-    *gateOut = AevonGatePass;
-    return YES;
+    return AevonGatePass;
 }
 
 // Once we survive long enough in a live SpringBoard, the counter is cleared.
@@ -198,8 +191,7 @@ static void AevonScheduleStableReset(void) {
 __attribute__((constructor))
 static void AevonConstructor(void) {
     @autoreleasepool {
-        AevonGate gate = AevonGatePass;
-        if (!AevonPassGates(&gate)) {
+        if (AevonPassGates() != AevonGatePass) {
             return;  // absolutely nothing installed
         }
 
