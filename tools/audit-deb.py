@@ -411,9 +411,14 @@ def main():
     # for the window build. What must stay is the tree walk's own markers plus the
     # new build's markers: a build that logs nothing reads as "the request never
     # arrived", which is the one wrong answer that costs a full round trip.
+    # 0.0.15 adds the census and the identity path. Every planned exit has its own
+    # line, because the failing run is exactly the one whose log is all there is.
     for token in (b"scene: probe begin", b"scene: probe end",
                   b"scene: window level", b"scene: carrier view", b"scene: live scenes",
-                  b"win: begin manager", b"win: no template", b"win: calling _createScene"):
+                  b"win: begin manager", b" spec=",
+                  b" calling _createSceneWithDefinition: now",
+                  b"win: no scene built", b" definition is immutable, stop",
+                  b" no identity", b"census %@ super=%@"):
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the probe would never reach SpringBoard")

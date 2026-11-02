@@ -446,3 +446,52 @@ calls: tail done names=4411 owned=6 missing=9 secs=4
 对齐表落在 `docs/calls-align-0.0.13.md`（125 行，123 条 + 表头 2 行）。
 
 这轮**不构建**：结论已经到手，版本号留在 0.0.13 不动。
+
+### 8.8 0.0.14 建窗取证：场景建出来了没有（2026-11-02 23:00）
+
+第一次把「读现成场景」和「拿副本建一个」放进同一次按键。两阶段，顺序不能换：
+阶段 1 的产物就是阶段 2 的输入。
+
+```
+win: begin manager cls=FBSceneManager
+win: scenes=N
+win: s1 FBScene id=…
+win: s1.definition cls=…      ← 逐 ivar，最多 20 行
+win: s1.settings cls=…
+win: s1.clientSettings cls=…
+win: s1.uiPresentationManager cls=…
+win: calling _createSceneWithDefinition: now
+win: created …  或  win: create failed err=…
+```
+
+三条读法：
+
+| 日志末尾 | 结论 |
+|---|---|
+| `win: created` | 场景建出来了，下一步才是 presenter + window |
+| `win: create failed err=` | 系统明确拒绝，错误串指 payload 还是 identifier |
+| `calling …` 之后断档 | 调用本身炸了，配 `previous scan died` / `faulted with signal` 一起读 |
+| `win: aborted: id would collide` | 安全闸主动放弃：没有 identifier setter，共用会顶掉原场景 |
+
+**为什么先读再建**：母本二进制里没有 `FBSMutableSceneDefinition`、没有
+`setSpecification:`、没有任何 settings 字段 setter，只有 `valueForKey:` ——
+它自己也是抄现成场景。所以「dump 一个活的 definition 照抄」不是捷径，是同一个方法。
+
+**体积这一课**（记下来，别再走一遍）：
+
+- 删 46 行源码（`dumpClasses` + `chain` + `matrix` + `encoding`）**只减 64 字节**。
+  Swift dylib 的重量在类型元数据，不在指令。
+- `Aevon_SWIFTFLAGS := -Osize` 一加上，328,848 → **312,496**（-16,352 B，5%）。
+  这是唯一有效的杠杆。
+- 因此 0.0.14 的 dylib 回到 95% 预算内。
+
+**烧的 run**：5 个。1 个信息量 + 4 个修复：
+
+1. `Info.plist` 被 plistlib 存成二进制，CI 用 `grep "<string>$V</string>"` 找 XML 标签 → 直接 fail。
+   **教训：这个文件必须是 FMT_XML，其它 plist 是 FMT_BINARY，不能一刀切。**
+2. dylib 328,912 > 327,680。
+3. 审计断言用了 `win: scenes=`，而这个字面量在二进制里找不到（拼接被优化）→ 断言改成纯字面量 `win: no template`。
+4. `-Osize`。
+
+**没做的**：不建 presenter、不建 window、不设 deactivation reasons。
+`activate` 在母本二进制里 hits=0 这件事仍未解，它是下一版的分岔点。

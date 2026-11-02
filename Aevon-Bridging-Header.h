@@ -35,6 +35,19 @@ BOOL AevonAnswers(id _Nullable object, NSString *_Nullable name, NSInteger argum
 
 void AevonEnumerateScenes(id _Nullable manager, void (^_Nullable block)(id _Nullable scene));
 
+/// Reading and rebuilding the pieces of a scene definition. Every one of these
+/// answers nil/NO rather than trapping, and every attempt it makes is recorded
+/// in the note buffer, which the caller drains with AevonTakeNotes before doing
+/// anything that can take the process down.
+NSString *_Nullable AevonTakeNotes(void);
+NSString *_Nullable AevonClassCensus(NSString *_Nullable name, NSString *_Nullable keys);
+id _Nullable AevonGetGetter(id _Nullable object, NSString *_Nullable name);
+id _Nullable AevonGetIvar(id _Nullable object, NSString *_Nullable name);
+BOOL AevonSetIvar(id _Nullable object, NSString *_Nullable name, id _Nullable value);
+id _Nullable AevonMutableCopy(id _Nullable object);
+id _Nullable AevonRenameIdentity(id _Nullable template, NSString *_Nullable identifier);
+BOOL AevonSetIdentity(id _Nullable definition, id _Nullable identity);
+
 id _Nullable AevonSceneManager(void);
 
 @interface UIImage (AevonPrivateIcons)

@@ -81,3 +81,168 @@ BOOL AevonAnswers(id object, NSString *name, NSInteger arguments) {
     if (arguments < 0) return YES;
     return [[object methodSignatureForSelector:sel] numberOfArguments] == (NSUInteger)(arguments + 2);
 }
+
+// MARK: - Reading and rebuilding the pieces of a scene definition
+
+/// Notes are collected here and drained by Swift in one go, so the log gets
+/// twenty lines from one crossing instead of twenty. Nothing is written to
+/// disk — the caller decides when the moment is safe enough to log.
+static NSMutableString *AevonNoteBuffer(void) {
+    static NSMutableString *buffer = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ buffer = [NSMutableString new]; });
+    return buffer;
+}
+
+static void AevonNote(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *line = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    [AevonNoteBuffer() appendString:line];
+    [AevonNoteBuffer() appendString:@"\n"];
+}
+
+/// Hands every pending note to the caller and clears the buffer. Called before
+/// anything that may take the process down: a note that is still in memory when
+/// the process dies is a note that never happened.
+NSString *AevonTakeNotes(void) {
+    NSMutableString *buffer = AevonNoteBuffer();
+    NSString *out = [buffer copy];
+    [buffer setString:@""];
+    return out;
+}
+
+/// A zero-argument getter, or nil when the object does not answer. This is the
+/// only call shape that can be made without knowing the signature first.
+id AevonGetGetter(id object, NSString *name) {
+    if (object == nil || name == nil) return nil;
+    SEL sel = NSSelectorFromString(name);
+    if (![object respondsToSelector:sel]) return nil;
+    id (*call)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    return call(object, sel);
+}
+
+/// Reads an ivar by name, walking the superclasses. FrontBoard keeps its
+/// interesting state in ivars with no public getter, so `_identity` is the
+/// normal way in, not the exception.
+id AevonGetIvar(id object, NSString *name) {
+    if (object == nil || name == nil) return nil;
+    for (Class cursor = object_getClass(object); cursor != Nil; cursor = class_getSuperclass(cursor)) {
+        Ivar ivar = class_getInstanceVariable(cursor, name.UTF8String);
+        if (ivar != NULL) return object_getIvar(object, ivar);
+    }
+    AevonNote(@"ivar %@ absent on %@", name, NSStringFromClass([object class]));
+    return nil;
+}
+
+/// Writes an ivar by name. Used only on a copy the caller has already proven is
+/// a different object from the template — writing through to a live scene's
+/// definition renames that scene out from under its owner.
+BOOL AevonSetIvar(id object, NSString *name, id value) {
+    if (object == nil || name == nil) return NO;
+    Class cls = object_getClass(object);
+    for (Class cursor = cls; cursor != Nil; cursor = class_getSuperclass(cursor)) {
+        Ivar ivar = class_getInstanceVariable(cursor, name.UTF8String);
+        if (ivar == NULL) continue;
+        object_setIvar(object, ivar, value);
+        AevonNote(@"ivar %@ written on %@", name, NSStringFromClass(cls));
+        return YES;
+    }
+    AevonNote(@"ivar %@ absent on %@", name, NSStringFromClass(cls));
+    return NO;
+}
+
+/// `mutableCopy` and the class of what comes back. An immutable class copies to
+/// itself, and that one fact decides whether the copy may be modified at all.
+id AevonMutableCopy(id object) {
+    if (object == nil || ![object respondsToSelector:@selector(mutableCopy)]) return nil;
+    id copy = [object mutableCopy];
+    AevonNote(@"copy %@ -> %@", NSStringFromClass([object class]),
+              copy ? NSStringFromClass([copy class]) : @"nil");
+    return copy;
+}
+
+/// Copies, then renames. A new identifier means a new scene identity, and an
+/// identity is the one field FrontBoard treats as a primary key: two scenes
+/// sharing one is a replacement, not a duplicate.
+id AevonRenameIdentity(id template, NSString *identifier) {
+    if (template == nil || identifier == nil) return nil;
+    id workspace = AevonGetGetter(template, @"workspaceIdentifier");
+    AevonNote(@"identity template %@ workspace=%@",
+              NSStringFromClass([template class]), workspace ?: @"nil");
+
+    Class cls = NSClassFromString(@"FBSSceneIdentity");
+    SEL pair = NSSelectorFromString(@"identityForIdentifier:workspaceIdentifier:");
+    if (cls != Nil && [cls respondsToSelector:pair]) {
+        id (*call)(id, SEL, id, id) = (id (*)(id, SEL, id, id))objc_msgSend;
+        id made = call((id)cls, pair, identifier, workspace);
+        if (made != nil) {
+            AevonNote(@"identity via +identityForIdentifier:workspaceIdentifier:");
+            return made;
+        }
+    }
+    SEL single = NSSelectorFromString(@"identityForIdentifier:");
+    if (cls != Nil && [cls respondsToSelector:single]) {
+        id (*call)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
+        id made = call((id)cls, single, identifier);
+        if (made != nil) {
+            AevonNote(@"identity via +identityForIdentifier:");
+            return made;
+        }
+    }
+
+    // Last resort: a copy of the template identity with the name rewritten.
+    id copy = AevonMutableCopy(template);
+    if (copy != nil && [copy class] != [template class]) {
+        if (AevonSetIvar(copy, @"_identifier", identifier)) return copy;
+    }
+    AevonNote(@"no identity path worked");
+    return nil;
+}
+
+/// Puts the identity on a definition. The setter is preferred over the ivar
+/// because a setter may also refresh state derived from it.
+BOOL AevonSetIdentity(id definition, id identity) {
+    if (definition == nil || identity == nil) return NO;
+    SEL sel = NSSelectorFromString(@"setIdentity:");
+    if ([definition respondsToSelector:sel]) {
+        void (*call)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
+        call(definition, sel, identity);
+        AevonNote(@"setIdentity: accepted by %@", NSStringFromClass([definition class]));
+        return YES;
+    }
+    return AevonSetIvar(definition, @"_identity", identity);
+}
+
+/// Every method whose name contains one of the comma-separated keys, with its
+/// type encoding. This is how "how do I build one of these" gets answered on a
+/// system whose headers are not available: ask the class, do not guess.
+NSString *AevonClassCensus(NSString *name, NSString *keys) {
+    Class cls = NSClassFromString(name);
+    if (cls == Nil) {
+        AevonNote(@"census %@ absent", name);
+        return AevonTakeNotes();
+    }
+    NSArray<NSString *> *wanted = [keys componentsSeparatedByString:@","];
+    AevonNote(@"census %@ super=%@", name, NSStringFromClass(class_getSuperclass(cls)));
+
+    for (int side = 0; side < 2; side++) {
+        Class host = (side == 0) ? object_getClass(cls) : cls;
+        unsigned int count = 0;
+        Method *methods = class_copyMethodList(host, &count);
+        if (methods == NULL) continue;
+        for (unsigned int i = 0; i < count; i++) {
+            NSString *sel = NSStringFromSelector(method_getName(methods[i]));
+            BOOL hit = NO;
+            for (NSString *key in wanted) {
+                if (key.length > 0 && [sel rangeOfString:key].location != NSNotFound) { hit = YES; break; }
+            }
+            if (!hit) continue;
+            const char *types = method_getTypeEncoding(methods[i]);
+            AevonNote(@"  %@ %@ %s", (side == 0 ? @"+" : @"-"), sel, types ? types : "?");
+        }
+        free(methods);
+    }
+    return AevonTakeNotes();
+}

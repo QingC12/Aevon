@@ -770,6 +770,15 @@ zStackParticipantDidChange:
     /// deliberately the smallest possible build: no presenter, no window, no
     /// deactivation reasons. The question this run answers is "does a scene
     /// come back", and nothing beyond it.
+    /// Two stages in one press, because stage 1's output is stage 2's input and
+    /// a second trip to the phone doubles the cost of the same information.
+    ///
+    /// Stage 1 reads: six scenes, their definitions, their presentation managers.
+    /// Stage 2 builds: a copy of one definition with a new identity, handed to
+    /// `_createSceneWithDefinition:`. Between the two sits a method census,
+    /// because the previous run proved the blocker is not "which class" but
+    /// "how is an identity constructed" — and that is a question the runtime
+    /// answers in one line if it is asked.
     static func runWindow() {
         guard let manager = AevonSceneManager() as? NSObject else {
             Log.write("win: no manager")
@@ -777,32 +786,129 @@ zStackParticipantDidChange:
         }
         Log.write("win: begin manager cls=" + NSStringFromClass(type(of: manager)))
 
-        var template: NSObject?
+        census()
+
+        var springboard: NSObject?
+        var keyboard: NSObject?
         var seen = 0
-        // Declared as a value, not a trailing closure: the C function takes an
-        // optional block, and an explicit closure type removes any doubt about
-        // how the compiler bridges it.
         let visit: (Any?) -> Void = { scene in
             guard let scene = scene as? NSObject else { return }
             seen += 1
-            // Three is enough to see a foreground app scene, a system scene and
-            // whatever SpringBoard keeps for itself. The log has a size cap and
-            // this runs on the main thread.
-            if seen <= 3 {
-                dumpScene(scene, tag: "s" + String(seen))
-            }
-            if template == nil, value(of: scene, "definition") != nil {
-                template = scene
-            }
+            let ident = value(of: scene, "identifier").map { String(describing: $0) } ?? "?"
+            if seen <= 8 { Log.write("win: s" + String(seen) + " id=" + ident) }
+            if ident == "com.apple.springboard" { springboard = scene }
+            if ident.contains("remote-keyboard") { keyboard = scene }
         }
         AevonEnumerateScenes(manager, visit)
         Log.write("win: scenes=" + String(seen))
 
-        guard let model = template else {
-            Log.write("win: no template")
-            return
+        // SpringBoard's own scene first: its client identity is SpringBoard, so
+        // a scene built from it is hosted by the process that is building it.
+        // The keyboard scene second: different specification, same host, and it
+        // is the one that is demonstrably presentable by this very manager.
+        let plans: [(String, NSObject?)] = [("SB", springboard), ("KB", keyboard)]
+        for (tag, model) in plans {
+            guard let model = model else {
+                Log.write("win: no " + tag + " template")
+                continue
+            }
+            if attempt(model, manager: manager, tag: tag) { return }
         }
-        buildScene(from: model, manager: manager)
+        Log.write("win: no scene built")
+    }
+
+    /// Asks the classes that have to be built how they are built. Filtered to
+    /// the fields that matter: identity, specification, copying, init.
+    private static func census() {
+        for name in ["FBSSceneIdentity", "FBSSceneClientIdentity",
+                     "FBSSceneDefinition", "FBSMutableSceneDefinition"] {
+            let text = AevonClassCensus(name, "identity,identifier,workspace,spec,definition,init")
+            emitNotes(text)
+        }
+    }
+
+    /// Drains the C-side note buffer into the log, one line each. Called before
+    /// every call that could end the process: an undrained note is lost work.
+    private static func emitNotes(_ text: String?) {
+        guard let text = text, !text.isEmpty else { return }
+        var printed = 0
+        for raw in text.split(separator: "\n") {
+            if printed >= 40 { Log.write("win: …notes truncated"); return }
+            Log.write("win: " + raw.trimmingCharacters(in: .whitespaces))
+            printed += 1
+        }
+    }
+
+    /// One build attempt. Returns true only when the manager handed back a
+    /// scene, so the caller can stop instead of building a second one on top of
+    /// a success.
+    private static func attempt(_ model: NSObject, manager: NSObject, tag: String) -> Bool {
+        guard let made = AevonGetGetter(model, "definition") else {
+            Log.write("win: " + tag + " no definition")
+            return false
+        }
+        let specName = AevonGetIvar(made, "_specification")
+            .map { NSStringFromClass(type(of: $0 as AnyObject)) } ?? "?"
+        Log.write("win: " + tag + " spec=" + specName)
+
+        let definition = AevonMutableCopy(made)
+        guard let definition = definition else {
+            Log.write("win: " + tag + " no copy")
+            emitNotes(AevonTakeNotes())
+            return false
+        }
+        // An immutable class copies to itself. Writing through that copy would
+        // rename the live scene it belongs to, so the attempt stops here rather
+        // than trading a floater for a broken SpringBoard.
+        if String(describing: type(of: definition)) == String(describing: type(of: made)) {
+            Log.write("win: " + tag + " definition is immutable, stop")
+            emitNotes(AevonTakeNotes())
+            return false
+        }
+
+        let template = AevonGetIvar(made, "_identity")
+        let identity = AevonRenameIdentity(template, "com.aevon.floater." + tag.lowercased())
+        guard let identity = identity else {
+            Log.write("win: " + tag + " no identity")
+            emitNotes(AevonTakeNotes())
+            return false
+        }
+        if !AevonSetIdentity(definition, identity) {
+            Log.write("win: " + tag + " identity refused")
+            emitNotes(AevonTakeNotes())
+            return false
+        }
+
+        let settings = AevonMutableCopy(AevonGetGetter(model, "settings"))
+        let client = AevonMutableCopy(AevonGetGetter(model, "clientSettings"))
+        emitNotes(AevonTakeNotes())
+
+        Log.write("win: " + tag + " calling _createSceneWithDefinition: now")
+        // The completion may arrive after this call returns, so success is read
+        // from both places: the block sets the flag, the return value is the
+        // object the manager already had. Believing only one of them would
+        // either log a success as a failure or build a second scene on top of
+        // the first.
+        var built = false
+        let done: (Any?, Any?) -> Void = { scene, error in
+            if let scene = scene as? NSObject {
+                Log.write("win: " + tag + " created " + NSStringFromClass(type(of: scene)))
+                dumpScene(scene, tag: "new")
+                built = true
+            } else {
+                Log.write("win: " + tag + " failed err=" + String(describing: error))
+            }
+        }
+        let returned = AevonCreateScene(manager, definition, settings, client,
+                                        nil, nil, nil, done)
+        if built { return true }
+        if let scene = returned as? NSObject {
+            Log.write("win: " + tag + " returned " + NSStringFromClass(type(of: scene))
+                      + " before its completion ran")
+            return true
+        }
+        Log.write("win: " + tag + " call returned nil, completion not called yet")
+        return false
     }
 
     private static func value(of object: NSObject, _ key: String) -> NSObject? {
@@ -811,10 +917,13 @@ zStackParticipantDidChange:
         return object.perform(sel)?.takeUnretainedValue() as? NSObject
     }
 
+    /// What a live scene is made of, in its own words. `_ivarDescription` is the
+    /// only reader that works on a FrontBoard object without knowing its shape,
+    /// which is exactly the situation: headers are not available, and guessing
+    /// a field name is how a probe lies to itself.
     private static func dumpScene(_ scene: NSObject, tag: String) {
-        let name = NSStringFromClass(type(of: scene))
         let ident = value(of: scene, "identifier").map { String(describing: $0) } ?? "?"
-        Log.write("win: " + tag + " " + name + " id=" + ident)
+        Log.write("win: " + tag + " " + NSStringFromClass(type(of: scene)) + " id=" + ident)
         for key in ["definition", "settings", "clientSettings", "uiPresentationManager"] {
             guard let obj = value(of: scene, key) else {
                 Log.write("win: " + tag + " " + key + " absent")
@@ -825,84 +934,21 @@ zStackParticipantDidChange:
         }
     }
 
-    /// `_ivarDescription` prints one ivar per line with its class. It is the
-    /// only way to read a FrontBoard settings object without knowing its shape,
-    /// which is exactly the situation here. Capped: a settings object has ~40
-    /// fields and past that the log stops being readable.
     private static func emitIvars(_ object: NSObject, tag: String) {
         let sel = NSSelectorFromString("_ivarDescription")
         guard object.responds(to: sel),
               let text = object.perform(sel)?.takeUnretainedValue() as? String else {
-            Log.write("win: " + tag + " no _ivarDescription")
+            Log.write("win: " + tag + " no ivars")
             return
         }
         var printed = 0
         for raw in text.split(separator: "\n") {
-            let line = String(raw).trimmingCharacters(in: .whitespaces)
-            if line.isEmpty || line.count > 170 { continue }
-            if printed >= 20 {
-                Log.write("win: " + tag + " ...")
-                break
-            }
-            printed += 1
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { continue }
+            if printed >= 20 { Log.write("win: " + tag + " …capped"); return }
             Log.write("win: " + tag + " " + line)
+            printed += 1
         }
-    }
-
-    private static func mutable(_ object: NSObject?) -> NSObject? {
-        guard let object = object else { return nil }
-        let sel = NSSelectorFromString("mutableCopy")
-        guard object.responds(to: sel) else { return object }
-        return object.perform(sel)?.takeUnretainedValue() as? NSObject
-    }
-
-    private static func buildScene(from template: NSObject, manager: NSObject) {
-        guard let definition = mutable(value(of: template, "definition")) else {
-            Log.write("win: no definition")
-            return
-        }
-        let settings = mutable(value(of: template, "settings"))
-        let client = mutable(value(of: template, "clientSettings"))
-
-        // A scene identifier is FrontBoard's primary key. Two scenes sharing one
-        // is not a duplicate — it is a replacement, and the template's owner
-        // loses its scene. So the identifier is only rewritten when the object
-        // actually has the setter; otherwise the copy is refused and the log
-        // says why, instead of handing the system a collision.
-        if AevonAnswers(definition, "setIdentifier:", 1) {
-            _ = definition.perform(NSSelectorFromString("setIdentifier:"),
-                                   with: "com.aevon.floater" as NSString)
-            Log.write("win: id set on definition")
-        } else if let identity = value(of: definition, "identity"),
-                  AevonAnswers(identity, "setIdentifier:", 1) {
-            // A scene definition keeps its identity in a nested object on some
-            // releases; the identifier lives there, not on the definition.
-            _ = identity.perform(NSSelectorFromString("setIdentifier:"),
-                                 with: "com.aevon.floater" as NSString)
-            Log.write("win: id set on identity")
-        } else {
-            let kept = value(of: definition, "identifier").map { String(describing: $0) } ?? "?"
-            Log.write("win: no id setter, keep=" + kept)
-            Log.write("win: aborted: id would collide")
-            return
-        }
-
-        Log.write("win: build def=" + NSStringFromClass(type(of: definition))
-                  + " settings=" + (settings.map { NSStringFromClass(type(of: $0)) } ?? "nil")
-                  + " client=" + (client.map { NSStringFromClass(type(of: $0)) } ?? "nil"))
-
-        Log.write("win: calling _createSceneWithDefinition: now")
-        let done: (Any?, Any?) -> Void = { scene, error in
-            if let scene = scene as? NSObject {
-                Log.write("win: created " + NSStringFromClass(type(of: scene)))
-                dumpScene(scene, tag: "new")
-            } else {
-                Log.write("win: create failed err=" + String(describing: error))
-            }
-        }
-        let made = AevonCreateScene(manager, definition, settings, client,
-                                    nil, nil, nil, done)
-        Log.write("win: call returned " + (made.map { String(describing: $0) } ?? "nil"))
     }
 
     /// Called once at boot, before anything else touches the runtime. If the
