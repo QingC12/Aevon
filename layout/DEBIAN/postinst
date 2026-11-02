@@ -15,7 +15,7 @@
 #
 set +e
 
-VERSION="0.0.3"
+VERSION="0.0.4"
 
 # roothide 的维护脚本跑在 libvroot 里："/" 是 jbroot，真实根在 /rootfs。
 # 两个都试一次；失败也无所谓，插件加载时会自己再建。
@@ -32,6 +32,10 @@ for ROOT in /var/mobile /rootfs/var/mobile; do
         : > "$LOG" 2>/dev/null
     fi
     chown mobile:mobile "$LOG" 2>/dev/null
+    # Settings runs sandboxed; without group/other write it cannot record why
+    # a panel failed to load, which is the only diagnostic channel that exists
+    # on a device with no terminal. The log holds no secrets.
+    chmod 666 "$LOG" 2>/dev/null
     echo "$(date '+%Y-%m-%d %H:%M:%S') [$VERSION] installed (roothide / arm64e / swift)" >> "$LOG" 2>/dev/null
 done
 

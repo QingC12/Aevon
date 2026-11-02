@@ -230,10 +230,24 @@ def main():
         panes = [item.get("file") for item in root_dict.get("items", [])
                  if item.get("cell") == "PSChildPaneSpecifier"]
         missing = [p for p in panes if f"{BUNDLE_DIR}/{p}.plist" not in files]
+        items = root_dict.get("items", [])
         if missing:
             bad(f"panes: referenced but not packaged: {', '.join(missing)}")
         else:
-            ok(f"panes: {len(panes)} child panes all resolve")
+            ok(f"panes: {len(panes)} child panes all resolve, root has {len(items)} items")
+        if len(items) < 20:
+            bad(f"root: only {len(items)} items — the page would render almost empty")
+
+    # -- 5b. the controller must fill its own specifiers ivar ---------------
+    # 0.0.3 overrode only the readers, PSListController never populated the
+    # ivar, and Settings rendered a blank page. This string is the proof that
+    # the explicit load is still there.
+    prefs = files.get(f"{BUNDLE_DIR}/AevonPrefs", b"")
+    if b"loadSpecifiersFromPlistName:" not in prefs:
+        bad("prefs: bundle never calls loadSpecifiersFromPlistName: — "
+            "the specifiers ivar stays nil and Settings shows a black page")
+    else:
+        ok("prefs: loads Root.plist explicitly into the specifiers ivar")
 
     # -- 6. log path contract ----------------------------------------------
     dylib = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")

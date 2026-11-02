@@ -5,6 +5,18 @@
 //  tools/gen-settings.py from one table, so the UI and the delivery document
 //  can never drift apart.
 //
+//  Why this class loads the plist itself (0.0.4):
+//  `PSListController.specifiers` is a plain property backed by an ivar, and
+//  nothing in the framework populates it for a subclass. 0.0.3 only overrode
+//  the *readers*, so the ivar stayed nil, the table had zero rows, and Settings
+//  showed an empty black page. Every row now comes from an explicit
+//  loadSpecifiersFromPlistName: call written back through the setter, which is
+//  also what rowsForGroup:/specifierAtIndex: read internally.
+//
+//  If even that returns nothing, the controller renders one diagnostic group
+//  instead of a black page: a blank screen tells the operator nothing, a line
+//  of text tells them exactly which path is missing.
+//
 //  Four rows are real functionality, not placeholders:
 //      inject status / version / loads / last load   -> read from state.plist
 //      emergency stop (G0) / pause injection (G1)    -> real gate writes
@@ -21,18 +33,67 @@ final class RootListController: PSListController {
 
     // MARK: Lifecycle
 
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        refreshLiveRows()   // these rows are live data, not cached defaults
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        installRows()
     }
 
-    // MARK: Live rows
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        installRows()   // no-op once rows exist; the safety net for odd timings
+        reload()        // status / gate rows re-read their values
+    }
 
-    /// Every live row (status + both gate switches) is served by
-    /// readPreferenceValue(_:) below, so refreshing is a single reload.
-    /// One source of truth — no half-updated cell can survive here.
+    // MARK: Rows
+
+    /// Loads Root.plist into the `specifiers` ivar exactly once.
+    ///
+    /// Three attempts, cheapest first, and the last one always succeeds:
+    ///   1. the classic two-argument loader (present on every iOS that has
+    ///      Preferences.framework at all)
+    ///   2. the bundle-explicit overload, guarded by responds(to:) because it
+    ///      is newer — an unguarded call would be an unrecognized selector
+    ///   3. one diagnostic group, so the page is never blank
+    private func installRows() {
+        if let existing = specifiers, existing.count > 0 { return }
+
+        let bundle = Bundle(for: RootListController.self)
+
+        var list = loadSpecifiers(fromPlistName: "Root", target: self)
+        if list == nil || list.count == 0,
+           responds(to: NSSelectorFromString("loadSpecifiersFromPlistName:target:bundle:")) {
+            list = loadSpecifiers(fromPlistName: "Root", target: self, bundle: bundle)
+        }
+        if list == nil || list.count == 0 {
+            list = diagnosticRows(bundle: bundle)
+        }
+
+        specifiers = list ?? NSMutableArray()
+        Log.write("prefs: \(specifiers?.count ?? 0) rows, bundle=\(bundle.bundlePath)")
+    }
+
+    /// One group cell with a readable explanation. Uses only emptyGroupSpecifier
+    /// and string properties — no factory call whose cell-type constant could
+    /// differ across iOS versions, so this path cannot itself fail.
+    private func diagnosticRows(bundle: Bundle) -> NSMutableArray {
+        let plist = bundle.path(forResource: "Root", ofType: "plist") ?? "缺失"
+        let group = PSSpecifier.emptyGroupSpecifier()
+        group.setProperty("界面未能加载", forKey: "label")
+        group.setProperty("""
+            这不是崩溃，是面板文件没被读到。请把这段文字连同 /var/mobile/Aevon.log 一起反馈。
+            bundle: \(bundle.bundlePath)
+            Root.plist: \(plist)
+            """, forKey: "footerText")
+
+        let list = NSMutableArray()
+        list.add(group)
+        return list
+    }
+
+    /// Live rows re-read through readPreferenceValue(_:), so a full plist
+    /// reload is unnecessary — and would rebuild the ivar we just filled.
     private func refreshLiveRows() {
-        reloadSpecifiers()
+        reload()
     }
 
     // MARK: Gate switches
