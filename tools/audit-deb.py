@@ -415,10 +415,10 @@ def main():
     # line, because the failing run is exactly the one whose log is all there is.
     for token in (b"scene: probe begin", b"scene: probe end",
                   b"scene: window level", b"scene: carrier view", b"scene: live scenes",
-                  b"win: begin manager", b" spec=",
+                  b"win: begin manager",
                   b" calling _createSceneWithDefinition: now",
                   b"win: no scene built", b" definition is immutable, stop",
-                  b" no identity", b"census %@ super=%@"):
+                  b"census %@ super=%@"):
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the probe would never reach SpringBoard")

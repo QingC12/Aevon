@@ -35,15 +35,6 @@ id AevonCreateScene(id manager,
                 transitionContext, remnant, clientProvider, completion);
 }
 
-/// `createPresenterWithIdentifier:priority:` — one object plus one int64.
-id AevonCreatePresenter(id manager, id identifier, long long priority) {
-    SEL sel = NSSelectorFromString(@"createPresenterWithIdentifier:priority:");
-    if (manager == nil || ![manager respondsToSelector:sel]) return nil;
-
-    id (*call)(id, SEL, id, long long) = (id (*)(id, SEL, id, long long))objc_msgSend;
-    return call(manager, sel, identifier, priority);
-}
-
 /// The scene manager is a singleton with no public door, and its spelling has
 /// changed across releases. Resolving it here keeps the class-method dispatch
 /// out of Swift, where `AnyClass` + `perform` needs casts that the compiler is
@@ -70,16 +61,6 @@ void AevonEnumerateScenes(id manager, void (^block)(id scene)) {
 
     void (*call)(id, SEL, void (^)(id)) = (void (*)(id, SEL, void (^)(id)))objc_msgSend;
     call(manager, sel, block);
-}
-
-/// The selector exists on this OS and answers the given argument count.
-/// Used by the probe to say "not there" instead of "I did not look".
-BOOL AevonAnswers(id object, NSString *name, NSInteger arguments) {
-    if (object == nil || name == nil) return NO;
-    SEL sel = NSSelectorFromString(name);
-    if (![object respondsToSelector:sel]) return NO;
-    if (arguments < 0) return YES;
-    return [[object methodSignatureForSelector:sel] numberOfArguments] == (NSUInteger)(arguments + 2);
 }
 
 // MARK: - Reading and rebuilding the pieces of a scene definition
@@ -215,9 +196,9 @@ BOOL AevonSetIdentity(id definition, id identity) {
     return AevonSetIvar(definition, @"_identity", identity);
 }
 
-/// Every method whose name contains one of the comma-separated keys, with its
-/// type encoding. This is how "how do I build one of these" gets answered on a
-/// system whose headers are not available: ask the class, do not guess.
+/// Every method whose name contains one of the comma-separated keys. This is
+/// how "how do I build one of these" gets answered on a system whose headers
+/// are not available: ask the class, do not guess.
 NSString *AevonClassCensus(NSString *name, NSString *keys) {
     Class cls = NSClassFromString(name);
     if (cls == Nil) {
@@ -239,8 +220,7 @@ NSString *AevonClassCensus(NSString *name, NSString *keys) {
                 if (key.length > 0 && [sel rangeOfString:key].location != NSNotFound) { hit = YES; break; }
             }
             if (!hit) continue;
-            const char *types = method_getTypeEncoding(methods[i]);
-            AevonNote(@"  %@ %@ %s", (side == 0 ? @"+" : @"-"), sel, types ? types : "?");
+            AevonNote(@"  %@ %@", (side == 0 ? @"+" : @"-"), sel);
         }
         free(methods);
     }

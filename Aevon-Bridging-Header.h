@@ -27,12 +27,6 @@ id _Nullable AevonCreateScene(id _Nullable manager,
                               void (^_Nullable completion)(id _Nullable scene,
                                                            id _Nullable error));
 
-id _Nullable AevonCreatePresenter(id _Nullable manager,
-                                  id _Nullable identifier,
-                                  long long priority);
-
-BOOL AevonAnswers(id _Nullable object, NSString *_Nullable name, NSInteger arguments);
-
 void AevonEnumerateScenes(id _Nullable manager, void (^_Nullable block)(id _Nullable scene));
 
 /// Reading and rebuilding the pieces of a scene definition. Every one of these
