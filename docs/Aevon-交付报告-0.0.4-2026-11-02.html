@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aevon 0.0.4 交付报告 — 设置页黑屏修复</title>
+<style>
+  :root{
+    --bg:#0a0d13; --bg2:#0f131c; --card:#121722; --card2:#161c28;
+    --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.13);
+    --tx:#e8edf6; --tx2:#9aa7bd; --tx3:#6b7688;
+    --cy:#4dd4e8; --vi:#9d8cff; --am:#f0b45f; --gr:#5fd6a4; --rd:#ff7a86;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:radial-gradient(1200px 600px at 15% -10%,rgba(77,212,232,.09),transparent 60%),
+               radial-gradient(1000px 500px at 90% 0%,rgba(157,140,255,.08),transparent 55%),
+               var(--bg);
+    color:var(--tx);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased; line-height:1.65; padding:44px 28px 80px;
+  }
+  .wrap{max-width:1120px;margin:0 auto}
+  .eyebrow{font-size:12px;letter-spacing:.22em;color:var(--cy);text-transform:uppercase;font-weight:600}
+  h1{font-size:33px;line-height:1.28;font-weight:650;margin:12px 0 10px;letter-spacing:-.01em}
+  h1 em{font-style:normal;background:linear-gradient(92deg,var(--cy),var(--vi));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--tx2);font-size:14.5px;max-width:900px}
+  .meta{margin-top:18px;display:flex;gap:10px;flex-wrap:wrap}
+  .chip{font-size:12px;color:var(--tx2);border:1px solid var(--line2);border-radius:999px;padding:5px 12px;background:rgba(255,255,255,.02)}
+  .chip b{color:var(--tx);font-weight:600}
+  .kpi{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:34px 0 8px}
+  .k{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:16px 14px}
+  .k .n{font-size:22px;font-weight:650;letter-spacing:-.02em;line-height:1.2}
+  .k .n span{font-size:12px;color:var(--tx3);font-weight:500;margin-left:2px}
+  .k .l{font-size:11.5px;color:var(--tx3);margin-top:4px;letter-spacing:.02em}
+  .k.c1 .n{color:var(--cy)} .k.c2 .n{color:var(--vi)} .k.c3 .n{color:var(--am)}
+  .k.c4 .n{color:var(--gr)} .k.c5 .n{color:#c9d4e8} .k.c6 .n{color:#8fa3bf}
+  section{margin-top:44px}
+  .sh{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:22px}
+  .sh .num{font-size:12px;color:var(--cy);font-weight:700;letter-spacing:.12em}
+  .sh h2{font-size:19px;font-weight:600;letter-spacing:-.01em}
+  .sh .note{margin-left:auto;font-size:12px;color:var(--tx3)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-weight:600;color:var(--tx3);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;padding:9px 10px;border-bottom:1px solid var(--line2)}
+  td{padding:10px;border-bottom:1px solid var(--line);color:var(--tx2);vertical-align:top}
+  td b{color:var(--tx);font-weight:600}
+  tr:hover td{background:rgba(255,255,255,.017)}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+  .sm{font-size:11.5px}
+  .num{font-variant-numeric:tabular-nums}
+  .tag{display:inline-block;font-size:10.5px;padding:1.5px 7px;border-radius:5px;border:1px solid;line-height:1.5;white-space:nowrap}
+  .tA{color:var(--gr);border-color:rgba(95,214,164,.35);background:rgba(95,214,164,.08)}
+  .tB{color:var(--am);border-color:rgba(240,180,95,.35);background:rgba(240,180,95,.08)}
+  .tC{color:var(--rd);border-color:rgba(255,122,134,.35);background:rgba(255,122,134,.08)}
+  .tN{color:#8fa3bf;border-color:rgba(143,163,191,.35);background:rgba(143,163,191,.08)}
+  .tV{color:var(--vi);border-color:rgba(157,140,255,.35);background:rgba(157,140,255,.08)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .card{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:18px}
+  .card h3{font-size:14px;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .card p{font-size:13px;color:var(--tx2)}
+  .card ul{margin:8px 0 0 2px;list-style:none;display:flex;flex-direction:column;gap:6px}
+  .card li{font-size:12.8px;color:var(--tx2);padding-left:14px;position:relative}
+  .card li::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;border-radius:50%;background:var(--cy);opacity:.7}
+  .hl{color:var(--tx);font-weight:600}
+  pre{background:#0b0f17;border:1px solid var(--line2);border-radius:12px;padding:16px 18px;overflow-x:auto;
+      font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.75;color:#c7d3e6}
+  pre .k{color:var(--cy)} pre .c{color:var(--tx3)} pre .g{color:var(--gr)}
+  .steps{display:flex;flex-direction:column;gap:12px}
+  .step{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:16px 18px;display:grid;grid-template-columns:38px 1fr;gap:14px}
+  .step .no{width:30px;height:30px;border-radius:9px;background:rgba(77,212,232,.1);border:1px solid rgba(77,212,232,.3);
+            color:var(--cy);font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .step h4{font-size:14px;font-weight:600;margin-bottom:4px}
+  .step h4 .restart{font-size:10.5px;font-weight:500;color:var(--am);border:1px solid rgba(240,180,95,.35);
+            background:rgba(240,180,95,.08);border-radius:5px;padding:1px 7px;margin-left:8px}
+  .step p{font-size:13px;color:var(--tx2)}
+  .expect,.fail{margin-top:10px;font-size:12.6px;padding:9px 12px;border-radius:9px;line-height:1.7}
+  .expect{background:rgba(95,214,164,.07);border-left:2px solid var(--gr);color:#b9e9d4}
+  .fail{background:rgba(255,122,134,.06);border-left:2px solid var(--rd);color:#ffc6cb}
+  .expect b,.fail b{color:#fff}
+  footer{margin-top:52px;padding-top:18px;border-top:1px solid var(--line);color:var(--tx3);font-size:12px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+  @media(max-width:900px){
+    .kpi{grid-template-columns:repeat(3,1fr)}
+    .grid2{grid-template-columns:1fr}
+    body{padding:28px 16px 60px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="eyebrow">AEVON · DELIVERY 0.0.4</div>
+  <h1>设置页不再黑屏：<em>specifiers</em> 从来没人填<br>现在自己填，填不上也会说话</h1>
+  <p class="sub">
+    0.0.3 的入口是对的，包也是对的 —— 点进去空白，是因为 <span class="hl">PSListController 的 specifiers 数组默认是 nil，
+    框架不会替你读 Root.plist</span>。我们只覆写了「读取值」的方法，没写「装载行」的那一步，所以表格 0 行。
+    这一版补上装载，并且加了第三层兜底：即使一条都读不到，页面也会显示一行可读的诊断文字，而不是一片黑。
+  </p>
+
+  <div class="meta">
+    <span class="chip">版本 <b>0.0.4</b></span>
+    <span class="chip">架构 <b>iphoneos-arm64e</b></span>
+    <span class="chip">包体 <b>43,646 B</b></span>
+    <span class="chip">载荷 <b>14 文件 / 252,189 B</b></span>
+    <span class="chip">审计 <b>11 项 PASS</b></span>
+    <span class="chip">钩子 <b>0</b></span>
+  </div>
+
+  <div class="kpi">
+    <div class="k c1"><div class="n">21<span>项</span></div><div class="l">根面板实际行数</div></div>
+    <div class="k c2"><div class="n">8<span>个</span></div><div class="l">子面板全部可解析</div></div>
+    <div class="k c3"><div class="n">3<span>层</span></div><div class="l">装载尝试，最后一层必成功</div></div>
+    <div class="k c4"><div class="n">0<span>行</span></div><div class="l">黑屏时的可读信息 → 已消除</div></div>
+    <div class="k c5"><div class="n">123,264<span>B</span></div><div class="l">AevonPrefs（Swift）</div></div>
+    <div class="k c6"><div class="n">121,664<span>B</span></div><div class="l">Aevon.dylib（未改动）</div></div>
+  </div>
+
+  <section>
+    <div class="sh"><span class="num">01</span><h2>根因：入口是好的，是里面没人装数据</h2><span class="note">一句话能对上你的现象</span></div>
+
+    <p class="sub" style="margin-bottom:16px">
+      你看到的现象是「设置里有 Aevon，点进去黑屏」。这两件事其实是两个独立的环节：
+      入口由 PreferenceLoader 读一个 plist 决定，点进去之后显示什么，由 <span class="mono">PSListController</span> 的
+      <span class="mono">specifiers</span> 数组决定。前者一直是好的，后者一直是空的。
+    </p>
+
+    <table>
+      <thead><tr><th style="width:22%">环节</th><th style="width:30%">默认行为</th><th>结果</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><b>入口</b><br><span class="sm mono">PreferenceLoader/Preferences/Aevon.plist</span></td>
+          <td>Settings 启动时扫描该目录，把 <span class="mono">label/bundle/detail</span> 读进列表</td>
+          <td><span class="tag tA">正常</span> 所以你能看到 Aevon 这一行</td>
+        </tr>
+        <tr>
+          <td><b>点进去</b><br><span class="sm mono">AevonRootListController</span></td>
+          <td><span class="mono">specifiers</span> 是普通属性，背后是 ivar，<b>框架不会替你加载 Root.plist</b></td>
+          <td><span class="tag tC">0.0.3 空的</span> 0 行 → 全黑</td>
+        </tr>
+        <tr>
+          <td><b>0.0.3 做了什么</b></td>
+          <td>覆写了 <span class="mono">readPreferenceValue</span> / <span class="mono">setPreferenceValue</span>，这两个只在<b>已有行</b>上取值</td>
+          <td><span class="tag tC">没补装载</span> 所以永远没有行可取值</td>
+        </tr>
+        <tr>
+          <td><b>母本为什么没事</b></td>
+          <td>Stheno 的 Root.plist 只有 134 字节，是个空壳；界面全部由 Swift 代码构建</td>
+          <td><span class="tag tV">绕开了这一步</span> 但代价是 267 KB</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="card">
+        <h3>为什么之前没发现</h3>
+        <p>0.0.2 装完连入口都没有（Settings 进程缓存），根本没机会点进去；0.0.3 修好入口后，才第一次真正执行到这一步。这是同一个底座问题被前一个问题挡住了。</p>
+      </div>
+      <div class="card">
+        <h3>为什么不是「崩溃」</h3>
+        <p>没有异常、没有闪退日志。控制器正常创建、正常 push，只是它认为「这一页有 0 行」。深色模式下 0 行就是纯黑，看起来像卡死。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">02</span><h2>修复：三层装载，最后一层永远不会失手</h2><span class="note">AevonPrefs-Bridging-Header.h + RootListController.swift</span></div>
+
+    <div class="steps">
+      <div class="step">
+        <div class="no">1</div>
+        <div>
+          <h4>经典装载 API <span class="restart">一定会存在</span></h4>
+          <p><span class="mono">loadSpecifiersFromPlistName:target:</span> 把 Root.plist 解析成 PSSpecifier 数组。这是 Preferences.framework 的老接口，任何有设置面板的 iOS 都有。</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="no">2</div>
+        <div>
+          <h4>带 bundle 的重载 <span class="restart">responds(to:) 保护</span></h4>
+          <p>roothide 会重映射路径，所以再试一次显式传 bundle 的版本。它是较新的接口，因此调用前先用 <span class="mono">responds(to:)</span> 判断 —— 系统没有这个方法就跳过，<b>绝不把「空白页」升级成「崩溃」</b>。</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="no">3</div>
+        <div>
+          <h4>诊断兜底 <span class="restart">绝不黑屏</span></h4>
+          <p>两次都失败时，渲染一个分组，直接写出 <span class="mono">bundle 路径</span> 和 <span class="mono">Root.plist 是否存在</span>。这一行只用最老的 API 和字符串属性，自身不会再失败。</p>
+          <div class="expect">以后任何一次「点进去是空的」，你都会看到一行文字说明缺什么，而不是一片黑。<b>这就是这次真正买到的保险。</b></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h3>写回的方式也换了</h3>
+      <p>装载结果通过 <span class="mono">specifiers</span> 的 setter 写回 <b>ivar</b>，而不是覆写 getter。因为 Preferences 内部用的是
+      <span class="mono">rowsForGroup:</span> / <span class="mono">specifierAtIndex:</span>，它们直接读 ivar —— 只覆写 getter 会让框架继续看到 nil，还是 0 行。这是 0.0.3 的第二个隐性问题，这次一起解决。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">03</span><h2>实测数据</h2><span class="note">本地解包复核，不是 CI 自报</span></div>
+
+    <table>
+      <thead><tr><th style="width:26%">项目</th><th style="width:20%">实测值</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>deb 体积</td><td class="mono"><b>43,646 B</b></td><td>0.0.3 是 42,436 B，+1,210 B 全部来自三层装载与诊断代码；预算 520 KB，占 8%</td></tr>
+        <tr><td>载荷</td><td class="mono">14 文件 / 252,189 B</td><td>与 0.0.3 相同的 14 个文件，没有新增资源</td></tr>
+        <tr><td>两个二进制</td><td class="mono">thin arm64e</td><td>cpusubtype <span class="mono">0x80000002</span>，无 arm64 切片；均含 libswiftCore</td></tr>
+        <tr><td>根面板</td><td class="mono">21 items</td><td><span class="mono">PSGroupCell / PSTitleValueCell / PSSwitchCell / PSButtonCell / PSChildPaneSpecifier</span> 五类齐全</td></tr>
+        <tr><td>子面板</td><td class="mono">8 / 8 可解析</td><td>Window、Ring、Gesture、Keyboard、Notify、Jump、Listen、Apps 全部在包内</td></tr>
+        <tr><td>装载逻辑落包</td><td class="mono">3 处命中</td><td>二进制含 <span class="mono">loadSpecifiersFromPlistName:</span>（含带 bundle 的重载 2 处）</td></tr>
+        <tr><td>类名</td><td class="mono">AevonRootListController</td><td>无 <span class="mono">_TtC</span> 前缀，与入口 <span class="mono">detail</span> 逐字一致</td></tr>
+        <tr><td>审计闸门</td><td><span class="tag tA">11 项 PASS</span></td><td>新增两条：根面板行数 ≥ 20、二进制必须含装载调用（防这次的问题回潮）</td></tr>
+        <tr><td>构建</td><td><span class="tag tA">success</span></td><td>run 41424001049，单包，未产生第二个 deb</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">04</span><h2>真机验证流程</h2><span class="note">全程不需要终端，不需要重启</span></div>
+
+    <div class="steps">
+      <div class="step">
+        <div class="no">1</div>
+        <div>
+          <h4>用 Filza 安装本次的 deb</h4>
+          <p><span class="mono">com.Aevon_0.0.4-arm64e.deb</span> → 点击 → 安装。装完 Settings 会被自动重启（只会终止设置 App，桌面不动）。</p>
+          <div class="expect">预期：Sileo / Filza 显示安装成功，<b>不需要注销</b>。</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="no">2</div>
+        <div>
+          <h4>打开「设置」，找 Aevon</h4>
+          <p>第一屏就能看到；Shuffle 聚合的布局里也在同一个位置。</p>
+          <div class="expect">预期：<b>能看到 Aevon 这一行</b>（这一步 0.0.3 已经过了，用于确认安装没变质）。</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="no">3</div>
+        <div>
+          <h4>点进去 —— 这一步是本次的唯一验收点</h4>
+          <p>应该看到 21 行：顶部「状态」分组 5 行（注入状态 / 版本 / 启动次数 / 最近一次加载 / 日志路径）、
+          「安全闸门」2 个开关 + 2 个按钮、「功能设置」8 个子面板入口、「关于」1 段说明。</p>
+          <div class="expect">预期：<b>有内容、可滚动、能点进子面板</b>。子面板里能看到开关和滑杆（本期只复刻界面，开关尚未接通）。</div>
+          <div class="fail">如果仍然黑屏：这次不可能全黑。若只看到一行「界面未能加载」，请把那一行文字连同 <span class="mono">/var/mobile/Aevon.log</span> 末尾 20 行发回 —— 它会直接写明 bundle 路径和 Root.plist 是否读到，不用再猜。</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="no">4</div>
+        <div>
+          <h4>验证闸门真的能写 <span class="restart">安全底线</span></h4>
+          <p>打开「紧急停止（G0）」→ 返回上一页再进来，「注入状态」应变成<b>「已紧急停止（G0）」</b>。再关掉，状态回到「运行中」。</p>
+          <div class="expect">预期：状态文字随开关实时变化。这说明设置进程 → 偏好域 → 状态读取这条链路是通的。</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="no">5</div>
+        <div>
+          <h4>回滚（只在需要时）</h4>
+          <p>保留的 <span class="mono">com.Aevon_0.0.3-arm64e.deb</span> 直接覆盖安装即可，不需要先卸载（包 id 相同）。</p>
+          <div class="expect">预期：回滚不丢偏好；G0/G1 状态存在 <span class="mono">com.aevon</span> 域，与版本无关。</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">05</span><h2>这一版改动的文件</h2><span class="note">只有 4 个源码/配置文件 + 1 个闸门</span></div>
+
+    <table>
+      <thead><tr><th style="width:36%">文件</th><th>改了什么</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">AevonPrefs-Bridging-Header.h</td><td>把 <span class="mono">specifiers</span> 补成可写属性（并显式标 nullable，否则 Swift 首次读取会强行解包），补两个 <span class="mono">loadSpecifiersFromPlistName:</span> 重载与 <span class="mono">reload</span></td></tr>
+        <tr><td class="mono">Sources/Prefs/RootListController.swift</td><td>新增 <span class="mono">installRows()</span> 三层装载 + <span class="mono">diagnosticRows()</span> 兜底；<span class="mono">viewWillAppear</span> 改用 <span class="mono">reload()</span>，不再用 <span class="mono">reloadSpecifiers()</span>（后者会重建刚填好的数组）</td></tr>
+        <tr><td class="mono">layout/DEBIAN/postinst</td><td>日志 <span class="mono">chmod 666</span>：Settings 是沙箱进程，没有写权限时连「为什么失败」都记不下来</td></tr>
+        <tr><td class="mono">tools/audit-deb.py</td><td>新增两条闸门：根面板行数 ≥ 20；二进制必须含 <span class="mono">loadSpecifiersFromPlistName:</span>，防止以后有人把装载逻辑删掉再次黑屏</td></tr>
+        <tr><td class="mono">Makefile / control / Info.plist / Paths.swift</td><td>版本统一 0.0.4；去掉与 Theos 重复的 <span class="mono">-rpath</span>；<span class="mono">CFBundleDevelopmentRegion</span> 改为规范的 <span class="mono">zh-Hans</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    <div>Aevon 0.0.4 · roothide · arm64e · Swift · 零钩子</div>
+    <div>构建 run 41424001049 · 审计 11/11 PASS · 2026-11-02</div>
+  </footer>
+
+</div>
+</body>
+</html>
