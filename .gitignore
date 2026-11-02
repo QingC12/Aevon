@@ -7,3 +7,6 @@ build/
 __pycache__/
 *.pyc
 _ref/
+
+# 交付报告只留在本地，不进仓库（CI 不需要，仓库也不该是成果物仓库）
+docs/Aevon-*.html

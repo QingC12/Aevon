@@ -47,23 +47,51 @@ final class PanelController: PSListController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        installRows()
+        installRows()   // always: a panel must show its own plist, every time
         reload()
     }
 
     // MARK: Rows
 
-    private func installRows() {
-        if let existing = specifiers, existing.count > 0 { return }
+    /// Loads this panel's plist into `specifiers`.
+    ///
+    /// 0.0.6 kept an early return here — "rows already exist, nothing to do" —
+    /// copied from the root page. That was right for the root page and wrong
+    /// for every panel: Preferences pre-populates a freshly pushed controller
+    /// with its own rows, so the return fired, our plist was never read, and
+    /// all eight panels showed the same handful of switches. The rows are now
+    /// always replaced, and the counts are logged so the next report can tell
+    /// "preloaded" from "loaded" without guessing.
+    /// Which panel's rows are currently installed. Without it, every return
+    /// from a sub-page rebuilt the table from the top: the switch you just
+    /// flipped comes back into view, but so does the scroll position, and a
+    /// panel you had scrolled halfway down jumps back to the top.
+    private var installedPanel: String?
 
+    private func installRows() {
         let bundle = Bundle(for: PanelController.self)
+        let preloaded = specifiers?.count ?? 0
+
         let rows = SpecifierBootstrap.load(named: panelID, target: self, bundle: bundle)
-        if (rows?.count ?? 0) > 0 {
-            specifiers = rows
-        } else {
+        let loaded = rows?.count ?? 0
+
+        let samePanel = (installedPanel == panelID && loaded == preloaded && loaded > 0)
+        if loaded > 0 {
+            if !samePanel {
+                specifiers = rows
+                installedPanel = panelID
+            }
+        } else if preloaded == 0 {
+            // Nothing loaded and nothing pre-filled: draw the diagnostic rather
+            // than an empty page. Once rows exist, never replace them with it.
             specifiers = diagnosticRows(bundle: bundle)
+            installedPanel = nil
         }
-        Log.write("prefs: panel \(panelID) -> \(specifiers?.count ?? 0) rows")
+        // loaded == 0 && preloaded > 0 keeps what the framework gave us: a page
+        // with the wrong rows still beats a page with none.
+
+        Log.write("prefs: panel \(panelID) loaded=\(loaded) preloaded=\(preloaded) "
+                  + "final=\(specifiers?.count ?? 0) \(samePanel ? "kept" : "installed")")
     }
 
     private func diagnosticRows(bundle: Bundle) -> NSMutableArray {
@@ -96,6 +124,12 @@ final class PanelController: PSListController {
                 ? "开关已开启 · \(config.summary)"
                 : "开关已关闭（桌面无握把）"
         }
+        if key == "@ring.apps" {
+            return RingApps.summary()
+        }
+        if key == "@ring.grip" {
+            return GripLayout.describe()
+        }
         return super.readPreferenceValue(specifier)
     }
 
@@ -117,6 +151,10 @@ final class PanelController: PSListController {
             }
             super.setPreferenceValue(value, specifier: specifier)
             ringChanged(named: key, value: on)
+            // The other three switches have just been switched off in the
+            // domain; without this their rows would still look on until the
+            // page is re-entered. Deferred so the tap animation is not cut.
+            DispatchQueue.main.async { [weak self] in self?.reload() }
             return
         }
 
@@ -127,9 +165,62 @@ final class PanelController: PSListController {
         }
     }
 
+    // MARK: Actions
+
+    /// The Ring panel's own buttons. In 0.0.6 this panel shipped a preview
+    /// button whose action only the root controller implemented, so it was
+    /// another row that looked alive and did nothing.
+    @objc func previewRing(_ specifier: PSSpecifier) {
+        RingActions.preview(from: self)
+    }
+
+    @objc func editApps(_ specifier: PSSpecifier) {
+        RingActions.editApps(from: self)
+    }
+
+    @objc func resetGrip(_ specifier: PSSpecifier) {
+        RingActions.resetGrip(from: self)
+        refreshSummaryRow()
+    }
+
+    /// Keys driven by a slider. A drag produces a value per touch event, so
+    /// these are coalesced; a switch produces exactly one and is written at
+    /// once.
+    private static let sliderKeys: Set<String> = [
+        "Radius", "IconWidth", "RotationAngle", "LastIconAngle",
+        "DampingFraction", "INTENSITY", "Speed",
+    ]
+
+    private var lastWrite = Date.distantPast
+    private var flushItem: DispatchWorkItem?
+
     /// Writes the snapshot *before* posting: the receiver reads the file, so a
     /// notification that arrives early must never see the previous values.
+    ///
+    /// A drag would otherwise write the file and post a Darwin notification on
+    /// every touch event — a hundred atomic writes a second into /var/mobile,
+    /// which is exactly the kind of thing that makes a slider feel sticky. The
+    /// rate is capped, and a trailing write makes sure the value the finger
+    /// stopped on is the value that lands.
     private func ringChanged(named key: String, value: Bool) {
+        let isSlider = PanelController.sliderKeys.contains(key)
+        if isSlider, Date().timeIntervalSince(lastWrite) < 0.08 {
+            flushItem?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                self?.flushRing(key: key, value: value)
+            }
+            flushItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: item)
+            return
+        }
+        flushRing(key: key, value: value)
+    }
+
+    private func flushRing(key: String, value: Bool) {
+        flushItem?.cancel()
+        flushItem = nil
+        lastWrite = Date()
+
         let config = RingConfig.load()
         if config.writeSnapshot() {
             Log.write("prefs: \(key)=\(value) -> \(config.summary) "
@@ -146,7 +237,8 @@ final class PanelController: PSListController {
         for element in rows {
             guard let row = element as? PSSpecifier,
                   let key = row.property(forKey: "key") as? String else { continue }
-            if key == "@ring.summary" || key == "@ring.host" {
+            if key == "@ring.summary" || key == "@ring.host"
+                || key == "@ring.apps" || key == "@ring.grip" {
                 if responds(to: NSSelectorFromString("reloadSpecifier:")) {
                     _ = perform(NSSelectorFromString("reloadSpecifier:"), with: row)
                 } else {

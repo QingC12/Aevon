@@ -24,6 +24,16 @@ struct RingApp {
     let icon: UIImage?
 }
 
+/// One installed application, before an icon has been drawn for it. Kept
+/// separate from RingApp on purpose: the app picker lists hundreds of rows and
+/// rendering a 120 pt tile for every one of them would make the panel scroll at
+/// 12 fps. The icon is produced only for rows that are actually on screen.
+struct InstalledApp {
+    let bundleID: String
+    let name: String
+    let path: String?
+}
+
 enum IconSource: String {
     case launchServices = "LaunchServices"
     case filesystem = "文件扫描"
@@ -40,6 +50,66 @@ enum IconSource: String {
 
 enum RingIcons {
 
+    // MARK: Catalogue (every installed app, no icons drawn)
+
+    private static var catalogueCache: [InstalledApp]?
+    private static var imageCache: [String: UIImage] = [:]
+
+    /// Every installed app, sorted by name. Cached for the life of the process:
+    /// enumerating LaunchServices takes ~70 ms and the picker asks for this on
+    /// every keystroke while searching.
+    static func catalogue() -> [InstalledApp] {
+        if let cached = catalogueCache { return cached }
+
+        var items: [InstalledApp] = launchServicesApps().map {
+            InstalledApp(bundleID: $0.bundleID, name: $0.name, path: $0.path)
+        }
+        if items.isEmpty {
+            items = filesystemCatalogue()
+        }
+        items.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        catalogueCache = items
+        return items
+    }
+
+    /// Called after the operator adds or removes an app in the picker, so the
+    /// next panel is not built from a stale list.
+    static func invalidateCatalogue() {
+        catalogueCache = nil
+    }
+
+    static func item(for bundleID: String) -> InstalledApp? {
+        return catalogue().first { $0.bundleID == bundleID }
+    }
+
+    /// The real icon when the system will give us one, a stable tile otherwise.
+    /// Never nil: a missing icon must not be able to produce a blank slot.
+    static func image(for item: InstalledApp) -> UIImage {
+        if let cached = imageCache[item.bundleID] { return cached }
+        let image = icon(for: item.bundleID, bundlePath: item.path)
+            ?? placeholderIcon(item.name)
+        imageCache[item.bundleID] = image
+        return image
+    }
+
+    static func placeholder(named name: String) -> UIImage {
+        return placeholderIcon(name)
+    }
+
+    /// A ring-ready app from a bare bundle identifier.
+    static func ringApp(for bundleID: String) -> RingApp {
+        if let item = item(for: bundleID) {
+            return RingApp(bundleID: item.bundleID, name: item.name, icon: image(for: item))
+        }
+        // Still installed as far as the operator is concerned, just not in the
+        // catalogue any more (deleted, or LaunchServices hid it). Keep the id
+        // so the row can be identified and removed instead of silently
+        // becoming a different app.
+        return RingApp(bundleID: bundleID,
+                       name: bundleID,
+                       icon: placeholderIcon(bundleID))
+    }
+
     /// - Parameter limit: hard cap, so a phone with 300 apps cannot make the
     ///   preview feel hung. The ring never shows more than 12 anyway.
     static func load(limit: Int = 12) -> (apps: [RingApp], source: IconSource) {
@@ -48,8 +118,9 @@ enum RingIcons {
             var apps: [RingApp] = []
             var real = 0
             for item in fromLS.prefix(limit) {
-                if let icon = icon(for: item.bundleID, bundlePath: item.path) {
+                if let icon = self.icon(for: item.bundleID, bundlePath: item.path) {
                     real += 1
+                    imageCache[item.bundleID] = icon
                     apps.append(RingApp(bundleID: item.bundleID, name: item.name, icon: icon))
                 } else {
                     apps.append(RingApp(bundleID: item.bundleID,
@@ -133,7 +204,10 @@ enum RingIcons {
 
     // MARK: Filesystem
 
-    private static func filesystemApps(limit: Int) -> [RingApp] {
+    /// Bundle paths reachable without LaunchServices. Used both as a fallback
+    /// for the ring and as the picker's catalogue when the private API is not
+    /// there, so the two can never offer different sets of apps.
+    private static func bundlePaths() -> [String] {
         var bundles: [String] = []
 
         for root in ["/Applications", "/var/containers/Bundle/Application"] {
@@ -155,17 +229,29 @@ enum RingIcons {
                 }
             }
         }
+        return bundles
+    }
 
-        var apps: [RingApp] = []
-        for path in bundles {
-            guard apps.count < limit else { break }
+    private static func filesystemCatalogue() -> [InstalledApp] {
+        var items: [InstalledApp] = []
+        for path in bundlePaths() {
             guard let info = NSDictionary(contentsOfFile: path + "/Info.plist") as? [String: Any],
-                  let bundleID = info["CFBundleIdentifier"] as? String else { continue }
+                  let bundleID = info["CFBundleIdentifier"] as? String,
+                  !bundleID.isEmpty else { continue }
             let name = (info["CFBundleDisplayName"] as? String)
                 ?? (info["CFBundleName"] as? String) ?? bundleID
-            apps.append(RingApp(bundleID: bundleID,
-                                name: name,
-                                icon: icon(for: bundleID, bundlePath: path) ?? placeholderIcon(name)))
+            items.append(InstalledApp(bundleID: bundleID, name: name, path: path))
+        }
+        return items
+    }
+
+    private static func filesystemApps(limit: Int) -> [RingApp] {
+        var apps: [RingApp] = []
+        for item in filesystemCatalogue() {
+            guard apps.count < limit else { break }
+            apps.append(RingApp(bundleID: item.bundleID,
+                                name: item.name,
+                                icon: image(for: item)))
         }
         return apps.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }

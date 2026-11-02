@@ -40,6 +40,16 @@ public enum Aevon {
     /// SpringBoard reads it on every notification.
     public static let ringPath = "/var/mobile/Library/Logs/Aevon/ring.plist"
 
+    /// The operator's own icon list, in their own order. Settings writes it,
+    /// SpringBoard reads it. Empty file = "no choice made yet", and the ring
+    /// falls back to the automatic list instead of showing nothing.
+    public static let appsPath = "/var/mobile/Library/Logs/Aevon/apps.plist"
+
+    /// Where the grip is. SpringBoard writes it after a drag (that is the only
+    /// place the drag happens), Settings reads it to show the position and
+    /// deletes it to send the grip back to its corner.
+    public static let layoutPath = "/var/mobile/Library/Logs/Aevon/layout.plist"
+
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"
     public static let legacyStatePath = "/var/mobile/Library/Preferences/com.aevon.state.plist"

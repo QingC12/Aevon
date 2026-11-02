@@ -231,7 +231,9 @@ final class RingView: UIView {
     }
 
     @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
-        guard !iconViews.isEmpty else { return }
+        // Both guards matter: an empty app list would make `index % count` a
+        // division by zero inside a tap handler on the home screen.
+        guard !iconViews.isEmpty, !apps.isEmpty else { return }
         let point = gesture.location(in: self)
 
         for (index, view) in iconViews.enumerated() where view.frame.contains(point) {

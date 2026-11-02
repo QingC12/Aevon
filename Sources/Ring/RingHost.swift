@@ -45,6 +45,14 @@ final class RingHost: NSObject {
     private var expanded = false
     private var preloaded = false
 
+    /// Where the drag that is in progress started. Only used while a pan is
+    /// live; the durable value is the normalised point in layout.plist.
+    private var dragOrigin: CGPoint = .zero
+
+    /// Cheap change detectors. Comparing a string costs nothing and lets a
+    /// rotation or a slider drag skip the icon rebuild entirely.
+    private var appsSignature = ""
+
     private var observers: [NSObjectProtocol] = []
 
     // MARK: - Enabled?
@@ -127,8 +135,26 @@ final class RingHost: NSObject {
             || updated.customSpring != config.customSpring
         config = updated
 
-        guard changed else { return }
-        Log.write("ring: live update -> \(config.summary)")
+        // The app list is a separate file with its own lifecycle: it changes on
+        // add / remove / reorder, not on a slider drag, so it gets its own
+        // check instead of forcing a rebuild every time.
+        let signature = RingApps.signature()
+        var appsChanged = false
+        if signature != appsSignature {
+            appsSignature = signature
+            let loaded = RingApps.resolved(limit: 12)
+            apps = loaded.apps
+            appsChanged = true
+            Log.write("ring: apps -> \(apps.count) (\(loaded.source.rawValue)), "
+                      + (signature == "auto" ? "automatic list" : "operator list"))
+        }
+
+        // Applies a reset or a move made from Settings; harmless when the grip
+        // has not moved.
+        layout()
+
+        guard changed || appsChanged else { return }
+        if changed { Log.write("ring: live update -> \(config.summary)") }
         if expanded {
             ring?.rebuild(config: config, apps: apps.isEmpty ? nil : apps)
         }
@@ -194,10 +220,7 @@ final class RingHost: NSObject {
         let bounds = window.bounds
         guard bounds.width > 0 else { return }
 
-        let inset = window.safeAreaInsets
-        let margin: CGFloat = 34
-        let point = CGPoint(x: bounds.maxX - Swift.max(margin, inset.right + 14),
-                            y: bounds.maxY - Swift.max(margin, inset.bottom + 22))
+        let point = gripPoint(in: bounds)
 
         // The grip is a subview of the pad, so only the pad moves. Setting the
         // dot's centre here would move it in the pad's coordinate space.
@@ -208,6 +231,30 @@ final class RingHost: NSObject {
             ring.frame = bounds
             ring.movePivot(point)
         }
+    }
+
+    /// Where the grip belongs: the operator's own position when one was saved,
+    /// the bottom-right corner otherwise. Normalised on purpose — 82% / 91% is
+    /// the same place on the screen after a rotation, a stored point is not.
+    private func gripPoint(in bounds: CGRect) -> CGPoint {
+        if let saved = GripLayout.load() {
+            return clamped(CGPoint(x: saved.x * bounds.width,
+                                   y: saved.y * bounds.height),
+                           in: bounds)
+        }
+        let inset = window?.safeAreaInsets ?? .zero
+        let margin: CGFloat = 34
+        return CGPoint(x: bounds.maxX - Swift.max(margin, inset.right + 14),
+                       y: bounds.maxY - Swift.max(margin, inset.bottom + 22))
+    }
+
+    /// Keeps the whole 40 pt touch pad on screen. A grip dragged half off the
+    /// edge is a grip that cannot be tapped back.
+    private func clamped(_ point: CGPoint, in bounds: CGRect) -> CGPoint {
+        let half: CGFloat = 20
+        let x = Swift.min(bounds.maxX - half, Swift.max(half, point.x))
+        let y = Swift.min(bounds.maxY - half, Swift.max(half, point.y))
+        return CGPoint(x: x, y: y)
     }
 
     // MARK: - Grip
@@ -224,6 +271,11 @@ final class RingHost: NSObject {
         pad.isUserInteractionEnabled = true
         pad.addGestureRecognizer(UITapGestureRecognizer(target: self,
                                                         action: #selector(toggle)))
+        // Drag to move. The tap still wins for a touch that does not travel,
+        // which is why the two recognisers can share the same 40 pt pad.
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleGripPan(_:)))
+        pan.maximumNumberOfTouches = 1
+        pad.addGestureRecognizer(pan)
         host.addSubview(pad)
         gripPad = pad
 
@@ -246,6 +298,42 @@ final class RingHost: NSObject {
 
     @objc private func toggle() {
         if expanded { collapse(animated: true) } else { expand() }
+    }
+
+    /// Moving the grip is the one gesture this project takes for itself, so it
+    /// is deliberately narrow: one finger, on a 40 pt pad, and the ring is put
+    /// away the moment the drag starts. No long press, no swipe from an edge —
+    /// a hijacked screen edge is the bug that makes a phone feel broken.
+    @objc private func handleGripPan(_ gesture: UIPanGestureRecognizer) {
+        guard let pad = gripPad, let host = window?.rootViewController?.view else { return }
+
+        switch gesture.state {
+        case .began:
+            dragOrigin = pad.center
+            if expanded { collapse(animated: true) }
+
+        case .changed:
+            let translation = gesture.translation(in: host)
+            let target = clamped(CGPoint(x: dragOrigin.x + translation.x,
+                                         y: dragOrigin.y + translation.y),
+                                 in: host.bounds)
+            pad.center = target
+            ring?.movePivot(target)
+
+        case .ended, .cancelled, .failed:
+            let bounds = host.bounds
+            guard bounds.width > 0, bounds.height > 0 else { return }
+            let normalized = CGPoint(x: pad.center.x / bounds.width,
+                                     y: pad.center.y / bounds.height)
+            if GripLayout.save(normalized) {
+                Log.write("ring: grip moved to \(Int(normalized.x * 100))% / "
+                          + "\(Int(normalized.y * 100))%")
+            }
+            layout()   // re-clamps and re-reads, so the saved value is what is shown
+
+        default:
+            break
+        }
     }
 
     private func animateGrip(expanded: Bool) {
@@ -304,11 +392,13 @@ final class RingHost: NSObject {
         // draws placeholder tiles, and neither is documented as thread-safe.
         // Mount + 1 s is a quiet moment, so the cost is invisible.
         let started = Date()
-        let loaded = RingIcons.load(limit: 12)
+        let loaded = RingApps.resolved(limit: 12)
         apps = loaded.apps
+        appsSignature = RingApps.signature()
 
         let milliseconds = Int(Date().timeIntervalSince(started) * 1000)
-        Log.write("ring: \(loaded.apps.count) apps via \(loaded.source.rawValue) in \(milliseconds)ms")
+        Log.write("ring: \(loaded.apps.count) apps via \(loaded.source.rawValue) in \(milliseconds)ms"
+                  + (appsSignature == "auto" ? " (automatic)" : " (operator list)"))
 
         if expanded, !apps.isEmpty {
             ring?.rebuild(config: config, apps: apps)

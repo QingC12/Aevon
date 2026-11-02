@@ -18,14 +18,18 @@ include $(THEOS)/makefiles/common.mk
 
 # Shared, platform-free core. The same three files are compiled into both
 # binaries, so SpringBoard and Settings can never disagree about paths/gates.
-AE_CORE := Sources/Core/Paths.swift Sources/Core/Log.swift Sources/Core/Gate.swift
+AE_CORE := Sources/Core/Paths.swift Sources/Core/Log.swift Sources/Core/Gate.swift \
+           Sources/Core/GripLayout.swift
 
 # The ring's model + icons + view are compiled into BOTH binaries on purpose:
 # the settings preview and the home-screen host must render the same shape from
 # the same numbers, or "it looks different on the desktop" becomes
 # unfalsifiable.
+#
+# RingApps joins them in 0.1.0: the icon list is written by Settings and read by
+# SpringBoard, and both sides have to resolve it the same way.
 AE_RING := Sources/Ring/RingModel.swift Sources/Ring/RingIcons.swift \
-           Sources/Ring/RingView.swift
+           Sources/Ring/RingApps.swift Sources/Ring/RingView.swift
 
 # ---------------------------------------------------------------------------
 # SpringBoard tweak. One C file (the load-time constructor Swift cannot
@@ -52,6 +56,9 @@ BUNDLE_NAME := AevonPrefs
 
 AevonPrefs_FILES := $(AE_CORE) $(AE_RING) \
                     Sources/Ring/RingPreviewController.swift \
+                    Sources/Prefs/RingActions.swift \
+                    Sources/Prefs/AppListController.swift \
+                    Sources/Prefs/AppPickerController.swift \
                     Sources/Prefs/PanelController.swift \
                     Sources/Prefs/RootListController.swift
 AevonPrefs_INSTALL_PATH := /Library/PreferenceBundles

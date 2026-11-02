@@ -209,18 +209,17 @@ final class RootListController: PSListController {
 
     /// Opens the carrier shape full screen. Everything it shows comes from the
     /// Ring panel's live values, so this is the tuning surface, not a mock-up.
+    /// Shared with the Ring panel's own preview row (RingActions), because two
+    /// implementations of "show the ring" is two chances to show different ones.
     @objc func previewRing(_ specifier: PSSpecifier) {
-        let started = Date()
-        let config = RingConfig.load()
-        let loaded = RingIcons.load(limit: 12)
-        let milliseconds = Int(Date().timeIntervalSince(started) * 1000)
-        Log.write("prefs: ring preview shape=\(config.shape.title) icons=\(loaded.apps.count) "
-                  + "source=\(loaded.source.rawValue) in \(milliseconds)ms")
+        RingActions.preview(from: self)
+    }
 
-        let controller = RingPreviewController(config: config,
-                                               apps: loaded.apps,
-                                               source: loaded.source)
-        present(controller, animated: true)
+    /// App list from the root page. The Ring panel has the same button; this
+    /// one exists so the feature stays reachable even if a panel plist ever
+    /// fails to load on some iOS build.
+    @objc func editApps(_ specifier: PSSpecifier) {
+        RingActions.editApps(from: self)
     }
 
     private func alert(_ title: String, _ message: String) {

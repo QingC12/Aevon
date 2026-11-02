@@ -264,6 +264,17 @@ BUILDERS = {"switch": spec_switch, "slider": spec_slider, "title": spec_title}
 
 def build_panel(panel_id, title, intro, items):
     specs = []
+    if panel_id == "Apps":
+        # 应用面板原本只有 7 行母本键，没有一处能真正改东西。托盘入口放在
+        # 最上面：它的数据是活的（@ring.apps 现读 apps.plist），按钮直达
+        # 添加/删除/排序页，和「承载形状」面板里那个是同一个入口。
+        specs.append({"cell": "PSGroupCell", "label": "托盘",
+                      "footerText": "托盘装哪些 App 由这里决定，改动立刻作用到桌面上的环。"
+                                    "不指定时退回系统自动挑选的前 12 个。"})
+        specs.append({"cell": "PSTitleValueCell", "label": "已选应用",
+                      "key": "@ring.apps", "default": "自动", "defaults": DOMAIN})
+        specs.append({"cell": "PSButtonCell", "label": "编辑应用（添加 / 删除 / 排序）",
+                      "action": "editApps:", "defaults": DOMAIN})
     if panel_id == "Ring":
         # 预览放在最上面：这一节剩下的 12 项都是它的参数，先能看见形状，
         # 后面的半径/图标宽度/旋转角才有意义。
@@ -285,6 +296,26 @@ def build_panel(panel_id, title, intro, items):
                       "key": "!ring.desktop", "default": True, "defaults": DOMAIN})
         specs.append({"cell": "PSTitleValueCell", "label": "桌面状态",
                       "key": "@ring.host", "default": "—", "defaults": DOMAIN})
+
+        # 应用：这一版起这份清单由操作者自己决定，顺序就是托盘顺序。
+        specs.append({"cell": "PSGroupCell", "label": "应用",
+                      "footerText": "托盘里放哪些 App、按什么顺序，全部由这一节决定。"
+                                    "顺序即落位顺序：第一个 App 在起始角上，其余顺时针排。"
+                                    "不指定时退回系统自动挑选的前 12 个。"})
+        specs.append({"cell": "PSTitleValueCell", "label": "已选应用",
+                      "key": "@ring.apps", "default": "自动", "defaults": DOMAIN})
+        specs.append({"cell": "PSButtonCell", "label": "编辑应用（添加 / 删除 / 排序）",
+                      "action": "editApps:", "defaults": DOMAIN})
+
+        # 握把位置：桌面上的拖动会写进 layout.plist，这里读回来显示。
+        specs.append({"cell": "PSGroupCell", "label": "握把位置",
+                      "footerText": "在桌面上按住小白点拖动即可改变位置，松手即保存，"
+                                    "横竖屏按屏幕比例还原。这里显示的是当前落位；"
+                                    "复位后回到右下角。"})
+        specs.append({"cell": "PSTitleValueCell", "label": "当前位置",
+                      "key": "@ring.grip", "default": "右下角（默认）", "defaults": DOMAIN})
+        specs.append({"cell": "PSButtonCell", "label": "握把复位到右下角",
+                      "action": "resetGrip:", "defaults": DOMAIN})
     specs.append({"cell": "PSGroupCell", "label": title, "footerText": intro})
     for it in items:
         specs.append(BUILDERS[it["cell"]](it))
@@ -342,10 +373,21 @@ def build_root():
     items.append({"cell": "PSButtonCell", "label": "应用与全局",
                   "action": "openPanel:", "panel": "Apps"})
 
+    # 快捷入口：不经过面板，直接作用于桌面上的环。面板页的装载一旦在某个
+    # iOS 版本上失败，这两个按钮仍然可达 —— 它们是这一版新功能的唯一保证。
+    items.append({"cell": "PSGroupCell", "label": "快捷操作",
+                  "footerText": "这两个动作不经过面板，直接作用于桌面上的环："
+                                "预览用当前参数全屏画一次；应用与排序改的是托盘装哪些 App。"})
+    items.append({"cell": "PSButtonCell", "label": "预览承载形状（全屏）",
+                  "action": "previewRing:", "defaults": DOMAIN})
+    items.append({"cell": "PSButtonCell", "label": "应用与排序（托盘）",
+                  "action": "editApps:", "defaults": DOMAIN})
+
     items.append({"cell": "PSGroupCell", "label": "关于",
-                  "footerText": f"Aevon {VERSION} · Swift · arm64e · 8 个面板全部可进入，"
-                                f"承载形状 8 项已接通（桌面实时生效），其余 56 项写入域待功能落地。"
-                                f"所有改动只写 {DOMAIN}，不触碰系统文件。"})
+                  "footerText": f"Aevon {VERSION} · Swift · arm64e · 8 个面板全部可进入。"
+                                f"承载形状：形状/半径/图标宽度/旋转角/尾角可改，"
+                                f"应用可增删排序，握把可拖动，全部在桌面上实时生效。"
+                                f"其余 56 项写入域待功能落地。所有改动只写 {DOMAIN}，不触碰系统文件。"})
 
     return {"title": "Aevon", "items": items}
 

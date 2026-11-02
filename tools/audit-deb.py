@@ -263,6 +263,44 @@ def main():
     else:
         ok("prefs: loads Root.plist explicitly into the specifiers ivar")
 
+    # 0.0.6's panel page returned early when Preferences had already filled the
+    # ivar, which made all eight panels render the same rows. The log line is
+    # the only thing that tells the two cases apart on a device, so its presence
+    # is asserted here: a panel that silently reuses preloaded rows again would
+    # also be a panel with no log line.
+    if b"preloaded=" not in prefs:
+        bad("prefs: panel loader no longer reports loaded/preloaded counts — "
+            "the 0.0.6 all-panels-identical regression could return unnoticed")
+
+    # -- 5b-bis. every panel must have its *own* content --------------------
+    # The shipped 0.0.6 regression was eight panels showing the same handful of
+    # switches. The cause (an early return before the plist was read) is fixed,
+    # but a generator edit could make the plists genuinely identical, which
+    # looks exactly the same on a phone. Compare their contents.
+    panel_names = ["Window", "Ring", "Gesture", "Keyboard",
+                   "Notify", "Jump", "Listen", "Apps"]
+    signatures = {}
+    for name in panel_names:
+        blob = files.get(f"{BUNDLE_DIR}/{name}.plist")
+        if blob is None:
+            bad(f"panels: {name}.plist missing")
+            continue
+        entries = plistlib.loads(blob).get("items", [])
+        if len(entries) < 3:
+            bad(f"panels: {name} has only {len(entries)} rows")
+        signatures[name] = tuple(
+            (e.get("cell"), e.get("label"), e.get("key"), e.get("action"))
+            for e in entries)
+    clash = [a for a in signatures for b in signatures
+             if a < b and signatures[a] == signatures[b]]
+    if clash:
+        bad(f"panels: identical body in {', '.join(clash)} — "
+            "the panel plist is probably being ignored again")
+    elif signatures:
+        counts = [len(v) for v in signatures.values()]
+        ok(f"panels: {len(signatures)} panels all different, "
+           f"{min(counts)}–{max(counts)} rows each")
+
     # -- 5c. carrier shape (0.0.5, wired to the desktop in 0.0.6) -----------
     # The ring is the first real rendering code in this project, and its
     # regressions are all silent: a lost preview row, a lost shape switch, a
@@ -283,11 +321,18 @@ def main():
             bad(f"ring: {len(shapes)} of 4 shape switches present")
         elif "!ring.desktop" not in keys:
             bad("ring: no !ring.desktop switch — the desktop host cannot be turned off")
+        elif "editApps:" not in actions:
+            bad("ring: no editApps: row — apps cannot be added, removed or sorted")
+        elif "resetGrip:" not in actions:
+            bad("ring: no resetGrip: row — a grip dragged off screen could not be recovered")
+        elif "@ring.apps" not in keys or "@ring.grip" not in keys:
+            bad("ring: the app list / grip position has no live row")
         else:
-            ok("ring: 4 shapes, live summary, preview action, desktop switch")
+            ok("ring: 4 shapes, live summary, preview, apps, grip reset, desktop switch")
 
     for token in (b"RingView", b"RingPreviewController", b"openPanel:",
-                  b"PanelController", b"previewRing:",
+                  b"PanelController", b"previewRing:", b"editApps:", b"resetGrip:",
+                  b"AppListController", b"AppPickerController", b"RingActions",
                   b"_applicationIconImageForBundleIdentifier:"):
         if token not in prefs:
             bad(f"ring: {token.decode()} missing from the bundle binary")
@@ -297,10 +342,15 @@ def main():
     # assert on strings that are *content* of the host, not on symbol names:
     # the class, the private API it calls, and the line it logs on mount.
     dylib_early = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
-    for token in (b"RingHost", b"ring: hosted on desktop", b"LSApplicationWorkspace"):
+    for token in (b"RingHost", b"ring: hosted on desktop", b"LSApplicationWorkspace",
+                  b"RingApps", b"GripLayout", b"ring: grip moved to"):
         if token not in dylib_early:
             bad(f"host: {token.decode()} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")
+    if b"/var/mobile/Library/Logs/Aevon/apps.plist" not in dylib_early:
+        bad("host: apps.plist path missing from the tweak — the operator's list would be ignored")
+    if b"/var/mobile/Library/Logs/Aevon/layout.plist" not in dylib_early:
+        bad("host: layout.plist path missing from the tweak — a dragged grip could not persist")
     if b"com.aevon.prefs" not in prefs:
         bad("host: settings never posts com.aevon.prefs — changes would not reach SpringBoard")
     if b"/var/mobile/Library/Logs/Aevon/ring.plist" not in prefs \
