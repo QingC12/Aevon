@@ -430,7 +430,7 @@ final class RingHost: NSObject {
     private func trash(_ app: RingApp) {
         let ok = RingApps.remove(app.bundleID)
         let result = ok ? "ok" : "write failed"
-        Log.write("ring: trash " + app.bundleID + " -> " + result)
+        Log.write("ring: trash remove " + app.bundleID + " -> " + result)
         reloadApps()
         // Nothing left to show. Keeping an empty ring on screen would look like
         // the delete broke the shape instead of emptying it.
@@ -444,7 +444,7 @@ final class RingHost: NSObject {
     private func pin(_ app: RingApp) {
         let ok = RingApps.togglePin(app.bundleID)
         let now = RingApps.isPinned(app.bundleID)
-        Log.write("ring: pin " + app.bundleID + " -> " + (now ? "on" : "off")
+        Log.write("ring: pin toggle " + app.bundleID + " -> " + (now ? "on" : "off")
                   + (ok ? "" : " (write failed)"))
         reloadApps()
     }

@@ -354,10 +354,15 @@ def main():
     # A local Swift function's name is stripped from a FINALPACKAGE build, so
     # assert on strings that are *content* of the host, not on symbol names:
     # the class, the private API it calls, and the line it logs on mount.
+    #
+    # Every log marker below is at least 16 bytes on purpose: Swift encodes
+    # literals of 15 bytes or less as immediates inside the instruction stream,
+    # so a short marker simply is not present in the file and this check fails
+    # in CI while looking fine locally. tools/push-gate.py enforces the length.
     dylib_early = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
     for token in (b"RingHost", b"ring: hosted on desktop", b"LSApplicationWorkspace",
                   b"(operator list)", b"ring: grip moved to",
-                  b"ring: trash ", b"ring: pin ", b"ring: rotate -> "):
+                  b"ring: trash remove ", b"ring: pin toggle ", b"ring: rotate -> "):
         if token not in dylib_early:
             bad(f"host: {token.decode()} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")

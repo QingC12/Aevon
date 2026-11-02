@@ -386,6 +386,14 @@ def check_audit_tokens():
     else:
         ok(f"audit: {len(tokens)} 条内容断言全部能在源码里找到")
 
+    # Swift 把 ≤15 字节的字符串字面量编成立即数塞进指令，字节流里根本没有。
+    # 所以「ring: trash 」这种短标记在 dylib 里 grep 不到，审计必挂 —— 而且
+    # 本地看不出、只在 CI 里挂。这条把它挡在推送之前：标记必须够长。
+    for token in sorted(tokens):
+        if token.startswith(("ring: ", "prefs: ")) and len(token.encode()) < 16:
+            bad(f"audit: 标记「{token}」只有 {len(token.encode())} 字节，"
+                f"Swift 会把它编成立即数，二进制里搜不到 —— 至少再加几个字")
+
 
 # ---------------------------------------------------------------------------
 # 9  Swift 静态检查（只抓过去真出现过的那几类）
