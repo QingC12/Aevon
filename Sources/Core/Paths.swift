@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.0.8"
+    public static let version = "0.0.9"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -56,6 +56,18 @@ public enum Aevon {
     /// where the domain lives on roothide, and because "one shot" is exactly
     /// what a file is.
     public static let probePath = "/var/mobile/Library/Logs/Aevon/probe.request"
+
+    /// The class a scan was looking at when the process stopped. Written before
+    /// each class is touched, so it is the one witness that survives a SIGKILL —
+    /// a signal handler cannot, and a jetsam kill and one poisonous class leave
+    /// the same log otherwise. Raw bytes on purpose (4-byte index + name): a
+    /// million writes are cheap, and this runs once per class.
+    public static let callStatePath = "/var/mobile/Library/Logs/Aevon/call.state"
+
+    /// Classes that already killed a scan, one per line. Read at the start of
+    /// every scan and written at boot from `callStatePath`: a probe that walks
+    /// straight back into a class that took SpringBoard down teaches nothing.
+    public static let callSkipPath = "/var/mobile/Library/Logs/Aevon/call.skip"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"

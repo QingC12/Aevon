@@ -217,3 +217,38 @@ iOS 上不存在」这种极具说服力又完全错误的答案。工具遇到 
 
 这一条是刻意的：一份扫了一半的 dump，比没有 dump 危险得多，因为它会把「还没扫到」
 印成 `n=0`，而 `n=0` 的读法是「这台 iOS 上不存在」。
+
+### 8.2 0.0.8 还是死了，所以这次先让探针能说出自己死在哪（0.0.9）
+
+0.0.8 的日志比 0.0.7 更短，也更有信息量：
+
+```
+20:59:27 prefs: scene probe requested -> calls ok
+20:59:27 calls: definition begin v1 targets=123 classes=99374
+20:59:33 boot ok: version 0.0.8, pid 34326
+```
+
+搬后台线程之后**连一行 `scan reached` 都没有**，而那一行本来在第一个 250 类
+之后就该出现。两条线索因此成立：
+
+1. 第一条 250 类的块都没跑完 —— 耗时以毫秒计，六秒不是扫描时长，是 respring 时长；
+2. 「主线程被杀」这个假设被排除（扫描已经不在主线程），剩下的是**某个类有毒**、
+   **内存被杀**、以及**与 SpringBoard 自己的类实现过程撞车**（请求到达时是开机后
+   12 秒，进程正在 realize 类、attach 方法表；这时去读同一个类的 method list 是
+   典型的 use-after-free）。
+
+0.0.9 不再猜，改成让探针**自己留下证据**：
+
+| 改动 | 治哪个 | 判据（下次日志里看什么） |
+|---|---|---|
+| 每个类动手之前写 4 字节序号 + 类名到 `call.state`（一次 open，`lseek`+`write`+`ftruncate`，不走 Log 也不分配） | 无论怎么死都能知道停在哪 | 下次开机第一行 `calls: previous scan died at <i> <类名>` |
+| 开机读 `call.state`，把那个类写进 `call.skip`，扫描时跳过 | 同样的死法不会重来 | `skip=N`；每跑一次就多排除一个类 |
+| `SB*`/`FB*`/`UI*`/`_UI*` 家族排到队首，走完就输出 `calls: phase1 by …` | 后半个进程死掉不连累结论 | `calls: phase1 done hits=… of 123` |
+| 扫描延后 6 秒启动 | 与类的 realize/attach 撞车 | 日志里 begin 与 phase1 的 secs |
+| 每块读一次 rss，>220MB 停 | 内存被杀 | 结束行的 `stopped at the memory ceiling` |
+| `_NSZombie_` 类直接跳过 | 僵尸类是运行时按需新建的，最可能正在被写 | `skip=` 计数 |
+| `calls: ordering walk over N classes` 单独一行 | 主线程那一遍（9.9 万个类名）死掉，和后台扫描死掉分开 | 日志停在这一行 = 死的是排序，不是扫描 |
+
+结论仍然是原来那条：`tools/compare-calls.py` 退出码 0 之前不创建任何窗口。
+新增的 `phase1` 段**不是结论**（后面的类也可能是归属），工具只在没有结束行时
+才拿它出来，并且一样退出码 2。

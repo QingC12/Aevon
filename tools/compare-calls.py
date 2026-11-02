@@ -216,6 +216,13 @@ END = "calls: definition end"
 # Log.write 会在正文前加「时间戳 [版本] 」，所以不能锚行首，只能 search。
 # 锚行首的写法会把一份完整 dump 全部判成截断 —— 实测踩到过。
 LINE = re.compile(r"calls: defined by (.+?) n=(\d+)(.*)$")
+# 0.0.9 起扫描分两段：SB/FB/UI 家族先走完，把结果印成 phase1，再走剩下的。
+# phase1 不是结论（后面的类也可能定义同一个选择子），但它证明「第一段活着」，
+# 并且在第二段把 SpringBoard 带走时是唯一能用的数据。
+PHASE1 = re.compile(r"calls: phase1 by (.+?) n=(\d+)(.*)$")
+# 启动时对上一次死亡的回读：类名 + 序号。这条比任何猜测都硬。
+DEATH = re.compile(r"calls: previous scan died at (\d+) (\S+)")
+SKIP = re.compile(r"skip=(\d+)")
 
 
 PROGRESS = re.compile(r"calls: scan reached (\d+) (\S+) rss=(-?\d+)mb")
@@ -225,30 +232,55 @@ COVERAGE = re.compile(r"upto=(\d+) of (\d+)")
 def parse(path):
     """取日志里最后一段 dump：begin 之后、end 之前。
 
-    另外两样东西也一起取：最后一次 `calls: scan reached` 进度行，和结束行里的
-    `upto=X of Y`。0.0.7 那次 SpringBoard 死在第六秒、一行输出都没有 —— 单看
-    日志分不清「主线程被杀」「内存被杀」「某一个类有毒」。进度行 + upto 就是为了
-    让下一次死掉的时候能说出来是哪一种。
+    另外几样东西也一起取：
+      · 最后一次 `calls: scan reached` 进度行 —— 死掉时能说出停在哪；
+      · 结束行里的 `upto=X of Y` 和 `skip=N`；
+      · `phase1` 段（第一段的结果，第二段死掉时唯一的凭据）；
+      · `previous scan died at <i> <name>` —— 上一次扫描的死亡标记回读，
+        这是唯一能区分「某个类有毒」和「被系统杀掉」的证据。
     """
     dump, inside, found_any = {}, False, False
     progress = None
     coverage = None
+    phase1 = {}
+    deaths = []
+    skip = 0
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         for raw in handle:
             line = raw.strip()
+            hit_death = DEATH.search(line)
+            if hit_death:
+                deaths.append((int(hit_death.group(1)), hit_death.group(2)))
+                continue
             if BEGIN in line:
                 dump, inside, found_any = {}, True, True
+                phase1 = {}
+                hit_skip = SKIP.search(line)
+                if hit_skip:
+                    skip = int(hit_skip.group(1))
                 continue
             if END in line:
                 inside = False
                 hit = COVERAGE.search(line)
                 if hit:
                     coverage = (int(hit.group(1)), int(hit.group(2)))
+                hit_skip = SKIP.search(line)
+                if hit_skip:
+                    skip = int(hit_skip.group(1))
                 continue
             hit_progress = PROGRESS.search(line)
             if hit_progress:
                 progress = (int(hit_progress.group(1)), hit_progress.group(2),
                             int(hit_progress.group(3)))
+                continue
+            hit_phase = PHASE1.search(line)
+            if hit_phase:
+                owners = []
+                for chunk in hit_phase.group(3).strip().split():
+                    if "|" in chunk:
+                        name, encoding = chunk.split("|", 1)
+                        owners.append((name.rstrip("+-"), encoding))
+                phase1[hit_phase.group(1)] = (int(hit_phase.group(2)), owners)
                 continue
             if not inside:
                 continue
@@ -262,7 +294,7 @@ def parse(path):
                     name, encoding = chunk.split("|", 1)
                     owners.append((name.rstrip("+-"), encoding))
             dump[selector] = (count, owners)
-    return dump, found_any, progress, coverage
+    return dump, found_any, progress, coverage, phase1, deaths, skip
 
 
 def verdicts(dump):
@@ -320,7 +352,15 @@ def main():
         print("找不到日志文件：%s" % path)
         return 2
 
-    dump, found_any, progress, coverage = parse(path)
+    dump, found_any, progress, coverage, phase1, deaths, skip = parse(path)
+    if deaths:
+        # 上一次扫描的死亡标记。有名字就是某个类有毒；只有序号没有名字，
+        # 说明连类名都没写下去 —— 那是被系统在标记前就杀掉了。
+        print("上一次扫描死在：第 %d 个类 %s（这次启动已写进跳过表）"
+              % (deaths[-1][0], deaths[-1][1]))
+    if skip:
+        print("本次跳过了 %d 个曾经杀死扫描的类 —— 它们不会成为任何选择子的归属"
+              "（所以这 %d 个类相关的 n=0 要打折扣）。" % (skip, skip))
     if progress:
         print("最后一次进度：扫到第 %d 个类（%s），rss=%d MB"
               % (progress[0], progress[1], progress[2]))
@@ -329,16 +369,36 @@ def main():
         print("日志里没有 calls: 段 —— 请求没到 SpringBoard，或转储还没跑完。")
         return 2
 
+    # 第二段把 SpringBoard 带走时，只有第一段（SB/FB/UI 家族）的数据。
+    # 它不能当结论用（后面的类也可能是归属），但足够判断「有没有死路」。
+    if not dump and phase1:
+        rows = verdicts(phase1)
+        counts = {}
+        for verdict, selector, want, got, enc in rows:
+            counts[verdict] = counts.get(verdict, 0) + 1
+        print("\n[PHASE1-ONLY] 只拿到第一段 %d 条 —— 第二段没有结束行。" % len(phase1))
+        for name in ("MATCH", "PRESENT", "OWNER-DIFF", "ENCODING-DIFF", "ABSENT"):
+            if name in counts:
+                print("  %-14s %3d" % (name, counts[name]))
+        absent = [row[0] for row in rows
+                  if row[0] == "ABSENT" and row[1] not in OWN_METHODS]
+        dead = [row[0] for row in rows if row[0] in ("OWNER-DIFF", "ENCODING-DIFF")]
+        if absent:
+            print("  第一段里就没有定义的：%s" % ", ".join(absent[:6]))
+        print("  这些是「至少在 SB/FB/UI 家族里成立」的部分结论，不是对齐结论。")
+        return 2
+
+    if not dump:
+        print("找到了 calls: 段但一行也解析不出来 —— 转储中途断了，重跑一次。")
+        return 2
+
     # 扫到一半就结束的 dump，比没有 dump 更危险：它会把「还没扫到」印成 n=0，
     # 而 n=0 的读法是「这台 iOS 上没有它」。所以先拦这一种。
     if coverage and coverage[0] < coverage[1]:
         print("\n[PARTIAL] 这一趟只扫了 %d / %d 个类就停了 —— 排在后面的 n=0 不是结论。"
               % (coverage[0], coverage[1]))
-        print("  看结束行里的 secs：接近 60 是时间上限，明显更小是被系统杀掉的。")
-        return 2
-
-    if not dump:
-        print("找到了 calls: 段但一行也解析不出来 —— 转储中途断了，重跑一次。")
+        print("  看结束行里的 secs：接近 180 是时间上限，明显更小是被系统杀掉的。")
+        print("  被系统杀掉时，下一次启动会在日志里写出「previous scan died at」那一行。")
         return 2
 
     rows = verdicts(dump)

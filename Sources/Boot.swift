@@ -72,6 +72,11 @@ public func AevonStart() {
     guard case .pass = Gate.evaluate() else { return }
 
     Log.write("boot ok: version \(Aevon.version), pid \(getpid())")
+
+    // Before anything else touches the runtime: if a probe left a death marker
+    // behind, name the class that stopped it and blacklist it. This is the only
+    // way a probe that killed SpringBoard can be read instead of guessed at.
+    SceneProbe.reportPreviousDeath()
     observeCommands()
     scheduleStableReset()
 

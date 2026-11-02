@@ -425,11 +425,27 @@ def main():
     # The call table is the gate on building a window: if its markers or the
     # per-line prefix fall out of the stripped binary, the log comes back empty
     # and looks like 'nothing answered' instead of 'the dump never ran'.
-    for token in (b"calls: definition begin v1 targets=", b"calls: defined by ",
-                  b"calls: definition end v1 missing=", b"calls: scan reached "):
+    for token in (b"calls: definition begin v2 targets=", b"calls: defined by ",
+                  b"calls: definition end v2 missing=", b"calls: scan reached "):
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the call table would come back empty and read as a negative")
+
+    # 0.0.9: the scan that killed SpringBoard twice now carries its own witness.
+    # Each of these three is load-bearing on its own —
+    #   `phase1`   the first half's results, so a death in the second half is not fatal
+    #   `died at`  the class named at next boot instead of "something, somewhere"
+    #   `ordering` separates a death in the main-thread ordering pass from one in the walk
+    for token in (b"calls: phase1 by ", b"calls: previous scan died at ",
+                  b"calls: ordering walk over ", b"calls: skip list now holds "):
+        if token not in dylib_early:
+            bad(f"probe: {token.decode()} missing from Aevon.dylib — "
+                "a third SpringBoard death would be as blind as the first two")
+    for token in (b"/var/mobile/Library/Logs/Aevon/call.state",
+                  b"/var/mobile/Library/Logs/Aevon/call.skip"):
+        if token not in dylib_early:
+            bad(f"probe: {token.decode()} missing from Aevon.dylib — "
+                "the death marker and the skip list would silently stop working")
 
     # 0.0.7 crashed SpringBoard mid-scan with nothing written. The progress line
     # is what turns the next crash from "somewhere" into "class N", so its

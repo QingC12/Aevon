@@ -576,6 +576,10 @@ zStackParticipantDidChange:
     private static var callCeiling = 0
     private static var callStart = Date()
     private static var callBusy = false
+    private static var callEdge = 0
+    private static var callPhaseDone = false
+    private static var callSkipped = 0
+    private static var callStateFD: Int32 = -1
 
     /// The second attempt runs off the main thread. The first one walked the
     /// same classes in 600-class slices on the main thread and SpringBoard died
@@ -583,7 +587,22 @@ zStackParticipantDidChange:
     /// the log alone a killed main thread, a jetsam kill and one bad class look
     /// exactly the same. Going off-thread removes the first; `calls: scan
     /// reached` lines remove the guesswork about the other two.
+    ///
+    /// It also starts six seconds late on purpose. The request reaches
+    /// SpringBoard about twelve seconds after boot, which is exactly when the
+    /// process is still realising classes and attaching method lists on its own
+    /// threads. Walking a method list while `attachCategories` is rewriting the
+    /// same class is a use-after-free, and a probe has no business being the
+    /// reason a phone resprings a third time.
     private static let callWorker = DispatchQueue(label: "com.aevon.calls", qos: .utility)
+
+    /// Candidate families first, everything else second. This is not a filter —
+    /// every class is still walked. It is an ordering: the master's own
+    /// selectors land on SpringBoard (`SB*`), FrontBoard (`FB*`), UIKit
+    /// (`UI*`, `_UI*`) and the Foundation/LaunchServices classes the master
+    /// calls by name (`NS*`, `LS*`), so if the walk dies again the classes that
+    /// matter have already been read and `phase1` lines record what they said.
+    private static let callPriorityPrefixes = ["SB", "FB", "_UI", "UI", "NS", "LS", "CA", "BK", "XB", "SpringBoard"]
 
     /// SpringBoard side, third dump. The first two answered "does the class
     /// exist" and "what does this named class answer". Neither answers the
@@ -602,19 +621,76 @@ zStackParticipantDidChange:
         }
         callTargets = Set(callSelectors.split(separator: "\n").map(String.init))
         callHits = [:]
-        callQueue = allClasses()
         callCursor = 0
+        callPhaseDone = false
+        callSkipped = 0
+        // Never walk a class that already took SpringBoard down. The list is
+        // written at boot from the last death marker, so this is what turns
+        // "the probe kills the phone" into "the probe gets one class further
+        // every run".
+        let poison = loadSkipList()
+        let classes = allClasses()
+        // Its own line: the ordering pass names every class on the main thread,
+        // and if the log ends here the walk is not what died — this is.
+        Log.write("calls: ordering walk over " + String(classes.count) + " classes")
+        var head: [AnyClass] = []
+        var tail: [AnyClass] = []
+        for cls in classes {
+            let name = NSStringFromClass(cls)
+            if poison.contains(name) {
+                callSkipped += 1
+                continue
+            }
+            // `_NSZombie_<X>` classes are minted on demand the first time an
+            // object of class X is freed. Walking one while that same class is
+            // still being built is the cleanest way to fault on a method list
+            // that is half attached — and no selector of ours lives there.
+            if name.hasPrefix("_NSZombie_") {
+                callSkipped += 1
+                continue
+            }
+            if priorityRank(of: name) < callPriorityPrefixes.count {
+                head.append(cls)
+            } else {
+                tail.append(cls)
+            }
+        }
+        callQueue = head
+        callQueue.append(contentsOf: tail)
+        callEdge = head.count
         callCeiling = callQueue.count
         callStart = Date()
-        Log.write("calls: definition begin v1 targets=" + String(callTargets.count)
-                  + " classes=" + String(callQueue.count))
+        Log.write("calls: definition begin v2 targets=" + String(callTargets.count)
+                  + " classes=" + String(callCeiling)
+                  + " phase1=" + String(callEdge)
+                  + " skip=" + String(callSkipped))
         guard !callQueue.isEmpty else {
-            Log.write("calls: definition end v1 missing=" + String(callTargets.count)
+            Log.write("calls: definition end v2 missing=" + String(callTargets.count)
                       + " upto=0 of 0 no classes")
             return
         }
         callBusy = true
-        callWorker.async { scanAll() }
+        callWorker.asyncAfter(deadline: .now() + 6.0) { scanAll() }
+    }
+
+    private static func priorityRank(of name: String) -> Int {
+        for (index, prefix) in callPriorityPrefixes.enumerated() where name.hasPrefix(prefix) {
+            return index
+        }
+        return callPriorityPrefixes.count
+    }
+
+    /// One class per marker write, index and name raw. `lseek` + `write` +
+    /// `ftruncate` on a handle that is opened once: no allocation, no bridge,
+    /// no log line, and it survives the SIGKILL that a signal handler cannot.
+    private static func mark(_ cls: AnyClass, index: Int) {
+        guard callStateFD >= 0, let name = class_getName(cls) else { return }
+        let length = strlen(name)
+        var slot = UInt32(truncatingIfNeeded: index)
+        _ = lseek(callStateFD, 0, SEEK_SET)
+        withUnsafeBytes(of: &slot) { _ = write(callStateFD, $0.baseAddress, 4) }
+        _ = write(callStateFD, UnsafeRawPointer(name), length)
+        _ = ftruncate(callStateFD, off_t(4 + length))
     }
 
     /// Straight through, on the worker queue, one autorelease pool per 250
@@ -624,32 +700,77 @@ zStackParticipantDidChange:
     /// pile up until the process ends.
     private static func scanAll() {
         var reason = ""
+        callStateFD = open(Aevon.callStatePath, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+        if callStateFD < 0 {
+            Log.write("calls: death marker unavailable, walking without it")
+        }
         while callCursor < callCeiling {
             // A probe that never finishes is a probe that cannot be trusted to
-            // leave the phone alone. Two minutes is far past the expected few,
+            // leave the phone alone. Three minutes is far past the expected few,
             // and past it we stop and say so in the end line — a partial dump
             // the reader can see is worth more than a process that never ends.
-            if Date().timeIntervalSince(callStart) > 120 {
-                reason = " stopped on the two minute limit"
+            if Date().timeIntervalSince(callStart) > 180 {
+                reason = " stopped on the three minute limit"
                 break
             }
             autoreleasepool {
                 let end = min(callCursor + 250, callCeiling)
                 while callCursor < end {
                     let cls = callQueue[callCursor]
+                    mark(cls, index: callCursor)
                     callCursor += 1
                     collectMethods(of: cls, meta: false)
                     collectMethods(of: cls, meta: true)
                 }
             }
+            if !callPhaseDone, callEdge > 0, callCursor >= callEdge {
+                callPhaseDone = true
+                emitPhase1()
+            }
+            let rss = residentMegabytes()
+            // Each method name costs a bridged string; the pool returns them,
+            // but a jetsam kill looks exactly like a bad class in the log, so
+            // the ceiling is checked rather than trusted.
+            if rss > 220 {
+                reason = " stopped at the memory ceiling"
+                break
+            }
             if callCursor < callCeiling {
                 Log.write("calls: scan reached " + String(callCursor) + " "
                           + NSStringFromClass(callQueue[callCursor])
-                          + " rss=" + String(residentMegabytes()) + "mb")
+                          + " rss=" + String(rss) + "mb")
             }
         }
         emitCallTable(reason: reason)
+        if callStateFD >= 0 {
+            _ = close(callStateFD)
+            callStateFD = -1
+        }
+        // Only a run that reached the end may erase the witness. A stopped run
+        // keeps it, so the next boot can name the class instead of guessing.
+        if reason.isEmpty {
+            try? FileManager.default.removeItem(atPath: Aevon.callStatePath)
+        }
         callBusy = false
+    }
+
+    /// Everything the first half found, printed the moment the boundary is
+    /// crossed. The final table repeats it — this block exists so that a death
+    /// in the second half costs the tail of the process, not the whole answer.
+    private static func emitPhase1() {
+        var found = 0
+        for selector in callTargets.sorted() {
+            guard let hit = callHits[selector] else { continue }
+            found += 1
+            var line = "calls: phase1 by " + selector + " n=" + String(hit.count)
+            for owner in hit.owners {
+                line += " " + owner.name + "|" + owner.encoding
+            }
+            Log.write(line)
+        }
+        Log.write("calls: phase1 done hits=" + String(found) + " of " + String(callTargets.count)
+                  + " scanned=" + String(callCursor)
+                  + " secs=" + String(Int(Date().timeIntervalSince(callStart))))
     }
 
     /// Own methods only, instance and class side separately. Inherited hits are
@@ -714,12 +835,56 @@ zStackParticipantDidChange:
         }
         // `upto` is not decoration: a scan that stopped early makes every
         // `n=0` above it a lie, and tools/compare-calls.py refuses to read a
-        // partial dump as a verdict for exactly that reason.
-        Log.write("calls: definition end v1 missing=" + String(missing)
+        // partial dump as a verdict for exactly that reason. `skip` is the same
+        // warning from the other side — classes dropped on purpose cannot be
+        // the owner of anything either.
+        Log.write("calls: definition end v2 missing=" + String(missing)
                   + " capped=" + String(multi)
                   + " upto=" + String(callCursor) + " of " + String(callQueue.count)
+                  + " skip=" + String(callSkipped)
                   + " secs=" + String(Int(Date().timeIntervalSince(callStart)))
                   + reason)
+    }
+
+    private static func loadSkipList() -> Set<String> {
+        guard let text = try? String(contentsOfFile: Aevon.callSkipPath, encoding: .utf8) else {
+            return []
+        }
+        return Set(text.split(separator: "\n").map(String.init).filter { !$0.isEmpty })
+    }
+
+    /// Called once at boot, before anything else touches the runtime. If the
+    /// last scan left a marker, the class named in it is the one that stopped
+    /// the process — a fault, a deadlock or a jetsam kill all leave the same
+    /// log, and only this file tells them apart. The name is then added to the
+    /// skip list, so the next scan steps over it and the dump keeps growing
+    /// across runs instead of dying in the same place forever.
+    static func reportPreviousDeath() {
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: Aevon.callStatePath) else { return }
+        defer { try? manager.removeItem(atPath: Aevon.callStatePath) }
+        guard let data = manager.contents(atPath: Aevon.callStatePath), data.count > 4 else {
+            Log.write("calls: previous scan died without naming a class")
+            return
+        }
+        // Byte by byte rather than `withUnsafeBytes { load(as:) }`: a marker
+        // that dies on an alignment trap would be a new reason to respring.
+        var index: UInt32 = 0
+        for offset in 0..<4 {
+            index |= UInt32(data[offset]) << (8 * UInt32(offset))
+        }
+        let name = String(decoding: data.dropFirst(4), as: UTF8.self)
+        guard !name.isEmpty, !name.contains("\n") else {
+            Log.write("calls: previous scan died at " + String(index) + " unnamed")
+            return
+        }
+        Log.write("calls: previous scan died at " + String(index) + " " + name)
+        var poison = loadSkipList()
+        poison.insert(name)
+        var text = ""
+        for entry in poison.sorted() { text += entry + "\n" }
+        try? text.write(toFile: Aevon.callSkipPath, atomically: true, encoding: .utf8)
+        Log.write("calls: skip list now holds " + String(poison.count) + " classes")
     }
 
     // MARK: - Runtime helpers
