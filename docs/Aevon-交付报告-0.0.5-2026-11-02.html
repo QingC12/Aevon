@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aevon 0.0.5 交付报告 — 承载形状</title>
+<style>
+  :root{
+    --bg:#0a0d13; --bg2:#0f131c; --card:#121722; --card2:#161c28;
+    --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.13);
+    --tx:#e8edf6; --tx2:#9aa7bd; --tx3:#6b7688;
+    --cy:#4dd4e8; --vi:#9d8cff; --am:#f0b45f; --gr:#5fd6a4; --rd:#ff7a86;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:radial-gradient(1200px 600px at 15% -10%,rgba(77,212,232,.09),transparent 60%),
+               radial-gradient(1000px 500px at 90% 0%,rgba(157,140,255,.08),transparent 55%),
+               var(--bg);
+    color:var(--tx);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased; line-height:1.65; padding:44px 28px 80px;
+  }
+  .wrap{max-width:1120px;margin:0 auto}
+  .eyebrow{font-size:12px;letter-spacing:.22em;color:var(--cy);text-transform:uppercase;font-weight:600}
+  h1{font-size:33px;line-height:1.28;font-weight:650;margin:12px 0 10px;letter-spacing:-.01em}
+  h1 em{font-style:normal;background:linear-gradient(92deg,var(--cy),var(--vi));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--tx2);font-size:14.5px;max-width:900px}
+  .meta{margin-top:18px;display:flex;gap:10px;flex-wrap:wrap}
+  .chip{font-size:12px;color:var(--tx2);border:1px solid var(--line2);border-radius:999px;padding:5px 12px;background:rgba(255,255,255,.02)}
+  .chip b{color:var(--tx);font-weight:600}
+  .kpi{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:34px 0 8px}
+  .k{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:16px 14px}
+  .k .n{font-size:22px;font-weight:650;letter-spacing:-.02em;line-height:1.2}
+  .k .n span{font-size:12px;color:var(--tx3);font-weight:500;margin-left:2px}
+  .k .l{font-size:11.5px;color:var(--tx3);margin-top:4px;letter-spacing:.02em}
+  .k.c1 .n{color:var(--cy)} .k.c2 .n{color:var(--vi)} .k.c3 .n{color:var(--am)}
+  .k.c4 .n{color:var(--gr)} .k.c5 .n{color:#c9d4e8} .k.c6 .n{color:#8fa3bf}
+  section{margin-top:44px}
+  .sh{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:22px}
+  .sh .num{font-size:12px;color:var(--cy);font-weight:700;letter-spacing:.12em}
+  .sh h2{font-size:19px;font-weight:600;letter-spacing:-.01em}
+  .sh .note{margin-left:auto;font-size:12px;color:var(--tx3)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-weight:600;color:var(--tx3);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;padding:9px 10px;border-bottom:1px solid var(--line2)}
+  td{padding:10px;border-bottom:1px solid var(--line);color:var(--tx2);vertical-align:top}
+  td b{color:var(--tx);font-weight:600}
+  tr:hover td{background:rgba(255,255,255,.017)}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+  .sm{font-size:11.5px}
+  .num{font-variant-numeric:tabular-nums}
+  .tag{display:inline-block;font-size:10.5px;padding:1.5px 7px;border-radius:5px;border:1px solid;line-height:1.5;white-space:nowrap}
+  .tA{color:var(--gr);border-color:rgba(95,214,164,.35);background:rgba(95,214,164,.08)}
+  .tB{color:var(--am);border-color:rgba(240,180,95,.35);background:rgba(240,180,95,.08)}
+  .tC{color:var(--rd);border-color:rgba(255,122,134,.35);background:rgba(255,122,134,.08)}
+  .tN{color:#8fa3bf;border-color:rgba(143,163,191,.35);background:rgba(143,163,191,.08)}
+  .tV{color:var(--vi);border-color:rgba(157,140,255,.35);background:rgba(157,140,255,.08)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .card{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:18px}
+  .card h3{font-size:14px;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .card p{font-size:13px;color:var(--tx2)}
+  .card ul{margin:8px 0 0 2px;list-style:none;display:flex;flex-direction:column;gap:6px}
+  .card li{font-size:12.8px;color:var(--tx2);padding-left:14px;position:relative}
+  .card li::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;border-radius:50%;background:var(--cy);opacity:.7}
+  .hl{color:var(--tx);font-weight:600}
+  pre{background:#0b0f17;border:1px solid var(--line2);border-radius:12px;padding:16px 18px;overflow-x:auto;
+      font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.75;color:#c7d3e6}
+  pre .k{color:var(--cy)} pre .c{color:var(--tx3)} pre .g{color:var(--gr)}
+  .steps{display:flex;flex-direction:column;gap:12px}
+  .step{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:16px 18px;display:grid;grid-template-columns:38px 1fr;gap:14px}
+  .step .no{width:30px;height:30px;border-radius:9px;background:rgba(77,212,232,.1);border:1px solid rgba(77,212,232,.3);
+            color:var(--cy);font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .step h4{font-size:14px;font-weight:600;margin-bottom:4px}
+  .step h4 .restart{font-size:10.5px;font-weight:500;color:var(--am);border:1px solid rgba(240,180,95,.35);
+            background:rgba(240,180,95,.08);border-radius:5px;padding:1px 7px;margin-left:8px}
+  .step p{font-size:13px;color:var(--tx2)}
+  .expect,.fail{margin-top:10px;font-size:12.6px;padding:9px 12px;border-radius:9px;line-height:1.7}
+  .expect{background:rgba(95,214,164,.07);border-left:2px solid var(--gr);color:#b9e9d4}
+  .fail{background:rgba(255,122,134,.06);border-left:2px solid var(--rd);color:#ffc6cb}
+  .expect b,.fail b{color:#fff}
+  footer{margin-top:52px;padding-top:18px;border-top:1px solid var(--line);color:var(--tx3);font-size:12px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+  @media(max-width:900px){
+    .kpi{grid-template-columns:repeat(3,1fr)}
+    .grid2{grid-template-columns:1fr}
+    body{padding:28px 16px 60px}
+  }
+  figure{margin:0;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#0d1016}
+  figure img{display:block;width:100%;height:auto}
+  figcaption{padding:10px 14px;font-size:12px;color:var(--tx3);border-top:1px solid var(--line);background:rgba(255,255,255,.015)}
+  .kv{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:14px}
+  .kv div{background:rgba(255,255,255,.02);border:1px solid var(--line);border-radius:11px;padding:12px 13px}
+  .kv .a{font-size:11px;color:var(--tx3);letter-spacing:.03em}
+  .kv .b{font-size:17px;font-weight:650;margin-top:3px;font-variant-numeric:tabular-nums}
+  @media(max-width:720px){.kv{grid-template-columns:repeat(2,1fr)}}
+</style>
+<body>
+<div class="wrap">
+
+  <div class="eyebrow">AEVON · DELIVERY 0.0.5</div>
+  <h1>承载形状落地：<em>四种形状</em>、从枢轴绽放的动画，<br>以及一个能当场看见它们的入口</h1>
+  <p class="sub">
+    这一版没有碰桌面进程一行代码。做的是「形状」本身 —— 图标怎么排在弧上、怎么从中心长出来、拖一下怎么转。
+    形状不需要窗口就能评审，所以宿主暂时放在设置里的全屏预览：装完即刻可看、不需要重启、
+    几何实验再离谱也不可能影响开机。<span class="hl">RingView 是同一份代码，浮窗那一步直接搬过去。</span>
+  </p>
+
+  <div class="meta">
+    <span class="chip">版本 <b>0.0.5</b></span>
+    <span class="chip">架构 <b>iphoneos-arm64e</b></span>
+    <span class="chip">包体 <b>72,588 B</b></span>
+    <span class="chip">载荷 <b>14 文件 / 344,858 B</b></span>
+    <span class="chip">审计 <b>13 项 PASS</b></span>
+    <span class="chip">SpringBoard 新增代码 <b>0 行</b></span>
+  </div>
+
+  <div class="kpi">
+    <div class="k c1"><div class="n">522<span>帧</span></div><div class="l">母本 GIF 逐帧核对</div></div>
+    <div class="k c2"><div class="n">4<span>种</span></div><div class="l">圆盘 / 半圆盘 / 直角盘 / 任意</div></div>
+    <div class="k c3"><div class="n">7<span>个</span></div><div class="l">默认圆盘能放满的图标数</div></div>
+    <div class="k c4"><div class="n">22<span>ms</span></div><div class="l">相邻图标的错开间隔</div></div>
+    <div class="k c5"><div class="n">215,664<span>B</span></div><div class="l">AevonPrefs（占预算 52%）</div></div>
+    <div class="k c6"><div class="n">121,664<span>B</span></div><div class="l">Aevon.dylib（未改动）</div></div>
+  </div>
+
+  <section>
+    <div class="sh"><span class="num">01</span><h2>先量，再画：GIF 里读到的三个数</h2><span class="note">证据/stheno图标动画.GIF</span></div>
+
+    <p class="sub" style="margin-bottom:16px">
+      逆向文件夹里那段录屏是 295×639、<b>522 帧、每帧 20 ms</b>（约 10.4 秒）。我把它拆成帧，
+      对托盘区域的白色图标底盘做连通域检测，取三个不同位置的图标圆心做三点定圆：
+    </p>
+
+    <table>
+      <thead><tr><th style="width:24%">量</th><th style="width:26%">GIF 实测</th><th>换算（393 pt 宽屏）</th></tr></thead>
+      <tbody>
+        <tr><td><b>托盘半径</b></td><td class="mono">R = 40.4 px</td><td><b>≈ 54 pt</b> —— 母本 <span class="mono">Radius</span> 默认 64，实际按自身 <span class="mono">_scale</span> 收缩</td></tr>
+        <tr><td><b>图标边长</b></td><td class="mono">35 px（1225 px²）</td><td><b>≈ 46 pt</b> —— 与 <span class="mono">IconWidth</span> 默认 44 一致（含 1pt 抗锯齿边）</td></tr>
+        <tr><td><b>圆心位置</b></td><td class="mono">(189.5, 566.9)</td><td><b>屏幕右下角</b>，即浮窗右下握把处 —— 不是屏幕中心</td></tr>
+        <tr><td><b>可见图标</b></td><td>同帧检出 3 个白底</td><td>其余图标底色是深色，未被阈值捕获；按 72° 均分推算，圆盘约 5–6 个</td></tr>
+      </tbody>
+    </table>
+
+    <div class="grid2" style="margin-top:16px">
+      <div class="card">
+        <h3>动画不是「沿弧淡入」</h3>
+        <p>第 65–78 帧可以看到全部图标先<b>聚成一个点</b>，随后边外扩边放大、逐个错开落位。
+        这与 <span class="mono">RingEnv</span> 的 <span class="mono">_offset</span> 加弹簧模型完全吻合 —— 图标是从枢轴<b>长出来</b>的，不是从天上掉下来的。</p>
+      </div>
+      <div class="card">
+        <h3>所以第一版就按「绽放」写</h3>
+        <p>起点 = 枢轴点、缩放 0.12、透明 0；终点 = 弧上落位、缩放 1、透明 1；
+        相邻错开 22 ms，弹簧阻尼取 <span class="mono">DampingFraction</span>。不是先做完再调，而是照着量到的东西写。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">02</span><h2>几何：四种形状，一条公式决定能放几个</h2><span class="note">RingModel.swift</span></div>
+
+    <p class="sub" style="margin-bottom:16px">
+      角度约定全项目统一：<b>0° 朝上（12 点），顺时针为正</b>。下面的图是<b>用同一套公式</b>在本地算出来的落位，
+      不是示意图 —— 图标之间不重叠，靠的是容量公式而不是手调的间距。
+    </p>
+
+    <figure>
+      <img src="data:image/png;base64,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" alt="三种承载形状的图标落位">
+      <figcaption>R=64、图标 44pt、间距下限 6pt。圆盘 7 个、半圆盘 4 个、直角盘 2 个 —— 数量由半径与图标宽度算出，放大半径会自动容纳更多。</figcaption>
+    </figure>
+
+    <table style="margin-top:18px">
+      <thead><tr><th style="width:17%">形状</th><th style="width:13%">母本键</th><th style="width:15%">扫角</th><th style="width:20%">起始角</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><b>圆盘</b></td><td class="mono">RTSIF</td><td>360°（闭合）</td><td class="mono">旋转角</td><td>首尾相接，按 <span class="mono">360/n</span> 均分，0° 不会落两个图标</td></tr>
+        <tr><td><b>半圆盘</b></td><td class="mono">RTSIH</td><td>180°</td><td class="mono">旋转角 − 90°</td><td>默认占上半圆：左右两端水平，贴边使用</td></tr>
+        <tr><td><b>直角盘</b></td><td class="mono">RTSIQ</td><td>90°</td><td class="mono">旋转角 − 45°</td><td>默认占正上方 90°，贴角展开</td></tr>
+        <tr><td><b>任意角度</b></td><td class="mono">RTSIZ</td><td class="mono">尾角 − 旋转角</td><td class="mono">旋转角</td><td>拖动即改尾角；两端差值小于 5° 时按闭合圆盘处理</td></tr>
+      </tbody>
+    </table>
+
+    <pre style="margin-top:16px"><span class="c">// 相邻图标所需的最小圆心角：弦长 = 图标宽度 + 间距</span>
+step = 2 · asin( <span class="k">min</span>(1, (iconWidth + 6) / (2 · radius)) )
+
+<span class="c">// 闭合盘用整除，开口弧用「段数 + 1」——后者两端要各占一个图标</span>
+圆盘 / 任意闭合 : n = <span class="k">floor</span>(2π / step)        <span class="g">// R64·44pt → 7</span>
+半圆 / 直角     : n = <span class="k">floor</span>(扫角 / step) + 1  <span class="g">// → 4 / 2</span></pre>
+
+    <p class="sub" style="margin-top:14px">
+      这条公式同时解释了 GIF：把 <span class="mono">R=54、图标 46</span> 代进去得 <b>6 个</b>，
+      正是录屏里那个密度。母本的 <span class="mono">_angleScale</span> 允许在此基础上再做角度压缩，我们暂未接线。
+    </p>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">03</span><h2>面板里 12 项参数，各自接到了哪里</h2><span class="note">改完回到预览页点「重播」即可对比</span></div>
+
+    <table>
+      <thead><tr><th style="width:18%">设置项</th><th style="width:14%">键</th><th>在本版中的作用</th></tr></thead>
+      <tbody>
+        <tr><td>圆盘 / 半圆盘 / 直角盘 / 任意</td><td class="mono">RTSIF/IH/IQ/IZ</td><td><span class="tag tA">已接线</span> 四选一，写入时同步关掉其余三个，不会出现「既是圆盘又是半圆」</td></tr>
+        <tr><td>半径</td><td class="mono">Radius</td><td><span class="tag tA">已接线</span> 40–120 pt，直接改落位半径，同时改容量</td></tr>
+        <tr><td>图标宽度</td><td class="mono">IconWidth</td><td><span class="tag tA">已接线</span> 28–64 pt，圆角按 iOS 比例 0.2237</td></tr>
+        <tr><td>旋转角</td><td class="mono">RotationAngle</td><td><span class="tag tA">已接线</span> 整盘朝向偏移，−180°–180°</td></tr>
+        <tr><td>尾角</td><td class="mono">LastIconAngle</td><td><span class="tag tA">已接线</span> 「任意角度」的终止角，拖拽即改</td></tr>
+        <tr><td>阻尼系数</td><td class="mono">DampingFraction</td><td><span class="tag tA">已接线</span> 直接喂给 <span class="mono">UIViewPropertyAnimator(dampingRatio:)</span></td></tr>
+        <tr><td>动画弹性</td><td class="mono">CustomSpringAnimation</td><td><span class="tag tA">已接线</span> 开＝弹簧，关＝系统 easeOut</td></tr>
+        <tr><td>震动 / 强度</td><td class="mono">VIBRATE / INTENSITY</td><td><span class="tag tA">已接线</span> soft 触感，强度透传</td></tr>
+        <tr><td>速度</td><td class="mono">Speed</td><td><span class="tag tA">已接线</span> 时长 = 0.52 s ÷ 速度，错开间隔同步缩放</td></tr>
+        <tr><td>收藏 / 旋转自适应·立即·延迟</td><td class="mono">Star / IOMI0-2</td><td><span class="tag tB">待接线</span> 依赖「图标来源」与方向事件，浮窗阶段一起做</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">04</span><h2>承载的是谁：图标三级回退，并且把用了哪一级写在页面上</h2><span class="note">RingIcons.swift</span></div>
+
+    <div class="steps">
+      <div class="step"><div class="no">1</div><div>
+        <h4>LaunchServices<span style="font-size:10.5px;color:var(--gr);border:1px solid rgba(95,214,164,.35);background:rgba(95,214,164,.08);border-radius:5px;padding:1px 7px;margin-left:8px">首选</span></h4>
+        <p><span class="mono">LSApplicationWorkspace</span> 列出全部已安装 App，图标走
+        <span class="mono">+[UIImage _applicationIconImageForBundleIdentifier:format:scale:]</span> —— 这是桌面自己渲染图标用的方法，
+        连只有 Assets.car 的 App 也能拿到真实图标。<b>调用前先 <span class="mono">responds(to:)</span> 判断</b>，系统没有这个方法就跳过，不会变成崩溃。</p>
+      </div></div>
+      <div class="step"><div class="no">2</div><div>
+        <h4>文件扫描</h4>
+        <p><span class="mono">/Applications</span> 与 <span class="mono">/var/containers/Bundle/Application</span> 下逐个读 Info.plist 取名字与 bundle id，
+        图标找包内的 <span class="mono">AppIcon60x60@2x.png</span> 一类平铺文件。</p>
+      </div></div>
+      <div class="step"><div class="no">3</div><div>
+        <h4>占位色块</h4>
+        <p>前两级都读不到时，按名字生成圆角色块加首字。颜色用<b>稳定散列</b>（<span class="mono">String.hashValue</span> 每次进程启动都不同，会让同一个 App 换色）。</p>
+        <p style="margin-top:6px">关键是：<b>用了哪一级会写在预览页第三行</b>。空环或假环看起来像几何写错了，而几何正是这一版要评审的东西 —— 所以宁可把「读不到」说清楚。</p>
+      </div></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">05</span><h2>为什么宿主先放在设置里，而不是桌面上</h2><span class="note">这是刻意的取舍，不是省事</span></div>
+
+    <div class="grid2">
+      <div class="card">
+        <h3>放在设置里得到的</h3>
+        <ul>
+          <li>装完<b>不用重启</b>就能看，改一个参数重开一次，迭代成本几乎为零</li>
+          <li>桌面进程<b>一行代码都没加</b>，几何实验再离谱也不可能让手机起不来</li>
+          <li>预览页就是调参面板：半径、图标宽度、四种形状都能当场对比</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>代价与偿还方式</h3>
+        <ul>
+          <li>预览页的枢轴在屏幕中心，而母本在<b>浮窗右下握把</b> —— 位置差别由下一步的宿主决定，形状本身不受影响</li>
+          <li>点图标目前只弹名字，不打开 App —— 打开需要浮窗与场景，属于下一步</li>
+          <li><span class="mono">RingView</span> 是纯叶子视图：不建窗口、不抢手势、不启动 App，换宿主不用改一行</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">06</span><h2>实测数据</h2><span class="note">构建 run 41426470309 · 一次通过</span></div>
+
+    <table>
+      <thead><tr><th style="width:30%">项</th><th style="width:24%">实测</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>deb 包体</td><td class="mono">72,588 B</td><td>0.0.4 为 43,646 B，全部增量来自形状代码</td></tr>
+        <tr><td>载荷</td><td class="mono">14 文件 / 344,858 B</td><td>文件数未变，仍无 <span class="mono">usr/</span>、无 <span class="mono">var/jb</span> 前缀</td></tr>
+        <tr><td>AevonPrefs</td><td class="mono">215,664 B</td><td>thin arm64e、含 libswiftCore，占预算 52%</td></tr>
+        <tr><td>Aevon.dylib</td><td class="mono">121,664 B</td><td><b>与 0.0.4 完全相同</b> —— 桌面侧确实一行没动</td></tr>
+        <tr><td>Ring.plist</td><td class="mono">16 项</td><td>预览组 3 行 + 12 设置项，四形状键齐全</td></tr>
+        <tr><td>二进制符号</td><td class="mono">RingView ×5<br>RingPreviewController ×5<br>previewRing: ×1</td><td>证明形状代码与入口都真的进了包，而不是被 dead_strip 掉</td></tr>
+      </tbody>
+    </table>
+
+    <div class="kv">
+      <div><div class="a">审计</div><div class="b" style="color:var(--gr)">13 / 13 PASS</div></div>
+      <div><div class="a">构建耗时</div><div class="b">含 Swift 全量编译</div></div>
+      <div><div class="a">新增编译单元</div><div class="b">4 个 .swift</div></div>
+      <div><div class="a">新钩子</div><div class="b" style="color:var(--gr)">0</div></div>
+    </div>
+
+    <p class="sub" style="margin-top:14px">
+      审计这次新增四条硬闸门：Ring.plist 里必须有 <span class="mono">previewRing:</span> 行、
+      必须有 <span class="mono">@ring.summary</span> 行、四个形状键必须齐全、二进制里必须能找到
+      <span class="mono">RingView</span> / <span class="mono">RingPreviewController</span> / 私有图标选择子。
+      这四条都是「少了也不会报错、但功能会悄悄消失」的类型。
+    </p>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">07</span><h2>真机验证流程</h2><span class="note">不需要终端，不需要重启</span></div>
+
+    <div class="steps">
+      <div class="step"><div class="no">1</div><div>
+        <h4>安装 <span class="mono">com.Aevon_0.0.5-arm64e.deb</span></h4>
+        <p>用 Filza 点开安装。装完设置 App 会自动重启（postinst 只杀 Preferences，不动桌面）。</p>
+        <div class="expect">预期：打开「设置」→ 插件集合 → 仍能看到 <b>Aevon</b>，根页 21 行不变。</div>
+      </div></div>
+
+      <div class="step"><div class="no">2</div><div>
+        <h4>进入「承载形状」面板</h4>
+        <p>设置 → Aevon → 功能设置 → 承载形状。最上面是新的「预览」组，共三行。</p>
+        <div class="expect">预期：「当前承载」显示类似 <span class="mono">圆盘 · R64 · 44pt · 7 个 · 起点 0°</span>。</div>
+        <div class="fail">若此处显示 <b>—</b>：说明这一行没读到值，把 <span class="mono">/var/mobile/Aevon.log</span> 末尾发我。</div>
+      </div></div>
+
+      <div class="step"><div class="no">3</div><div>
+        <h4>点「预览承载形状（全屏）」</h4>
+        <p>全屏黑底，中间一组图标，周围有虚线圆与枢轴点，顶部三行说明，底部「重播动画」。</p>
+        <div class="expect">预期：<b>图标从中心点扩散出来</b>并逐个放大落位，约半秒；顶部第三行会写<b>图标来源</b>（LaunchServices / 文件扫描 / 占位图标）。</div>
+        <div class="fail">若顶部写着「占位图标」：说明设置进程读不到真实图标，形状仍然正确，但请把这三个字告诉我 —— 下一步就从桌面侧抓图标。</div>
+      </div></div>
+
+      <div class="step"><div class="no">4</div><div>
+        <h4>点图标</h4>
+        <p>随便点一个图标。</p>
+        <div class="expect">预期：图标轻微弹一下、触发一次轻震，下方浮出 App 名称。</div>
+      </div></div>
+
+      <div class="step"><div class="no">5</div><div>
+        <h4>换形状对比</h4>
+        <p>右上角 × 关闭 → 把「半圆盘」打开（会自动关掉「圆盘」）→ 再点预览。</p>
+        <div class="expect">预期：只剩上半圆一排 4 个图标，虚线导引弧也一起缩短。再试「直角盘」应只剩 2 个。</div>
+        <div class="fail">若四个开关能同时亮：说明互斥没生效，请回传截图。</div>
+      </div></div>
+
+      <div class="step"><div class="no">6</div><div>
+        <h4>验证参数真的在起作用</h4>
+        <p>把「半径」拉到 120、「图标宽度」拉到 28 → 回预览。</p>
+        <div class="expect">预期：图标明显变小、离中心更远，<b>数量变多</b>（容量公式跟着半径走）。再打开「任意角度」，在预览里按住拖动 —— 整盘应跟着手指旋转。</div>
+      </div></div>
+    </div>
+
+    <p class="sub" style="margin-top:16px">
+      回滚：直接覆盖安装 <span class="mono">dist/</span> 里的 0.0.4 包。包 id 相同，偏好不丢。
+      这两个版本桌面侧完全一致，所以回滚不需要重启。
+    </p>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">08</span><h2>边界与下一步</h2><span class="note">先说清楚没做的部分</span></div>
+
+    <table>
+      <thead><tr><th style="width:26%">没做</th><th>原因与计划</th></tr></thead>
+      <tbody>
+        <tr><td><b>枢轴不在浮窗右下角</b></td><td>浮窗还不存在。预览把枢轴放在屏幕中心，是为了四种形状都能完整看见；接上浮窗后枢轴改为握把坐标，<span class="mono">RingView</span> 不用改。</td></tr>
+        <tr><td><b>点图标不启动 App</b></td><td>启动需要浮窗窗口与场景层。这一步只做形状，故意不掺进来。</td></tr>
+        <tr><td><b>收藏 / 旋转自适应·立即·延迟</b></td><td>依赖用户收藏列表与屏幕方向事件，与浮窗生命周期一起做才有意义。</td></tr>
+        <tr><td><b>图标缓存</b></td><td>每次打开预览都重新枚举。目前实测（iOS 设置进程）耗时写在日志 <span class="mono">ring preview … in Nms</span>；若超过 200 ms 再加缓存。</td></tr>
+      </tbody>
+    </table>
+
+    <figure style="margin-top:18px">
+      <div class="card" style="border:0;background:transparent;padding:0">
+        <h3 style="margin-bottom:10px">下一步（按顺序）</h3>
+        <ul style="margin:0">
+          <li>把 <span class="mono">RingView</span> 挂到浮窗窗口：枢轴取握把、窗口层独立、开局不抢键盘</li>
+          <li>图标来源改为桌面侧采集一次、缓存到 <span class="mono">/var/mobile/Library/Logs/Aevon/</span>，设置里直接读缓存</li>
+          <li>接通「收藏 / 旋转自适应」，以及点击图标启动到浮窗</li>
+          <li>全部接完再谈呼出手势 —— 手势要 hook 系统识别器，是风险最高的一步，必须放在最后</li>
+        </ul>
+      </div>
+    </figure>
+  </section>
+
+  <footer>
+    <div>Aevon 0.0.5 · 承载形状 · 2026-11-02</div>
+    <div>源码 <span class="mono">Sources/Ring/</span> · 证据 <span class="mono">stheno-逆向分析/证据/stheno图标动画.GIF</span></div>
+  </footer>
+</div>
+</body>
+</html>
