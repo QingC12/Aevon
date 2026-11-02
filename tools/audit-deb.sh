@@ -83,6 +83,31 @@ fi
 fail=0
 note() { printf '  %-5s %s\n' "$1" "$2"; }
 
+# 读 MobileSubstrate 过滤 plist 里的 Filter 列表。二进制/XML 都能处理。
+read_bundles() {
+    local p="$1"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$p" <<'PY'
+import plistlib, sys
+try:
+    with open(sys.argv[1], "rb") as fh:
+        d = plistlib.load(fh)
+except Exception:
+    sys.exit(1)
+names = []
+flt = d.get("Filter", {}) if isinstance(d, dict) else {}
+for key in ("Bundles", "Classes", "Executables"):
+    v = flt.get(key)
+    if isinstance(v, list):
+        names += [str(x) for x in v]
+print(" ".join(names))
+PY
+        return
+    fi
+    # 没有 python3 时退回文本解析（仅适用于 XML plist）
+    grep -o '<string>[^<]*</string>' "$p" 2>/dev/null | sed 's/<[^>]*>//g' | tr '\n' ' '
+}
+
 echo "== Aevon package audit =="
 echo "file: $DEB"
 echo ""
@@ -158,13 +183,14 @@ if [ ! -f "$FILTER" ]; then
     note FAIL "缺少 Aevon.plist 注入过滤器"
     fail=1
 else
-    BUNDLES="$(grep -o '<string>[^<]*</string>' "$FILTER" | sed 's/<[^>]*>//g' | tr '\n' ' ')"
+    # Theos 打包时会把 plist 转成二进制，不能靠 grep 抽字符串。
+    BUNDLES="$(read_bundles "$FILTER" 2>/dev/null || true)"
     BUNDLE_COUNT="$(printf '%s' "$BUNDLES" | wc -w | tr -d ' ')"
-    note info "注入目标: $BUNDLES"
+    note info "注入目标: ${BUNDLES:-<解析失败>}"
     if printf '%s' "$BUNDLES" | grep -q 'com.apple.springboard'; then
         note ok "包含 SpringBoard"
     else
-        note FAIL "过滤器里没有 SpringBoard"
+        note FAIL "过滤器里没有 SpringBoard（或无法解析）"
         fail=1
     fi
     # Stage 0 只允许注入一个进程。扩大范围必须是刻意动作，会同时改阶段号。
