@@ -13,21 +13,17 @@
 import Foundation
 import CoreFoundation
 
-private let darwinCallback: CFNotificationCallback = { _, _, name, _, _ in
-    // Compare as CFString with CFEqual. Bridging CFNotificationName to a Swift
-    // String is not available on this toolchain, and the name is only ever
-    // compared, never printed.
-    let isPreferences = name.map { CFEqual($0, Aevon.notePrefs as CFString) } ?? false
-
-    // A setting changed. The snapshot file is already on disk (Settings writes
-    // it before posting), so this is a re-read, not a command that can be lost.
-    if isPreferences {
-        DispatchQueue.main.async {
-            RingHost.shared.refresh()
-        }
-        return
+// Two notifications, two callbacks. Deciding "which notification is this" by
+// comparing the name needs a CFString -> String bridge that this toolchain
+// refuses (CFNotificationName is not class-constrained here), so the name is
+// never inspected at all: the observer registration already says what it is.
+private let prefsCallback: CFNotificationCallback = { _, _, _, _, _ in
+    DispatchQueue.main.async {
+        RingHost.shared.refresh()
     }
+}
 
+private let commandCallback: CFNotificationCallback = { _, _, _, _, _ in
     guard let command = Gate.takePendingCommand() else { return }
 
     switch command {
@@ -47,10 +43,10 @@ private let darwinCallback: CFNotificationCallback = { _, _, name, _, _ in
 
 private func observeCommands() {
     let center = CFNotificationCenterGetDarwinNotifyCenter()
-    CFNotificationCenterAddObserver(center, nil, darwinCallback,
+    CFNotificationCenterAddObserver(center, nil, commandCallback,
                                     Aevon.noteCommand as CFString, nil,
                                     .deliverImmediately)
-    CFNotificationCenterAddObserver(center, nil, darwinCallback,
+    CFNotificationCenterAddObserver(center, nil, prefsCallback,
                                     Aevon.notePrefs as CFString, nil,
                                     .deliverImmediately)
 }
