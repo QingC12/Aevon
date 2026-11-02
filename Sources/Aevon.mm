@@ -357,7 +357,7 @@ static void AevonRespringNow(void) {
 
         NSMutableArray *argv = [NSMutableArray arrayWithObject:path];
         [argv addObjectsFromArray:[c subarrayWithRange:NSMakeRange(1, c.count - 1)]];
-        const char **cargv = calloc(argv.count + 1, sizeof(char *));
+        const char **cargv = (const char **)calloc(argv.count + 1, sizeof(char *));
         if (!cargv) continue;
         for (NSUInteger i = 0; i < argv.count; i++) cargv[i] = [argv[i] UTF8String];
         pid_t pid = 0;

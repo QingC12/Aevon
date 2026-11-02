@@ -58,7 +58,7 @@ static BOOL AevonSpawn(NSString *path, NSArray<NSString *> *args) {
     NSMutableArray *argv = [NSMutableArray arrayWithObject:path];
     [argv addObjectsFromArray:args];
 
-    const char **cargv = calloc(argv.count + 1, sizeof(char *));
+    const char **cargv = (const char **)calloc(argv.count + 1, sizeof(char *));
     if (!cargv) return NO;
     for (NSUInteger i = 0; i < argv.count; i++) cargv[i] = [argv[i] UTF8String];
 
