@@ -151,14 +151,18 @@ aevon-uninstall       # 卸载
 
 每次装新 deb 之前做这四步，不要跳：
 
-1. **备份现状**（在设备上跑）：
+1. **体检 + 快照**（把仓库里的 `tools/preflight.sh` 拷到设备上，root 执行）：
    ```sh
-   dpkg -l > /var/mobile/aevon-baseline-$(date +%Y%m%d-%H%M).txt
-   ls -l /var/jb/Library/MobileSubstrate/DynamicLibraries/ >> 同上
+   sh /var/mobile/preflight.sh
    ```
-2. **确认 panic 文件可写**：`touch /var/mobile/Library/Preferences/com.aevon.panic && rm 它`。写不进去说明路径假设错了，先别装。
-3. **确认安全模式可用**：装任何东西之前先试一次"按住音量上键重新越狱"，确认你能进去。
-4. **保留上一版 deb**：仓库 Release 里每个 tag 都有，回退就是 `dpkg -i 旧包.deb`。
+   它会检查 rootless 环境、ElleKit/Substrate、dpkg 健康、可用空间、**panic 文件是否真的可写**，并把当前状态存成 `/var/mobile/Library/Logs/Aevon/baseline-*.txt`。
+   最后一行不是 `PREFLIGHT: PASS` 就不要装。
+
+2. **确认安全模式可用**：装任何东西之前先试一次"按住音量上键重新越狱"，确认你能进去。
+
+3. **保留上一版 deb**：仓库 Release 里每个 tag 都有，回退就是 `dpkg -i 旧包.deb`。
+
+4. **一次只装一个阶段**：不要"顺手"把 P2 和 P3 一起推上去。
 
 ---
 
