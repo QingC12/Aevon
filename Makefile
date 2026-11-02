@@ -40,7 +40,10 @@ Aevon_FILES := Sources/AevonBoot.m Sources/AevonScene.m Sources/Boot.swift $(AE_
                Sources/Ring/RingHost.swift Sources/Scene/SceneProbe.swift
 Aevon_FRAMEWORKS := Foundation UIKit
 # Swift metadata is the bulk of a Swift dylib; dead-strip keeps it honest.
-Aevon_LDFLAGS := -Wl,-dead_strip
+# `-x` drops the local symbol table at link time. A Swift object carries one
+# mangled name per declaration (`_$s5Aevon...`), and those names are pure weight
+# in an injected library nothing debugs: 0.0.15 went 330,064 -> see BUILD.md.
+Aevon_LDFLAGS := -Wl,-dead_strip -Wl,-x
 # -Osize, not -O. The dylib sits 1.2 KB over a hard 320 KB budget and the window
 # build needs that room. This trades a little speed for bytes, which is the right
 # way round for code that runs once per button press. Deleting source does not
