@@ -206,9 +206,11 @@ enum SceneProbe {
     /// our own buffer is the same information with an owner. The first call is
     /// how you ask how big it has to be.
     ///
-    /// It lived in the surface dump until 0.0.11 retired that dump — and retired
-    /// this with it, which the compiler caught on the next push. It belongs to
-    /// the call table now, and the call table is the only caller.
+    /// The second call can return a number larger than the buffer — the runtime
+    /// documents it, because classes can be created between the two calls — and
+    /// reading that many entries means reading pointers past the end of a
+    /// malloc block. Wrapped in `min`, which is the whole fix: a stale pointer
+    /// looks exactly like a class until you ask it for a method list.
     private static func allClasses() -> [AnyClass] {
         let total = objc_getClassList(nil, 0)
         guard total > 0 else { return [] }
@@ -216,7 +218,7 @@ enum SceneProbe {
         defer { buffer.deallocate() }
         let count = objc_getClassList(AutoreleasingUnsafeMutablePointer(buffer), total)
         guard count > 0 else { return [] }
-        return (0..<Int(count)).map { buffer[$0] }
+        return (0..<Int(min(count, total))).map { buffer[$0] }
     }
 
 
@@ -433,7 +435,6 @@ zStackParticipantDidChange:
         // and if the log ends here the walk is not what died — this is.
         Log.write("calls: ordering walk over " + String(classes.count) + " classes")
         var head: [AnyClass] = []
-        var tail: [AnyClass] = []
         for cls in classes {
             let name = NSStringFromClass(cls)
             if poison.contains(name) {
@@ -452,20 +453,28 @@ zStackParticipantDidChange:
             }
             if priorityRank(of: name) < callPriorityPrefixes.count {
                 head.append(cls)
-            } else {
-                tail.append(cls)
             }
         }
         callQueue = head
-        callQueue.append(contentsOf: tail)
         callEdge = head.count
-        callCeiling = callQueue.count
+        // `of` counts every class the process has, not just the ones this pass
+        // touches. Dropping the tail from the queue would have made the end line
+        // read `upto = of` and the dump look complete while ninety thousand
+        // classes had never been read at all — the one lie this file exists to
+        // avoid. The tail is not kept: only its size is needed.
+        callCeiling = classes.count - callSkipped
         callStart = Date()
+        installFaultWitness()
         Log.write("calls: definition begin v2 targets=" + String(callTargets.count)
                   + " classes=" + String(callCeiling)
                   + " phase1=" + String(callEdge)
-                  + " scope=full"
+                  + " scope=phase1"
                   + " skip=" + String(callSkipped))
+        // The tail is never walked any more. 0.0.10 and 0.0.12 both died one or
+        // two classes into it — different class each time, same position — so
+        // the tail is not where a bad class lives, it is where classes the
+        // runtime has not finished building live. It is read by name only, in
+        // runTail(), and only for the selectors the walk could not answer.
         // No empty-queue guard: an empty queue simply walks nothing and the end
         // line reports `upto=0 of 0`. The guard that used to stand here cost
         // bytes in a binary that has none to spare and could never fire.
@@ -478,6 +487,18 @@ zStackParticipantDidChange:
             return index
         }
         return callPriorityPrefixes.count
+    }
+
+    /// Installed for the length of one scan, and only one scan. Everything this
+    /// file has learned about the deaths so far is inference from where the log
+    /// stops: a poisonous class, a jetsam kill and a watchdog kill all end it
+    /// mid sentence. A signal number splits the first from the other two, and a
+    /// missing `call.fault` file after a death says the process was killed
+    /// rather than faulted — which is a different bug in a different place.
+    private static func installFaultWitness() {
+        for sig in [SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGTRAP] {
+            _ = signal(sig, aevonFaultWitness)
+        }
     }
 
     /// One class per marker write, index and name raw. `lseek` + `write` +
@@ -508,17 +529,13 @@ zStackParticipantDidChange:
         // "stop above 220 MB" fired on the very first chunk and the 0.0.9 dump
         // ended at class 250 with `stopped at the memory ceiling`, twice.
         let baseMB = residentMegabytes()
-        // The walk stops at the family boundary, and the boundary is a chunk
-        // boundary of its own. 0.0.10 walked past it: the last chunk of the
-        // family began at 9750, `phase1` was not due until 10000, and the
-        // process died at 9827 — 9826 classes of answers collected and never
-        // printed. A chunk that straddles the edge can lose the whole answer,
-        // so no chunk straddles it.
-        let stop = callCeiling
-        // The family answer is printed at the edge and never again lost, so the
-        // walk no longer has to stop there. 9827 classes took under a second in
-        // 0.0.11; the remaining ninety thousand are the same kind of cheap read.
-        var nextCheck = 10000
+        // The walk stops at the family boundary. Not because the answer ends
+        // there — because the last two runs that walked past it died one and two
+        // classes later. 0.0.10 died at 9827 `__NSGenericDeallocHandler`, 0.0.12
+        // at 9828 `JSExport`: different class, same position, so the poison is
+        // not a class but the neighbourhood, and stepping over one name at a
+        // time would take a respring per name.
+        let stop = callEdge > 0 ? callEdge : callCeiling
         callStateFD = open(Aevon.callStatePath, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
         if callStateFD < 0 {
             Log.write("calls: death marker unavailable, walking without it")
@@ -533,11 +550,7 @@ zStackParticipantDidChange:
                 break
             }
             autoreleasepool {
-                // Still no chunk straddles the edge, even though the edge is no
-                // longer the end of the walk: `phase1` hangs off the chunk
-                // boundary, and that is what makes it unlosable.
-                var end = min(callCursor + 250, stop)
-                if callCursor < callEdge, end > callEdge { end = callEdge }
+                let end = min(callCursor + 250, stop)
                 while callCursor < end {
                     let cls = callQueue[callCursor]
                     mark(cls, index: callCursor)
@@ -549,14 +562,6 @@ zStackParticipantDidChange:
             if !callPhaseDone, callEdge > 0, callCursor >= callEdge {
                 callPhaseDone = true
                 emitPhase1()
-            }
-            // A checkpoint every ten thousand classes. These lines are the same
-            // `defined by` rows the final dump repeats, so the parser reads them
-            // as one table — but they mean a death in the tail costs at most ten
-            // thousand classes instead of everything the walk had learned.
-            if callCursor >= nextCheck, callCursor < stop {
-                nextCheck = callCursor + 10000
-                _ = emitRows()
             }
             let rss = residentMegabytes()
             // The progress line comes first, on purpose: when the ceiling broke
@@ -585,7 +590,10 @@ zStackParticipantDidChange:
         if reason.isEmpty {
             try? FileManager.default.removeItem(atPath: Aevon.callStatePath)
         }
-        callBusy = false
+        // Same thread, same pool discipline: the tail pass asks a few hundred
+        // named classes nine questions, and it is the only part of this file
+        // that realizes a class it did not walk.
+        runTail()
     }
 
     /// Everything the first half found, printed the moment the boundary is
@@ -681,16 +689,97 @@ zStackParticipantDidChange:
         // `n=0` above it a lie, and tools/compare-calls.py refuses to read a
         // partial dump as a verdict for exactly that reason. `skip` is the same
         // warning from the other side — classes dropped on purpose cannot be
-        // the owner of anything either. `scope=full` says the walk was asked for
-        // everything, so `upto` below `of` is a real truncation and the tool
-        // treats it as one.
+        // the owner of anything either. `scope=phase1` says the stop was chosen,
+        // not suffered: `upto` below `of` by design, and `n=0` here means "not
+        // one of the families", which the tool reads as out of scope rather
+        // than absent. runTail() below is what closes those last few.
         Log.write("calls: definition end v2 missing=" + String(missing)
                   + " capped=" + String(multi)
-                  + " upto=" + String(callCursor) + " of " + String(callQueue.count)
-                  + " scope=full"
+                  + " upto=" + String(callCursor) + " of " + String(callCeiling)
+                  + " scope=phase1"
                   + " skip=" + String(callSkipped)
                   + " secs=" + String(Int(Date().timeIntervalSince(callStart)))
                   + reason)
+    }
+
+    /// The selectors the family walk could not answer, asked of the classes it
+    /// died reaching — without walking them.
+    ///
+    /// Three runs died one or two classes into the non-family tail, a different
+    /// class each time, so skipping the poisonous name was never going to work:
+    /// ninety thousand classes at one respring per name. What those names have
+    /// in common is not poison, it is that the runtime builds them — bridged,
+    /// minted, or not finished. `class_getName` reads ro data and realizes
+    /// nothing, so reading all ninety thousand names is safe; the danger is only
+    /// in asking for a method table. So: read every name, keep the ones whose
+    /// name says something about the selectors still missing, and ask only
+    /// those. A few hundred classes instead of ninety thousand, and a name that
+    /// does not match is a name this pass cannot speak for.
+    private static let tailKeywords = ["presentable", "material", "handle", "tap",
+                                       "icon", "foreground", "duration", "press",
+                                       "setting"]
+
+    private static func runTail() {
+        var missing: [String] = []
+        for selector in callTargets.sorted() where callHits[selector] == nil {
+            missing.append(selector)
+        }
+        guard !missing.isEmpty else {
+            callBusy = false
+            Log.write("calls: tail not needed, every selector has an owner")
+            return
+        }
+        let poison = loadSkipList()
+        let started = Date()
+        var candidates = 0
+        var owned = 0
+        callStateFD = open(Aevon.callStatePath, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+        for cls in allClasses() {
+            let text = String(cString: class_getName(cls))
+            // Family classes answered nothing with their method tables already
+            // read, `__`-minted ones are the classes that die, and a class that
+            // already killed a run stays killed. None of them is a candidate.
+            if priorityRank(of: text) < callPriorityPrefixes.count { continue }
+            if text.hasPrefix("__") || text.hasPrefix("_NSZombie_") { continue }
+            if poison.contains(text) { continue }
+            let lower = text.lowercased()
+            var wanted = false
+            for keyword in tailKeywords where lower.contains(keyword) {
+                wanted = true
+                break
+            }
+            guard wanted else { continue }
+            candidates += 1
+            // The same marker the walk uses: if this class is the one that
+            // faults, the next boot names it, the skip list steps over it, and
+            // every line printed before it is already on disk.
+            mark(cls, index: candidates)
+            Log.write("calls: tail cand " + text)
+            for selector in missing {
+                let sel = NSSelectorFromString(selector)
+                var side = "-"
+                var method = class_getInstanceMethod(cls, sel)
+                if method == nil {
+                    method = class_getClassMethod(cls, sel)
+                    side = "+"
+                }
+                guard let method = method else { continue }
+                let encoding = method_getTypeEncoding(method).map { String(cString: $0) } ?? "?"
+                owned += 1
+                Log.write("calls: tail owns " + text + side + " " + selector + " " + encoding)
+            }
+        }
+        if callStateFD >= 0 {
+            _ = close(callStateFD)
+            callStateFD = -1
+        }
+        // This pass either finished or did not exist; there is no half state
+        // worth keeping, and a leftover marker reads as a death next boot.
+        try? FileManager.default.removeItem(atPath: Aevon.callStatePath)
+        callBusy = false
+        Log.write("calls: tail done names=" + String(candidates) + " owned=" + String(owned)
+                  + " missing=" + String(missing.count)
+                  + " secs=" + String(Int(Date().timeIntervalSince(started))))
     }
 
     private static func loadSkipList() -> Set<String> {
@@ -716,6 +805,22 @@ zStackParticipantDidChange:
     /// across runs instead of dying in the same place forever.
     static func reportPreviousDeath() {
         let manager = FileManager.default
+        // Before anything else, and before the early return below: a fault can
+        // arrive while the walk is still naming classes, and the number of the
+        // signal is the one fact that does not have to be inferred from where
+        // the log stops. No file at all is also an answer — the process was
+        // killed, not faulted, and that is a different bug in a different place.
+        if let fault = manager.contents(atPath: Aevon.callFaultPath), fault.count >= 4 {
+            var value: UInt32 = 0
+            for offset in 0..<4 {
+                value |= UInt32(fault[offset]) << (8 * UInt32(offset))
+            }
+            let names: [UInt32: String] = [4: "SIGILL", 5: "SIGTRAP", 6: "SIGABRT",
+                                          10: "SIGBUS", 11: "SIGSEGV"]
+            Log.write("calls: previous run faulted with signal " + String(value)
+                      + " " + (names[value] ?? "unrecognised"))
+            try? manager.removeItem(atPath: Aevon.callFaultPath)
+        }
         guard manager.fileExists(atPath: Aevon.callStatePath) else { return }
         defer { try? manager.removeItem(atPath: Aevon.callStatePath) }
         guard let data = manager.contents(atPath: Aevon.callStatePath), data.count > 4 else {
@@ -734,6 +839,11 @@ zStackParticipantDidChange:
             return
         }
         Log.write("calls: previous scan died at " + String(index) + " " + name)
+        // Which image the name belongs to. `JSExport` is a name; the framework
+        // it comes from is the answer to "why is this one different".
+        if let cls = NSClassFromString(name), let image = class_getImageName(cls) {
+            Log.write("calls: that class lives in " + String(cString: image))
+        }
         var poison = loadSkipList()
         poison.insert(name)
         var text = "!" + Aevon.version + "\n"
@@ -798,4 +908,23 @@ zStackParticipantDidChange:
         }
         return "[" + hits.joined(separator: ",") + "]"
     }
+}
+
+/// The signal handler itself, at file scope because `signal()` wants a C
+/// function pointer and a static method is a question mark at the point of
+/// conversion. Nothing here allocates: the fault may have happened inside
+/// malloc, and a handler that allocates turns one crash into a hang.
+///
+/// It writes and then gets out of the way — restore the default action, raise
+/// the same signal, and let the system finish what it started. A probe that
+/// swallows a real crash is worse than one that causes it.
+private func aevonFaultWitness(_ signo: Int32) {
+    let fd = open(Aevon.callFaultPath, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+    if fd >= 0 {
+        var slot = UInt32(truncatingIfNeeded: signo)
+        withUnsafeBytes(of: &slot) { _ = write(fd, $0.baseAddress, 4) }
+        _ = close(fd)
+    }
+    _ = signal(signo, SIG_DFL)
+    _ = raise(signo)
 }

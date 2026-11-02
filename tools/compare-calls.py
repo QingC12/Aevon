@@ -226,6 +226,16 @@ SKIP = re.compile(r"skip=(\d+)")
 
 
 PROGRESS = re.compile(r"calls: scan reached (\d+) (\S+) rss=(-?\d+)mb")
+
+# 0.0.13 起，家族段走完就停，家族外的类不再读方法表 —— 那正是三次 respring
+# 的位置。剩下几条改由「只读类名 + 按关键词挑候选 + 逐个问」补，于是有了这
+# 三组行。它们不是「全量 dump」，标记必须和 defined by 区分开。
+TAIL_CAND = re.compile(r"calls: tail cand (\S+)")
+TAIL_OWN  = re.compile(r"calls: tail owns (\S+)\s+(\S+)\s+(\S+)")
+TAIL_DONE = re.compile(r"calls: tail done names=(\d+) owned=(\d+) missing=(\d+)")
+TAIL_SKIP = re.compile(r"calls: tail not needed")
+FAULT     = re.compile(r"calls: previous run faulted with signal (\d+) (\w+)")
+IMAGE     = re.compile(r"calls: that class lives in (\S+)")
 COVERAGE = re.compile(r"upto=(\d+) of (\d+)")
 
 
@@ -246,6 +256,12 @@ def parse(path):
     phase1 = {}
     deaths = []
     skip = 0
+    tail = {}          # selector -> [(类名, 编码)]，只来自族外候选点名
+    tail_cands = 0
+    tail_done = None
+    tail_skipped = False
+    faults = []
+    image = None
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         for raw in handle:
             line = raw.strip()
@@ -273,6 +289,31 @@ def parse(path):
                 if hit_skip:
                     skip = int(hit_skip.group(1))
                 continue
+            hit_own = TAIL_OWN.search(line)
+            if hit_own:
+                name = hit_own.group(1).rstrip("+-")
+                tail.setdefault(hit_own.group(2), []).append((name, hit_own.group(3)))
+                continue
+            hit_cand = TAIL_CAND.search(line)
+            if hit_cand:
+                tail_cands += 1
+                continue
+            hit_tail_done = TAIL_DONE.search(line)
+            if hit_tail_done:
+                tail_done = (int(hit_tail_done.group(1)), int(hit_tail_done.group(2)),
+                             int(hit_tail_done.group(3)))
+                continue
+            if TAIL_SKIP.search(line):
+                tail_skipped = True
+                continue
+            hit_fault = FAULT.search(line)
+            if hit_fault:
+                faults.append((int(hit_fault.group(1)), hit_fault.group(2)))
+                continue
+            hit_image = IMAGE.search(line)
+            if hit_image:
+                image = hit_image.group(1)
+                continue
             hit_progress = PROGRESS.search(line)
             if hit_progress:
                 progress = (int(hit_progress.group(1)), hit_progress.group(2),
@@ -299,10 +340,11 @@ def parse(path):
                     name, encoding = chunk.split("|", 1)
                     owners.append((name.rstrip("+-"), encoding))
             dump[selector] = (count, owners)
-    return dump, found_any, progress, coverage, phase1, deaths, skip, scoped
+    return (dump, found_any, progress, coverage, phase1, deaths, skip, scoped,
+            tail, tail_cands, tail_done, tail_skipped, faults, image)
 
 
-def verdicts(dump, scoped=False):
+def verdicts(dump, scoped=False, tail=None):
     """每一行的判定。
 
     关键区分：`n=0` 是 dump 明确告诉我们「本机没人定义它」，那是结论；
@@ -319,6 +361,16 @@ def verdicts(dump, scoped=False):
         count, owners = dump[selector]
         names = [name for name, _ in owners]
         encodings = [encoding for _, encoding in owners]
+
+        # 家族段一条都没有，但族外候选点名里找到了。这条判定必须和 PRESENT
+        # 分开写：一个是「整个家族的方法表读过、它就在那儿」，一个是「只问了
+        # 名字像它的那几百个类」。混在一起就是把窄证据冒充宽证据。
+        from_tail = False
+        if count == 0 and tail and selector in tail:
+            owners = list(tail[selector])
+            count, from_tail = len(owners), True
+            names = [name for name, _ in owners]
+            encodings = [encoding for _, encoding in owners]
 
         if count == 0:
             # 家族外的类这次根本没扫，n=0 只说明「不在这几个家族里」。
@@ -344,7 +396,8 @@ def verdicts(dump, scoped=False):
                 rows.append(("ENCODING-DIFF", selector, want_enc, " ".join(encodings), want_enc))
             continue
 
-        rows.append(("PRESENT", selector, " ".join(names[:3]), " ".join(encodings[:3]), ""))
+        rows.append(("PRESENT-TAIL" if from_tail else "PRESENT", selector,
+                     " ".join(names[:3]), " ".join(encodings[:3]), ""))
     return rows
 
 
@@ -359,7 +412,14 @@ def main():
         print("找不到日志文件：%s" % path)
         return 2
 
-    dump, found_any, progress, coverage, phase1, deaths, skip, scoped = parse(path)
+    (dump, found_any, progress, coverage, phase1, deaths, skip, scoped,
+     tail, tail_cands, tail_done, tail_skipped, faults, image) = parse(path)
+    if faults:
+        print("上一次运行收到了信号 %d（%s）—— 是被信号带走的，不是被杀掉的；"
+              "没有这一行才是被杀（jetsam / 看门狗）。"
+              % (faults[-1][0], faults[-1][1]))
+    if image:
+        print("那个致死的类属于：%s" % image)
     if deaths:
         # 上一次扫描的死亡标记。有名字就是某个类有毒；只有序号没有名字，
         # 说明连类名都没写下去 —— 那是被系统在标记前就杀掉了。
@@ -417,7 +477,7 @@ def main():
         print("  被系统杀掉时，下一次启动会在日志里写出「previous scan died at」那一行。")
         return 2
 
-    rows = verdicts(dump, scoped)
+    rows = verdicts(dump, scoped, tail)
     buckets = {}
     for verdict, selector, want, got, enc in rows:
         buckets.setdefault(verdict, []).append((selector, want, got, enc))
@@ -426,8 +486,8 @@ def main():
     print("调用点核对 · 母本 %d 条（其中 %d 条是母本自己实现的方法），本机 dump 覆盖 %d 条"
           % (len(SELECTORS), own,
              len(SELECTORS) - len(buckets.get("NOT-IN-DUMP", []))))
-    for name in ("MATCH", "PRESENT", "OWNER-DIFF", "ENCODING-DIFF", "ABSENT",
-                 "OUT-OF-SCOPE", "NOT-IN-DUMP"):
+    for name in ("MATCH", "PRESENT", "PRESENT-TAIL", "OWNER-DIFF", "ENCODING-DIFF",
+                 "ABSENT", "OUT-OF-SCOPE", "NO-IMPLEMENTER", "NOT-IN-DUMP"):
         if name in buckets:
             print("  %-14s %3d" % (name, len(buckets[name])))
 
@@ -444,7 +504,25 @@ def main():
             print("  缺行: %s" % selector)
         return 2
 
+    # 0.0.13 的族外候选点名：只读了类名，只问了名字像那几条选择子的类。
+    if tail_done:
+        print("\n[族外候选] 只读类名挑出 %d 个候选，问出 %d 条归属（这一趟缺 %d 条）"
+              % (tail_done[0], tail_done[1], tail_done[2]))
+        print("  注意这不是「全量扫过 9.9 万类」：它只覆盖名字命中的候选，其余类没读方法表。")
+    elif tail_skipped:
+        print("\n[族外候选] 每一条都已有归属，这一趟没有跑。")
+
+    # 家族段 n=0 且族外候选也没问出来：只有在「候选点名确实跑完了」时，才敢
+    # 把 OUT-OF-SCOPE 升级成 NO-IMPLEMENTER —— 否则那还是「没扫到」。
+    if tail_done:
+        rows = [(("NO-IMPLEMENTER" if verdict == "OUT-OF-SCOPE" else verdict),
+                 selector, want, got, enc) for verdict, selector, want, got, enc in rows]
+        buckets = {}
+        for verdict, selector, want, got, enc in rows:
+            buckets.setdefault(verdict, []).append((selector, want, got, enc))
+
     for name, note, limit in (
+            ("NO-IMPLEMENTER", "家族段没有，族外候选里也没有 —— 本机很可能根本没人实现", 20),
             ("ABSENT", "本机无人定义 —— 这条路走不通", 20),
             ("OWNER-DIFF", "归属类与逆向记录不一致 —— 必须先解释清楚", 20),
             ("ENCODING-DIFF", "签名与逆向记录不一致 —— 照旧签名调用会崩", 20)):
@@ -484,15 +562,24 @@ def main():
 
     own_absent = len([row for row in buckets.get("ABSENT", []) if row[0] in OWN_METHODS])
     absent = len(buckets.get("ABSENT", [])) - own_absent
+    silent = len(buckets.get("NO-IMPLEMENTER", []))
     hard = (absent + len(buckets.get("OWNER-DIFF", [])) + len(buckets.get("ENCODING-DIFF", []))
-            + len(buckets.get("OUT-OF-SCOPE", [])))
-    print("\n结论：%s" % ("全部对齐，可以等指令做浮窗" if hard == 0
-                         else "%d 条还没有对上的证据，浮窗还不能开始" % hard))
+            + len(buckets.get("OUT-OF-SCOPE", [])) + silent)
+    if hard == 0:
+        verdict_line = "全部对齐，可以等指令做浮窗"
+    elif hard == silent:
+        verdict_line = ("只剩 %d 条「本机没人实现」，其余全部对上 —— 这 %d 条要不要"
+                        "当作结论，你点头才算" % (silent, silent))
+    else:
+        verdict_line = "%d 条还没有对上的证据，浮窗还不能开始" % hard
+    print("\n结论：%s" % verdict_line)
     if own_absent:
         print("  （另有 %d 条 ABSENT 属于母本自有方法，不计入未对齐）" % own_absent)
 
     if md_out:
-        with open(md_out, "w", encoding="utf-8") as handle:
+        # newline="\n": this file is committed, and a Windows-written CRLF
+        # turns every regeneration into a whole-file diff.
+        with open(md_out, "w", encoding="utf-8", newline="\n") as handle:
             handle.write("| 判定 | 调用 | 母本自有 | 逆向记录 | 本机实测 |\n"
                          "|---|---|---|---|---|\n")
             for verdict, selector, want, got, enc in rows:

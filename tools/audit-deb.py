@@ -429,6 +429,17 @@ def main():
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the call table would come back empty and read as a negative")
 
+    # 0.0.13 splits the call table in two: the family walk, and a name-only pass
+    # over the tail it may no longer walk. Losing any of these lines silently
+    # turns "nine selectors unresolved" into "nine selectors nobody asked about".
+    for token in (b"calls: tail cand ", b"calls: tail owns ", b"calls: tail done names=",
+                  b"calls: previous run faulted with signal ",
+                  b"calls: that class lives in ",
+                  b"/var/mobile/Library/Logs/Aevon/call.fault"):
+        if token not in dylib_early:
+            bad(f"probe: {token.decode()} missing from Aevon.dylib — "
+                "the tail pass would report nothing and look like 'no owner exists'")
+
     # 0.0.9: the scan that killed SpringBoard twice now carries its own witness.
     # Each of these three is load-bearing on its own —
     #   `phase1`   the first half's results, so a death in the second half is not fatal

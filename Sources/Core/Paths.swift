@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.0.12"
+    public static let version = "0.0.13"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -68,6 +68,13 @@ public enum Aevon {
     /// every scan and written at boot from `callStatePath`: a probe that walks
     /// straight back into a class that took SpringBoard down teaches nothing.
     public static let callSkipPath = "/var/mobile/Library/Logs/Aevon/call.skip"
+
+    /// The signal that ended the last walk, four raw bytes, written from the
+    /// handler itself. Everything else about these runs is inference: a bad
+    /// class, a jetsam kill and a watchdog kill all leave the log ending mid
+    /// sentence. A signal number separates the first from the other two, and a
+    /// missing file says the process was killed rather than faulted.
+    public static let callFaultPath = "/var/mobile/Library/Logs/Aevon/call.fault"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"
