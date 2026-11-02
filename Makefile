@@ -36,7 +36,7 @@ AE_RING := Sources/Ring/RingModel.swift Sources/Ring/RingIcons.swift \
 # declare), the rest Swift.
 # ---------------------------------------------------------------------------
 TWEAK_NAME := Aevon
-Aevon_FILES := Sources/AevonBoot.m Sources/Boot.swift $(AE_CORE) $(AE_RING) \
+Aevon_FILES := Sources/AevonBoot.m Sources/AevonScene.m Sources/Boot.swift $(AE_CORE) $(AE_RING) \
                Sources/Ring/RingHost.swift Sources/Scene/SceneProbe.swift
 Aevon_FRAMEWORKS := Foundation UIKit
 # Swift metadata is the bulk of a Swift dylib; dead-strip keeps it honest.

@@ -368,3 +368,81 @@ SpringBoard 开机后的峰值本来就几百 MB，所以这个闸在第一个�
 
 `scope=full` 之后 `upto < of` 重新是**真截断**，`compare-calls.py` 恢复 `[PARTIAL]` 判定与退出 2；
 只有 `upto == of` 才可能给出对齐结论。
+
+### 8.6 死的不是某个类，是「刚越界的那一小片」——所以不再走尾（0.0.13）
+
+0.0.12 第二次在同一个位置被带走，而这次名字换了：
+
+| 版本 | 家族边界 | 死亡标记 | 位置 |
+|---|---|---|---|
+| 0.0.10 | 9826 | `__NSGenericDeallocHandler` | 边界后第 1 个 |
+| 0.0.11 | 9827 | —（停在边界，活） | — |
+| 0.0.12 | 9827 | `JSExport` | 边界后第 2 个 |
+
+**同一个类有毒，名字不会变。** 变了，说明毒不是某个类，而是「刚跨出家族段那一
+小片」——它们不是 UIKit 家族的类，而是运行时铸造/桥接的那一类（`__` 前缀只是
+其中一个子集，`Object`、`JSExport` 都不是 `__` 开头）。按 skip 表一个名字一个
+名字跳，等于一次 respring 换一个类，九万个类没有尽头。
+
+顺带修掉一个真 bug：`objc_getClassList` 的第二次调用可以返回**大于缓冲区**的数字
+（运行时文档明写，因为两次调用之间可以有新类），而代码按 `0..<count` 去读，就是
+从 malloc 块尾巴外面读指针。读到的那东西长得像类，直到你问它要方法表 —— 形状和
+「某个类有毒」完全一样。改成 `min(count, total)`。
+
+0.0.13 的做法：**尾巴一次都不走，只读名字。**
+
+| 改动 | 理由 | 判据 |
+|---|---|---|
+| `stop = callEdge`，`scope=phase1` 恢复 | 9827 个家族类已连续三次证明安全，114 条每次都拿得到 | 结束行 `upto=9827 of 98965 scope=phase1` |
+| `callCeiling = classes.count - callSkipped`（不再保留 tail 数组） | `of` 必须仍然是「进程里有几个类」，否则 `upto == of` 会让半截 dump 看起来完整 | `of` 仍是九万多 |
+| 族外候选点名：遍历 9.8 万个类**只调 `class_getName`**，名字命中 `presentable/material/handle/tap/icon/foreground/duration/press/setting` 的才留 | `class_getName` 只读 ro 数据、不 realize，是安全的；危险只在要方法表 | `calls: tail cand <类名>` |
+| 对候选逐个 `class_getInstanceMethod` / `class_getClassMethod` 问「仍然缺主的那几条」 | 缺哪条问哪条，不写死清单 | `calls: tail owns <类>+ <sel> <编码>` |
+| 每问一个候选之前写死亡标记；开机把死者写进 skip 表 | 候选也可能有毒，但一个 respring 只丢一个候选，之前打印的行已经在盘上 | 下次开机 `previous scan died at <i> <类名>` |
+| 给 SIGSEGV/SIGBUS/SIGILL/SIGABRT/SIGTRAP 装见证：handler 只写 4 字节信号号，然后恢复默认、重新 raise | 日志每次都停在句中，「毒类 / jetsam / 看门狗」三种死法长得一样；信号号把它们分开，**没有 call.fault 文件**说明是被杀的 | `calls: previous run faulted with signal 11 SIGSEGV` |
+| 开机回读时顺手打印死亡类的**所属镜像** | `JSExport` 是名字，`JavaScriptCore` 才是答案 | `calls: that class lives in …` |
+
+`tools/compare-calls.py` 跟着改口径：
+
+- 族外候选给出的归属记 **PRESENT-TAIL**，不与 `PRESENT` 合并 —— 一个是「整个家族
+  的方法表读过」，一个是「只问了名字像它的那几百个类」，混起来就是把窄证据冒充宽证据；
+- 家族段 `n=0` 且族外候选也没问出来、**且候选点名确实跑完**（见到 `tail done`）时才
+  升级成 **NO-IMPLEMENTER**（「本机很可能根本没人实现」），否则仍是 `OUT-OF-SCOPE`；
+- NO-IMPLEMENTER 照旧计入未对齐数，退出码不为 0，最后一行的措辞是「这 N 条要不要
+  当作结论，你点头才算」—— 工具不替操作者签发结论；
+- md 表用 `newline="\n"` 写，Windows 的 CRLF 会把每次重生成变成整文件 diff。
+
+**已知边界**：`class_getInstanceMethod` 会沿继承链返回，所以族外候选报出的类可能
+是「继承者」而不是「定义者」。那 9 条在家族段全为 0，所以任何命中都是真实定义，
+但归属类名要按「继承链上的一员」来读。
+
+### 8.7 0.0.13 真机跑完：无崩溃，尾巴收口（2026-11-02 22:14）
+
+第一次把「家族段 + 族外点名」两头都跑到底，全程**没有安全模式、没有崩溃信号**：
+
+```
+calls: ordering walk over 99378 classes
+calls: definition begin v2 targets=123 classes=98965 phase1=9827 scope=phase1 skip=413
+calls: phase1 done hits=114 of 123 scanned=9827 secs=7
+calls: definition end v2 missing=9 capped=33 upto=9827 of 98965 scope=phase1 skip=413 secs=7
+calls: tail owns BSAnimationSettings+ settingsWithDuration:timingFunction: @32@0:8d16@24
+…（共 6 条族外归属）
+calls: tail done names=4411 owned=6 missing=9 secs=4
+```
+
+读法：
+
+| 行 | 数字 | 含义 |
+|---|---|---|
+| `phase1 done hits=114 of 123` | 114 | 家族段（9827 个 SB/FB/UI/NS/LS/CA/BK/XB 类）里问到的条数，与 0.0.11 / 0.0.12 完全一致，稳定 |
+| `missing=9` | 9 | 家族段没问到的条数（其中 2 条后来在族外命中） |
+| `tail done names=4411 owned=6 missing=9` | 4411 / 6 | 只读名字挑出 4411 个候选，问出 6 条归属；`missing=9` 是不变量（进尾巴时的缺数），不是剩下的缺数 |
+| 无 `previous scan died` / 无 `faulted with signal` | — | 0.0.12 那个「越界即死」的问题被「不读尾巴方法表」彻底绕开 |
+
+`tools/compare-calls.py` 的判定：**MATCH 8 / PRESENT 106 / PRESENT-TAIL 2 / NO-IMPLEMENTER 7**，
+退出码 1（因为有 7 条 NO-IMPLEMENTER）。那 7 条逐条定性写在
+`docs/REVERSE-NOTES.md` 8.7：一条是母本自己的 delegate 方法，六条是母本想 hook 但
+17.3.1 上确实不存在的私有方法，**一条都不在建窗链上**。
+
+对齐表落在 `docs/calls-align-0.0.13.md`（125 行，123 条 + 表头 2 行）。
+
+这轮**不构建**：结论已经到手，版本号留在 0.0.13 不动。

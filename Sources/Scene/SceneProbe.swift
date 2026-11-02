@@ -45,9 +45,10 @@ enum SceneProbe {
         // gone, so the crash could not replay itself on the next launch.
         try? FileManager.default.removeItem(atPath: Aevon.probePath)
         switch mode.trimmingCharacters(in: .whitespacesAndNewlines) {
-        case "api":   runSurface()
-        case "calls": runCalls()
-        default:      run()
+        case "api":    runSurface()
+        case "calls":  runCalls()
+        case "window": runWindow()
+        default:       run()
         }
         return true
     }
@@ -795,6 +796,159 @@ zStackParticipantDidChange:
         guard lines.first == "!" + Aevon.version else { return [] }
         lines.removeFirst()
         return Set(lines)
+    }
+
+    // MARK: - Window build (0.0.14): read a real scene, then try to create one
+
+    /// Two phases in one run, in this order on purpose.
+    ///
+    /// Phase 1 is read-only: walk the scenes SpringBoard already owns and print
+    /// what their definition / settings / clientSettings actually contain. The
+    /// mother ship never built those objects field by field — it has no
+    /// `FBSMutableSceneDefinition` reference and no settings setter at all, only
+    /// `valueForKey:` — so copying a live one is not a shortcut, it is her
+    /// method. Phase 1 is also the part that survives a crash in phase 2,
+    /// because every line is flushed before the next one is written.
+    ///
+    /// Phase 2 mutates copies of exactly those objects and hands them to
+    /// `-[FBSceneManager _createSceneWithDefinition:settings:initialClientSettings:
+    /// transitionContext:fromRemnant:usingClientProvider:completion:]`. It is
+    /// deliberately the smallest possible build: no presenter, no window, no
+    /// deactivation reasons. The question this run answers is "does a scene
+    /// come back", and nothing beyond it.
+    static func runWindow() {
+        guard let manager = AevonSceneManager() as? NSObject else {
+            Log.write("win: no FBSceneManager in this process")
+            return
+        }
+        Log.write("win: begin manager cls=" + NSStringFromClass(type(of: manager)))
+
+        var template: NSObject?
+        var seen = 0
+        // Declared as a value, not a trailing closure: the C function takes an
+        // optional block, and an explicit closure type removes any doubt about
+        // how the compiler bridges it.
+        let visit: (Any?) -> Void = { scene in
+            guard let scene = scene as? NSObject else { return }
+            seen += 1
+            // Three is enough to see a foreground app scene, a system scene and
+            // whatever SpringBoard keeps for itself. The log has a size cap and
+            // this runs on the main thread.
+            if seen <= 3 {
+                dumpScene(scene, tag: "s" + String(seen))
+            }
+            if template == nil, value(of: scene, "definition") != nil {
+                template = scene
+            }
+        }
+        AevonEnumerateScenes(manager, visit)
+        Log.write("win: scenes=" + String(seen))
+
+        guard let model = template else {
+            Log.write("win: no template scene, stop before build")
+            return
+        }
+        buildScene(from: model, manager: manager)
+    }
+
+    private static func value(of object: NSObject, _ key: String) -> NSObject? {
+        let sel = NSSelectorFromString(key)
+        guard object.responds(to: sel) else { return nil }
+        return object.perform(sel)?.takeUnretainedValue() as? NSObject
+    }
+
+    private static func dumpScene(_ scene: NSObject, tag: String) {
+        let name = NSStringFromClass(type(of: scene))
+        let ident = value(of: scene, "identifier").map { String(describing: $0) } ?? "?"
+        Log.write("win: " + tag + " " + name + " id=" + ident)
+        for key in ["definition", "settings", "clientSettings", "uiPresentationManager"] {
+            guard let obj = value(of: scene, key) else {
+                Log.write("win: " + tag + " " + key + " absent")
+                continue
+            }
+            Log.write("win: " + tag + " " + key + " cls=" + NSStringFromClass(type(of: obj)))
+            emitIvars(obj, tag: tag + "." + key)
+        }
+    }
+
+    /// `_ivarDescription` prints one ivar per line with its class. It is the
+    /// only way to read a FrontBoard settings object without knowing its shape,
+    /// which is exactly the situation here. Capped: a settings object has ~40
+    /// fields and past that the log stops being readable.
+    private static func emitIvars(_ object: NSObject, tag: String) {
+        let sel = NSSelectorFromString("_ivarDescription")
+        guard object.responds(to: sel),
+              let text = object.perform(sel)?.takeUnretainedValue() as? String else {
+            Log.write("win: " + tag + " no _ivarDescription")
+            return
+        }
+        var printed = 0
+        for raw in text.split(separator: "\n") {
+            let line = String(raw).trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.count > 170 { continue }
+            if printed >= 20 {
+                Log.write("win: " + tag + " ...")
+                break
+            }
+            printed += 1
+            Log.write("win: " + tag + " " + line)
+        }
+    }
+
+    private static func mutable(_ object: NSObject?) -> NSObject? {
+        guard let object = object else { return nil }
+        let sel = NSSelectorFromString("mutableCopy")
+        guard object.responds(to: sel) else { return object }
+        return object.perform(sel)?.takeUnretainedValue() as? NSObject
+    }
+
+    private static func buildScene(from template: NSObject, manager: NSObject) {
+        guard let definition = mutable(value(of: template, "definition")) else {
+            Log.write("win: build skipped, no definition")
+            return
+        }
+        let settings = mutable(value(of: template, "settings"))
+        let client = mutable(value(of: template, "clientSettings"))
+
+        // A scene identifier is FrontBoard's primary key. Two scenes sharing one
+        // is not a duplicate — it is a replacement, and the template's owner
+        // loses its scene. So the identifier is only rewritten when the object
+        // actually has the setter; otherwise the copy is refused and the log
+        // says why, instead of handing the system a collision.
+        if AevonAnswers(definition, "setIdentifier:", 1) {
+            _ = definition.perform(NSSelectorFromString("setIdentifier:"),
+                                   with: "com.aevon.floater" as NSString)
+            Log.write("win: identifier rewritten on definition")
+        } else if let identity = value(of: definition, "identity"),
+                  AevonAnswers(identity, "setIdentifier:", 1) {
+            // A scene definition keeps its identity in a nested object on some
+            // releases; the identifier lives there, not on the definition.
+            _ = identity.perform(NSSelectorFromString("setIdentifier:"),
+                                 with: "com.aevon.floater" as NSString)
+            Log.write("win: identifier rewritten on identity")
+        } else {
+            let kept = value(of: definition, "identifier").map { String(describing: $0) } ?? "?"
+            Log.write("win: no identifier setter (definition or identity), would keep id=" + kept)
+            Log.write("win: build aborted, a shared identifier would evict the owner")
+            return
+        }
+
+        Log.write("win: build def=" + NSStringFromClass(type(of: definition))
+                  + " settings=" + (settings.map { NSStringFromClass(type(of: $0)) } ?? "nil")
+                  + " client=" + (client.map { NSStringFromClass(type(of: $0)) } ?? "nil"))
+
+        Log.write("win: calling _createSceneWithDefinition: now")
+        let done: (Any?, Any?) -> Void = { scene, error in
+            if let scene = scene as? NSObject {
+                Log.write("win: created " + NSStringFromClass(type(of: scene)))
+                dumpScene(scene, tag: "new")
+            } else {
+                Log.write("win: create failed err=" + String(describing: error))
+            }
+        }
+        let made = AevonCreateScene(manager, definition, settings, client,
+                                    nil, nil, nil, done)
+        Log.write("win: call returned " + (made.map { String(describing: $0) } ?? "nil"))
     }
 
     /// Called once at boot, before anything else touches the runtime. If the

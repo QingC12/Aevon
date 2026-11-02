@@ -282,20 +282,23 @@ def build_panel(panel_id, title, intro, items):
         specs.append({"cell": "PSGroupCell", "label": "探针",
                       "footerText": "浮窗不是塞进桌面的视图，而是自建 UIScene，"
                                     "需要先知道这台 iOS 上场景接口长什么样。"
-                                    "三个按钮都把结果写进 /var/mobile/Aevon.log："
+                                    "四个按钮都把结果写进 /var/mobile/Aevon.log："
                                     "第一个以 scene: 开头，是当前场景与窗口清单；"
-                                    "第二个以 scene2: 开头，是承载层的真实方法表；"
+                                    "第二个以 scene2: 开头，是承载层的真实方法表（已退役，只剩一行）；"
                                     "第三个以 calls: 开头，把母本用到的每一条调用"
-                                    "核对到这台 iOS 上真正定义它的类与签名 ——"
-                                    "前两个是找路，第三个才是能不能动手的依据。"
-                                    "各只转储一次，不会在开机时重放。"
-                                    "三个按钮都只读，不创建场景、不创建窗口。"})
+                                    "核对到这台 iOS 上真正定义它的类与签名；"
+                                    "第四个以 win: 开头，先把现成场景的 definition / settings / "
+                                    "clientSettings 打进日志，再用它们的副本真的建一个新场景 —— "
+                                    "前三个只读，第四个会写系统，失败时桌面可能注销一次。"
+                                    "各只执行一次，不会在开机时重放。"})
         specs.append({"cell": "PSButtonCell", "label": "转储场景与窗口（写 Aevon.log）",
                       "action": "sceneProbe:", "defaults": DOMAIN})
         specs.append({"cell": "PSButtonCell", "label": "转储承载接口面（方法表）",
                       "action": "sceneSurface:", "defaults": DOMAIN})
         specs.append({"cell": "PSButtonCell", "label": "核对调用点（母本 123 条调用）",
                       "action": "sceneCalls:", "defaults": DOMAIN})
+        specs.append({"cell": "PSButtonCell", "label": "建窗取证（读现成场景 → 试建一个）",
+                      "action": "sceneWindow:", "defaults": DOMAIN})
 
     if panel_id == "Ring":
         # 预览放在最上面：这一节剩下的 12 项都是它的参数，先能看见形状，

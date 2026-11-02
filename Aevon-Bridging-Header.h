@@ -14,6 +14,29 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// AevonScene.m — the two private calls that carry more arguments than
+/// `perform` can. Both return nil when the selector is absent, so the Swift
+/// side treats "nil" as "this system will not do it" and logs it.
+id _Nullable AevonCreateScene(id _Nullable manager,
+                              id _Nullable definition,
+                              id _Nullable settings,
+                              id _Nullable clientSettings,
+                              id _Nullable transitionContext,
+                              id _Nullable remnant,
+                              id _Nullable clientProvider,
+                              void (^_Nullable completion)(id _Nullable scene,
+                                                           id _Nullable error));
+
+id _Nullable AevonCreatePresenter(id _Nullable manager,
+                                  id _Nullable identifier,
+                                  long long priority);
+
+BOOL AevonAnswers(id _Nullable object, NSString *_Nullable name, NSInteger arguments);
+
+void AevonEnumerateScenes(id _Nullable manager, void (^_Nullable block)(id _Nullable scene));
+
+id _Nullable AevonSceneManager(void);
+
 @interface UIImage (AevonPrivateIcons)
 + (nullable UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID
                                                        format:(NSInteger)format

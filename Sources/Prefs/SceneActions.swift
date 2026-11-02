@@ -35,6 +35,14 @@ enum SceneActions {
         request("calls", from: controller, title: "已请求调用点核对")
     }
 
+    /// Fourth mode: read a live scene, then try to create one. Two phases in the
+    /// same run because the second is worthless without the first: the payload
+    /// it needs is a copy of what phase 1 just printed. This is the only button
+    /// that writes to FrontBoard, so its sheet says so before anything happens.
+    static func probeWindow(from controller: UIViewController) {
+        request("window", from: controller, title: "已请求建窗取证")
+    }
+
     private static func request(_ mode: String, from controller: UIViewController, title: String) {
         // The file is written here, not through SceneProbe: that type lives in
         // the tweak target only, and asking Settings to reach into SpringBoard's
@@ -49,14 +57,23 @@ enum SceneActions {
             notifyPost(Aevon.notePrefs)
         }
         Log.write("prefs: scene probe requested -> " + mode + " " + (wrote ? "ok" : "write failed"))
-        report(wrote, title: title, from: controller)
+        report(wrote, mode: mode, title: title, from: controller)
     }
 
-    private static func report(_ ok: Bool, title: String, from controller: UIViewController) {
-        let message = ok
-            ? "SpringBoard 会在一秒内把结果写进 /var/mobile/Aevon.log。"
-            + "这次转储只发生一次，不会在下次开机重放。"
-            : "无法写入 " + Aevon.probePath + "，请检查该目录权限。"
+    private static func report(_ ok: Bool, mode: String, title: String,
+                               from controller: UIViewController) {
+        let message: String
+        if !ok {
+            message = "无法写入 " + Aevon.probePath + "，请检查该目录权限。"
+        } else if mode == "window" {
+            message = "两步依次执行：先把现有场景的 definition / settings / clientSettings "
+                + "写进 /var/mobile/Aevon.log，再用它们的副本尝试建一个新场景。"
+                + "第二步会真的向系统注册场景，失败时 SpringBoard 可能注销一次——"
+                + "第一步的数据在此之前已经落盘，重开机后照样能读。"
+        } else {
+            message = "SpringBoard 会在一秒内把结果写进 /var/mobile/Aevon.log。"
+                + "这次转储只发生一次，不会在下次开机重放。"
+        }
         let sheet = UIAlertController(title: ok ? title : "请求失败",
                                       message: message, preferredStyle: .alert)
         sheet.addAction(UIAlertAction(title: "好", style: .default, handler: nil))

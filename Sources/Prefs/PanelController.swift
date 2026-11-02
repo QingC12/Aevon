@@ -209,6 +209,12 @@ final class PanelController: PSListController {
         SceneActions.probeCalls(from: self)
     }
 
+    /// 窗口与场景 · 建窗取证. Reads a live scene, then builds one from a copy of
+    /// it. The only button here that writes to FrontBoard.
+    @objc func sceneWindow(_ specifier: PSSpecifier) {
+        SceneActions.probeWindow(from: self)
+    }
+
     /// Keys driven by a slider. A drag produces a value per touch event, so
     /// these are coalesced; a switch produces exactly one and is written at
     /// once.

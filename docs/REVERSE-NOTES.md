@@ -153,3 +153,50 @@ Swift 方法体已被 strip，**不存在逐指令复刻的可能**。
 
 `tools/compare-calls.py` 的 `OWN_METHODS` 集合就是这 5 条：标记出来、不计入硬失败，
 但照常输出它的实测归属。
+
+### 8.7 最后 7 条：本机没有实现者（0.0.13 真机跑完，2026-11-02）
+
+0.0.13 第一次把「家族段 + 族外点名」两头都跑到底：`phase1 done hits=114 of 123 scanned=9827 secs=7`，
+接着 `tail done names=4411 owned=6 missing=9 secs=4`，全程无崩溃、无安全模式。
+
+| 判定 | 数量 | 含义 |
+|---|---|---|
+| MATCH | 8 | 归属 + 类型编码都与逆向记录一致 |
+| PRESENT | 106 | 本机有定义，逆向只记了调用（这次的实测即为新基准） |
+| PRESENT-TAIL | 2 | 只能在族外候选里问到（`BSAnimationSettings` 一族、`MTMaterialView` 一族） |
+| NO-IMPLEMENTER | 7 | 家族段 + 4411 个族外候选都问过，没人实现 |
+
+家族段覆盖的前缀是 `SB / FB / _UI / UI / NS / LS / CA / BK / XB / SpringBoard`（9827 个类），
+族外候选是「名字里带 presentable/material/handle/tap/icon/foreground/duration/press/setting」
+的 4411 个类。这两片加起来覆盖了这 7 条所有可能的宿主，所以「没人实现」是**实测结论**，
+不是没扫到。
+
+那 7 条分两类，都不在建窗链上：
+
+**一类：母本自己的 delegate 方法（selref 来自定义，不是调用）**
+
+| 选择子 | 依据 |
+|---|---|
+| `gestureRecognizer:shouldReceivePress:` | `UIGestureRecognizerDelegate` 的可选方法，Apple 侧几乎无人实现；母本有 `FullScreenBackGesture.Coordinator` 这个 delegate，与 `gestureRecognizerShouldBegin:` 同类 |
+
+**二类：母本想 hook / 想调的私有方法，17.3.1 上确实没有**
+
+| 选择子 | 依据 |
+|---|---|
+| `iconManager:launchIconForIconView:withActions:` | 母本有 `SBIconControllerHook`；`SBIconController`、`SBHIconManager`、`SBIconView` 都在家族段扫过，无人有此方法 |
+| `isApplicationForeground:` | 母本有 `SBApplicationHook`；`SBApplication` 在家族段，无此方法 |
+| `setHandleClick:` | 母本有 `SBGrabberTongueHook`；`SBGrabberTongue` 在家族段（且 `_handlePullGesture:` 已命中），无此 setter |
+| `_handleTapOnView:` | 名字属 SB 私有面，`SBIconView` / `SBHIconManager` / `SBFluidSwitcherGestureManager` 都无 |
+| `presentPresentable:withOptions:userInfo:` | `SBSystemAperture*` 全族在家族段，无 |
+| `_dismissPresentable:withReason:animated:userInfo:` | 同上；且它是这 7 条里**唯一**出现在 `__TEXT,__cstring` 的，说明母本是用 `NSSelectorFromString` 动态取它（配合 `respondsToSelector:` 做防御性调用），不是静态消息发送 |
+
+**结论**：建窗链（`initWithWindowScene:` → `createPresenterWithIdentifier:priority:` →
+`setResizesHostedContext:` → `setWindowLevel:` → scene 创建/更新链）上的调用**全部 MATCH 或 PRESENT**，
+7 条 NO-IMPLEMENTER 一条都不在链上。
+
+**顺带的两个副产品**：
+1. `presentPresentable:` 两条在本机无实现者 ⇒ **SystemAperture presentable 路线在 17.3.1 上走不通**，
+   这与「浮窗不该挂 SystemAperture 场景」的旧结论互相印证，不是巧合。
+2. 二类那 6 条意味着母本对应的钩子在 17.3.1 上是**空转**的（hook 注册了但 Apple 侧没有实现者）。
+   如果我们照抄这些 hook，得到的是一段永不触发的代码 —— 该换成我们已经在用的入口
+   （系统手势管线注册 + 自己的 window/scene 链），不要复刻。
