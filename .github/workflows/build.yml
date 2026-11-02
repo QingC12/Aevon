@@ -1,16 +1,23 @@
 name: build
 
-# 只在 main 上构建，且只产出一个 deb。
+# 只在 main 上构建。
 # 不打 tag、不建 Release：产物从 Actions 的 artifact 下载后本地留存。
+# 文档 / 说明的改动不触发构建 —— 那些提交不该占用构建额度。
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'dist/**'
+      - '.gitignore'
+      - '.gitattributes'
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# 连续 push 只保留最后一次，避免浪费额度。
+# 连续 push 只保留最后一次。
 concurrency:
   group: build-main
   cancel-in-progress: true
@@ -18,21 +25,20 @@ concurrency:
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 40
+    timeout-minutes: 20
     env:
       THEOS: ${{ github.workspace }}/.theos
 
     steps:
       - uses: actions/checkout@v4
 
-      # 缓存 key 必须随工具链变化：这里是 roothide 的 theos 分支，
-      # 不能复用旧 rootless 那套缓存，否则会拿到错的 makefiles。
+      # 缓存 key 随工具链变化。v2 = 首个 Swift 版本。
       - name: Restore Theos + SDK cache
         id: cache
         uses: actions/cache@v4
         with:
           path: .theos
-          key: theos-roothide-macos14-sdk16.5-v1
+          key: theos-roothide-macos14-sdk16.5-swift-v2
 
       - name: Install Theos (roothide branch)
         if: steps.cache.outputs.cache-hit != 'true'
@@ -44,57 +50,58 @@ jobs:
           git -C /tmp/sdks sparse-checkout set iPhoneOS16.5.sdk
           cp -R /tmp/sdks/iPhoneOS16.5.sdk "$THEOS/sdks/"
 
-      - name: Verify toolchain layout
+      # ldid 只在第一次装；brew 的下载缓存单独存，省掉 30–60 秒。
+      - name: Cache Homebrew downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew/downloads
+          key: brew-downloads-ldid-v1
+
+      - name: Preflight (toolchain, version, arch, architecture promise)
         run: |
           set -euxo pipefail
           test -d "$THEOS/makefiles"
           test -d "$THEOS/sdks/iPhoneOS16.5.sdk"
-          # roothide 的打包规则必须存在，缺了说明克隆到了错的仓库
-          test -e "$THEOS/makefiles/package" -o -e "$THEOS/makefiles/instance"
-          ls "$THEOS/makefiles/package" 2>/dev/null || true
-          echo "THEOS=$THEOS"
 
-      - name: Install packaging deps
-        run: |
-          set -euxo pipefail
-          if ! command -v ldid >/dev/null 2>&1; then
-            brew install ldid
-          fi
-          command -v ldid
-          xcodebuild -version
-          clang --version | head -2
+          if [ -x "$THEOS/bin/ldid" ]; then echo "ldid: theos"; 
+          elif command -v ldid >/dev/null 2>&1; then echo "ldid: system";
+          else brew install ldid; fi
 
-      - name: Version consistency
-        run: |
-          set -euxo pipefail
+          python3 --version
+          xcrun --find swiftc
+
           V="$(awk -F': ' '/^Version:/{print $2; exit}' control)"
           A="$(awk -F': ' '/^Architecture:/{print $2; exit}' control)"
-          echo "control: $V / $A"
-          grep -q "kAevonVersion = @\"$V\"" Sources/Aevon.mm
           test "$A" = "iphoneos-arm64e"
-          echo "version + arch consistent"
+          grep -q "version = \"$V\"" Sources/Core/Paths.swift
+          grep -q "<string>$V</string>" layout/Library/PreferenceBundles/AevonPrefs.bundle/Info.plist
+          # 编译承诺不许被后来的提交悄悄改掉
+          grep -q 'export ARCHS := arm64e' Makefile
+          grep -q 'THEOS_PACKAGE_SCHEME := roothide' Makefile
+          echo "preflight ok: $V / $A / swift"
 
-      - name: Build roothide deb (single package)
+      - name: Build (one package, no clean)
         run: |
           set -euxo pipefail
-          make clean || true
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
-          echo "--- packages ---"
           ls -la packages/
-          N="$(ls packages/*.deb | wc -l | tr -d ' ')"
-          test "$N" -eq 1
-          echo "exactly one deb: $(ls packages/*.deb)"
+          test "$(ls packages/*.deb | wc -l | tr -d ' ')" -eq 1
 
       - name: Gate — audit package payload
         run: |
           set -euxo pipefail
-          DEB="$(ls packages/*.deb | head -1)"
-          bash ./tools/audit-deb.sh "$DEB"
+          bash ./tools/audit-deb.sh "$(ls packages/*.deb | head -1)"
+
+      - name: Name artifact
+        run: |
+          set -euxo pipefail
+          bash ./tools/name-deb.sh packages dist
+          ls -la dist/
 
       - name: Upload deb
         uses: actions/upload-artifact@v4
         with:
           name: aevon-deb
-          path: packages/*.deb
+          path: dist/com.Aevon_*.deb
           if-no-files-found: error
           retention-days: 30

@@ -5,7 +5,8 @@
 #
 set +e
 
-echo "[Aevon] removing. State kept at /var/mobile/Library/Preferences/com.aevon.state.plist"
+echo "[Aevon] removing. State kept at /var/mobile/Library/Logs/Aevon/state.plist"
+echo "[Aevon] log kept at /var/mobile/Aevon.log"
 echo "[Aevon] a stale SpringBoard copy stays loaded until you reload SpringBoard."
 
 exit 0

@@ -2,35 +2,53 @@
 #
 # Aevon postinst — deliberately boring.
 #
-# Rules for this script:
-#   1. It must never return non-zero (a failed postinst leaves dpkg dirty).
-#   2. It must never modify a system file.
-#   3. It must never restart SpringBoard. Activation is a separate,
-#      human decision — you get a chance to look at the package first.
+# Rules, unchanged since 0.0.1:
+#   1. Never return non-zero (a failed postinst leaves dpkg dirty).
+#   2. Never modify a system file.
+#   3. Never restart SpringBoard. Activation stays a human decision.
+#
+# What it does do: prepares the two paths the tweak expects, records the
+# install in the log, and kicks the Settings process so the entry shows up
+# without a respring. Settings reads the PreferenceLoader directory once per
+# process and then keeps it in memory — that cache is why 0.0.2 installed
+# "successfully" and still showed no Aevon row.
 #
 set +e
 
+VERSION="0.0.3"
+
 # roothide 的维护脚本跑在 libvroot 里："/" 是 jbroot，真实根在 /rootfs。
-# 两个都试一次；失败也无所谓，插件加载时会自己建目录。
-for ROOT in /rootfs/var/mobile /var/mobile; do
-    LOG_DIR="$ROOT/Library/Logs/Aevon"
-    if mkdir -p "$LOG_DIR" 2>/dev/null; then
-        chown -R mobile:mobile "$LOG_DIR" 2>/dev/null
-        break
+# 两个都试一次；失败也无所谓，插件加载时会自己再建。
+for ROOT in /var/mobile /rootfs/var/mobile; do
+    [ -d "$ROOT" ] || continue
+
+    # gate state (tweak writes here; creating it now avoids a first-run fail)
+    mkdir -p "$ROOT/Library/Logs/Aevon" 2>/dev/null
+    chown mobile:mobile "$ROOT/Library/Logs/Aevon" 2>/dev/null
+
+    # the single log file the operator is told to look at
+    LOG="$ROOT/Aevon.log"
+    if [ ! -f "$LOG" ]; then
+        : > "$LOG" 2>/dev/null
     fi
+    chown mobile:mobile "$LOG" 2>/dev/null
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [$VERSION] installed (roothide / arm64e / swift)" >> "$LOG" 2>/dev/null
 done
 
+# Settings caches its PreferenceLoader list in memory. Dropping the process
+# makes the next open re-read the directory; it restarts itself immediately.
+killall -9 Preferences 2>/dev/null
+
 echo ""
-echo "  Aevon 0.0.2 installed (roothide / arm64e, zero hooks)."
+echo "  Aevon $VERSION installed (roothide / arm64e / swift, zero hooks)."
 echo ""
 echo "  Everything is operated from the GUI. No terminal needed:"
-echo "      Settings > Aevon"
+echo "      Settings > Aevon        (Settings was reloaded for you)"
 echo ""
 echo "  SpringBoard was NOT restarted on purpose. Nothing happens until you"
-echo "  reload it once (Settings > Aevon > Reload Desktop, or your jailbreak"
-echo "  app's respring button)."
+echo "  reload it once:  Settings > Aevon > 重载桌面（应用闸门变更）"
 echo ""
 echo "  Emergency stop, from the GUI:"
-echo "      Settings > Aevon > Emergency stop (G0)  ->  Reload Desktop"
+echo "      Settings > Aevon > 紧急停止（G0）  ->  重载桌面"
 echo ""
 exit 0

@@ -49,6 +49,20 @@ def api(path, data=None, method=None):
         raise SystemExit(f"API {e.code} on {path}: {detail}")
 
 
+BINARY_EXT = {".deb", ".png", ".gif", ".jpg", ".dylib", ".zip"}
+
+
+def lf_only(path, data):
+    """Windows 工作区写出来的文件常常是 CRLF。CRLF 的 Makefile / .sh 推到远端后
+    会让 macOS 的 make 和 sh 当场报错，而这一环最容易被忘掉 —— 所以统一在推送
+    前收敛成 LF。二进制文件（二进制 plist、png、deb）原样放行。"""
+    if os.path.splitext(path)[1].lower() in BINARY_EXT:
+        return data
+    if data[:6] == b"bplist":
+        return data
+    return data.replace(b"\r\n", b"\n")
+
+
 def tracked_files():
     # -z 是关键：不加的话 git 会把非 ASCII 路径转义成 "\344\272..."，
     # 中文文档名会直接 open() 失败。NUL 分隔的原始字节没有这个问题。
@@ -77,9 +91,10 @@ def main():
     tree = []
     for path, mode in files:
         with open(path, "rb") as fh:
+            data = lf_only(path, fh.read())
             blob = api(
                 f"/repos/{REPO}/git/blobs",
-                {"content": base64.b64encode(fh.read()).decode(), "encoding": "base64"},
+                {"content": base64.b64encode(data).decode(), "encoding": "base64"},
             )
         tree.append(
             {

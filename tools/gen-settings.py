@@ -24,7 +24,20 @@ BUNDLE = os.path.join(
 )
 OUTDIR = os.path.join(ROOT, "build")
 
-DOMAIN = "com.aevon.aevon"
+DOMAIN = "com.aevon"
+
+
+def control_version():
+    """控制文件是版本号的唯一来源：control / Paths.swift / Info.plist 三处一致，
+    由 CI 的 preflight 断言，这里只是把它带进界面文案和文档里。"""
+    with open(os.path.join(ROOT, "control"), encoding="utf-8") as fh:
+        for line in fh:
+            if line.startswith("Version:"):
+                return line.split(":", 1)[1].strip()
+    raise SystemExit("control 里没有 Version:")
+
+
+VERSION = control_version()
 
 # ---------------------------------------------------------------------------
 # 面板定义
@@ -271,6 +284,7 @@ def build_root():
         ("版本", "@status.version", "—"),
         ("启动次数", "@status.loads", "—"),
         ("最近一次加载", "@status.last", "—"),
+        ("日志文件", "@status.log", "/var/mobile/Aevon.log"),
     ]:
         items.append({"cell": "PSTitleValueCell", "label": label,
                       "key": key, "default": default, "defaults": DOMAIN})
@@ -287,16 +301,6 @@ def build_root():
     items.append({"cell": "PSButtonCell", "label": "重载桌面（应用闸门变更）",
                   "action": "respring:", "defaults": DOMAIN})
 
-    items.append({"cell": "PSGroupCell", "label": "诊断",
-                  "footerText": "探针在桌面进程内执行，只读、不改任何状态。"
-                                "一次安装可跑完 10 项，结果直接在这里看，不需要终端，也不需要重启。"})
-    items.append({"cell": "PSButtonCell", "label": "查看探测报告",
-                  "action": "showProbe:", "defaults": DOMAIN})
-    items.append({"cell": "PSButtonCell", "label": "重新探测（不重启）",
-                  "action": "reprobe:", "defaults": DOMAIN})
-    items.append({"cell": "PSButtonCell", "label": "复制报告到剪贴板",
-                  "action": "copyProbe:", "defaults": DOMAIN})
-
     items.append({"cell": "PSGroupCell", "label": "功能设置",
                   "footerText": "下面 8 个面板共 64 项，键名与母本一一对应。"
                                 "本期只复刻界面与操作逻辑，开关尚未接通；每接通一项会在版本说明里标注。"})
@@ -307,8 +311,8 @@ def build_root():
                   "file": "Apps", "File": "Apps"})
 
     items.append({"cell": "PSGroupCell", "label": "关于",
-                  "footerText": "Aevon 0.0.2 · 设置界面 64/64 项已就位，功能 0/64 已接通。"
-                                "所有改动只写 com.aevon.aevon，不触碰系统文件。"})
+                  "footerText": f"Aevon {VERSION} · Swift · arm64e · 设置 64/64 项已就位，"
+                                f"功能 0/64 已接通。所有改动只写 {DOMAIN}，不触碰系统文件。"})
 
     return {"title": "Aevon", "items": items}
 
@@ -370,6 +374,8 @@ def main():
         fh.write(rows)
 
     manifest = {
+        "package": "com.aevon",
+        "version": VERSION,
         "domain": DOMAIN,
         "total_母本键": 81,
         "设置项": n,

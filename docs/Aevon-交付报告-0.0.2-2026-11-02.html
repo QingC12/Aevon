@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aevon 0.0.2 交付报告 — roothide / arm64e</title>
+<style>
+  :root{
+    --bg:#0a0d13; --bg2:#0f131c; --card:#121722; --card2:#161c28;
+    --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.13);
+    --tx:#e8edf6; --tx2:#9aa7bd; --tx3:#6b7688;
+    --cy:#4dd4e8; --vi:#9d8cff; --am:#f0b45f; --gr:#5fd6a4; --rd:#ff7a86;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:radial-gradient(1200px 600px at 15% -10%,rgba(77,212,232,.09),transparent 60%),
+               radial-gradient(1000px 500px at 90% 0%,rgba(157,140,255,.08),transparent 55%),
+               var(--bg);
+    color:var(--tx);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased; line-height:1.65; padding:44px 28px 80px;
+  }
+  .wrap{max-width:1120px;margin:0 auto}
+  .eyebrow{font-size:12px;letter-spacing:.22em;color:var(--cy);text-transform:uppercase;font-weight:600}
+  h1{font-size:33px;line-height:1.28;font-weight:650;margin:12px 0 10px;letter-spacing:-.01em}
+  h1 em{font-style:normal;background:linear-gradient(92deg,var(--cy),var(--vi));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--tx2);font-size:14.5px;max-width:880px}
+  .meta{margin-top:18px;display:flex;gap:10px;flex-wrap:wrap}
+  .chip{font-size:12px;color:var(--tx2);border:1px solid var(--line2);border-radius:999px;padding:5px 12px;background:rgba(255,255,255,.02)}
+  .chip b{color:var(--tx);font-weight:600}
+  .kpi{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:34px 0 8px}
+  .k{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:16px 14px}
+  .k .n{font-size:24px;font-weight:650;letter-spacing:-.02em;line-height:1.2}
+  .k .n span{font-size:13px;color:var(--tx3);font-weight:500;margin-left:2px}
+  .k .l{font-size:11.5px;color:var(--tx3);margin-top:4px;letter-spacing:.02em}
+  .k.c1 .n{color:var(--cy)} .k.c2 .n{color:var(--vi)} .k.c3 .n{color:var(--am)}
+  .k.c4 .n{color:var(--gr)} .k.c5 .n{color:#c9d4e8} .k.c6 .n{color:#8fa3bf}
+  section{margin-top:44px}
+  .sh{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:22px}
+  .sh .num{font-size:12px;color:var(--cy);font-weight:700;letter-spacing:.12em}
+  .sh h2{font-size:19px;font-weight:600;letter-spacing:-.01em}
+  .sh .note{margin-left:auto;font-size:12px;color:var(--tx3)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-weight:600;color:var(--tx3);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;padding:9px 10px;border-bottom:1px solid var(--line2)}
+  td{padding:10px;border-bottom:1px solid var(--line);color:var(--tx2);vertical-align:top}
+  td b{color:var(--tx);font-weight:600}
+  tr:hover td{background:rgba(255,255,255,.017)}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+  .tag{display:inline-block;font-size:10.5px;padding:1.5px 7px;border-radius:5px;border:1px solid;line-height:1.5;white-space:nowrap}
+  .tA{color:var(--gr);border-color:rgba(95,214,164,.35);background:rgba(95,214,164,.08)}
+  .tB{color:var(--am);border-color:rgba(240,180,95,.35);background:rgba(240,180,95,.08)}
+  .tC{color:var(--rd);border-color:rgba(255,122,134,.35);background:rgba(255,122,134,.08)}
+  .tN{color:#8fa3bf;border-color:rgba(143,163,191,.35);background:rgba(143,163,191,.08)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .card{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:18px}
+  .card h3{font-size:14px;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .card p{font-size:13px;color:var(--tx2)}
+  .card ul{margin:8px 0 0 2px;list-style:none;display:flex;flex-direction:column;gap:6px}
+  .card li{font-size:12.8px;color:var(--tx2);padding-left:14px;position:relative}
+  .card li::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;border-radius:50%;background:var(--cy);opacity:.7}
+  .hl{color:var(--tx);font-weight:600}
+  pre{background:#0b0f17;border:1px solid var(--line2);border-radius:12px;padding:16px 18px;overflow-x:auto;
+      font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.75;color:#c7d3e6}
+  pre .k{color:var(--cy)} pre .c{color:var(--tx3)}
+  .steps{display:flex;flex-direction:column;gap:12px}
+  .step{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:16px 18px;display:grid;grid-template-columns:38px 1fr;gap:14px}
+  .step .no{width:30px;height:30px;border-radius:9px;background:rgba(77,212,232,.1);border:1px solid rgba(77,212,232,.3);
+            color:var(--cy);font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .step h4{font-size:14px;font-weight:600;margin-bottom:4px}
+  .step h4 .restart{font-size:10.5px;font-weight:500;color:var(--am);border:1px solid rgba(240,180,95,.35);
+            background:rgba(240,180,95,.08);border-radius:5px;padding:1px 7px;margin-left:8px}
+  .step p{font-size:13px;color:var(--tx2)}
+  .expect,.fail{margin-top:10px;font-size:12.6px;padding:9px 12px;border-radius:9px;line-height:1.7}
+  .expect{background:rgba(95,214,164,.07);border-left:2px solid var(--gr);color:#b9e9d4}
+  .fail{background:rgba(255,122,134,.06);border-left:2px solid var(--rd);color:#ffc6cb}
+  .expect b,.fail b{color:#fff}
+  footer{margin-top:52px;padding-top:18px;border-top:1px solid var(--line);color:var(--tx3);font-size:12px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+  @media(max-width:900px){
+    .kpi{grid-template-columns:repeat(3,1fr)}
+    .grid2{grid-template-columns:1fr}
+    body{padding:28px 16px 60px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="eyebrow">AEVON · DELIVERY 0.0.2</div>
+  <h1>从 rootless 切到 <em>roothide / arm64e</em><br>一次构建只出一个包</h1>
+  <p class="sub">
+    这一版不新增功能，只做「装得进、装得对」。母本功能面（64 项设置）已在 0.0.1 打底，
+    本轮把打包环境改成你手机的 roothide 随机 jbroot，二进制收成纯 arm64e，
+    去掉 Sileo 里的描述，并拆掉 Release / tag 流程。
+  </p>
+
+  <div class="meta">
+    <span class="chip">版本 <b>0.0.2</b></span>
+    <span class="chip">架构 <b>iphoneos-arm64e</b></span>
+    <span class="chip">包体 <b>25,658 B</b></span>
+    <span class="chip">载荷 <b>18 文件 / 172,199 B</b></span>
+    <span class="chip">审计 <b>PASS</b></span>
+    <span class="chip">钩子 <b>0</b></span>
+  </div>
+
+  <div class="kpi">
+    <div class="k c1"><div class="n">8</div><div class="l">设置面板</div></div>
+    <div class="k c2"><div class="n">64</div><div class="l">设置项（含 4 只读行）</div></div>
+    <div class="k c3"><div class="n">81</div><div class="l">母本键位对齐</div></div>
+    <div class="k c4"><div class="n">2<span>个</span></div><div class="l">二进制均为 arm64e</div></div>
+    <div class="k c5"><div class="n">18</div><div class="l">载荷文件</div></div>
+    <div class="k c6"><div class="n">0</div><div class="l">已安装钩子</div></div>
+  </div>
+
+  <section>
+    <div class="sh"><span class="num">01</span><h2>环境切换：为什么必须重打包</h2><span class="note">不是换个参数，是换了安装位置</span></div>
+    <p class="sub" style="margin-bottom:16px">
+      roothide 的 bootstrap 不在 <span class="mono">/var/jb</span>，而在
+      <span class="mono">/var/containers/Bundle/Application/.jbroot-XXXXXXXXXXXXXXXX</span>，
+      每次越狱随机。原先打的 rootless 包路径前缀是写死的，装上去会落到错的树里。
+    </p>
+    <table>
+      <thead><tr><th style="width:132px">项目</th><th style="width:210px">上一版 0.1.0（rootless）</th><th style="width:230px">本版 0.0.2（roothide）</th><th>依据</th></tr></thead>
+      <tbody>
+        <tr><td><b>打包方案</b></td><td class="mono">THEOS_PACKAGE_SCHEME=rootless</td><td class="mono">THEOS_PACKAGE_SCHEME=roothide</td><td>roothide 官方开发者文档：<span class="mono">make package THEOS_PACKAGE_SCHEME=roothide</span></td></tr>
+        <tr><td><b>包内路径</b></td><td class="mono">var/jb/Library/…</td><td class="mono">Library/…</td><td>roothide 包结构与 rootful 相同，由 dpkg 自己写进随机 jbroot</td></tr>
+        <tr><td><b>Architecture</b></td><td class="mono">iphoneos-arm64</td><td class="mono">iphoneos-arm64e</td><td>roothide 的包标识，Sileo 用它判断能否安装</td></tr>
+        <tr><td><b>二进制切片</b></td><td class="mono">arm64 + arm64e</td><td class="mono">arm64e</td><td>手机是 arm64e，roothide 要求 arm64e</td></tr>
+        <tr><td><b>工具链</b></td><td class="mono">theos/theos</td><td class="mono">roothide/theos</td><td>原版 theos 没有 roothide 打包规则</td></tr>
+        <tr><td><b>状态文件位置</b></td><td class="mono">Library/Preferences/com.aevon.state.plist</td><td class="mono">Library/Logs/Aevon/state.plist</td><td>roothide 会把 Preferences 重定向到随机路径，Settings 与桌面可能读到不同副本</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">02</span><h2>包体实测</h2><span class="note">拆包逐项核对，不是"应该"</span></div>
+    <div class="grid2" style="margin-bottom:16px">
+      <div class="card">
+        <h3>control 原文</h3>
+        <pre><span class="k">Package</span>: com.aevon.aevon
+<span class="k">Name</span>: Aevon
+<span class="k">Version</span>: 0.0.2
+<span class="k">Architecture</span>: iphoneos-arm64e
+<span class="k">Maintainer</span>: QingC
+<span class="k">Section</span>: Tweaks
+<span class="k">Depends</span>: firmware (&gt;= 15.0),
+    ellekit | mobilesubstrate,
+    preferenceloader
+
+<span class="c"># 无 Description 字段
+# → Sileo 插件页不显示描述
+# → dpkg 只给 warning，不影响安装</span></pre>
+      </div>
+      <div class="card">
+        <h3>两个 Mach-O 都只有 arm64e</h3>
+        <pre>Aevon.dylib      88,416 B   cffaedfe   [arm64e]
+AevonPrefs       71,904 B   cffaedfe   [arm64e]
+
+<span class="c"># magic cffaedfe = thin arm64,
+# subtype 2 = arm64e</span></pre>
+        <p style="margin-top:10px">机械校验写在审计脚本里：切片不含 arm64e，构建直接红，坏包出不了 CI。</p>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th>payload 分组</th><th style="width:72px">数量</th><th style="width:100px">字节</th><th>路径</th></tr></thead>
+      <tbody>
+        <tr><td><b>注入库</b></td><td>1</td><td class="mono">88,416</td><td class="mono">Library/MobileSubstrate/DynamicLibraries/Aevon.dylib</td></tr>
+        <tr><td><b>注入过滤器</b></td><td>1</td><td class="mono">93</td><td class="mono">Library/MobileSubstrate/DynamicLibraries/Aevon.plist</td></tr>
+        <tr><td><b>设置面板二进制</b></td><td>1</td><td class="mono">71,904</td><td class="mono">Library/PreferenceBundles/AevonPrefs.bundle/AevonPrefs</td></tr>
+        <tr><td><b>面板 plist</b></td><td>10</td><td class="mono">7,261</td><td class="mono">…/AevonPrefs.bundle/{Root,Window,Ring,Gesture,Keyboard,Notify,Jump,Listen,Apps,Info}.plist</td></tr>
+        <tr><td><b>设置入口</b></td><td>1</td><td class="mono">148</td><td class="mono">Library/PreferenceLoader/Preferences/Aevon.plist</td></tr>
+        <tr><td><b>救援脚本</b></td><td>4</td><td class="mono">4,377</td><td class="mono">usr/libexec/aevon/{disable,enable,status,uninstall}</td></tr>
+        <tr><td><b>合计</b></td><td><b>18</b></td><td class="mono"><b>172,199</b></td><td>全部在 <span class="mono">Library/</span> 与 <span class="mono">usr/libexec/</span> 下，无 <span class="mono">var/jb</span> 前缀</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">03</span><h2>设置面：这一版你能点到什么</h2><span class="note">界面全在，功能未接</span></div>
+    <p class="sub" style="margin-bottom:16px">
+      8 个面板共 <span class="hl">60 个开关/滑杆 + 4 个只读行</span>，加上首页的 4 个状态行、2 个闸门开关、4 个按钮。
+      键名与母本（Stheno 0.1.23）逐字对应，81 个本地化键的账是：64 设置项 + 17 纯文案键。
+      目前 <span class="hl">真正生效的只有 3 个</span>：状态显示、G0 紧急停止、G1 暂停注入（外加减计数与重载桌面）。
+    </p>
+    <table>
+      <thead><tr><th style="width:150px">面板</th><th style="width:72px">开关</th><th style="width:72px">滑杆</th><th>这一页管什么</th></tr></thead>
+      <tbody>
+        <tr><td><b>窗口与场景</b></td><td>11</td><td>4</td><td>独立窗口、分离窗口、临时窗口、窗口比例、左右角手势、自锁、贴边缩小</td></tr>
+        <tr><td><b>承载形状</b></td><td>8</td><td>4</td><td>圆盘 / 半圆盘 / 直角盘 / 任意形，半径、图标宽度、旋转角、尾角</td></tr>
+        <tr><td><b>手势与动效</b></td><td>5</td><td>4</td><td>触发边、快滑灵敏度、扩展四边交互、旋转三档、防遮挡跳动、震动强度、阻尼</td></tr>
+        <tr><td><b>键盘与输入</b></td><td>2</td><td>1</td><td>键盘避让系数、竖向键盘、UIKit 注入</td></tr>
+        <tr><td><b>通知</b></td><td>4</td><td>—</td><td>通知转浮窗、前台通知、附加主 App</td></tr>
+        <tr><td><b>跳转与伪装</b></td><td>11</td><td>—</td><td>URL / UniversalLinks / SafariViewService / Activity / StoreKit 的转浮窗与外跳权限</td></tr>
+        <tr><td><b>监听与系统动作</b></td><td>4</td><td>—</td><td>浮窗激活、系统服务监听、缩小范围、摄像头权限</td></tr>
+        <tr><td><b>应用与全局</b></td><td>2</td><td>—</td><td>全局生效、自整理自定义</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">04</span><h2>安全闸门</h2><span class="note">本轮新增 3 条机械校验</span></div>
+    <table>
+      <thead><tr><th style="width:74px">闸门</th><th style="width:250px">机制</th><th>为什么可靠</th></tr></thead>
+      <tbody>
+        <tr><td><b>G0</b></td><td>设置里的「紧急停止」开关</td><td>写偏好域 <span class="mono">com.aevon.aevon</span>，桌面侧读取；不依赖终端、不依赖文件权限</td></tr>
+        <tr><td><b>G1</b></td><td>「暂停注入」开关</td><td>同上，并记录停用原因与时间</td></tr>
+        <tr><td><b>G2</b></td><td>崩溃循环断路器</td><td>活过 60 秒清零计数；5 分钟内连挂 3 次永久自禁用；状态文件写不进就不加载（fail-safe）</td></tr>
+        <tr><td><b>G3</b></td><td>CI 包体审计</td><td>见下三条；任一不过，构建红，包到不了你手机</td></tr>
+        <tr><td><b>G4</b></td><td>阶段闸门</td><td>每期都要真机验收，不过不开下一期</td></tr>
+      </tbody>
+    </table>
+    <div class="grid2" style="margin-top:14px">
+      <div class="card">
+        <h3>本轮新增的三条</h3>
+        <ul>
+          <li>载荷只要出现 <span class="mono">var/jb/</span> 前缀 → 失败（说明 scheme 没生效）</li>
+          <li>两个 Mach-O 任一不含 arm64e 切片 → 失败</li>
+          <li>control 里出现 <span class="mono">Description:</span> → 失败（Sileo 会显示描述）</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>仍然守着的红线</h3>
+        <ul>
+          <li>不装 LaunchDaemon / LaunchAgent</li>
+          <li>不写 <span class="mono">/System</span>、不碰 substrate 本体</li>
+          <li><span class="mono">postinst</span> 不重启桌面，激活永远由你手动触发</li>
+          <li>过滤 plist 只允许注入 SpringBoard 一个进程</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">05</span><h2>手机实测流程</h2><span class="note">全程只用设置 App，不需要终端</span></div>
+    <p class="sub" style="margin-bottom:16px">
+      目标：用最少的重启次数，把「注入通了 / 闸门真的管用 / 设置能点」三件事一次验完。
+      标 <span class="tag tB">重启</span> 的步骤才需要重启桌面，其余都要重启后才会动。
+    </p>
+
+    <div class="steps">
+      <div class="step">
+        <div class="no">1</div>
+        <div>
+          <h4>装包，先别重启</h4>
+          <p>在 Sileo / Zebra 里直接打开 <span class="mono">com.aevon.aevon_0.0.2_iphoneos-arm64e.deb</span> 安装。装完不要点任何"重启"。</p>
+          <div class="expect"><b>期望</b>：安装过程没有报错，也没有"依赖缺失"。装完桌面没有任何变化——这是对的，因为 postinst 故意不重启。</div>
+          <div class="fail"><b>失败</b>：Sileo 提示架构不匹配 → 把提示原文发我；提示依赖 <span class="mono">ellekit</span> 缺失 → 先装 ElleKit，再装本包。</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="no">2</div>
+        <div>
+          <h4>确认设置里出现了「Aevon」<span class="restart">不重启</span></h4>
+          <p>打开 设置，往下翻，应该在越狱插件的区域看到一行 <b>Aevon</b>，点进去能看到「状态 / 安全闸门 / 诊断 / 功能设置」四组。</p>
+          <div class="expect"><b>期望</b>：入口在，8 个面板都能点进去，不闪退。<b>此时状态显示"未加载"是正常的</b>——桌面还没重新加载。</div>
+          <div class="fail"><b>失败</b>：看不到入口 → 设置 App 完全退出再进一次；仍没有 → 告诉我，我用 Filza 路径排查。某个面板点进去白屏/闪退 → 立刻在 Filza 删掉 <span class="mono">…/Library/PreferenceLoader/Preferences/Aevon.plist</span>，入口会消失，桌面行为不变，然后告诉我崩的是哪个面板。</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="no">3</div>
+        <div>
+          <h4>重载桌面，验证注入<span class="restart">重启 1</span></h4>
+          <p>用越狱工具自带的重启按钮，或设置里 Aevon →「重载桌面（应用闸门变更）」。</p>
+          <div class="expect"><b>期望</b>：回到设置 → Aevon：<b>注入状态 = 运行中</b>，<b>版本 = 0.0.2</b>，<b>启动次数 = 1</b>，最近一次加载有时间。60 秒后再进来，启动次数变回 <b>0</b>（说明心跳清零生效）。</div>
+          <div class="fail"><b>失败</b>：状态一直是"未加载" → 注入没生效，把「诊断 → 查看探测报告」的内容发我（报告里有 jbroot 路径、各方法签名、场景树，一次就能定位）。</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="no">4</div>
+        <div>
+          <h4>跑探针，把 P1 的两项取证一次拿全<span class="restart">不重启</span></h4>
+          <p>设置 → Aevon →「重新探测（不重启）」，等 2 秒，然后「查看探测报告」。</p>
+          <div class="expect"><b>期望</b>：报告第一段显示 <b>越狱根 = .jbroot-…（roothide）</b>，然后能看到 <span class="mono">_scene:interceptUpdateWithNewSettings:</span> 的类型编码、哪些类直接实现了它、以及当前场景树（几个场景、每个场景几个窗口）。<b>这三样齐了，P1 该怎么写就定了。</b></div>
+          <div class="fail"><b>失败</b>：提示"没有响应" → 说明桌面里没有 Aevon 在跑，回第 3 步。报告能看但没有场景树 → 把整份报告发我。</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="no">5</div>
+        <div>
+          <h4>演练 G0 紧急停止<span class="restart">重启 2</span></h4>
+          <p>设置 → Aevon → 打开「紧急停止（G0）」，然后点「重载桌面」。</p>
+          <div class="expect"><b>期望</b>：桌面回来后，注入状态 = <b>已紧急停止（G0）</b>，版本停在 0.0.2 不再更新。<b>这就是"出事时的那一键"</b>，它必须真的管用。</div>
+          <div class="fail"><b>失败</b>：重启后仍显示"运行中" → 闸门没生效，立刻告诉我，这一条不通不能往下做功能。</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="no">6</div>
+        <div>
+          <h4>关掉 G0，回到正常<span class="restart">重启 3</span></h4>
+          <p>关掉「紧急停止（G0）」，再点「重载桌面」。</p>
+          <div class="expect"><b>期望</b>：状态回到 <b>运行中</b>，启动次数重新开始计。<b>到此为止，安全闭环验证完成。</b></div>
+          <div class="fail"><b>失败</b>：状态回不来 → 点「清除崩溃计数」再重载一次；仍不行就把探测报告发我。</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3>只想快速看效果？</h3>
+      <p>只做 <b>第 1–4 步</b>，<span class="hl">只重启 1 次</span>，就能拿到：注入是否正常、设置是否可用、P1 的两项取证。第 5–6 步是逃生通道演练，可以留到你方便的时候再做——但<b>在开始写任何 hook 之前，它必须通过</b>。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sh"><span class="num">06</span><h2>版本与构建规则</h2><span class="note">按你的要求改掉了</span></div>
+    <table>
+      <thead><tr><th style="width:170px">规则</th><th style="width:210px">以前</th><th style="width:210px">现在</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><b>版本号</b></td><td class="mono">0.1.0</td><td class="mono">0.0.2</td><td>0.0.x 递增，每次只进位末位</td></tr>
+        <tr><td><b>构建次数</b></td><td>push + tag 各一次，可能重复</td><td>只在 push main 时构建一次，连续 push 自动取消旧的</td><td>省额度</td></tr>
+        <tr><td><b>产物数量</b></td><td>可能多个</td><td>断言 <span class="mono">exactly one deb</span>，多一个就红</td><td>每次只给一个包</td></tr>
+        <tr><td><b>Release / tag</b></td><td>打 tag 自动发 Release</td><td>全删，流程里不再创建</td><td>发布流程已移除</td></tr>
+        <tr><td><b>源码</b></td><td>——</td><td>全部保留在本地 <span class="mono">D:\最新工作区\Aevon</span></td><td>GitHub 只作备份与构建</td></tr>
+        <tr><td><b>描述</b></td><td>control 里有一段英文描述</td><td>删除，Sileo 不显示描述</td><td>审计会拦住再写回去的提交</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    <div>Aevon 0.0.2 · com.aevon.aevon_0.0.2_iphoneos-arm64e.deb · 25,658 B · 审计 PASS</div>
+    <div>2026-11-02 · 零钩子 · roothide / arm64e</div>
+  </footer>
+
+</div>
+</body>
+</html>

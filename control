@@ -1,8 +1,10 @@
-Package: com.aevon.aevon
+Package: com.aevon
 Name: Aevon
-Version: 0.0.2
+Version: 0.0.3
 Architecture: iphoneos-arm64e
 Maintainer: QingC
 Author: QingC
 Section: Tweaks
 Depends: firmware (>= 15.0), ellekit | mobilesubstrate, preferenceloader
+Replaces: com.aevon.aevon
+Conflicts: com.aevon.aevon
