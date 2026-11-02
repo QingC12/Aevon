@@ -28,7 +28,13 @@ enum SceneActions {
     }
 
     private static func request(_ mode: String, from controller: UIViewController, title: String) {
-        let wrote = SceneProbe.request(mode)
+        // The file is written here, not through SceneProbe: that type lives in
+        // the tweak target only, and asking Settings to reach into SpringBoard's
+        // code is how you end up compiling the whole carrier into this bundle.
+        try? FileManager.default.createDirectory(atPath: Aevon.stateDir,
+                                                 withIntermediateDirectories: true)
+        let wrote = (try? mode.write(toFile: Aevon.probePath, atomically: true,
+                                     encoding: .utf8)) != nil
         if wrote {
             // Same note the host already listens to: no new observer, no new
             // failure mode.

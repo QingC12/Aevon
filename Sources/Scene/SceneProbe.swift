@@ -32,27 +32,10 @@ enum SceneProbe {
 
     // MARK: - Trigger
 
-    /// Settings side. Writing the request file *is* the request: the tweak's
-    /// prefs observer sees the notification and runs the dump inside
-    /// SpringBoard, which is the only process that has the real scene tree.
-    ///
-    /// The file's *content* picks the dump. Two dumps instead of one button
-    /// because they answer different questions and each has its own blast
-    /// radius: the tree walk only reads, the surface walk sends two messages to
-    /// FrontBoard.
-    static func request(_ mode: String) -> Bool {
-        try? FileManager.default.createDirectory(atPath: Aevon.stateDir,
-                                                 withIntermediateDirectories: true)
-        do {
-            try mode.write(toFile: Aevon.probePath, atomically: true, encoding: .utf8)
-            return true
-        } catch {
-            return false
-        }
-    }
-
     /// SpringBoard side. The file is deleted before the dump, so a failed run
-    /// cannot leave a landmine that fires on every boot.
+    /// cannot leave a landmine that fires on every boot. Settings writes it
+    /// (SceneActions), because the request must not drag this file's whole
+    /// carrier surface into the preferences bundle.
     @discardableResult
     static func consumeRequest() -> Bool {
         guard FileManager.default.fileExists(atPath: Aevon.probePath) else { return false }

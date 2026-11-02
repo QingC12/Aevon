@@ -200,6 +200,80 @@ def check_makefile():
         ok(f"makefile: {len(on_disk)} 个源文件全部进了某个 target，无悬空引用")
 
 
+def _makefile_variable(makefile, name):
+    """A make variable's file list, continuation lines and $(VAR) expanded."""
+    lines = makefile.splitlines()
+    raw = None
+    for index, line in enumerate(lines):
+        if re.match(rf"^{name}\s*:?=", line):
+            chunk = [line]
+            cursor = index
+            while chunk[-1].rstrip().endswith("\\") and cursor + 1 < len(lines):
+                cursor += 1
+                chunk.append(lines[cursor])
+            raw = " ".join(part.rstrip().rstrip("\\") for part in chunk)
+            break
+    if raw is None:
+        return []
+    value = raw.split("=", 1)[1]
+    for _ in range(3):                      # AE_CORE / AE_RING 一层就够
+        expanded = re.sub(r"\$\((\w+)\)",
+                          lambda m: " ".join(_makefile_variable(makefile, m.group(1))),
+                          value)
+        if expanded == value:
+            break
+        value = expanded
+    return re.findall(r"Sources/[\w/]+\.(?:swift|m)", value)
+
+
+def check_targets():
+    section("3b 目标边界")
+    makefile = read("Makefile")
+    tweak = set(_makefile_variable(makefile, "Aevon_FILES"))
+    prefs = set(_makefile_variable(makefile, "AevonPrefs_FILES"))
+    if not tweak or not prefs:
+        bad("targets: Makefile 里读不出两个 target 的文件清单 —— 这条检查失效了，先修它")
+        return
+
+    tweak_only = sorted(tweak - prefs)
+    declared = {}
+    for path in sorted(tweak | prefs):
+        if not path.endswith(".swift"):
+            continue
+        text = re.sub(r"//[^\n]*", "", read(path))
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        text = re.sub(r'"(?:\\.|[^"\\])*"', '""', text)
+        declared[path] = set(re.findall(
+            r"^\s*(?:(?:public|internal|private|fileprivate|open|final)\s+)*"
+            r"(?:class|struct|enum|protocol)\s+([A-Za-z_]\w*)", text, re.M))
+
+    # A name the tweak declares and no prefs file declares can only be reached
+    # from the tweak. Seeing it on the prefs side is the same class of failure
+    # as the missing bridging header: the compiler is right, and it costs a CI.
+    foreign = {}
+    for path in tweak_only:
+        for name in declared.get(path, set()):
+            if any(name in declared.get(other, set()) for other in prefs):
+                continue
+            foreign[name] = path
+
+    hits = []
+    for path in sorted(prefs):
+        if not path.endswith(".swift"):
+            continue
+        text = re.sub(r"//[^\n]*", "", read(path))
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        text = re.sub(r'"(?:\\.|[^"\\])*"', '""', text)
+        for name, owner in sorted(foreign.items()):
+            if re.search(rf"\b{name}\b", text):
+                hits.append((path, name, owner))
+    for path, name, owner in hits:
+        bad(f"targets: {path} 用了 {name}，而它只编译进 tweak（{owner}）—— "
+            f"bundle 会报 cannot find '{name}' in scope")
+    if not hits:
+        ok(f"targets: prefs 侧没有引用 tweak 独有的 {len(foreign)} 个类型")
+
+
 # ---------------------------------------------------------------------------
 # 4  版本号：四处必须一致，且 preflight 会因此失败
 # ---------------------------------------------------------------------------
@@ -496,6 +570,7 @@ def main():
     check_manifest(files)
     check_untracked(files)
     check_makefile()
+    check_targets()
     ver = version()
     check_python()
     check_plists()
