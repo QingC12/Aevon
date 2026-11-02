@@ -268,7 +268,7 @@ def main():
     # the only thing that tells the two cases apart on a device, so its presence
     # is asserted here: a panel that silently reuses preloaded rows again would
     # also be a panel with no log line.
-    if b"preloaded=" not in prefs:
+    if b"preloaded" not in prefs or b"final=" not in prefs:
         bad("prefs: panel loader no longer reports loaded/preloaded counts — "
             "the 0.0.6 all-panels-identical regression could return unnoticed")
 
@@ -332,7 +332,8 @@ def main():
 
     for token in (b"RingView", b"RingPreviewController", b"openPanel:",
                   b"PanelController", b"previewRing:", b"editApps:", b"resetGrip:",
-                  b"AppListController", b"AppPickerController", b"RingActions",
+                  b"AppListController", b"AppPickerController",
+                  b"prefs: open app list", b"prefs: grip reset",
                   b"_applicationIconImageForBundleIdentifier:"):
         if token not in prefs:
             bad(f"ring: {token.decode()} missing from the bundle binary")
@@ -343,7 +344,7 @@ def main():
     # the class, the private API it calls, and the line it logs on mount.
     dylib_early = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
     for token in (b"RingHost", b"ring: hosted on desktop", b"LSApplicationWorkspace",
-                  b"RingApps", b"GripLayout", b"ring: grip moved to"):
+                  b"(operator list)", b"ring: grip moved to"):
         if token not in dylib_early:
             bad(f"host: {token.decode()} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")

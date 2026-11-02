@@ -130,7 +130,9 @@ final class RingPreviewController: UIViewController {
         replay.tintColor = .white
         replay.backgroundColor = UIColor.white.withAlphaComponent(0.12)
         replay.layer.cornerRadius = 20
-        replay.contentEdgeInsets = UIEdgeInsets(top: 10, left: 24, bottom: 10, right: 24)
+        // No contentEdgeInsets: deprecated in iOS 15 and ignored once the
+        // button has a configuration. The size is expressed as constraints
+        // instead, which keeps the pill the same on every iOS this runs on.
         replay.translatesAutoresizingMaskIntoConstraints = false
         replay.addTarget(self, action: #selector(replayTapped), for: .touchUpInside)
         view.addSubview(replay)
@@ -171,6 +173,8 @@ final class RingPreviewController: UIViewController {
             close.heightAnchor.constraint(equalToConstant: 34),
 
             replay.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            replay.widthAnchor.constraint(equalToConstant: 152),
+            replay.heightAnchor.constraint(equalToConstant: 44),
             replay.bottomAnchor.constraint(equalTo: hint.topAnchor, constant: -14),
 
             hint.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 32),
