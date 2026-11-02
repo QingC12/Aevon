@@ -50,6 +50,13 @@ public enum Aevon {
     /// deletes it to send the grip back to its corner.
     public static let layoutPath = "/var/mobile/Library/Logs/Aevon/layout.plist"
 
+    /// A request, not a setting: Settings drops this file and posts the prefs
+    /// note; SpringBoard deletes it and writes the scene dump to the log. A
+    /// file rather than a preference because the two processes disagree about
+    /// where the domain lives on roothide, and because "one shot" is exactly
+    /// what a file is.
+    public static let probePath = "/var/mobile/Library/Logs/Aevon/probe.request"
+
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"
     public static let legacyStatePath = "/var/mobile/Library/Preferences/com.aevon.state.plist"

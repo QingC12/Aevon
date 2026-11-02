@@ -20,6 +20,9 @@ import CoreFoundation
 private let prefsCallback: CFNotificationCallback = { _, _, _, _, _ in
     DispatchQueue.main.async {
         RingHost.shared.refresh()
+        // A probe request rides the same note: Settings drops a file, this
+        // process owns the scene tree. One shot, then the file is gone.
+        SceneProbe.consumeRequest()
     }
 }
 
@@ -85,5 +88,8 @@ public func AevonStart() {
     DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
         RingHost.shared.refresh()
         Log.write("ring: mount pass done, desktop=\(RingHost.shared.isEnabled)")
+        // Second chance for a probe: the request may have been written while
+        // this process was still coming up and the note went nowhere.
+        SceneProbe.consumeRequest()
     }
 }

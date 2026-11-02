@@ -222,6 +222,13 @@ final class RootListController: PSListController {
         RingActions.editApps(from: self)
     }
 
+    /// The 窗口与场景 probe, reachable from the root page as well: the panel
+    /// plist is the one thing in this bundle that a future iOS can silently
+    /// refuse to load, and the probe is how we would find that out.
+    @objc func sceneProbe(_ specifier: PSSpecifier) {
+        SceneActions.probeScene(from: self)
+    }
+
     private func alert(_ title: String, _ message: String) {
         let sheet = UIAlertController(title: title, message: message, preferredStyle: .alert)
         sheet.addAction(UIAlertAction(title: "好", style: .default, handler: nil))

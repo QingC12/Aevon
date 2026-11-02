@@ -37,7 +37,7 @@ AE_RING := Sources/Ring/RingModel.swift Sources/Ring/RingIcons.swift \
 # ---------------------------------------------------------------------------
 TWEAK_NAME := Aevon
 Aevon_FILES := Sources/AevonBoot.m Sources/Boot.swift $(AE_CORE) $(AE_RING) \
-               Sources/Ring/RingHost.swift
+               Sources/Ring/RingHost.swift Sources/Scene/SceneProbe.swift
 Aevon_FRAMEWORKS := Foundation UIKit
 # Swift metadata is the bulk of a Swift dylib; dead-strip keeps it honest.
 Aevon_LDFLAGS := -Wl,-dead_strip
@@ -57,6 +57,7 @@ BUNDLE_NAME := AevonPrefs
 AevonPrefs_FILES := $(AE_CORE) $(AE_RING) \
                     Sources/Ring/RingPreviewController.swift \
                     Sources/Prefs/RingActions.swift \
+                    Sources/Prefs/SceneActions.swift \
                     Sources/Prefs/AppListController.swift \
                     Sources/Prefs/AppPickerController.swift \
                     Sources/Prefs/PanelController.swift \

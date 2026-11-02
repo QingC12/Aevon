@@ -376,6 +376,41 @@ def main():
             or b"/var/mobile/Library/Logs/Aevon/ring.plist" not in dylib_early:
         bad("host: ring.plist path missing from one side — the two processes would disagree")
 
+    # -- 5e. the scene probe (0.0.6, 窗口与场景 P0) -------------------------
+    # The probe is the difference between "the master's carrier API is probably
+    # there" and knowing what it actually answers on this iOS. If it silently
+    # falls out of either binary the next phase gets built on a guess, so its
+    # rows and its markers are checked like any other shipped feature.
+    window_plist = files.get(f"{BUNDLE_DIR}/Window.plist")
+    if window_plist is None:
+        bad("probe: Window.plist missing")
+    else:
+        window_items = plistlib.loads(window_plist).get("items", [])
+        window_actions = [item.get("action") for item in window_items]
+        window_labels = [item.get("label") for item in window_items
+                         if item.get("cell") == "PSGroupCell"]
+        if "sceneProbe:" not in window_actions:
+            bad("probe: no sceneProbe: row on 窗口与场景 — the scene tree cannot be measured")
+        elif "探针" not in window_labels:
+            bad("probe: the 探针 group lost its label")
+        else:
+            ok("probe: 窗口与场景 has the 探针 group and its button")
+
+    for token in (b"sceneProbe:", b"prefs: scene probe requested"):
+        if token not in prefs:
+            bad(f"probe: {token.decode()} missing from the bundle binary")
+
+    for token in (b"scene: probe begin", b"scene: probe end", b"scene: class missing",
+                  b"scene: window level", b"scene: carrier view", b"scene: live scenes"):
+        if token not in dylib_early:
+            bad(f"probe: {token.decode()} missing from Aevon.dylib — "
+                "the probe would never reach SpringBoard")
+
+    probe_path = b"/var/mobile/Library/Logs/Aevon/probe.request"
+    if probe_path not in prefs or probe_path not in dylib_early:
+        bad("probe: the request path is missing from one side — Settings could ask "
+            "for a dump nothing would ever answer")
+
     # -- 6. log path contract ----------------------------------------------
     dylib = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
     if b"/var/mobile/Aevon.log" not in dylib:

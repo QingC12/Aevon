@@ -193,6 +193,11 @@ final class PanelController: PSListController {
         refreshSummaryRow()
     }
 
+    /// 窗口与场景 · 探针. Runs in SpringBoard, not here: see SceneActions.
+    @objc func sceneProbe(_ specifier: PSSpecifier) {
+        SceneActions.probeScene(from: self)
+    }
+
     /// Keys driven by a slider. A drag produces a value per touch event, so
     /// these are coalesced; a switch produces exactly one and is written at
     /// once.

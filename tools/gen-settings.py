@@ -275,6 +275,19 @@ def build_panel(panel_id, title, intro, items):
                       "key": "@ring.apps", "default": "自动", "defaults": DOMAIN})
         specs.append({"cell": "PSButtonCell", "label": "编辑应用（添加 / 删除 / 排序）",
                       "action": "editApps:", "defaults": DOMAIN})
+    if panel_id == "Window":
+        # 探针放在这一页最上面：这一页的 15 个键都是浮窗参数，但浮窗本身
+        # 还没做 —— 先能用同一个入口把「这台设备上到底有什么场景」测出来，
+        # 后面写承载层才不是猜。转储在 SpringBoard 里跑，不在这里。
+        specs.append({"cell": "PSGroupCell", "label": "探针",
+                      "footerText": "浮窗不是塞进桌面的视图，而是自建 UIScene，"
+                                    "需要先知道这台 iOS 上场景接口长什么样。"
+                                    "点下面的按钮，SpringBoard 会把类、选择子签名、"
+                                    "当前场景与窗口清单写进 /var/mobile/Aevon.log，"
+                                    "以 scene: 开头；只转储一次，不会在开机时重放。"})
+        specs.append({"cell": "PSButtonCell", "label": "转储场景与窗口（写 Aevon.log）",
+                      "action": "sceneProbe:", "defaults": DOMAIN})
+
     if panel_id == "Ring":
         # 预览放在最上面：这一节剩下的 12 项都是它的参数，先能看见形状，
         # 后面的半径/图标宽度/旋转角才有意义。
