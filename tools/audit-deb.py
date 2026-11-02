@@ -293,8 +293,11 @@ def main():
             bad(f"ring: {token.decode()} missing from the bundle binary")
 
     # -- 5d. the desktop host must actually be in the tweak ------------------
+    # A local Swift function's name is stripped from a FINALPACKAGE build, so
+    # assert on strings that are *content* of the host, not on symbol names:
+    # the class, the private API it calls, and the line it logs on mount.
     dylib_early = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
-    for token in (b"RingHost", b"ringSlots", b"LSApplicationWorkspace"):
+    for token in (b"RingHost", b"ring: hosted on desktop", b"LSApplicationWorkspace"):
         if token not in dylib_early:
             bad(f"host: {token.decode()} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")
