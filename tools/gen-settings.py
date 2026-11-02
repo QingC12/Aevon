@@ -301,8 +301,10 @@ def build_root():
                   "footerText": "下面 8 个面板共 64 项，键名与母本一一对应。"
                                 "本期只复刻界面与操作逻辑，开关尚未接通；每接通一项会在版本说明里标注。"})
     for pid, title, _intro in [(p[0], p[1], p[2]) for p in PANELS]:
-        items.append({"cell": "PSChildPaneSpecifier", "label": title, "file": pid})
-    items.append({"cell": "PSChildPaneSpecifier", "label": "应用与全局", "file": "Apps"})
+        items.append({"cell": "PSChildPaneSpecifier", "label": title,
+                      "file": pid, "File": pid})
+    items.append({"cell": "PSChildPaneSpecifier", "label": "应用与全局",
+                  "file": "Apps", "File": "Apps"})
 
     items.append({"cell": "PSGroupCell", "label": "关于",
                   "footerText": "Aevon 0.1.0 · 设置界面 64/64 项已就位，功能 0/64 已接通。"
