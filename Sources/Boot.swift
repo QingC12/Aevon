@@ -13,7 +13,20 @@
 import Foundation
 import CoreFoundation
 
-private let darwinCallback: CFNotificationCallback = { _, _, _, _, _ in
+private let darwinCallback: CFNotificationCallback = { _, _, name, _, _ in
+    // CFString -> NSString -> String: the two-step bridge is the one form
+    // that compiles on every Swift version this project has been built with.
+    let notification = name.map { $0 as NSString as String } ?? ""
+
+    // A setting changed. The snapshot file is already on disk (Settings writes
+    // it before posting), so this is a re-read, not a command that can be lost.
+    if notification == Aevon.notePrefs {
+        DispatchQueue.main.async {
+            RingHost.shared.refresh()
+        }
+        return
+    }
+
     guard let command = Gate.takePendingCommand() else { return }
 
     switch command {
@@ -35,6 +48,9 @@ private func observeCommands() {
     let center = CFNotificationCenterGetDarwinNotifyCenter()
     CFNotificationCenterAddObserver(center, nil, darwinCallback,
                                     Aevon.noteCommand as CFString, nil,
+                                    .deliverImmediately)
+    CFNotificationCenterAddObserver(center, nil, darwinCallback,
+                                    Aevon.notePrefs as CFString, nil,
                                     .deliverImmediately)
 }
 
@@ -60,10 +76,17 @@ public func AevonStart() {
     scheduleStableReset()
 
     // ---------------------------------------------------------------------
-    // Stage 1 ships ZERO hooks on purpose: the whole settings surface has to
-    // be reachable from the GUI, and the kill switches have to be provably
-    // able to stop the tweak before anything is hooked.
+    // The carrier shape, hosted in SpringBoard.
     //
-    // P1 (scene mounting) is added below this line, and only below it.
+    // Deferred: a constructor runs while SpringBoard is still assembling its
+    // scene, and a window created then can end up without one. Two seconds is
+    // after the home screen exists and before anyone reaches for the corner.
+    //
+    // Everything it does is gated again inside RingHost: the "!" switch off
+    // means no window at all, and a closed switch removes an open one.
     // ---------------------------------------------------------------------
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+        RingHost.shared.refresh()
+        Log.write("ring: mount pass done, desktop=\(RingHost.shared.isEnabled)")
+    }
 }

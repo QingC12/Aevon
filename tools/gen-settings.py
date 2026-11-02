@@ -39,6 +39,12 @@ def control_version():
 
 VERSION = control_version()
 
+# 真正接通的键：形状四选一、半径、图标宽度、旋转角、尾角。这八个值写进
+# ring.plist 后由 SpringBoard 的 RingHost 直接读取并作用于桌面上的环。
+# 收藏 / 旋转自适应 / 立即 / 延迟（Star、IOMI0-2）目前只写域，不能算接通。
+WIRED_KEYS = {"RTSIF", "RTSIH", "RTSIQ", "RTSIZ",
+              "Radius", "IconWidth", "RotationAngle", "LastIconAngle"}
+
 # ---------------------------------------------------------------------------
 # 面板定义
 #    k      母本键名（保持原样，用于对账）
@@ -268,6 +274,17 @@ def build_panel(panel_id, title, intro, items):
                       "key": "@ring.summary", "default": "—", "defaults": DOMAIN})
         specs.append({"cell": "PSButtonCell", "label": "预览承载形状（全屏）",
                       "action": "previewRing:", "defaults": DOMAIN})
+
+        # 桌面承载：0.0.6 起 RingHost 把同一个 RingView 挂到桌面右下角。
+        # 这两个 key 不属于母本 81 键，所以加 "!" 前缀单独记账。
+        specs.append({"cell": "PSGroupCell", "label": "桌面",
+                      "footerText": "开启后桌面右下角出现一个小握把（14pt 圆点）。"
+                                    "点它展开圆盘，点图标启动 App，再点握把收起。"
+                                    "本节任何参数改动都会立刻作用到桌面上的环，不需要重载桌面。"})
+        specs.append({"cell": "PSSwitchCell", "label": "桌面显示握把",
+                      "key": "!ring.desktop", "default": True, "defaults": DOMAIN})
+        specs.append({"cell": "PSTitleValueCell", "label": "桌面状态",
+                      "key": "@ring.host", "default": "—", "defaults": DOMAIN})
     specs.append({"cell": "PSGroupCell", "label": title, "footerText": intro})
     for it in items:
         specs.append(BUILDERS[it["cell"]](it))
@@ -314,16 +331,21 @@ def build_root():
 
     items.append({"cell": "PSGroupCell", "label": "功能设置",
                   "footerText": "下面 8 个面板共 64 项，键名与母本一一对应。"
-                                "本期只复刻界面与操作逻辑，开关尚未接通；每接通一项会在版本说明里标注。"})
+                                "点任一项进入该面板；承载形状一节已经接通，"
+                                "其余面板的开关会写入 com.aevon 域，等对应功能落地后即生效。"})
     for pid, title, _intro in [(p[0], p[1], p[2]) for p in PANELS]:
-        items.append({"cell": "PSChildPaneSpecifier", "label": title,
-                      "file": pid, "File": pid})
-    items.append({"cell": "PSChildPaneSpecifier", "label": "应用与全局",
-                  "file": "Apps", "File": "Apps"})
+        # PSButtonCell + 显式 action：0.0.5 用 PSChildPaneSpecifier，这一版 iOS
+        # 不给它选中态，8 行全是死的。按钮是唯一不会随框架改版失效的写法，
+        # 由 RootListController 自己 push。
+        items.append({"cell": "PSButtonCell", "label": title,
+                      "action": "openPanel:", "panel": pid})
+    items.append({"cell": "PSButtonCell", "label": "应用与全局",
+                  "action": "openPanel:", "panel": "Apps"})
 
     items.append({"cell": "PSGroupCell", "label": "关于",
-                  "footerText": f"Aevon {VERSION} · Swift · arm64e · 设置 64/64 项已就位，"
-                                f"功能 0/64 已接通。所有改动只写 {DOMAIN}，不触碰系统文件。"})
+                  "footerText": f"Aevon {VERSION} · Swift · arm64e · 8 个面板全部可进入，"
+                                f"承载形状 8 项已接通（桌面实时生效），其余 56 项写入域待功能落地。"
+                                f"所有改动只写 {DOMAIN}，不触碰系统文件。"})
 
     return {"title": "Aevon", "items": items}
 
@@ -353,12 +375,17 @@ def html_rows():
                 rng = "开 / 关　默认" + ("开" if it["d"] else "关")
             else:
                 rng = "—"
+            # 只有真正写进运行参数并被桌面读取的键才标「已接通」，
+            # 其余只是写域、功能尚未落地，不能标成一样的状态。
+            wired = it["k"] in WIRED_KEYS
+            tag = ("<span class='tag tD'>已接通</span>" if wired
+                   else "<span class='tag tW'>待接通</span>")
             rows.append(
                 f"<tr><td class='num'>{n:02d}</td><td>{esc(title)}</td>"
                 f"<td class='mono'>{esc(it['k'])}</td><td>{esc(it['cn'])}</td>"
                 f"<td class='ctr'>{CELL_CN[it['cell']]}</td><td class='mono sm'>{esc(rng)}</td>"
                 f"<td>{esc(it['note'])}</td>"
-                f"<td class='ctr'><span class='tag tW'>未接通</span></td></tr>"
+                f"<td class='ctr'>{tag}</td></tr>"
             )
     return "\n".join(rows), n
 
@@ -384,6 +411,9 @@ def main():
     with open(os.path.join(OUTDIR, "settings-tbody.html"), "w", encoding="utf-8") as fh:
         fh.write(rows)
 
+    ring_keys = [it["k"] for p in PANELS if p[0] == "Ring" for it in p[3]]
+    wired = set(ring_keys) & WIRED_KEYS
+
     manifest = {
         "package": "com.aevon",
         "version": VERSION,
@@ -391,14 +421,21 @@ def main():
         "total_母本键": 81,
         "设置项": n,
         "文案键": len(TEXT_KEYS),
-        "已接通": 0,
+        "已接通": len(wired),
         "面板": [
             {"id": p[0], "title": p[1], "count": len(p[3])} for p in PANELS
         ] + [{"id": "Apps", "title": "应用与全局", "count": len(APPS_ITEMS)}],
         "文案键清单": [{"key": k, "cn": c} for k, c in TEXT_KEYS],
+        # 不属于母本 81 键的 Aevon 自有开关，单独记账，避免它们混进复刻进度。
+        "自有项": [
+            {"key": "!ring.desktop", "cn": "桌面显示握把", "cell": "switch",
+             "default": True, "wired": True},
+            {"key": "@ring.host", "cn": "桌面状态", "cell": "title", "wired": True},
+            {"key": "@ring.summary", "cn": "当前承载", "cell": "title", "wired": True},
+        ],
         "items": [
             {"panel": p[0], "key": it["k"], "cn": it["cn"],
-             "cell": it["cell"], "wired": False}
+             "cell": it["cell"], "wired": it["k"] in wired}
             for p in PANELS for it in p[3]
         ] + [
             {"panel": "Apps", "key": it["k"], "cn": it["cn"],

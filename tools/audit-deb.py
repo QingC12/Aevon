@@ -227,14 +227,28 @@ def main():
         panes = []
     else:
         root_dict = plistlib.loads(root)
-        panes = [item.get("file") for item in root_dict.get("items", [])
-                 if item.get("cell") == "PSChildPaneSpecifier"]
-        missing = [p for p in panes if f"{BUNDLE_DIR}/{p}.plist" not in files]
         items = root_dict.get("items", [])
-        if missing:
-            bad(f"panes: referenced but not packaged: {', '.join(missing)}")
+        # 0.0.5 used PSChildPaneSpecifier and iOS refused to select the rows,
+        # so "8 panels" existed on paper only. Every entry row must now be a
+        # button that names an action and a panel, or the page is decorative.
+        panes, broken = [], []
+        for item in items:
+            if item.get("cell") != "PSButtonCell":
+                continue
+            panel = item.get("panel")
+            if not panel:
+                continue
+            panes.append(panel)
+            if item.get("action") != "openPanel:":
+                broken.append(f"{panel}: action={item.get('action')!r}")
+            if f"{BUNDLE_DIR}/{panel}.plist" not in files:
+                broken.append(f"{panel}: plist not packaged")
+        if broken:
+            bad("panes: " + "; ".join(broken))
+        elif len(panes) != 8:
+            bad(f"panes: {len(panes)} openable panels, expected 8")
         else:
-            ok(f"panes: {len(panes)} child panes all resolve, root has {len(items)} items")
+            ok(f"panes: {len(panes)} child panes open via openPanel:, root has {len(items)} items")
         if len(items) < 20:
             bad(f"root: only {len(items)} items — the page would render almost empty")
 
@@ -249,10 +263,10 @@ def main():
     else:
         ok("prefs: loads Root.plist explicitly into the specifiers ivar")
 
-    # -- 5c. carrier shape (0.0.5) ------------------------------------------
-    # The ring is the first real rendering code in this project, and its three
-    # regressions are all silent: a lost preview row, a lost shape switch, or a
-    # build that quietly dropped the view. Assert all three.
+    # -- 5c. carrier shape (0.0.5, wired to the desktop in 0.0.6) -----------
+    # The ring is the first real rendering code in this project, and its
+    # regressions are all silent: a lost preview row, a lost shape switch, a
+    # build that dropped the view, or a desktop host that was never mounted.
     ring_plist = files.get(f"{BUNDLE_DIR}/Ring.plist")
     if ring_plist is None:
         bad("ring: Ring.plist missing")
@@ -267,13 +281,28 @@ def main():
             bad("ring: no @ring.summary row — nothing reports the live geometry")
         elif len(shapes) != 4:
             bad(f"ring: {len(shapes)} of 4 shape switches present")
+        elif "!ring.desktop" not in keys:
+            bad("ring: no !ring.desktop switch — the desktop host cannot be turned off")
         else:
-            ok("ring: 4 shapes, live summary, preview action")
+            ok("ring: 4 shapes, live summary, preview action, desktop switch")
 
-    for token in (b"RingView", b"RingPreviewController",
+    for token in (b"RingView", b"RingPreviewController", b"openPanel:",
+                  b"PanelController", b"previewRing:",
                   b"_applicationIconImageForBundleIdentifier:"):
         if token not in prefs:
             bad(f"ring: {token.decode()} missing from the bundle binary")
+
+    # -- 5d. the desktop host must actually be in the tweak ------------------
+    dylib_early = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
+    for token in (b"RingHost", b"ringSlots", b"LSApplicationWorkspace"):
+        if token not in dylib_early:
+            bad(f"host: {token.decode()} missing from Aevon.dylib — "
+                "the ring would never appear on the home screen")
+    if b"com.aevon.prefs" not in prefs:
+        bad("host: settings never posts com.aevon.prefs — changes would not reach SpringBoard")
+    if b"/var/mobile/Library/Logs/Aevon/ring.plist" not in prefs \
+            or b"/var/mobile/Library/Logs/Aevon/ring.plist" not in dylib_early:
+        bad("host: ring.plist path missing from one side — the two processes would disagree")
 
     # -- 6. log path contract ----------------------------------------------
     dylib = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")

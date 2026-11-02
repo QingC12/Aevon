@@ -23,8 +23,8 @@ final class RingView: UIView {
     var onPick: ((RingApp) -> Void)?
 
     private(set) var config: RingConfig
-    private let apps: [RingApp]
-    private let pivot: CGPoint
+    private var apps: [RingApp]
+    private var pivot: CGPoint
 
     private var iconViews: [UIView] = []
     private var targetCenters: [CGPoint] = []
@@ -165,6 +165,46 @@ final class RingView: UIView {
             targetCenters[index] = slots[index].center
             view.center = slots[index].center
         }
+    }
+
+    /// Re-applies a configuration that changes the icon *count* (radius, icon
+    /// width and shape all do). The old icons are removed and new ones bloom
+    /// out of the pivot, which is what "the shape changed" should look like —
+    /// sliding eight icons into six slots would only look like a glitch.
+    func rebuild(config newConfig: RingConfig, apps newApps: [RingApp]? = nil) {
+        config = newConfig
+        if let newApps = newApps { apps = newApps }
+
+        for view in iconViews { view.removeFromSuperview() }
+        iconViews.removeAll()
+        targetCenters.removeAll()
+        iconCount = 0
+
+        build()
+        appear()
+    }
+
+    /// The pivot follows the grip when the screen rotates or the host window
+    /// changes size. Re-seating is instant: nothing is animating at that point.
+    func movePivot(_ point: CGPoint) {
+        pivot = point
+        let slots = ringSlots(pivot: pivot, count: iconCount, config: config)
+        for (index, view) in iconViews.enumerated() where index < slots.count {
+            targetCenters[index] = slots[index].center
+            view.center = slots[index].center
+        }
+    }
+
+    /// Only the icons take touches. Everything else in this view is empty
+    /// space, and in the floating window empty space has to fall through to
+    /// whatever is underneath — otherwise a full-screen ring would swallow
+    /// every tap on the home screen.
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard isUserInteractionEnabled, !isHidden, alpha > 0.01 else { return nil }
+        for view in iconViews where view.frame.insetBy(dx: -6, dy: -6).contains(point) {
+            return self
+        }
+        return nil
     }
 
     // MARK: Input

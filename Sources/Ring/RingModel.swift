@@ -69,6 +69,20 @@ struct RingConfig {
     var intensity: CGFloat = 0.7     // 强度
     var speed: CGFloat = 1           // 速度
 
+    /// "Put the grip on the home screen." Not one of the master's 81 keys, so
+    /// it is prefixed and kept out of the generated table. Ships on: a shape
+    /// nobody can see is not a feature.
+    var desktop: Bool = true
+
+    /// Every key whose change has to be mirrored to ring.plist. One list, so a
+    /// new ring control cannot be added to the UI and forgotten here.
+    static let mirroredKeys: Set<String> = [
+        "RTSIF", "RTSIH", "RTSIQ", "RTSIZ",
+        "Radius", "IconWidth", "RotationAngle", "LastIconAngle",
+        "DampingFraction", "CustomSpringAnimation", "VIBRATE", "INTENSITY",
+        "Speed", "!ring.desktop",
+    ]
+
     /// Gap kept between two neighbouring icons, in points. The master's own
     /// screenshots never show icons touching, so this is a floor, not a taste.
     static let iconGap: CGFloat = 6
@@ -119,11 +133,86 @@ struct RingConfig {
         config.haptic = flag("VIBRATE", true)
         config.intensity = clamp(number("INTENSITY", 0.7), 0.10, 1.0)
         config.speed = clamp(number("Speed", 1), 0.2, 2.0)
+        config.desktop = flag("!ring.desktop", true)
         return config
     }
 
     private static func clamp(_ value: CGFloat, _ low: CGFloat, _ high: CGFloat) -> CGFloat {
         return Swift.min(high, Swift.max(low, value))
+    }
+
+    // MARK: Snapshot — the cross-process channel
+
+    /// The settings process writes this file after every change; SpringBoard
+    /// reads it when the Darwin notification arrives. Preferences alone are
+    /// not enough on roothide (Library/Preferences is redirected per process),
+    /// and a file is the one thing both processes see the same way.
+    var snapshot: [String: Any] {
+        return [
+            "shape": shape.title,
+            "shapeIndex": shape.rawValue,
+            "RTSIF": shape == .full,
+            "RTSIH": shape == .half,
+            "RTSIQ": shape == .quarter,
+            "RTSIZ": shape == .free,
+            "Radius": Double(radius),
+            "IconWidth": Double(iconWidth),
+            "RotationAngle": Double(rotation),
+            "LastIconAngle": Double(tail),
+            "DampingFraction": Double(damping),
+            "CustomSpringAnimation": customSpring,
+            "VIBRATE": haptic,
+            "INTENSITY": Double(intensity),
+            "Speed": Double(speed),
+            "capacity": capacity,
+            "summary": summary,
+            "desktop": desktop,
+            "writtenAt": Date().timeIntervalSince1970,
+        ]
+    }
+
+    @discardableResult
+    func writeSnapshot() -> Bool {
+        try? FileManager.default.createDirectory(atPath: Aevon.stateDir,
+                                                 withIntermediateDirectories: true)
+        return (snapshot as NSDictionary).write(toFile: Aevon.ringPath, atomically: true)
+    }
+
+    static func loadSnapshot() -> RingConfig? {
+        guard let dict = NSDictionary(contentsOfFile: Aevon.ringPath) as? [String: Any] else {
+            return nil
+        }
+        // A snapshot without a readable shape was not written by this version;
+        // ignore it instead of inventing a geometry from half a file.
+        guard let raw = (dict["shapeIndex"] as? NSNumber)?.intValue,
+              let shape = RingShape(rawValue: raw) else { return nil }
+
+        func number(_ key: String, _ fallback: CGFloat) -> CGFloat {
+            return (dict[key] as? NSNumber).map { CGFloat($0.doubleValue) } ?? fallback
+        }
+        func flag(_ key: String, _ fallback: Bool) -> Bool {
+            return (dict[key] as? NSNumber)?.boolValue ?? fallback
+        }
+
+        var config = RingConfig()
+        config.shape = shape
+        config.radius = clamp(number("Radius", 64), 40, 120)
+        config.iconWidth = clamp(number("IconWidth", 44), 28, 64)
+        config.rotation = clamp(number("RotationAngle", 0), -180, 180)
+        config.tail = clamp(number("LastIconAngle", 0), -180, 180)
+        config.damping = clamp(number("DampingFraction", 0.82), 0.10, 1.0)
+        config.customSpring = flag("CustomSpringAnimation", true)
+        config.haptic = flag("VIBRATE", true)
+        config.intensity = clamp(number("INTENSITY", 0.7), 0.10, 1.0)
+        config.speed = clamp(number("Speed", 1), 0.2, 2.0)
+        config.desktop = flag("desktop", true)
+        return config
+    }
+
+    /// What SpringBoard uses: the snapshot first (it is what the operator just
+    /// changed), the preference domain second (a fresh install has no file yet).
+    static func loadRuntime() -> RingConfig {
+        return loadSnapshot() ?? load()
     }
 
     // MARK: Derived

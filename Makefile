@@ -20,16 +20,22 @@ include $(THEOS)/makefiles/common.mk
 # binaries, so SpringBoard and Settings can never disagree about paths/gates.
 AE_CORE := Sources/Core/Paths.swift Sources/Core/Log.swift Sources/Core/Gate.swift
 
+# The ring's model + icons + view are compiled into BOTH binaries on purpose:
+# the settings preview and the home-screen host must render the same shape from
+# the same numbers, or "it looks different on the desktop" becomes
+# unfalsifiable.
+AE_RING := Sources/Ring/RingModel.swift Sources/Ring/RingIcons.swift \
+           Sources/Ring/RingView.swift
+
 # ---------------------------------------------------------------------------
 # SpringBoard tweak. One C file (the load-time constructor Swift cannot
 # declare), the rest Swift.
 # ---------------------------------------------------------------------------
 TWEAK_NAME := Aevon
-Aevon_FILES := Sources/AevonBoot.m Sources/Boot.swift $(AE_CORE)
-Aevon_FRAMEWORKS := Foundation
+Aevon_FILES := Sources/AevonBoot.m Sources/Boot.swift $(AE_CORE) $(AE_RING) \
+               Sources/Ring/RingHost.swift
+Aevon_FRAMEWORKS := Foundation UIKit
 # Swift metadata is the bulk of a Swift dylib; dead-strip keeps it honest.
-# The rpath is where iOS keeps libswiftCore (12.2+); harmless if Theos already
-# adds it, fatal if nobody does.
 Aevon_LDFLAGS := -Wl,-dead_strip
 
 include $(THEOS_MAKE_PATH)/tweak.mk
@@ -43,10 +49,11 @@ include $(THEOS_MAKE_PATH)/tweak.mk
 # adding an install-time dependency on the framework.
 # ---------------------------------------------------------------------------
 BUNDLE_NAME := AevonPrefs
-AE_RING := Sources/Ring/RingModel.swift Sources/Ring/RingIcons.swift \
-           Sources/Ring/RingView.swift Sources/Ring/RingPreviewController.swift
 
-AevonPrefs_FILES := $(AE_CORE) $(AE_RING) Sources/Prefs/RootListController.swift
+AevonPrefs_FILES := $(AE_CORE) $(AE_RING) \
+                    Sources/Ring/RingPreviewController.swift \
+                    Sources/Prefs/PanelController.swift \
+                    Sources/Prefs/RootListController.swift
 AevonPrefs_INSTALL_PATH := /Library/PreferenceBundles
 AevonPrefs_FRAMEWORKS := Foundation UIKit
 AevonPrefs_LDFLAGS := -Wl,-undefined,dynamic_lookup -Wl,-dead_strip

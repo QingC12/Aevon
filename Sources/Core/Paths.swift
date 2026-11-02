@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.0.5"
+    public static let version = "0.0.6"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -31,6 +31,15 @@ public enum Aevon {
     public static let statePath = "/var/mobile/Library/Logs/Aevon/state.plist"
     public static let panicPath = "/var/mobile/Library/Logs/Aevon/panic"
 
+    /// The carrier-shape values, mirrored out of the preferences domain.
+    ///
+    /// Why a file as well as the domain: on roothide, Library/Preferences is
+    /// redirected per process, so Settings and SpringBoard can read two
+    /// different copies of "Radius". This path is plain and shared, the same
+    /// reason state.plist lives here. Settings writes it on every change,
+    /// SpringBoard reads it on every notification.
+    public static let ringPath = "/var/mobile/Library/Logs/Aevon/ring.plist"
+
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"
     public static let legacyStatePath = "/var/mobile/Library/Preferences/com.aevon.state.plist"
@@ -43,6 +52,12 @@ public enum Aevon {
     public static let noteCommand    = "com.aevon.command"
     public static let commandRespring = "respring"
     public static let commandReset    = "reset"
+
+    /// "A setting changed, re-read it." Sent after every write from Settings,
+    /// and also posted by the tweak so a second Settings window stays honest.
+    /// The payload is not in the notification: whoever receives it reads the
+    /// snapshot file, which is written *before* this is posted.
+    public static let notePrefs      = "com.aevon.prefs"
 }
 
 // MARK: - Darwin notifications

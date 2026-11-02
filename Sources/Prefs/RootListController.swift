@@ -58,17 +58,12 @@ final class RootListController: PSListController {
         if let existing = specifiers, existing.count > 0 { return }
 
         let bundle = Bundle(for: RootListController.self)
-
-        var list = loadSpecifiers(fromPlistName: "Root", target: self)
-        if (list?.count ?? 0) == 0,
-           responds(to: NSSelectorFromString("loadSpecifiersFromPlistName:target:bundle:")) {
-            list = loadSpecifiers(fromPlistName: "Root", target: self, bundle: bundle)
+        let rows = SpecifierBootstrap.load(named: "Root", target: self, bundle: bundle)
+        if (rows?.count ?? 0) > 0 {
+            specifiers = rows
+        } else {
+            specifiers = diagnosticRows(bundle: bundle)
         }
-        if (list?.count ?? 0) == 0 {
-            list = diagnosticRows(bundle: bundle)
-        }
-
-        specifiers = list ?? NSMutableArray()
         Log.write("prefs: \(specifiers?.count ?? 0) rows, bundle=\(bundle.bundlePath)")
     }
 
@@ -154,6 +149,31 @@ final class RootListController: PSListController {
     }
 
     // MARK: Actions
+
+    /// Opens one of the eight panels.
+    ///
+    /// 0.0.5 left this to PSChildPaneSpecifier and the rows were dead on this
+    /// iOS: no selection, no push, nothing. The rows are buttons now and the
+    /// controller is built here, so the only way a panel can fail to open is a
+    /// missing plist — which PanelController then renders as a readable line
+    /// instead of an empty page.
+    @objc func openPanel(_ specifier: PSSpecifier) {
+        guard let panel = specifier.property(forKey: "panel") as? String,
+              !panel.isEmpty else {
+            alert("面板未配置", "这一行没有 panel 键，无法确定要打开哪个面板。")
+            return
+        }
+        let title = (specifier.property(forKey: "label") as? String) ?? panel
+        let controller = PanelController(panelID: panel, title: title)
+
+        if let navigation = navigationController {
+            navigation.pushViewController(controller, animated: true)
+        } else {
+            let wrapper = UINavigationController(rootViewController: controller)
+            present(wrapper, animated: true)
+        }
+        Log.write("prefs: open panel \(panel)")
+    }
 
     @objc func clearAttempts(_ specifier: PSSpecifier) {
         Gate.resetAttempts()
