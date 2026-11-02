@@ -441,10 +441,12 @@ zStackParticipantDidChange:
                 continue
             }
             // `_NSZombie_<X>` classes are minted on demand the first time an
-            // object of class X is freed. Walking one while that same class is
-            // still being built is the cleanest way to fault on a method list
-            // that is half attached — and no selector of ours lives there.
-            if name.hasPrefix("_NSZombie_") {
+            // object of class X is freed, and `__`-prefixed classes are minted
+            // by the runtime itself. Walking one while that same class is still
+            // being built is the cleanest way to fault on a method list that is
+            // half attached — and no selector of ours lives there. The class
+            // that ended two runs, `__NSGenericDeallocHandler`, is one of these.
+            if name.hasPrefix("__") || name.hasPrefix("_NSZombie_") {
                 callSkipped += 1
                 continue
             }
@@ -462,7 +464,7 @@ zStackParticipantDidChange:
         Log.write("calls: definition begin v2 targets=" + String(callTargets.count)
                   + " classes=" + String(callCeiling)
                   + " phase1=" + String(callEdge)
-                  + " scope=phase1"
+                  + " scope=full"
                   + " skip=" + String(callSkipped))
         // No empty-queue guard: an empty queue simply walks nothing and the end
         // line reports `upto=0 of 0`. The guard that used to stand here cost
@@ -512,7 +514,11 @@ zStackParticipantDidChange:
         // process died at 9827 — 9826 classes of answers collected and never
         // printed. A chunk that straddles the edge can lose the whole answer,
         // so no chunk straddles it.
-        let stop = callEdge > 0 ? min(callEdge, callCeiling) : callCeiling
+        let stop = callCeiling
+        // The family answer is printed at the edge and never again lost, so the
+        // walk no longer has to stop there. 9827 classes took under a second in
+        // 0.0.11; the remaining ninety thousand are the same kind of cheap read.
+        var nextCheck = 10000
         callStateFD = open(Aevon.callStatePath, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
         if callStateFD < 0 {
             Log.write("calls: death marker unavailable, walking without it")
@@ -527,7 +533,11 @@ zStackParticipantDidChange:
                 break
             }
             autoreleasepool {
-                let end = min(callCursor + 250, stop)
+                // Still no chunk straddles the edge, even though the edge is no
+                // longer the end of the walk: `phase1` hangs off the chunk
+                // boundary, and that is what makes it unlosable.
+                var end = min(callCursor + 250, stop)
+                if callCursor < callEdge, end > callEdge { end = callEdge }
                 while callCursor < end {
                     let cls = callQueue[callCursor]
                     mark(cls, index: callCursor)
@@ -539,6 +549,14 @@ zStackParticipantDidChange:
             if !callPhaseDone, callEdge > 0, callCursor >= callEdge {
                 callPhaseDone = true
                 emitPhase1()
+            }
+            // A checkpoint every ten thousand classes. These lines are the same
+            // `defined by` rows the final dump repeats, so the parser reads them
+            // as one table — but they mean a death in the tail costs at most ten
+            // thousand classes instead of everything the walk had learned.
+            if callCursor >= nextCheck, callCursor < stop {
+                nextCheck = callCursor + 10000
+                _ = emitRows()
             }
             let rss = residentMegabytes()
             // The progress line comes first, on purpose: when the ceiling broke
@@ -633,7 +651,12 @@ zStackParticipantDidChange:
         return Int(usage.ru_maxrss) / (1024 * 1024)
     }
 
-    private static func emitCallTable(reason: String) {
+    /// The rows, and only the rows. Checkpoints call this without the end line
+    /// on purpose: the end line is what tells the reader the dump is complete,
+    /// and a checkpoint is by definition not complete. tools/compare-calls.py
+    /// collects rows until it sees the end line, so the last end line wins and
+    /// the checkpoints simply look like a table that grew.
+    private static func emitRows() -> (Int, Int) {
         var missing = 0
         var multi = 0
         for selector in callTargets.sorted() {
@@ -649,17 +672,22 @@ zStackParticipantDidChange:
             }
             Log.write(line)
         }
+        return (missing, multi)
+    }
+
+    private static func emitCallTable(reason: String) {
+        let (missing, multi) = emitRows()
         // `upto` is not decoration: a scan that stopped early makes every
         // `n=0` above it a lie, and tools/compare-calls.py refuses to read a
         // partial dump as a verdict for exactly that reason. `skip` is the same
         // warning from the other side — classes dropped on purpose cannot be
-        // the owner of anything either. `scope=phase1` says the stop was
-        // chosen, not suffered: `upto` below `of` by design, and a `n=0` here
-        // means "not one of the families", which is not a verdict at all.
+        // the owner of anything either. `scope=full` says the walk was asked for
+        // everything, so `upto` below `of` is a real truncation and the tool
+        // treats it as one.
         Log.write("calls: definition end v2 missing=" + String(missing)
                   + " capped=" + String(multi)
                   + " upto=" + String(callCursor) + " of " + String(callQueue.count)
-                  + " scope=phase1"
+                  + " scope=full"
                   + " skip=" + String(callSkipped)
                   + " secs=" + String(Int(Date().timeIntervalSince(callStart)))
                   + reason)

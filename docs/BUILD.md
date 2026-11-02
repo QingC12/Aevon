@@ -333,3 +333,38 @@ SpringBoard 开机后的峰值本来就几百 MB，所以这个闸在第一个�
 `dumpIvars`、无人调用的 `matrix` 类重载），腾出体积给调用点这一路。面板上的按钮
 保留 —— 删行会改面板，而面板不是这轮要测的东西 —— 按下只会写一行
 `scene2: retired in 0.0.11`。
+
+### 8.5 家族段跑通了：114 / 123（0.0.11 第一次真机成功，0.0.12 放开全程）
+
+0.0.11 的日志（`Aevon(9)`）终于是成功形态：
+
+```
+21:49:31 begin v2 targets=123 classes=99373 phase1=9827 scope=phase1 skip=1
+21:49:38 phase1 done hits=114 of 123 scanned=9827 secs=6
+21:49:38 definition end v2 missing=9 capped=33 upto=9827 of 99373 scope=phase1 skip=1 secs=6
+```
+
+- **没有再进安全模式**，9827 个家族类不到 1 秒走完（`secs=6` 里 6 秒是延迟）；
+- **114 条有主**，9 条 `n=0`；`compare-calls.py` 判定 **8 MATCH / 106 PRESENT / 9 OUT-OF-SCOPE**，
+  0 条 OWNER-DIFF、0 条 ENCODING-DIFF；
+- **承载关键的那条坐实了**：`createPresenterWithIdentifier:priority:` → `UIScenePresentationManager`
+  `@32@0:8@16q24`，与逆向记录一致（MATCH）。
+
+9 条 OUT-OF-SCOPE 的共同点：逆向记录里没有归属（`逆向: -`），所以不能靠「比对」解决，
+只能靠「找到谁定义它」：`_dismissPresentable:…`、`presentPresentable:withOptions:userInfo:`、
+`_handleTapOnView:`、`gestureRecognizer:shouldReceivePress:`、
+`iconManager:launchIconForIconView:withActions:`、`isApplicationForeground:`、
+`materialViewWithRecipe:configuration:initialWeighting:`、`setHandleClick:`、
+`settingsWithDuration:timingFunction:`。
+
+它们的类名多半落在家族前缀之外（`MTMaterialView` = CoreMaterial、`BNPresentable` = BannerKit …）。
+0.0.12 因此放开两件事：
+
+| 改动 | 理由 |
+|---|---|
+| 走全程（`scope=full`，99373 个类），不再封顶在边界 | 家族答案在边界处已经落盘、不会丢；9.9 万类实测约几秒，没有理由不扫 |
+| 跳过所有 `__` 前缀类（原来只跳 `_NSZombie_`） | 两次带走进程的 `__NSGenericDeallocHandler` 正是这一类；它们是运行时铸造的，123 条选择子不可能住在里面 |
+| 每 1 万个类落一次「只有行、没有结束行」的检查点（`emitRows`） | 尾巴里若还有毒类，损失上限是 1 万个类，而不是整趟白跑 |
+
+`scope=full` 之后 `upto < of` 重新是**真截断**，`compare-calls.py` 恢复 `[PARTIAL]` 判定与退出 2；
+只有 `upto == of` 才可能给出对齐结论。
