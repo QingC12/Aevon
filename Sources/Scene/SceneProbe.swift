@@ -201,6 +201,25 @@ enum SceneProbe {
 
     // MARK: - Call table (the master's own calls, asked of iOS 17.3.1)
 
+    /// `objc_copyClassList` hands back an autoreleasing pointer, which cannot be
+    /// freed without a conversion Swift will not make; `objc_getClassList` into
+    /// our own buffer is the same information with an owner. The first call is
+    /// how you ask how big it has to be.
+    ///
+    /// It lived in the surface dump until 0.0.11 retired that dump — and retired
+    /// this with it, which the compiler caught on the next push. It belongs to
+    /// the call table now, and the call table is the only caller.
+    private static func allClasses() -> [AnyClass] {
+        let total = objc_getClassList(nil, 0)
+        guard total > 0 else { return [] }
+        let buffer = UnsafeMutablePointer<AnyClass>.allocate(capacity: Int(total))
+        defer { buffer.deallocate() }
+        let count = objc_getClassList(AutoreleasingUnsafeMutablePointer(buffer), total)
+        guard count > 0 else { return [] }
+        return (0..<Int(count)).map { buffer[$0] }
+    }
+
+
     /// Every selector the reverse notes found in Stheno's `__objc_methname`,
     /// one per line, minus the three entries in that dump that only look like
     /// selectors: an https URL, a dyld rpath, and a stray type encoding.
