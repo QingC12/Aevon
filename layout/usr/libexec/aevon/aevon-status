@@ -1,0 +1,36 @@
+#!/bin/sh
+# aevon-status — 一眼看清 Aevon 当前是否在生效、为什么停用。
+set -u
+export PATH="/var/jb/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+D="/var/mobile/Library/Preferences"
+P="$D/com.aevon.panic"
+S="$D/com.aevon.state.plist"
+L="/var/mobile/Library/Logs/Aevon/aevon.log"
+
+echo "===== Aevon status ====="
+if [ -f "$P" ]; then
+  echo "panic flag : PRESENT  -> Aevon is fully disabled"
+else
+  echo "panic flag : absent"
+fi
+
+if [ -f "$S" ]; then
+  echo "state file : $S"
+  echo "--- state ---"
+  cat "$S"
+  echo "------------"
+else
+  echo "state file : none (never loaded, or cleared)"
+fi
+
+echo ""
+echo "loaded dylibs:"
+ls -l /var/jb/Library/MobileSubstrate/DynamicLibraries/ 2>/dev/null | grep -i aevon
+
+echo ""
+echo "SpringBoard up: $(ps -o etime= -p $(pgrep -x SpringBoard 2>/dev/null | head -1) 2>/dev/null || echo unknown)"
+
+echo ""
+echo "last log lines:"
+tail -n 20 "$L" 2>/dev/null || echo "(no log)"
+echo "========================"

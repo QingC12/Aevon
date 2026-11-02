@@ -1,0 +1,88 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 40
+    env:
+      THEOS: ${{ github.workspace }}/.theos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore Theos + SDK cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: .theos
+          key: theos-macos14-sdk16.5-v1
+
+      - name: Install Theos
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/sdks"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git /tmp/sdks
+          git -C /tmp/sdks sparse-checkout set iPhoneOS16.5.sdk
+          cp -R /tmp/sdks/iPhoneOS16.5.sdk "$THEOS/sdks/"
+
+      - name: Verify toolchain layout
+        run: |
+          set -euxo pipefail
+          test -d "$THEOS/makefiles"
+          test -d "$THEOS/sdks/iPhoneOS16.5.sdk"
+          echo "THEOS=$THEOS"
+          ls "$THEOS/sdks"
+
+      - name: Install packaging deps
+        run: |
+          set -euxo pipefail
+          if ! command -v ldid >/dev/null 2>&1; then
+            brew install ldid
+          fi
+          command -v ldid
+          xcodebuild -version
+          clang --version | head -2
+
+      - name: Build rootless deb
+        run: |
+          set -euxo pipefail
+          make clean || true
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          echo "--- packages ---"
+          ls -la packages/ || true
+
+      - name: Gate — audit package payload
+        run: |
+          set -euxo pipefail
+          DEB="$(ls packages/*.deb | head -1)"
+          bash ./tools/audit-deb.sh "$DEB"
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: aevon-deb
+          path: packages/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/*.deb
+          generate_release_notes: true

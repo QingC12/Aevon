@@ -1,0 +1,13 @@
+#!/bin/sh
+# aevon-uninstall — 彻底卸载，并把状态清干净。越狱环境不动。
+set -u
+export PATH="/var/jb/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+echo "[aevon] removing package..."
+dpkg -r com.aevon.aevon 2>/dev/null || apt-get remove -y com.aevon.aevon 2>/dev/null || echo "warn: dpkg failed, use Sileo/Zebra to remove 'Aevon'"
+
+rm -f /var/mobile/Library/Preferences/com.aevon.panic 2>/dev/null
+rm -f /var/mobile/Library/Preferences/com.aevon.state.plist 2>/dev/null
+
+echo "[aevon] reloading SpringBoard..."
+killall -9 SpringBoard 2>/dev/null || echo "warn: reboot manually"

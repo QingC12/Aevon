@@ -1,0 +1,12 @@
+#!/bin/sh
+# aevon-enable — 清掉 panic 标记与自禁用状态，让 Aevon 下次加载时重新开始。
+set -u
+export PATH="/var/jb/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+D="/var/mobile/Library/Preferences"
+P="$D/com.aevon.panic"
+S="$D/com.aevon.state.plist"
+
+rm -f "$P" 2>/dev/null
+rm -f "$S" 2>/dev/null
+echo "[aevon] cleared panic flag and state"
+echo "[aevon] attempt counter reset; reload SpringBoard to arm: sbreload"

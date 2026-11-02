@@ -1,0 +1,58 @@
+# 阶段计划与验收闸门
+
+每一期都产出一个可独立安装、可独立回退的 deb。**上一期真机验收不通过，不允许开下一期。**
+这不是形式主义：0.0.86→0.0.87 已经为"跳过验收"付过一次代价。
+
+| 期 | 内容 | 关键产出 | 验收闸门（全部真机通过才算过） |
+|---|---|---|---|
+| **P0** | 安全骨架 | 空 hook dylib + 三道闸门 + 救援脚本 + CI | 见下方 P0 清单 |
+| **P1** | 承载模型 | `UIScenePresentationManager` 建立独立 Scene | 空窗口常驻 30 分钟不崩、不卡、不发热异常 |
+| **P2** | 几何 | 窗口尺寸/圆角/贴边/比例 | 旋转、分屏、键盘弹出后几何不漂 |
+| **P3** | 手势 | 拖动、甩动、贴边缩入、长按 | 连续 200 次操作无丢手势、无卡死 |
+| **P4** | 圆盘 | 扇形展开、图标排布、旋转 | 展开/收起 100 次无可感知掉帧 |
+| **P5** | 保活 | `interceptUpdateWithNewSettings:` 改参数 | 后台 8 小时窗口仍在，且**不产生额外 Assertion 日志** |
+| **P6** | 键盘 | 独立键盘桥 dylib | 键盘弹出/收起时窗口避让正确，输入不丢焦点 |
+| **P7** | 设置 | PreferenceBundle，81 键对齐 | 每个开关改完 `sbreload` 后行为正确 |
+| **P8** | 扩展 | URL/通知/外跳拦截 | 只对用户显式添加的 App 生效，不误伤系统 |
+| **P9** | 验收 | 双机盲测 | 与母本同一档位可调，盲测说不出差别 |
+
+---
+
+## P0 验收清单（当前阶段）
+
+装完 `sbreload` 后：
+
+- [ ] `aevon-status` 显示 `panic flag : absent`，`attempts = 1`
+- [ ] 60 秒后 `attempts` 变成 `0`，出现 `stableSince`
+- [ ] `aevon.log` 里有 `boot ok: stage 0` 一行
+- [ ] 桌面行为与安装前**完全一致**（Stage 0 不装任何 hook，肉眼应看不出任何变化）
+- [ ] 新建 panic 文件 + `killall -9 SpringBoard` → 日志里出现 `gate G0`，桌面正常
+- [ ] 删掉 panic 文件 + `sbreload` → 恢复加载
+- [ ] 手工把 state.plist 的 `disabled` 改成 `true` → 日志出现 `gate G1`，不再加载
+- [ ] 连续 4 次「加载后 10 秒内 `killall -9 SpringBoard`」→ 第 4 次日志出现 `gate G2`，之后永久停用
+- [ ] `aevon-enable` 后恢复正常
+
+**任何一项不过，不进入 P1。**
+
+---
+
+## P1 的前置取证（必须在写代码之前完成）
+
+这两项只能在真机上做，做完再动手，否则场景挂载一定返工：
+
+1. **`_scene:interceptUpdateWithNewSettings:` 的返回值语义**
+   用 `method_getTypeEncoding` 读出签名，确认返回类型与参数含义；在单个 Scene 上看 20 次真实调用。
+   猜错 = SpringBoard 崩。
+
+2. **浮窗 Scene 与 App 主场景的父子关系**
+   `lsappinfo` dump 场景树，确认 `UIScenePresentationManager` 创建的 presenter 挂在哪个 `FBScene` 下。
+
+第三项（圆盘展开插值曲线）可以纯本地做：二进制在手，capstone 已具备，只差定位函数入口。
+
+---
+
+## 回退策略
+
+- 每个 tag 的 deb 都留在 Release 里，回退 = `dpkg -i` 旧包；
+- 状态文件跨版本保留，所以"降级后仍被自禁用"是预期行为，需要 `aevon-enable` 显式重置；
+- 阶段号写在 `Makefile` 的 `AEVON_STAGE`，CI 会把它编进二进制，日志里能直接看出装的是哪一期。

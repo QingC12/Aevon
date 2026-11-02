@@ -1,0 +1,18 @@
+#!/bin/sh
+# aevon-disable — 立刻停用 Aevon，不需要重装、不需要重启。
+# 可以在 SSH、NewTerm、或任何能执行命令的地方运行。
+set -u
+export PATH="/var/jb/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+P="/var/mobile/Library/Preferences/com.aevon.panic"
+
+mkdir -p "$(dirname "$P")" 2>/dev/null
+{
+  echo "disabled by rescue"
+  date
+} > "$P" 2>/dev/null || echo "warn: cannot write $P"
+chmod 644 "$P" 2>/dev/null
+
+echo "[aevon] panic flag: $P"
+echo "[aevon] Aevon will not install a single hook while this file exists."
+echo "[aevon] reloading SpringBoard..."
+killall -9 SpringBoard 2>/dev/null || echo "warn: killall failed, reboot manually"

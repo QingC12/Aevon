@@ -1,0 +1,33 @@
+#!/bin/sh
+#
+# Aevon postinst — deliberately boring.
+#
+# Rules for this script:
+#   1. It must never return non-zero (a failed postinst leaves dpkg dirty).
+#   2. It must never modify a system file.
+#   3. It must never restart SpringBoard. Activation is a separate,
+#      human decision — you get a chance to look at the package first.
+#
+set +e
+
+MOBILE_ROOT="/var/mobile"
+LOG_DIR="$MOBILE_ROOT/Library/Logs/Aevon"
+
+mkdir -p "$LOG_DIR" 2>/dev/null
+chown -R mobile:mobile "$LOG_DIR" 2>/dev/null
+
+echo ""
+echo "  Aevon installed (Stage 0 — safety skeleton, zero hooks)."
+echo ""
+echo "  SpringBoard was NOT restarted on purpose."
+echo "  Nothing happens until you reload SpringBoard:"
+echo "      sbreload        (or: killall -9 SpringBoard)"
+echo ""
+echo "  Emergency stop at any time:"
+echo "      touch /var/mobile/Library/Preferences/com.aevon.panic"
+echo "      killall -9 SpringBoard"
+echo ""
+echo "  Full status:  /var/jb/usr/libexec/aevon/aevon-status"
+echo ""
+
+exit 0

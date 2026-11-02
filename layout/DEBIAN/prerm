@@ -1,0 +1,11 @@
+#!/bin/sh
+#
+# Aevon prerm — keeps your state so a reinstall does not silently
+# re-arm a tweak that had already disabled itself.
+#
+set +e
+
+echo "[Aevon] removing. State kept at /var/mobile/Library/Preferences/com.aevon.state.plist"
+echo "[Aevon] a stale SpringBoard copy stays loaded until you reload SpringBoard."
+
+exit 0
