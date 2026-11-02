@@ -772,7 +772,7 @@ zStackParticipantDidChange:
     /// come back", and nothing beyond it.
     static func runWindow() {
         guard let manager = AevonSceneManager() as? NSObject else {
-            Log.write("win: no FBSceneManager in this process")
+            Log.write("win: no manager")
             return
         }
         Log.write("win: begin manager cls=" + NSStringFromClass(type(of: manager)))
@@ -799,7 +799,7 @@ zStackParticipantDidChange:
         Log.write("win: scenes=" + String(seen))
 
         guard let model = template else {
-            Log.write("win: no template scene, stop before build")
+            Log.write("win: no template")
             return
         }
         buildScene(from: model, manager: manager)
@@ -858,7 +858,7 @@ zStackParticipantDidChange:
 
     private static func buildScene(from template: NSObject, manager: NSObject) {
         guard let definition = mutable(value(of: template, "definition")) else {
-            Log.write("win: build skipped, no definition")
+            Log.write("win: no definition")
             return
         }
         let settings = mutable(value(of: template, "settings"))
@@ -872,18 +872,18 @@ zStackParticipantDidChange:
         if AevonAnswers(definition, "setIdentifier:", 1) {
             _ = definition.perform(NSSelectorFromString("setIdentifier:"),
                                    with: "com.aevon.floater" as NSString)
-            Log.write("win: identifier rewritten on definition")
+            Log.write("win: id set on definition")
         } else if let identity = value(of: definition, "identity"),
                   AevonAnswers(identity, "setIdentifier:", 1) {
             // A scene definition keeps its identity in a nested object on some
             // releases; the identifier lives there, not on the definition.
             _ = identity.perform(NSSelectorFromString("setIdentifier:"),
                                  with: "com.aevon.floater" as NSString)
-            Log.write("win: identifier rewritten on identity")
+            Log.write("win: id set on identity")
         } else {
             let kept = value(of: definition, "identifier").map { String(describing: $0) } ?? "?"
-            Log.write("win: no identifier setter (definition or identity), would keep id=" + kept)
-            Log.write("win: build aborted, a shared identifier would evict the owner")
+            Log.write("win: no id setter, keep=" + kept)
+            Log.write("win: aborted: id would collide")
             return
         }
 

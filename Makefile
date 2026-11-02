@@ -41,6 +41,12 @@ Aevon_FILES := Sources/AevonBoot.m Sources/AevonScene.m Sources/Boot.swift $(AE_
 Aevon_FRAMEWORKS := Foundation UIKit
 # Swift metadata is the bulk of a Swift dylib; dead-strip keeps it honest.
 Aevon_LDFLAGS := -Wl,-dead_strip
+# -Osize, not -O. The dylib sits 1.2 KB over a hard 320 KB budget and the window
+# build needs that room. This trades a little speed for bytes, which is the right
+# way round for code that runs once per button press. Deleting source does not
+# help: 46 lines came out in 0.0.14 and the file shrank by 64 bytes, because the
+# weight is type metadata, not instructions.
+Aevon_SWIFTFLAGS := -Osize
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 

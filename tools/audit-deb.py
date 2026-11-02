@@ -413,7 +413,7 @@ def main():
     # arrived", which is the one wrong answer that costs a full round trip.
     for token in (b"scene: probe begin", b"scene: probe end",
                   b"scene: window level", b"scene: carrier view", b"scene: live scenes",
-                  b"win: begin manager", b"win: scenes=", b"win: calling _createScene"):
+                  b"win: begin manager", b"win: no template", b"win: calling _createScene"):
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the probe would never reach SpringBoard")
