@@ -50,16 +50,17 @@ def api(path, data=None, method=None):
 
 
 def tracked_files():
+    # -z 是关键：不加的话 git 会把非 ASCII 路径转义成 "\344\272..."，
+    # 中文文档名会直接 open() 失败。NUL 分隔的原始字节没有这个问题。
     out = subprocess.run(
-        ["git", "ls-files", "-s"], capture_output=True, text=True, check=True
+        ["git", "ls-files", "-s", "-z"], capture_output=True, check=True
     ).stdout
     files = []
-    for line in out.splitlines():
-        if not line.strip():
+    for entry in out.split(b"\x00"):
+        if not entry.strip():
             continue
-        meta, path = line.split("\t", 1)
-        mode = meta.split()[0]
-        files.append((path, mode))
+        meta, path = entry.split(b"\t", 1)
+        files.append((path.decode("utf-8"), meta.split()[0].decode()))
     return files
 
 

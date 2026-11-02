@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aevon 交付报告 · Stage 1 设置面 · 2026-11-02</title>
+<style>
+  :root{
+    --bg:#0a0d13; --bg2:#0f131c; --card:#121722; --card2:#161c28;
+    --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.13);
+    --tx:#e8edf6; --tx2:#9aa7bd; --tx3:#6b7688;
+    --cy:#4dd4e8; --vi:#9d8cff; --am:#f0b45f; --gr:#5fd6a4; --rd:#ff7a86;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:radial-gradient(1200px 600px at 15% -10%,rgba(77,212,232,.09),transparent 60%),
+               radial-gradient(1000px 500px at 90% 0%,rgba(157,140,255,.08),transparent 55%),
+               var(--bg);
+    color:var(--tx);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased; line-height:1.65; padding:44px 28px 80px;
+  }
+  .wrap{max-width:1120px;margin:0 auto}
+  .eyebrow{font-size:12px;letter-spacing:.22em;color:var(--cy);text-transform:uppercase;font-weight:600}
+  h1{font-size:33px;line-height:1.28;font-weight:650;margin:12px 0 10px;letter-spacing:-.01em}
+  h1 em{font-style:normal;background:linear-gradient(92deg,var(--cy),var(--vi));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--tx2);font-size:14.5px;max-width:880px}
+  .meta{margin-top:18px;display:flex;gap:10px;flex-wrap:wrap}
+  .chip{font-size:12px;color:var(--tx2);border:1px solid var(--line2);border-radius:999px;padding:5px 12px;background:rgba(255,255,255,.02)}
+  .chip b{color:var(--tx);font-weight:600}
+  .kpi{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:34px 0 8px}
+  .k{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:16px 14px}
+  .k .n{font-size:24px;font-weight:650;letter-spacing:-.02em;line-height:1.2}
+  .k .n span{font-size:13px;color:var(--tx3);font-weight:500;margin-left:2px}
+  .k .l{font-size:11.5px;color:var(--tx3);margin-top:4px;letter-spacing:.02em}
+  .k.c1 .n{color:var(--cy)} .k.c2 .n{color:var(--vi)} .k.c3 .n{color:var(--am)}
+  .k.c4 .n{color:var(--gr)} .k.c5 .n{color:#c9d4e8} .k.c6 .n{color:#8fa3bf}
+  section{margin-top:44px}
+  .sh{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:22px}
+  .sh .num{font-size:12px;color:var(--cy);font-weight:700;letter-spacing:.12em}
+  .sh h2{font-size:19px;font-weight:600;letter-spacing:-.01em}
+  .sh .note{margin-left:auto;font-size:12px;color:var(--tx3)}
+  .bars{display:flex;flex-direction:column;gap:9px}
+  .bar{display:grid;grid-template-columns:150px 1fr 132px;align-items:center;gap:14px;font-size:13px}
+  .bar .nm{color:var(--tx2);display:flex;align-items:center;gap:8px;white-space:nowrap}
+  .dot{width:7px;height:7px;border-radius:2px;flex:none}
+  .track{height:9px;background:rgba(255,255,255,.045);border-radius:6px;overflow:hidden}
+  .fill{height:100%;border-radius:6px;background:linear-gradient(90deg,var(--cy),var(--vi));opacity:.85}
+  .bar .val{text-align:right;color:var(--tx3);font-variant-numeric:tabular-nums;font-size:12.5px}
+  .bar .val b{color:var(--tx);font-weight:600}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-weight:600;color:var(--tx3);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;padding:9px 10px;border-bottom:1px solid var(--line2)}
+  td{padding:10px;border-bottom:1px solid var(--line);color:var(--tx2);vertical-align:top}
+  td b{color:var(--tx);font-weight:600}
+  tr:hover td{background:rgba(255,255,255,.017)}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+  .sm{font-size:11.5px}
+  .ctr{text-align:center}
+  .num{color:var(--tx3);font-variant-numeric:tabular-nums}
+  .tag{display:inline-block;font-size:10.5px;padding:1.5px 7px;border-radius:5px;border:1px solid;line-height:1.5;white-space:nowrap}
+  .tA{color:var(--gr);border-color:rgba(95,214,164,.35);background:rgba(95,214,164,.08)}
+  .tB{color:var(--am);border-color:rgba(240,180,95,.35);background:rgba(240,180,95,.08)}
+  .tC{color:var(--rd);border-color:rgba(255,122,134,.35);background:rgba(255,122,134,.08)}
+  .tN{color:#8fa3bf;border-color:rgba(143,163,191,.35);background:rgba(143,163,191,.08)}
+  .tW{color:var(--am);border-color:rgba(240,180,95,.35);background:rgba(240,180,95,.08)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .card{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:14px;padding:18px}
+  .card h3{font-size:14px;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .card p{font-size:13px;color:var(--tx2)}
+  .card ul{margin:8px 0 0 2px;list-style:none;display:flex;flex-direction:column;gap:6px}
+  .card li{font-size:12.8px;color:var(--tx2);padding-left:14px;position:relative}
+  .card li::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;border-radius:50%;background:var(--cy);opacity:.7}
+  .hl{color:var(--tx);font-weight:600}
+  .steps{display:flex;flex-direction:column;gap:12px}
+  .step{display:grid;grid-template-columns:42px 1fr;gap:14px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .step .n{font-size:18px;font-weight:700;color:var(--cy);font-variant-numeric:tabular-nums;line-height:1.2}
+  .step.rep .n{color:var(--am)}
+  .step h4{font-size:13.5px;font-weight:600;margin-bottom:4px}
+  .step p{font-size:13px;color:var(--tx2)}
+  .expect{margin-top:8px;font-size:12.5px;color:var(--gr);background:rgba(95,214,164,.06);border-left:2px solid rgba(95,214,164,.5);padding:6px 10px;border-radius:0 6px 6px 0}
+  .fail{margin-top:6px;font-size:12.5px;color:var(--am);background:rgba(240,180,95,.06);border-left:2px solid rgba(240,180,95,.5);padding:6px 10px;border-radius:0 6px 6px 0}
+  .expect b,.fail b{color:var(--tx)}
+  footer{margin-top:52px;padding-top:18px;border-top:1px solid var(--line);color:var(--tx3);font-size:12px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+  @media(max-width:900px){
+    .kpi{grid-template-columns:repeat(3,1fr)}
+    .grid2,.grid3{grid-template-columns:1fr}
+    .bar{grid-template-columns:118px 1fr 104px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="eyebrow">Aevon · Stage 1 Delivery · 2026-11-02</div>
+  <h1>设置面复刻完成：<em>64 个设置项</em>全部就位，钩子数仍为 0</h1>
+  <p class="sub">
+    这一版把母本 Stheno 的整套设置界面按原键名搬了过来——开关、滑杆、分组、面板层级、每项的操作逻辑都在。
+    功能尚未接线，这是刻意的：<b style="color:var(--tx)">先把进度可视化，再逐项点亮</b>。
+    同时把「关掉它」这件事从终端搬进了图形界面，并让 10 项探针一次部署、一次读完。
+  </p>
+
+  <div class="meta">
+    <span class="chip">版本 <b>v0.1.0</b></span>
+    <span class="chip">设置项 <b>64</b>　文案键 <b>17</b>　合计 <b>81</b></span>
+    <span class="chip">安装包 <b>32,048 B</b>　payload <b>18 个文件</b></span>
+    <span class="chip">钩子 <b>0</b>　终端命令 <b>0</b></span>
+    <span class="chip">真机重启 <b>1～3 次</b></span>
+  </div>
+
+  <div class="kpi">
+    <div class="k c1"><div class="n">64<span>项</span></div><div class="l">设置项已复刻</div></div>
+    <div class="k c2"><div class="n">8<span>面板</span></div><div class="l">分组与母本对齐</div></div>
+    <div class="k c3"><div class="n">10<span>探针</span></div><div class="l">一次性部署</div></div>
+    <div class="k c4"><div class="n">0<span>hook</span></div><div class="l">桌面行为不变</div></div>
+    <div class="k c5"><div class="n">3<span>次</span></div><div class="l">最坏重启预算</div></div>
+    <div class="k c6"><div class="n">0<span>条</span></div><div class="l">需要敲的命令</div></div>
+  </div>
+
+  <!-- ============================================================ 01 -->
+  <section>
+    <div class="sh"><span class="num">01</span><h2>本期交付了什么</h2><span class="note">三件事，互相独立</span></div>
+    <div class="grid3">
+      <div class="card">
+        <h3>① 完整设置面</h3>
+        <p>8 个面板、64 个设置项，键名与母本逐字一致（<span class="mono hl">SISI</span>、<span class="mono hl">RTSIF</span>、<span class="mono hl">SSInterceptor</span>…）。</p>
+        <ul>
+          <li>开关 / 滑杆 / 只读行三种控件</li>
+          <li>默认值、取值范围照母本语义</li>
+          <li>每项都写了「它到底管什么」</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>② 安全闸门图形化</h3>
+        <p>以前要 <span class="mono">touch</span> 一个文件才能停用，现在设置里一个开关。</p>
+        <ul>
+          <li>G0 紧急停止 / G1 暂停注入</li>
+          <li>闸门状态双源：偏好 + 文件，任一生效</li>
+          <li>设置进程独立于桌面，桌面挂了也能进</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>③ 探针合批</h3>
+        <p>10 项只读探测在桌面进程内跑一次，结果直接显示在设置里。</p>
+        <ul>
+          <li>含 P1 卡住的两项取证</li>
+          <li>无需终端、无需重启即可重复执行</li>
+          <li>可一键复制成文本</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ 02 -->
+  <section>
+    <div class="sh"><span class="num">02</span><h2>面板构成</h2><span class="note">64 项按母本语义分组</span></div>
+    <div class="bars">
+      <div class="bar"><div class="nm"><span class="dot" style="background:#4dd4e8"></span>窗口与场景</div><div class="track"><div class="fill" style="width:100%"></div></div><div class="val"><b>15</b> 项</div></div>
+      <div class="bar"><div class="nm"><span class="dot" style="background:#9d8cff"></span>承载形状</div><div class="track"><div class="fill" style="width:80%"></div></div><div class="val"><b>12</b> 项</div></div>
+      <div class="bar"><div class="nm"><span class="dot" style="background:#f0b45f"></span>跳转与伪装</div><div class="track"><div class="fill" style="width:73%"></div></div><div class="val"><b>11</b> 项</div></div>
+      <div class="bar"><div class="nm"><span class="dot" style="background:#5fd6a4"></span>手势与动效</div><div class="track"><div class="fill" style="width:60%"></div></div><div class="val"><b>9</b> 项</div></div>
+      <div class="bar"><div class="nm"><span class="dot" style="background:#c9d4e8"></span>应用与全局</div><div class="track"><div class="fill" style="width:40%"></div></div><div class="val"><b>6</b> 项</div></div>
+      <div class="bar"><div class="nm"><span class="dot" style="background:#8fa3bf"></span>通知</div><div class="track"><div class="fill" style="width:27%"></div></div><div class="val"><b>4</b> 项</div></div>
+      <div class="bar"><div class="nm"><span class="dot" style="background:#8fa3bf"></span>监听与系统动作</div><div class="track"><div class="fill" style="width:27%"></div></div><div class="val"><b>4</b> 项</div></div>
+      <div class="bar"><div class="nm"><span class="dot" style="background:#ff7a86"></span>键盘与输入</div><div class="track"><div class="fill" style="width:20%"></div></div><div class="val"><b>3</b> 项</div></div>
+    </div>
+    <p class="sub" style="margin-top:16px;font-size:13px">
+      另有 <b style="color:var(--tx)">17 个纯文案键</b>（是 / 否 / 关闭 / 修改 / 警告…），它们不是设置项，但必须记账——
+      64 + 17 = <b style="color:var(--tx)">81</b>，正好是母本本地化表的全量。生成脚本里加了断言，改表改到对不上会直接报错。
+    </p>
+  </section>
+
+  <!-- ============================================================ 03 -->
+  <section>
+    <div class="sh"><span class="num">03</span><h2>设置清单</h2><span class="note">键名与母本逐条对应，可对照逆向资料</span></div>
+    <table>
+      <thead>
+        <tr><th style="width:38px">#</th><th style="width:104px">面板</th><th style="width:190px">键名</th><th style="width:132px">界面名称</th><th style="width:52px">控件</th><th style="width:150px">取值</th><th>操作逻辑</th><th style="width:66px">状态</th></tr>
+      </thead>
+      <tbody>
+<tr><td class='num'>01</td><td>窗口与场景</td><td class='mono'>SISI</td><td>单窗口</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>同一 App 只保留一个浮窗；切换 App 时状态同步，切回来还原默认尺寸。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>02</td><td>窗口与场景</td><td class='mono'>HVSeperate</td><td>横竖分离</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>横屏与竖屏各自独立，可同时存在两个浮窗。关掉则共用一个。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>03</td><td>窗口与场景</td><td class='mono'>SSTemperoryAutoClose</td><td>临时窗口</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>从底边激活新窗口时，自动关闭当前浮窗，避免叠窗。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>04</td><td>窗口与场景</td><td class='mono'>CustomFrameInit</td><td>自定义初始比例</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>浮窗首帧不套用系统比例，直接使用下面的宽度/高度系数。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>05</td><td>窗口与场景</td><td class='mono'>Width</td><td>宽度</td><td class='ctr'>滑杆</td><td class='mono sm'>0.3 ~ 1　默认 0.55</td><td>浮窗宽度占屏幕宽度的比例。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>06</td><td>窗口与场景</td><td class='mono'>HeightFraction</td><td>高度系数</td><td class='ctr'>滑杆</td><td class='mono sm'>0.2 ~ 1　默认 0.62</td><td>在宽度基础上再乘的系数，决定最终高度。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>07</td><td>窗口与场景</td><td class='mono'>Size</td><td>尺寸</td><td class='ctr'>滑杆</td><td class='mono sm'>0.4 ~ 1　默认 0.6</td><td>基准尺寸，圆盘展开时按此推导各图标位置。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>08</td><td>窗口与场景</td><td class='mono'>BallparkFigure</td><td>近似取值</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>尺寸取近似值，省掉逐帧重算；视觉差异约 1pt。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>09</td><td>窗口与场景</td><td class='mono'>LeftCornerTrim</td><td>左角微调</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认开</td><td>左下角：滑动微调比例，长按反向调整。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>10</td><td>窗口与场景</td><td class='mono'>RightCornerTrim</td><td>右角切换</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认开</td><td>右下角：点击在基础比例之间切换。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>11</td><td>窗口与场景</td><td class='mono'>AutoPin</td><td>自锁</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>展开后立即固定，不再随内容高度变化。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>12</td><td>窗口与场景</td><td class='mono'>SingleTapMinimize</td><td>单点缩小</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>单击贴边缩成不可操作的缩略态，再点恢复。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>13</td><td>窗口与场景</td><td class='mono'>DelayResume</td><td>延迟启动</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>展开动画播完再启动 App，避免动画期掉帧。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>14</td><td>窗口与场景</td><td class='mono'>Speed</td><td>速度</td><td class='ctr'>滑杆</td><td class='mono sm'>0.2 ~ 2　默认 1</td><td>展开/收起的速度倍率，1.0 为母本默认节奏。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>15</td><td>窗口与场景</td><td class='mono'>DelayRotate</td><td>延迟旋转</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>等动画结束再旋转窗口，避免旋转与缩放同时插值。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>16</td><td>承载形状</td><td class='mono'>RTSIF</td><td>圆盘</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认开</td><td>完整圆形托盘，图标沿圆周均分。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>17</td><td>承载形状</td><td class='mono'>RTSIH</td><td>半圆盘</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>只取上半个圆周，适合贴边使用。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>18</td><td>承载形状</td><td class='mono'>RTSIQ</td><td>直角盘</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>四分之一圆周，贴角展开。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>19</td><td>承载形状</td><td class='mono'>RTSIZ</td><td>任意角度</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>拖拽旋转最后一个图标来定角度，与上面三种互斥。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>20</td><td>承载形状</td><td class='mono'>Radius</td><td>半径</td><td class='ctr'>滑杆</td><td class='mono sm'>40 ~ 120　默认 64</td><td>托盘半径，单位 pt。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>21</td><td>承载形状</td><td class='mono'>IconWidth</td><td>图标宽度</td><td class='ctr'>滑杆</td><td class='mono sm'>28 ~ 64　默认 44</td><td>单个图标的边长，影响圆盘整体外径。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>22</td><td>承载形状</td><td class='mono'>RotationAngle</td><td>旋转角</td><td class='ctr'>滑杆</td><td class='mono sm'>-180 ~ 180　默认 0</td><td>整个托盘的朝向偏移。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>23</td><td>承载形状</td><td class='mono'>LastIconAngle</td><td>尾角</td><td class='ctr'>滑杆</td><td class='mono sm'>-180 ~ 180　默认 0</td><td>最后一个图标的落位角度，决定扇区开口方向。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>24</td><td>承载形状</td><td class='mono'>Star</td><td>收藏</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>把当前 App 标为收藏，托盘里置顶。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>25</td><td>承载形状</td><td class='mono'>IOMI0</td><td>旋转 自适应</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认开</td><td>让系统决定何时旋转。三选一，建议只开一个。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>26</td><td>承载形状</td><td class='mono'>IOMI1</td><td>旋转 立即</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>立刻跟随，游戏内视角容易错乱。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>27</td><td>承载形状</td><td class='mono'>IOMI2</td><td>旋转 延迟</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>等内容稳定后再旋转，观感最稳。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>28</td><td>手势与动效</td><td class='mono'>EBCI</td><td>可调触发边</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>开启后边缘触发区的宽度由下面一项决定，否则用系统默认。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>29</td><td>手势与动效</td><td class='mono'>GestureBorderWidth</td><td>手势宽度</td><td class='ctr'>滑杆</td><td class='mono sm'>8 ~ 40　默认 18</td><td>边缘可识别区域的宽度，单位 pt；越窄越容易误触内部控件。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>30</td><td>手势与动效</td><td class='mono'>FastMoveControl</td><td>快滑灵敏度</td><td class='ctr'>滑杆</td><td class='mono sm'>0.2 ~ 2　默认 1</td><td>快速滑动时的输入增益。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>31</td><td>手势与动效</td><td class='mono'>SIFEI</td><td>四边扩展</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>浮窗四条边都参与交互，而不只是贴边那一侧。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>32</td><td>手势与动效</td><td class='mono'>IconJump</td><td>防遮挡跳动</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>托盘被浮窗挡住时自动跳位。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>33</td><td>手势与动效</td><td class='mono'>VIBRATE</td><td>震动</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认开</td><td>手势落点时给触感反馈。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>34</td><td>手势与动效</td><td class='mono'>INTENSITY</td><td>强度</td><td class='ctr'>滑杆</td><td class='mono sm'>0.1 ~ 1　默认 0.7</td><td>触感强度，对应 impactOccurredWithIntensity: 的参数。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>35</td><td>手势与动效</td><td class='mono'>DampingFraction</td><td>阻尼系数</td><td class='ctr'>滑杆</td><td class='mono sm'>0.1 ~ 1　默认 0.82</td><td>弹簧动画阻尼，越小回弹越明显。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>36</td><td>手势与动效</td><td class='mono'>CustomSpringAnimation</td><td>动画弹性</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认开</td><td>使用自定义弹簧参数，关掉则走系统默认曲线。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>37</td><td>键盘与输入</td><td class='mono'>PortraitKeyboard</td><td>竖向键盘</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>横屏时把键盘强制按竖向布局绘制进浮窗。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>38</td><td>键盘与输入</td><td class='mono'>IntersectionHeightFraction</td><td>键盘避让</td><td class='ctr'>滑杆</td><td class='mono sm'>0 ~ 1　默认 0.5</td><td>浮窗与键盘相交时向上让出的高度比例。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>39</td><td>键盘与输入</td><td class='mono'>HookUIKit</td><td>注入 UIKit</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>扩大注入范围到 UIKit 进程。改动此项必须重启桌面，且只对已添加的 App 生效。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>40</td><td>通知</td><td class='mono'>Notification</td><td>通知总开关</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认开</td><td>关掉后下面三项全部失效。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>41</td><td>通知</td><td class='mono'>SISNFI</td><td>通知转浮窗</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>收到通知时直接把对应 App 拉进浮窗。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>42</td><td>通知</td><td class='mono'>ForegroundNotify</td><td>前台通知</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>仅对已经在浮窗里的 App 生效，不打扰其他。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>43</td><td>通知</td><td class='mono'>FrontmostNotify</td><td>附加主 App</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>通知同时附加到当前主 App 上。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>44</td><td>跳转与伪装</td><td class='mono'>SISURLI</td><td>URL 跳转</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认开</td><td>授权、支付、广告等 URL 统一在浮窗里打开。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>45</td><td>跳转与伪装</td><td class='mono'>SSNoUniversalLinks</td><td>UniversalLinks 转 Safari</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>把 UniversalLink 改走 Safari 打开，需要 UIKit 注入。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>46</td><td>跳转与伪装</td><td class='mono'>SSNoSafariViewService</td><td>SafariViewService 转 Safari</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>把应用内浏览器改走 Safari，需要进程注入。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>47</td><td>跳转与伪装</td><td class='mono'>SISATI</td><td>Activity</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>分享面板里的 Activity 请求同样走浮窗。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>48</td><td>跳转与伪装</td><td class='mono'>SISASI</td><td>StoreKitUIService</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>内购界面接管；母本注明伪装失败率较高。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>49</td><td>跳转与伪装</td><td class='mono'>SISSBI</td><td>SpringBoard 请求</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>允许 SpringBoard 侧发起激活目标浮窗。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>50</td><td>跳转与伪装</td><td class='mono'>SIVSI</td><td>视图服务</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>授予浮窗向外跳转的权限。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>51</td><td>跳转与伪装</td><td class='mono'>SSInterceptor</td><td>跳转伪装</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>拦截跳转并给图标提示；建议按单个 App 开启，全局开容易误伤。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>52</td><td>跳转与伪装</td><td class='mono'>BlockInterceptor</td><td>拦截</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>直接阻断跳转，不放行。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>53</td><td>跳转与伪装</td><td class='mono'>SSInterceptorSilence</td><td>静默</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>伪装成功时不提示；SafariViewService 是例外，仍会提示。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>54</td><td>跳转与伪装</td><td class='mono'>SIPI</td><td>预览</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>浮窗里显示 App 快照而不是实时画面，省电但会滞后。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>55</td><td>监听与系统动作</td><td class='mono'>SSListen</td><td>浮窗激活</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>系统服务请求激活时，改为在浮窗里打开。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>56</td><td>监听与系统动作</td><td class='mono'>ServiceListen</td><td>服务监听</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>监听系统服务调用，是上面一项的前置。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>57</td><td>监听与系统动作</td><td class='mono'>SISRI</td><td>缩小范围</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>只允许已添加的 App 走浮窗激活，避免全局接管。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>58</td><td>监听与系统动作</td><td class='mono'>SICMI</td><td>摄像头</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>允许浮窗内的 App 使用摄像头。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>59</td><td>应用与全局</td><td class='mono'>GlobalPreference</td><td>全局设置</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>对所有 App 生效的默认值。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>60</td><td>应用与全局</td><td class='mono'>AutoRemoveAppSettings</td><td>自整理自定义</td><td class='ctr'>开关</td><td class='mono sm'>开 / 关　默认关</td><td>自动删除与全局值一致的单 App 设置，保持列表干净。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>61</td><td>应用与全局</td><td class='mono'>UserList</td><td>用户列表</td><td class='ctr'>只读</td><td class='mono sm'>—</td><td>已添加的 App 列表，P4 接入。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>62</td><td>应用与全局</td><td class='mono'>SystemList</td><td>系统列表</td><td class='ctr'>只读</td><td class='mono sm'>—</td><td>系统 App 列表，P4 接入。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>63</td><td>应用与全局</td><td class='mono'>ActivateCode</td><td>激活码</td><td class='ctr'>只读</td><td class='mono sm'>—</td><td>母本的商业授权位。保留键位与位置，功能不实现。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+<tr><td class='num'>64</td><td>应用与全局</td><td class='mono'>RespringYourselfToActivate</td><td>自行注销激活</td><td class='ctr'>只读</td><td class='mono sm'>—</td><td>母本用于授权后自注销；本项目无授权，故保留占位。</td><td class='ctr'><span class='tag tW'>未接通</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ============================================================ 04 -->
+  <section>
+    <div class="sh"><span class="num">04</span><h2>手机实测流程</h2><span class="note">全程图形界面，不需要终端</span></div>
+
+    <div class="grid2" style="margin-bottom:16px">
+      <div class="card">
+        <h3>装之前：确认一件事</h3>
+        <p>你的越狱是 <span class="hl">rootless</span>（有 <span class="mono">/var/jb</span> 目录）。本包所有文件都落在 <span class="mono">/var/jb</span> 下，
+        不写 <span class="mono">/System</span>、不装 LaunchDaemon、不动 <span class="mono">/usr/lib</span>——这也是「最坏只会掉桌面，不会开不了机」的物理原因。</p>
+        <ul>
+          <li>用 Filza 打开 deb → 安装，或 Sileo 直接装</li>
+          <li>装完 dpkg 不会重启桌面，此时插件尚未加载</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>重启预算：最多 3 次</h3>
+        <p>正常验收 <span class="hl">1 次</span>；要演练 G0 逃生通道再加 2 次。每一次都会说明为什么必须重启。</p>
+        <ul>
+          <li>第 1 次：让 dylib 进桌面（必需）</li>
+          <li>第 2 次：验证 G0 真能停用（可选）</li>
+          <li>第 3 次：验证 G0 关掉后能回来（可选）</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="steps">
+
+      <div class="step">
+        <div class="n">01</div>
+        <div>
+          <h4>先看设置里有没有入口（不用重启）</h4>
+          <p>打开「设置」，往下翻或直接搜索 <b>Aevon</b>。PreferenceLoader 是实时扫目录的，装完立刻就能看到。</p>
+          <div class="expect">应看到一行 <b>Aevon</b>，点进去是「状态 / 安全闸门 / 诊断 / 功能设置」。</div>
+          <div class="fail">看不到：设置 App 完全退出再进一次。仍没有 → 用 Filza 确认 <span class="mono">/var/jb/Library/PreferenceLoader/Preferences/Aevon.plist</span> 存在，把结果告诉我。</div>
+        </div>
+      </div>
+
+      <div class="step rep">
+        <div class="n">02</div>
+        <div>
+          <h4>重启桌面一次 <span class="tag tB">第 1 次重启</span></h4>
+          <p>用越狱工具自带的重启按钮最稳。也可以点设置里的「重载桌面（应用闸门变更）」。</p>
+          <div class="expect">回来后进设置 → Aevon：<b>注入状态 = 运行中</b>，<b>版本 = 0.1.0</b>，<b>启动次数 = 1</b>，最近一次加载有时间。</div>
+          <div class="fail">状态显示「未加载」或启动次数为空：dylib 没被注入。先确认 G0/G1 是关的，再把 <span class="mono">Aevon.plist</span> 过滤器内容告诉我。</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="n">03</div>
+        <div>
+          <h4>跑探针（这是本期最关键的一步）</h4>
+          <p>点「重新探测（不重启）」→ 约 1.2 秒后弹「探测完成」，再点「查看探测报告」。</p>
+          <div class="expect">报告应含五段：<b>环境</b> / <b>承载模型·方法签名</b> / <b>谁定义了这些方法</b> / <b>场景树</b> / <b>判定</b>。
+          其中方法签名和场景树，正是 P1 开工前必须拿到的两项取证。</div>
+          <div class="fail">提示「没有响应」= 桌面里没有 Aevon 在跑（G0/G1 开着）。关掉闸门、重启桌面后再点一次。</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="n">04</div>
+        <div>
+          <h4>点一遍 8 个面板</h4>
+          <p>依次进「窗口与场景 / 承载形状 / 手势与动效 / 键盘与输入 / 通知 / 跳转与伪装 / 监听与系统动作 / 应用与全局」，
+          拨 2～3 个开关、拖 1 个滑杆，返回再进一次。</p>
+          <div class="expect">页面能正常打开、不闪退，改动返回后仍在（说明写盘成功）。这一步验证的是<b>界面与存储</b>，不是功能。</div>
+          <div class="fail">某个面板白屏或点进去闪退：先用 Filza 删掉 <span class="mono">/var/jb/Library/PreferenceLoader/Preferences/Aevon.plist</span>，
+          入口立刻消失，注入不受影响；然后把是哪个面板告诉我。</div>
+        </div>
+      </div>
+
+      <div class="step rep">
+        <div class="n">05</div>
+        <div>
+          <h4>演练 G0 逃生通道 <span class="tag tB">第 2 次重启</span></h4>
+          <p>打开「紧急停止（G0）」→ 重启桌面。</p>
+          <div class="expect">回来状态变成 <b>已紧急停止（G0）</b>；点「重新探测」会提示没有响应——这是对的，它确实没在跑了。
+          桌面本身、其他插件、越狱环境全部正常。</div>
+          <div class="fail">如果重启后桌面异常：这说明问题不在 Aevon（它没加载）。直接进设置关掉 G0 即可。</div>
+        </div>
+      </div>
+
+      <div class="step rep">
+        <div class="n">06</div>
+        <div>
+          <h4>关掉 G0，确认能回来 <span class="tag tB">第 3 次重启</span></h4>
+          <p>关掉「紧急停止（G0）」→ 重启桌面。</p>
+          <div class="expect">状态回到 <b>运行中</b>，启动次数 <b>+1</b>。至此闸门闭环验证完毕。</div>
+          <div class="fail">此时设置里的「重载桌面」可能无效——因为 Aevon 没加载，没人接这个请求，而设置进程又被沙箱限制执行外部命令。请改用越狱工具的重启按钮，这不是 bug。</div>
+        </div>
+      </div>
+
+    </div>
+
+    <p class="sub" style="margin-top:16px;font-size:13px">
+      <b style="color:var(--tx)">不要主动测 G2（崩溃循环断路器）。</b>它需要人为制造 3 次崩溃，风险与收益不成比例；
+      逻辑上它由「加载即计数 / 活过 60 秒清零 / 5 分钟内 3 次失败即永久停用 / 状态写不进去就干脆不加载」四条构成，
+      其中最后一条是 fail-safe：宁可不动，也不冒无法计数的险。
+    </p>
+  </section>
+
+  <!-- ============================================================ 05 -->
+  <section>
+    <div class="sh"><span class="num">05</span><h2>安全边界</h2><span class="note">这些是机械可验证的，不是承诺</span></div>
+    <div class="grid2">
+      <div class="card">
+        <h3>三道闸门</h3>
+        <ul>
+          <li><b class="hl">G0 紧急停止</b>：设置里一个开关，写入偏好 + 落一个文件，二者任一生效</li>
+          <li><b class="hl">G1 暂停注入</b>：同上，带停用原因与时间</li>
+          <li><b class="hl">G2 崩溃断路器</b>：3 次不稳定加载即自禁用；无法计数时直接不加载</li>
+        </ul>
+        <p style="margin-top:10px;font-size:12.5px;color:var(--tx3)">
+          闸门只影响「下次加载」。这是刻意的——运行时突然自我拆除比崩溃更难排查。
+        </p>
+      </div>
+      <div class="card">
+        <h3>包里到底装了什么</h3>
+        <ul>
+          <li><span class="mono">Aevon.dylib</span> 203,008 B —— 零钩子，只有闸门与探针</li>
+          <li><span class="mono">Aevon.plist</span> 93 B —— 只注入 SpringBoard 一个进程</li>
+          <li><span class="mono">AevonPrefs.bundle</span> 11 个文件 —— 设置界面</li>
+          <li><span class="mono">PreferenceLoader</span> 入口 1 个</li>
+          <li><span class="mono">usr/libexec/aevon/</span> 4 个救援脚本（可选，不用终端也能操作）</li>
+        </ul>
+      </div>
+    </div>
+
+    <table style="margin-top:16px">
+      <thead><tr><th style="width:210px">红线</th><th>为什么</th><th style="width:120px">谁来守</th></tr></thead>
+      <tbody>
+        <tr><td><b>不装 LaunchDaemon</b></td><td>开机自启的守护进程才是真正能卡开机的东西</td><td><span class="tag tA">CI 审计闸门</span></td></tr>
+        <tr><td><b>不写 /System、/usr/lib</b></td><td>系统分区被改动，出问题只能刷机</td><td><span class="tag tA">CI 审计闸门</span></td></tr>
+        <tr><td><b>postinst 不重启桌面</b></td><td>安装即生效就没有反悔窗口</td><td><span class="tag tA">脚本审查</span></td></tr>
+        <tr><td><b>注入范围只有 1 个进程</b></td><td>扩大范围等于扩大崩溃面，必须是刻意动作</td><td><span class="tag tA">CI 审计闸门</span></td></tr>
+        <tr><td><b>钩子必须写在闸门之后</b></td><td>否则停用开关形同虚设</td><td><span class="tag tB">代码约定</span></td></tr>
+      </tbody>
+    </table>
+    <p class="sub" style="margin-top:12px;font-size:12.5px;color:var(--tx3)">
+      CI 审计闸门是白名单机制：包内多出任何一个文件、落点越界、注入目标多于一个，构建直接失败，坏包到不了手机。
+    </p>
+  </section>
+
+  <!-- ============================================================ 06 -->
+  <section>
+    <div class="sh"><span class="num">06</span><h2>现在的进度，以及下一步</h2><span class="note">0 / 64 已接线</span></div>
+    <div class="grid2">
+      <div class="card">
+        <h3>已经成立的</h3>
+        <ul>
+          <li>设置面 64/64 项就位，键名可逐条对照母本</li>
+          <li>三个真功能已通：状态、G0、G1（含清计数）</li>
+          <li>探针链路打通：桌面执行 → 偏好回传 → 设置显示</li>
+          <li>构建链稳定：推 main 出构建，打 tag 出 Release</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>还没接线的</h3>
+        <ul>
+          <li>64 个开关目前只存值，不影响任何行为</li>
+          <li>P1 承载模型（独立 Scene 挂载）未开工</li>
+          <li>圆盘绘制、手势识别、键盘桥均未开始</li>
+          <li>App 列表（用户/系统）是占位，P4 接入</li>
+        </ul>
+      </div>
+    </div>
+    <p class="sub" style="margin-top:16px;font-size:13px">
+      <b style="color:var(--tx)">下一步的顺序不会变</b>：先拿探针报告里的方法签名与场景树，确认 P1 走哪条路；
+      再按「窗口 → 几何 → 手势 → 圆盘」依次点亮，每一期都能单独回退。
+      接线时开关即插即用——因为读取偏好的通道这一版已经建好了，改一个开关不需要重启。
+    </p>
+  </section>
+
+  <footer>
+    <div>Aevon · Stage 1 · 2026-11-02　|　仓库 github.com/QingC12/Aevon</div>
+    <div>安装包 com.aevon.aevon_0.1.0_iphoneos-arm64.deb · 32,048 B · 审计通过</div>
+  </footer>
+
+</div>
+</body>
+</html>
