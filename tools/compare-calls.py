@@ -359,8 +359,11 @@ def main():
         print("上一次扫描死在：第 %d 个类 %s（这次启动已写进跳过表）"
               % (deaths[-1][0], deaths[-1][1]))
     if skip:
-        print("本次跳过了 %d 个曾经杀死扫描的类 —— 它们不会成为任何选择子的归属"
-              "（所以这 %d 个类相关的 n=0 要打折扣）。" % (skip, skip))
+        # skip 是「故意没扫的类」总数：死亡标记黑名单 + `_NSZombie_*`（运行时
+        # 按需新建，扫它等于在读一张正在被写的方法表）。两者都不该成为任何选择子
+        # 的归属，所以它们相关的 n=0 要打折扣。
+        print("本次故意跳过 %d 个类（黑名单 + _NSZombie_）—— 它们不会成为任何选择子的归属"
+              "（相关的 n=0 要打折扣）。" % skip)
     if progress:
         print("最后一次进度：扫到第 %d 个类（%s），rss=%d MB"
               % (progress[0], progress[1], progress[2]))
@@ -397,7 +400,8 @@ def main():
     if coverage and coverage[0] < coverage[1]:
         print("\n[PARTIAL] 这一趟只扫了 %d / %d 个类就停了 —— 排在后面的 n=0 不是结论。"
               % (coverage[0], coverage[1]))
-        print("  看结束行里的 secs：接近 180 是时间上限，明显更小是被系统杀掉的。")
+        print("  看结束行末尾的 reason：`three minute limit` 是时间上限，"
+              "`memory ceiling` 是内存闸（我们自己停的），两个都没有才是被系统杀掉的。")
         print("  被系统杀掉时，下一次启动会在日志里写出「previous scan died at」那一行。")
         return 2
 

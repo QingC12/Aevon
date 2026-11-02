@@ -252,3 +252,35 @@ iOS 上不存在」这种极具说服力又完全错误的答案。工具遇到 
 结论仍然是原来那条：`tools/compare-calls.py` 退出码 0 之前不创建任何窗口。
 新增的 `phase1` 段**不是结论**（后面的类也可能是归属），工具只在没有结束行时
 才拿它出来，并且一样退出码 2。
+
+### 8.3 内存储是「峰值」，不是「现在用的」（0.0.9 第一次真机跑完的收获）
+
+0.0.9 上机两次，「核对调用点」都不再进安全模式，但两次都以同一行结束：
+
+```
+calls: definition end v2 missing=103 capped=1 upto=250 of 99482 skip=1 secs=6 stopped at the memory ceiling
+```
+
+`upto=250` —— 正好是第一个分块的边界，一次都没有输出 `scan reached`。原因是我把
+内存闸写成了绝对值：
+
+```swift
+if residentMegabytes() > 220 { ... }     // 错
+```
+
+`getrusage(RUSAGE_SELF).ru_maxrss` 是**进程生命周期内的峰值**，不是当前占用。
+SpringBoard 开机后的峰值本来就几百 MB，所以这个闸在第一个分块就恒真 ——
+它没在防 runaway，它在无条件停机。
+
+三处改动（0.0.10）：
+
+| 改动 | 理由 |
+|---|---|
+| `let baseMB = residentMegabytes()`，闸改成 `rss - baseMB > 200` | 峰值只能比，不能当阈值；比的是「这次扫描把峰值推高了多少」 |
+| 进度行**挪到**内存闸之前 | 0.0.9 那次闸先 break，所以日志里连一个 rss 数字都没有 —— 有数字才有得争 |
+| 删掉 `guard !callQueue.isEmpty` 分支 | 空队列本来就走 `upto=0 of 0`，这个分支永远不成立，白占体积 |
+
+顺带一条实测结论：`skip=1` 不是黑名单，是 `_NSZombie_*` 那一个类 ——
+0.0.9 之前不可能有 `call.skip` 文件（那版才第一次写它），所以那个 1 只可能来自
+僵尸类分支。**这台设备的 SpringBoard 进程里有僵尸类**，也就是说
+`class_copyMethodList` 随时可能撞上「正在被新建的类」—— 与 0.0.7/0.0.8 的死法吻合。

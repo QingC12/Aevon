@@ -664,11 +664,9 @@ zStackParticipantDidChange:
                   + " classes=" + String(callCeiling)
                   + " phase1=" + String(callEdge)
                   + " skip=" + String(callSkipped))
-        guard !callQueue.isEmpty else {
-            Log.write("calls: definition end v2 missing=" + String(callTargets.count)
-                      + " upto=0 of 0 no classes")
-            return
-        }
+        // No empty-queue guard: an empty queue simply walks nothing and the end
+        // line reports `upto=0 of 0`. The guard that used to stand here cost
+        // bytes in a binary that has none to spare and could never fire.
         callBusy = true
         callWorker.asyncAfter(deadline: .now() + 6.0) { scanAll() }
     }
@@ -703,6 +701,11 @@ zStackParticipantDidChange:
     /// pile up until the process ends.
     private static func scanAll() {
         var reason = ""
+        // Growth from here, never an absolute number. `ru_maxrss` is a *peak*,
+        // and SpringBoard's peak is already hundreds of megabytes at boot — so
+        // "stop above 220 MB" fired on the very first chunk and the 0.0.9 dump
+        // ended at class 250 with `stopped at the memory ceiling`, twice.
+        let baseMB = residentMegabytes()
         callStateFD = open(Aevon.callStatePath, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
         if callStateFD < 0 {
             Log.write("calls: death marker unavailable, walking without it")
@@ -731,17 +734,20 @@ zStackParticipantDidChange:
                 emitPhase1()
             }
             let rss = residentMegabytes()
-            // Each method name costs a bridged string; the pool returns them,
-            // but a jetsam kill looks exactly like a bad class in the log, so
-            // the ceiling is checked rather than trusted.
-            if rss > 220 {
-                reason = " stopped at the memory ceiling"
-                break
-            }
+            // The progress line comes first, on purpose: when the ceiling broke
+            // the run at class 250 there was no number in the log to argue with,
+            // because the break was checked before the write.
             if callCursor < callCeiling {
                 Log.write("calls: scan reached " + String(callCursor) + " "
                           + NSStringFromClass(callQueue[callCursor])
                           + " rss=" + String(rss) + "mb")
+            }
+            // Each method name costs a bridged string and the pool returns
+            // them, but a jetsam kill looks exactly like a bad class in the
+            // log, so a runaway is checked for rather than trusted.
+            if rss - baseMB > 200 {
+                reason = " stopped at the memory ceiling"
+                break
             }
         }
         emitCallTable(reason: reason)
