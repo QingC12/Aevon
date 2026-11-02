@@ -411,16 +411,14 @@ def main():
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the probe would never reach SpringBoard")
 
-    # The surface dump is the one that decides how P1 is built: if any of its
-    # sections falls out of the stripped binary, the log comes back with a
-    # convincing partial answer and no way to tell what was missing.
-    for token in (b"scene2: api probe begin", b"scene2: api probe end",
-                  b"scene2: census total ", b"scene2: method sel ",
-                  b"scene2: fbs manager accepts ", b"scene2: fbs scene found ",
-                  b"scene2: app bundle ", b"scene2: app ivar "):
+    # The surface dump was retired in 0.0.11 to pay for the call table. What
+    # must stay in the binary is the retirement line itself: the button is still
+    # on the panel, and a press that logs nothing is indistinguishable from a
+    # request that never arrived.
+    for token in (b"scene2: retired in 0.0.11", b"docs/REVERSE-NOTES.md"):
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
-                "the surface dump would come back half empty")
+                "a retired section that says nothing reads as a dead button")
 
     # The call table is the gate on building a window: if its markers or the
     # per-line prefix fall out of the stripped binary, the log comes back empty

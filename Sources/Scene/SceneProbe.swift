@@ -187,236 +187,16 @@ enum SceneProbe {
         }
     }
 
-    // MARK: - Surface probe (what P1 would actually have to call)
+    // MARK: - Surface probe (retired in 0.0.11)
 
-    /// The first dump answered "the classes exist". It could not answer the
-    /// only question that matters for building: *which* selector turns an app's
-    /// scene into a view I can hold. So this dump walks the runtime instead of a
-    /// hand-written list — `_UIScenePresenter` and friends never appear in a
-    /// strings dump, because Swift only ever names them through selectors.
-    private static let censusNeedles = [
-        "Presenter", "Presentation", "SceneSpecification", "SceneDefinition",
-        "SceneParameters", "ContextLayer", "SceneLayer",
-    ]
-
-    /// Classes worth a full method list: both carrier controllers, both carrier
-    /// views, all three handle classes, and the presentation pair.
-    private static let surfaceClasses = [
-        "SBDeviceApplicationSceneViewController",
-        "SBApplicationSceneViewController",
-        "SBSceneViewController",
-        "SBApplicationSceneView",
-        "SBSceneView",
-        "SBDeviceApplicationSceneHandle",
-        "SBApplicationSceneHandle",
-        "SBSceneHandle",
-        "_UIContextLayerHostView",
-        "_UIScenePresentationView",
-        "UIScenePresentationManager",
-        "UIWindowScene",
-        "FBSceneManager",
-        "FBScene",
-        "FBSMutableSceneDefinition",
-        "FBSMutableSceneParameters",
-        "FBSSceneSpecification",
-        "FBSSceneIdentity",
-        "FBSSceneClientIdentity",
-    ]
-
-    /// A full method list would be unreadable and mostly irrelevant; this keeps
-    /// only the selectors that could possibly be part of the carrier.
-    ///
-    /// "Context" / "Host" / "resiz" were added after the first real run: the
-    /// master's `setResizesHostedContext:` matches none of the original needles,
-    /// so a class that defines it printed as if it did not — a gap that reads
-    /// as a negative result. The 123-selector dump does not filter at all, but
-    /// this one should still not lie.
-    private static let surfaceNeedles = [
-        "init", "scene", "Scene", "handle", "Handle", "present", "Present",
-        "activat", "Activat", "layer", "Layer", "view", "View",
-        "Context", "host", "Host", "resiz", "Resiz",
-    ]
-
-    private static let applicationSelectors = [
-        "_scenePresentationManager", "scenePresentationManager", "_presentationManager",
-        "_windowScene", "_mainScene", "_sceneManager", "connectedScenes",
-    ]
-
-    private static let applicationSceneSelectors = [
-        "bundleIdentifier", "mainSceneHandle", "sceneHandleForSceneIdentifier:",
-        "mainSceneIdentifier", "sceneIdentifier", "sceneHandles", "displayIdentity",
-        "processState",
-    ]
-
-    private static let fbsManagerSelectors = [
-        "sharedInstance", "sharedManager", "sceneWithIdentifier:", "enumerateScenesWithBlock:",
-        "_createSceneWithDefinition:settings:initialClientSettings:transitionContext:fromRemnant:usingClientProvider:completion:",
-        "createSceneWithDefinition:",
-    ]
-
-    private static let sceneSurfaceSelectors = [
-        "identifier", "specification", "layers", "clientProcess", "settings",
-        "definition", "definitionIdentifier",
-    ]
-
+    /// Everything this dump measured — the class census, the method tables, the
+    /// installed-app scene handles, FrontBoard's facade — is already written up
+    /// in docs/REVERSE-NOTES.md. It was costing more of the shared 320 KB than
+    /// the call table, which still has unanswered questions, so it is gone.
+    /// The button stays: removing a row changes the panel, and the panel is not
+    /// what is being measured here.
     static func runSurface() {
-        Log.write("scene2: api probe begin")
-        censusClasses()
-        for name in surfaceClasses { dumpMethods(name) }
-        dumpApplicationIvars()
-        dumpInstalledApps()
-        // Last on purpose: this is the only part that sends a message to
-        // FrontBoard, so if anything here is unwelcome the data above survives.
-        dumpFrontBoardScenes()
-        Log.write("scene2: api probe end")
-    }
-
-    /// Every class in the process whose name looks like part of a scene carrier.
-    /// Capped: SpringBoard carries thousands of classes and this walks them on
-    /// the main thread.
-    private static func censusClasses() {
-        let classes = allClasses()
-        guard !classes.isEmpty else { return }
-        var matched = 0
-        var printed = 0
-        var owners: [String] = []
-        for cls in classes {
-            let name = NSStringFromClass(cls)
-            guard censusNeedles.contains(where: { name.contains($0) }) else { continue }
-            matched += 1
-            if printed < 80 {
-                printed += 1
-                let parent = class_getSuperclass(cls).map { NSStringFromClass($0) } ?? "nil"
-                Log.write("scene2: class census " + name + " <- " + parent)
-            }
-            if owners.count < 6, name.contains("Presenter") || name.contains("Specification") {
-                owners.append(name)
-            }
-        }
-        Log.write("scene2: census total " + String(matched) + " of " + String(classes.count))
-        for name in owners { dumpMethods(name) }
-    }
-
-    /// `objc_copyClassList` hands back an autoreleasing pointer, which cannot be
-    /// freed without a conversion Swift will not make; `objc_getClassList` into
-    /// our own buffer is the same information with an owner. The first call is
-    /// how you ask how big it has to be.
-    private static func allClasses() -> [AnyClass] {
-        let total = objc_getClassList(nil, 0)
-        guard total > 0 else { return [] }
-        let buffer = UnsafeMutablePointer<AnyClass>.allocate(capacity: Int(total))
-        defer { buffer.deallocate() }
-        let count = objc_getClassList(AutoreleasingUnsafeMutablePointer(buffer), total)
-        guard count > 0 else { return [] }
-        return (0..<Int(count)).map { buffer[$0] }
-    }
-
-    private static func dumpMethods(_ name: String) {
-        guard let cls = NSClassFromString(name) else {
-            Log.write("scene2: class missing " + name)
-            return
-        }
-        dumpMethods(cls, label: name, prefix: "-")
-        if let meta = object_getClass(cls) {
-            dumpMethods(meta, label: name, prefix: "+")
-        }
-    }
-
-    private static func dumpMethods(_ cls: AnyClass, label: String, prefix: String) {
-        var count: UInt32 = 0
-        guard let methods = class_copyMethodList(cls, &count) else { return }
-        var printed = 0
-        for index in 0..<Int(count) {
-            let method = methods[index]
-            let selector = NSStringFromSelector(method_getName(method))
-            guard surfaceNeedles.contains(where: { selector.contains($0) }) else { continue }
-            if printed >= 90 { break }
-            printed += 1
-            let types = method_getTypeEncoding(method).map { String(cString: $0) } ?? "?"
-            Log.write("scene2: method sel " + label + " " + prefix + selector + " " + types)
-        }
-        free(methods)
-        Log.write("scene2: method total " + label + prefix + " " + String(count)
-                  + " printed " + String(printed))
-    }
-
-    /// Workspace is the one place SpringBoard would keep a presentation manager
-    /// for its own windows. Ivars are read through `object_getIvar`, and only
-    /// when the type encoding says object — reading a CGRect as an object is a
-    /// crash, not a curiosity.
-    private static func dumpApplicationIvars() {
-        guard let application = sharedApplication() else { return }
-        Log.write("scene2: app accepts " + matrix(application, applicationSelectors))
-        dumpIvars(of: application, needles: ["scene", "present"])
-    }
-
-    private static func dumpInstalledApps() {
-        guard let cls = NSClassFromString("SBApplicationController") as? NSObject.Type else {
-            Log.write("scene2: class missing SBApplicationController")
-            return
-        }
-        let shared = NSSelectorFromString("sharedInstance")
-        guard cls.responds(to: shared),
-              let controller = cls.perform(shared)?.takeUnretainedValue() as? NSObject else {
-            Log.write("scene2: no SBApplicationController instance")
-            return
-        }
-        let listSelector = NSSelectorFromString("allApplications")
-        guard controller.responds(to: listSelector),
-              let list = controller.perform(listSelector)?.takeUnretainedValue() as? NSArray else {
-            Log.write("scene2: no allApplications")
-            return
-        }
-        Log.write("scene2: apps total " + String(list.count))
-        for index in 0..<Swift.min(3, list.count) {
-            guard let app = list[index] as? NSObject else { continue }
-            var bundle = "?"
-            let bundleSelector = NSSelectorFromString("bundleIdentifier")
-            if app.responds(to: bundleSelector),
-               let value = app.perform(bundleSelector)?.takeUnretainedValue() as? String {
-                bundle = value
-            }
-            Log.write("scene2: app bundle " + bundle + " "
-                      + NSStringFromClass(type(of: app)))
-            Log.write("scene2: app accepts " + matrix(app, applicationSceneSelectors))
-            dumpIvars(of: app, needles: ["scene", "present"])
-        }
-    }
-
-    /// FrontBoard's facade, without ever handing it a block. An earlier draft
-    /// called `enumerateScenesWithBlock:`, which needs the Swift closure
-    /// bit-cast into an ObjC block — a trick that either compiles and works or
-    /// compiles and crashes, with no way to tell locally. The method list plus
-    /// one guarded `sceneWithIdentifier:` answers the same question for free.
-    private static func dumpFrontBoardScenes() {
-        guard let cls = NSClassFromString("FBSceneManager") as? NSObject.Type else {
-            Log.write("scene2: fbs manager absent")
-            return
-        }
-        Log.write("scene2: fbs manager class " + matrix(cls, fbsManagerSelectors))
-        let shared = NSSelectorFromString("sharedInstance")
-        guard cls.responds(to: shared),
-              let manager = cls.perform(shared)?.takeUnretainedValue() as? NSObject else {
-            Log.write("scene2: fbs manager has no instance")
-            return
-        }
-        Log.write("scene2: fbs manager found " + NSStringFromClass(type(of: manager)))
-        Log.write("scene2: fbs manager accepts " + matrix(manager, fbsManagerSelectors))
-
-        let lookup = NSSelectorFromString("sceneWithIdentifier:")
-        guard manager.responds(to: lookup) else {
-            Log.write("scene2: fbs manager cannot look up")
-            return
-        }
-        // SpringBoard's own scene is the one identifier we can name without
-        // enumerating; it is also the scene a floating window would live on.
-        guard let scene = manager.perform(lookup, with: "com.apple.springboard")?
-                .takeUnretainedValue() as? NSObject else {
-            Log.write("scene2: fbs springboard scene absent")
-            return
-        }
-        Log.write("scene2: fbs scene found " + NSStringFromClass(type(of: scene)) + " "
-                  + matrix(scene, sceneSurfaceSelectors))
+        Log.write("scene2: retired in 0.0.11, data in docs/REVERSE-NOTES.md")
     }
 
     // MARK: - Call table (the master's own calls, asked of iOS 17.3.1)
@@ -663,6 +443,7 @@ zStackParticipantDidChange:
         Log.write("calls: definition begin v2 targets=" + String(callTargets.count)
                   + " classes=" + String(callCeiling)
                   + " phase1=" + String(callEdge)
+                  + " scope=phase1"
                   + " skip=" + String(callSkipped))
         // No empty-queue guard: an empty queue simply walks nothing and the end
         // line reports `upto=0 of 0`. The guard that used to stand here cost
@@ -706,11 +487,18 @@ zStackParticipantDidChange:
         // "stop above 220 MB" fired on the very first chunk and the 0.0.9 dump
         // ended at class 250 with `stopped at the memory ceiling`, twice.
         let baseMB = residentMegabytes()
+        // The walk stops at the family boundary, and the boundary is a chunk
+        // boundary of its own. 0.0.10 walked past it: the last chunk of the
+        // family began at 9750, `phase1` was not due until 10000, and the
+        // process died at 9827 — 9826 classes of answers collected and never
+        // printed. A chunk that straddles the edge can lose the whole answer,
+        // so no chunk straddles it.
+        let stop = callEdge > 0 ? min(callEdge, callCeiling) : callCeiling
         callStateFD = open(Aevon.callStatePath, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
         if callStateFD < 0 {
             Log.write("calls: death marker unavailable, walking without it")
         }
-        while callCursor < callCeiling {
+        while callCursor < stop {
             // A probe that never finishes is a probe that cannot be trusted to
             // leave the phone alone. Three minutes is far past the expected few,
             // and past it we stop and say so in the end line — a partial dump
@@ -720,7 +508,7 @@ zStackParticipantDidChange:
                 break
             }
             autoreleasepool {
-                let end = min(callCursor + 250, callCeiling)
+                let end = min(callCursor + 250, stop)
                 while callCursor < end {
                     let cls = callQueue[callCursor]
                     mark(cls, index: callCursor)
@@ -737,7 +525,7 @@ zStackParticipantDidChange:
             // The progress line comes first, on purpose: when the ceiling broke
             // the run at class 250 there was no number in the log to argue with,
             // because the break was checked before the write.
-            if callCursor < callCeiling {
+            if callCursor < stop {
                 Log.write("calls: scan reached " + String(callCursor) + " "
                           + NSStringFromClass(callQueue[callCursor])
                           + " rss=" + String(rss) + "mb")
@@ -846,10 +634,13 @@ zStackParticipantDidChange:
         // `n=0` above it a lie, and tools/compare-calls.py refuses to read a
         // partial dump as a verdict for exactly that reason. `skip` is the same
         // warning from the other side — classes dropped on purpose cannot be
-        // the owner of anything either.
+        // the owner of anything either. `scope=phase1` says the stop was
+        // chosen, not suffered: `upto` below `of` by design, and a `n=0` here
+        // means "not one of the families", which is not a verdict at all.
         Log.write("calls: definition end v2 missing=" + String(missing)
                   + " capped=" + String(multi)
                   + " upto=" + String(callCursor) + " of " + String(callQueue.count)
+                  + " scope=phase1"
                   + " skip=" + String(callSkipped)
                   + " secs=" + String(Int(Date().timeIntervalSince(callStart)))
                   + reason)
@@ -859,7 +650,15 @@ zStackParticipantDidChange:
         guard let text = try? String(contentsOfFile: Aevon.callSkipPath, encoding: .utf8) else {
             return []
         }
-        return Set(text.split(separator: "\n").map(String.init).filter { !$0.isEmpty })
+        // The list belongs to the build that learned it. 0.0.9 stopped cleanly
+        // at class 250 but kept its marker, so 0.0.10 booted, called that a
+        // death, and learned a class that never killed anything — a bogus skip
+        // is a silent false negative in the table below. A version stamp makes
+        // the list expire by itself instead of being trusted forever.
+        var lines = text.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+        guard lines.first == "!" + Aevon.version else { return [] }
+        lines.removeFirst()
+        return Set(lines)
     }
 
     /// Called once at boot, before anything else touches the runtime. If the
@@ -890,7 +689,7 @@ zStackParticipantDidChange:
         Log.write("calls: previous scan died at " + String(index) + " " + name)
         var poison = loadSkipList()
         poison.insert(name)
-        var text = ""
+        var text = "!" + Aevon.version + "\n"
         for entry in poison.sorted() { text += entry + "\n" }
         try? text.write(toFile: Aevon.callSkipPath, atomically: true, encoding: .utf8)
         Log.write("calls: skip list now holds " + String(poison.count) + " classes")
@@ -951,54 +750,5 @@ zStackParticipantDidChange:
             hits.append(name)
         }
         return "[" + hits.joined(separator: ",") + "]"
-    }
-
-    /// Same question asked of a class instead of an instance: `+sharedInstance`
-    /// and friends are what tell us whether a facade is reachable at all.
-    private static func matrix(_ cls: NSObject.Type, _ names: [String]) -> String {
-        var hits: [String] = []
-        for name in names where cls.responds(to: NSSelectorFromString(name)) {
-            hits.append(name)
-        }
-        return "[" + hits.joined(separator: ",") + "]"
-    }
-
-    /// Instance variables up the whole chain, objects only. `class_copyIvarList`
-    /// stops at the class it was asked about, so an ivar declared on the base
-    /// class of `SBApplication` would otherwise be invisible.
-    private static func dumpIvars(of object: NSObject, needles: [String]) {
-        var cursor: AnyClass? = type(of: object)
-        var hops = 0
-        while let current = cursor, hops < 4 {
-            let owner = NSStringFromClass(current)
-            var count: UInt32 = 0
-            if let ivars = class_copyIvarList(current, &count) {
-                var printed = 0
-                for index in 0..<Int(count) {
-                    let ivar = ivars[index]
-                    guard let pointer = ivar_getName(ivar) else { continue }
-                    let name = String(cString: pointer)
-                    let lowered = name.lowercased()
-                    guard needles.contains(where: { lowered.contains($0) }) else { continue }
-                    if printed >= 40 { break }
-                    printed += 1
-                    var note = " type=?"
-                    if let typePointer = ivar_getTypeEncoding(ivar) {
-                        let encoding = String(cString: typePointer)
-                        if encoding.hasPrefix("@") {
-                            let value = object_getIvar(object, ivar)
-                            note = value.map { " obj=" + String(describing: Swift.type(of: $0)) }
-                                ?? " obj=nil"
-                        } else {
-                            note = " type=" + encoding
-                        }
-                    }
-                    Log.write("scene2: app ivar " + owner + "." + name + note)
-                }
-                free(ivars)
-            }
-            cursor = class_getSuperclass(current)
-            hops += 1
-        }
     }
 }

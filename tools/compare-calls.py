@@ -242,6 +242,7 @@ def parse(path):
     dump, inside, found_any = {}, False, False
     progress = None
     coverage = None
+    scoped = False
     phase1 = {}
     deaths = []
     skip = 0
@@ -264,6 +265,10 @@ def parse(path):
                 hit = COVERAGE.search(line)
                 if hit:
                     coverage = (int(hit.group(1)), int(hit.group(2)))
+                    # 0.0.11 起，扫描到家族边界就自己停 —— 那个 `upto < of`
+                    # 是我们选的，不是被杀的。两者的读法完全相反，所以必须
+                    # 在结束行里标出来，不能靠工具去猜。
+                    scoped = "scope=phase1" in line
                 hit_skip = SKIP.search(line)
                 if hit_skip:
                     skip = int(hit_skip.group(1))
@@ -294,10 +299,10 @@ def parse(path):
                     name, encoding = chunk.split("|", 1)
                     owners.append((name.rstrip("+-"), encoding))
             dump[selector] = (count, owners)
-    return dump, found_any, progress, coverage, phase1, deaths, skip
+    return dump, found_any, progress, coverage, phase1, deaths, skip, scoped
 
 
-def verdicts(dump):
+def verdicts(dump, scoped=False):
     """每一行的判定。
 
     关键区分：`n=0` 是 dump 明确告诉我们「本机没人定义它」，那是结论；
@@ -316,7 +321,9 @@ def verdicts(dump):
         encodings = [encoding for _, encoding in owners]
 
         if count == 0:
-            rows.append(("ABSENT", selector, "-", "-", ""))
+            # 家族外的类这次根本没扫，n=0 只说明「不在这几个家族里」。
+            # 记成 ABSENT 就是拿没扫当没定义 —— 正是这个工具存在的理由。
+            rows.append(("OUT-OF-SCOPE" if scoped else "ABSENT", selector, "-", "-", ""))
             continue
 
         if selector in EXACT:
@@ -352,7 +359,7 @@ def main():
         print("找不到日志文件：%s" % path)
         return 2
 
-    dump, found_any, progress, coverage, phase1, deaths, skip = parse(path)
+    dump, found_any, progress, coverage, phase1, deaths, skip, scoped = parse(path)
     if deaths:
         # 上一次扫描的死亡标记。有名字就是某个类有毒；只有序号没有名字，
         # 说明连类名都没写下去 —— 那是被系统在标记前就杀掉了。
@@ -375,7 +382,7 @@ def main():
     # 第二段把 SpringBoard 带走时，只有第一段（SB/FB/UI 家族）的数据。
     # 它不能当结论用（后面的类也可能是归属），但足够判断「有没有死路」。
     if not dump and phase1:
-        rows = verdicts(phase1)
+        rows = verdicts(phase1, True)
         counts = {}
         for verdict, selector, want, got, enc in rows:
             counts[verdict] = counts.get(verdict, 0) + 1
@@ -397,7 +404,12 @@ def main():
 
     # 扫到一半就结束的 dump，比没有 dump 更危险：它会把「还没扫到」印成 n=0，
     # 而 n=0 的读法是「这台 iOS 上没有它」。所以先拦这一种。
-    if coverage and coverage[0] < coverage[1]:
+    if scoped and coverage and coverage[0] < coverage[1]:
+        print("\n[scope=phase1] 这一趟只走家族段（%d / %d 个类），是我们自己停的；"
+              "越过边界的类这次不参与判定。" % (coverage[0], coverage[1]))
+        print("  所以下面 n=0 的读法是「不在这几个家族里」，不是「本机没有它」。")
+
+    if coverage and coverage[0] < coverage[1] and not scoped:
         print("\n[PARTIAL] 这一趟只扫了 %d / %d 个类就停了 —— 排在后面的 n=0 不是结论。"
               % (coverage[0], coverage[1]))
         print("  看结束行末尾的 reason：`three minute limit` 是时间上限，"
@@ -405,7 +417,7 @@ def main():
         print("  被系统杀掉时，下一次启动会在日志里写出「previous scan died at」那一行。")
         return 2
 
-    rows = verdicts(dump)
+    rows = verdicts(dump, scoped)
     buckets = {}
     for verdict, selector, want, got, enc in rows:
         buckets.setdefault(verdict, []).append((selector, want, got, enc))
@@ -414,7 +426,8 @@ def main():
     print("调用点核对 · 母本 %d 条（其中 %d 条是母本自己实现的方法），本机 dump 覆盖 %d 条"
           % (len(SELECTORS), own,
              len(SELECTORS) - len(buckets.get("NOT-IN-DUMP", []))))
-    for name in ("MATCH", "PRESENT", "OWNER-DIFF", "ENCODING-DIFF", "ABSENT", "NOT-IN-DUMP"):
+    for name in ("MATCH", "PRESENT", "OWNER-DIFF", "ENCODING-DIFF", "ABSENT",
+                 "OUT-OF-SCOPE", "NOT-IN-DUMP"):
         if name in buckets:
             print("  %-14s %3d" % (name, len(buckets[name])))
 
@@ -462,11 +475,19 @@ def main():
         if rest > 0:
             print("  ...其余 %d 条见 md" % rest)
 
+    if "OUT-OF-SCOPE" in buckets:
+        print("\n[OUT-OF-SCOPE] 家族段里没人定义这 %d 条 —— 它们可能在家族外，"
+              "也可能是本机真没有。这一趟不下结论。" % len(buckets["OUT-OF-SCOPE"]))
+        for selector, want, got, enc in buckets["OUT-OF-SCOPE"][:20]:
+            print("  %s" % selector)
+            print("     逆向: %s" % (EXACT.get(selector, ("-", ""))[0] or "-"))
+
     own_absent = len([row for row in buckets.get("ABSENT", []) if row[0] in OWN_METHODS])
     absent = len(buckets.get("ABSENT", [])) - own_absent
-    hard = absent + len(buckets.get("OWNER-DIFF", [])) + len(buckets.get("ENCODING-DIFF", []))
+    hard = (absent + len(buckets.get("OWNER-DIFF", [])) + len(buckets.get("ENCODING-DIFF", []))
+            + len(buckets.get("OUT-OF-SCOPE", [])))
     print("\n结论：%s" % ("全部对齐，可以等指令做浮窗" if hard == 0
-                         else "%d 条未对齐，浮窗还不能开始" % hard))
+                         else "%d 条还没有对上的证据，浮窗还不能开始" % hard))
     if own_absent:
         print("  （另有 %d 条 ABSENT 属于母本自有方法，不计入未对齐）" % own_absent)
 
