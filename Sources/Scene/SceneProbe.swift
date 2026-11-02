@@ -282,13 +282,12 @@ enum SceneProbe {
     /// Capped: SpringBoard carries thousands of classes and this walks them on
     /// the main thread.
     private static func censusClasses() {
-        var count: UInt32 = 0
-        guard let classes = objc_copyClassList(&count) else { return }
+        let classes = allClasses()
+        guard !classes.isEmpty else { return }
         var matched = 0
         var printed = 0
         var owners: [String] = []
-        for index in 0..<Int(count) {
-            let cls: AnyClass = classes[index]
+        for cls in classes {
             let name = NSStringFromClass(cls)
             guard censusNeedles.contains(where: { name.contains($0) }) else { continue }
             matched += 1
@@ -301,9 +300,22 @@ enum SceneProbe {
                 owners.append(name)
             }
         }
-        free(classes)
-        Log.write("scene2: census total " + String(matched) + " of " + String(count))
+        Log.write("scene2: census total " + String(matched) + " of " + String(classes.count))
         for name in owners { dumpMethods(name) }
+    }
+
+    /// `objc_copyClassList` hands back an autoreleasing pointer, which cannot be
+    /// freed without a conversion Swift will not make; `objc_getClassList` into
+    /// our own buffer is the same information with an owner. The first call is
+    /// how you ask how big it has to be.
+    private static func allClasses() -> [AnyClass] {
+        let total = objc_getClassList(nil, 0)
+        guard total > 0 else { return [] }
+        let buffer = UnsafeMutablePointer<AnyClass>.allocate(capacity: Int(total))
+        defer { buffer.deallocate() }
+        let count = objc_getClassList(AutoreleasingUnsafeMutablePointer(buffer), total)
+        guard count > 0 else { return [] }
+        return (0..<Int(count)).map { buffer[$0] }
     }
 
     private static func dumpMethods(_ name: String) {
@@ -502,12 +514,13 @@ enum SceneProbe {
                     printed += 1
                     var note = " type=?"
                     if let typePointer = ivar_getTypeEncoding(ivar) {
-                        let type = String(cString: typePointer)
-                        if type.hasPrefix("@") {
+                        let encoding = String(cString: typePointer)
+                        if encoding.hasPrefix("@") {
                             let value = object_getIvar(object, ivar)
-                            note = value.map { " obj=" + String(describing: type(of: $0)) } ?? " obj=nil"
+                            note = value.map { " obj=" + String(describing: Swift.type(of: $0)) }
+                                ?? " obj=nil"
                         } else {
-                            note = " type=" + type
+                            note = " type=" + encoding
                         }
                     }
                     Log.write("scene2: app ivar " + owner + "." + name + note)
