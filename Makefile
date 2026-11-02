@@ -43,7 +43,10 @@ include $(THEOS_MAKE_PATH)/tweak.mk
 # adding an install-time dependency on the framework.
 # ---------------------------------------------------------------------------
 BUNDLE_NAME := AevonPrefs
-AevonPrefs_FILES := $(AE_CORE) Sources/Prefs/RootListController.swift
+AE_RING := Sources/Ring/RingModel.swift Sources/Ring/RingIcons.swift \
+           Sources/Ring/RingView.swift Sources/Ring/RingPreviewController.swift
+
+AevonPrefs_FILES := $(AE_CORE) $(AE_RING) Sources/Prefs/RootListController.swift
 AevonPrefs_INSTALL_PATH := /Library/PreferenceBundles
 AevonPrefs_FRAMEWORKS := Foundation UIKit
 AevonPrefs_LDFLAGS := -Wl,-undefined,dynamic_lookup -Wl,-dead_strip

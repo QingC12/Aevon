@@ -249,6 +249,32 @@ def main():
     else:
         ok("prefs: loads Root.plist explicitly into the specifiers ivar")
 
+    # -- 5c. carrier shape (0.0.5) ------------------------------------------
+    # The ring is the first real rendering code in this project, and its three
+    # regressions are all silent: a lost preview row, a lost shape switch, or a
+    # build that quietly dropped the view. Assert all three.
+    ring_plist = files.get(f"{BUNDLE_DIR}/Ring.plist")
+    if ring_plist is None:
+        bad("ring: Ring.plist missing")
+    else:
+        ring_items = plistlib.loads(ring_plist).get("items", [])
+        actions = [item.get("action") for item in ring_items]
+        keys = [item.get("key") for item in ring_items]
+        shapes = [k for k in keys if k in ("RTSIF", "RTSIH", "RTSIQ", "RTSIZ")]
+        if "previewRing:" not in actions:
+            bad("ring: no previewRing: row — the carrier shape is unreachable")
+        elif "@ring.summary" not in keys:
+            bad("ring: no @ring.summary row — nothing reports the live geometry")
+        elif len(shapes) != 4:
+            bad(f"ring: {len(shapes)} of 4 shape switches present")
+        else:
+            ok("ring: 4 shapes, live summary, preview action")
+
+    for token in (b"RingView", b"RingPreviewController",
+                  b"_applicationIconImageForBundleIdentifier:"):
+        if token not in prefs:
+            bad(f"ring: {token.decode()} missing from the bundle binary")
+
     # -- 6. log path contract ----------------------------------------------
     dylib = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
     if b"/var/mobile/Aevon.log" not in dylib:

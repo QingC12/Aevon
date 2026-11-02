@@ -257,7 +257,18 @@ BUILDERS = {"switch": spec_switch, "slider": spec_slider, "title": spec_title}
 
 
 def build_panel(panel_id, title, intro, items):
-    specs = [{"cell": "PSGroupCell", "label": title, "footerText": intro}]
+    specs = []
+    if panel_id == "Ring":
+        # 预览放在最上面：这一节剩下的 12 项都是它的参数，先能看见形状，
+        # 后面的半径/图标宽度/旋转角才有意义。
+        specs.append({"cell": "PSGroupCell", "label": "预览",
+                      "footerText": "形状、半径、图标宽度、旋转角、动画参数全部取本节当前值。"
+                                    "改完参数回到这一行点「预览」，就是一次真实验证。"})
+        specs.append({"cell": "PSTitleValueCell", "label": "当前承载",
+                      "key": "@ring.summary", "default": "—", "defaults": DOMAIN})
+        specs.append({"cell": "PSButtonCell", "label": "预览承载形状（全屏）",
+                      "action": "previewRing:", "defaults": DOMAIN})
+    specs.append({"cell": "PSGroupCell", "label": title, "footerText": intro})
     for it in items:
         specs.append(BUILDERS[it["cell"]](it))
     return {"title": title, "items": specs}

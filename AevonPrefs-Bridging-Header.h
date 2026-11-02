@@ -64,4 +64,17 @@ typedef NS_ENUM(NSInteger, PSCellType) {
 
 @end
 
+// ---------------------------------------------------------------------------
+// Private, but it is how SpringBoard itself renders an app icon, and it is the
+// only way to get a real icon for the many apps that ship nothing but
+// Assets.car. Every call site checks responds(to:) first, so a system without
+// this selector falls back to the filesystem scan instead of crashing.
+// ---------------------------------------------------------------------------
+@interface UIImage (AevonPrivateIcons)
++ (nullable UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID
+                                                       format:(NSInteger)format
+                                                        scale:(CGFloat)scale
+    NS_SWIFT_NAME(aevonAppIcon(bundleID:format:scale:));
+@end
+
 NS_ASSUME_NONNULL_END

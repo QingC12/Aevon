@@ -110,6 +110,7 @@ final class RootListController: PSListController {
         case "@status.log":     return Aevon.logPath
         case "!gate.panic":     return Gate.panicActive
         case "!gate.disabled":  return Gate.disabledActive
+        case "@ring.summary":   return RingConfig.load().summary
         default:                return super.readPreferenceValue(specifier)
         }
     }
@@ -127,6 +128,22 @@ final class RootListController: PSListController {
             case "!gate.disabled":
                 Gate.setDisabled(on, reason: "manual:settings")
                 Log.write("settings: G1 pause injection -> \(on ? "on" : "off")")
+                refreshLiveRows()
+                return
+            case "RTSIF", "RTSIH", "RTSIQ", "RTSIZ":
+                // The master's four shapes are a radio group, not four switches.
+                // Turning one on has to switch the other three off in the same
+                // breath, otherwise the ring would be asked to be a circle and
+                // a quarter-circle at once and the answer would depend on the
+                // order the reader happened to check them in.
+                if on {
+                    let store = UserDefaults(suiteName: Aevon.domain)
+                    for other in ["RTSIF", "RTSIH", "RTSIQ", "RTSIZ"] where other != key {
+                        store?.set(false, forKey: other)
+                    }
+                    store?.synchronize()
+                }
+                super.setPreferenceValue(value, specifier: specifier)
                 refreshLiveRows()
                 return
             default:
@@ -168,6 +185,22 @@ final class RootListController: PSListController {
                             "当前环境不允许从设置里重启桌面。请用越狱工具自带的重启按钮，或手动注销一次。")
             }
         }
+    }
+
+    /// Opens the carrier shape full screen. Everything it shows comes from the
+    /// Ring panel's live values, so this is the tuning surface, not a mock-up.
+    @objc func previewRing(_ specifier: PSSpecifier) {
+        let started = Date()
+        let config = RingConfig.load()
+        let loaded = RingIcons.load(limit: 12)
+        let milliseconds = Int(Date().timeIntervalSince(started) * 1000)
+        Log.write("prefs: ring preview shape=\(config.shape.title) icons=\(loaded.apps.count) "
+                  + "source=\(loaded.source.rawValue) in \(milliseconds)ms")
+
+        let controller = RingPreviewController(config: config,
+                                               apps: loaded.apps,
+                                               source: loaded.source)
+        present(controller, animated: true)
     }
 
     private func alert(_ title: String, _ message: String) {
