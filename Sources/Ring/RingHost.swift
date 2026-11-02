@@ -154,7 +154,6 @@ final class RingHost: NSObject {
         let center = NotificationCenter.default
         let names: [Notification.Name] = [
             UIDevice.orientationDidChangeNotification,
-            UIApplication.didChangeStatusBarOrientationNotification,
             UIApplication.didBecomeActiveNotification,
         ]
         for name in names {

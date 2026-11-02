@@ -14,13 +14,14 @@ import Foundation
 import CoreFoundation
 
 private let darwinCallback: CFNotificationCallback = { _, _, name, _, _ in
-    // CFString -> NSString -> String: the two-step bridge is the one form
-    // that compiles on every Swift version this project has been built with.
-    let notification = name.map { $0 as NSString as String } ?? ""
+    // Compare as CFString with CFEqual. Bridging CFNotificationName to a Swift
+    // String is not available on this toolchain, and the name is only ever
+    // compared, never printed.
+    let isPreferences = name.map { CFEqual($0, Aevon.notePrefs as CFString) } ?? false
 
     // A setting changed. The snapshot file is already on disk (Settings writes
     // it before posting), so this is a re-read, not a command that can be lost.
-    if notification == Aevon.notePrefs {
+    if isPreferences {
         DispatchQueue.main.async {
             RingHost.shared.refresh()
         }
