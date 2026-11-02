@@ -397,16 +397,23 @@ def main():
             bad("probe: no sceneSurface: row — the carrier call surface stays a guess")
         elif "sceneCalls:" not in window_actions:
             bad("probe: no sceneCalls: row — the master's calls never get resolved to a class")
+        elif "sceneWindow:" not in window_actions:
+            bad("probe: no sceneWindow: row — the window build has no way in")
         else:
-            ok("probe: 窗口与场景 has the 探针 group and all three of its buttons")
+            ok("probe: 窗口与场景 has the 探针 group and all four of its buttons")
 
-    for token in (b"sceneProbe:", b"sceneSurface:", b"sceneCalls:",
+    for token in (b"sceneProbe:", b"sceneSurface:", b"sceneCalls:", b"sceneWindow:",
                   b"prefs: scene probe requested"):
         if token not in prefs:
             bad(f"probe: {token.decode()} missing from the bundle binary")
 
-    for token in (b"scene: probe begin", b"scene: probe end", b"scene: class missing",
-                  b"scene: window level", b"scene: carrier view", b"scene: live scenes"):
+    # 0.0.14 retired `dumpClasses` (its output is in docs/REVERSE-NOTES.md) to pay
+    # for the window build. What must stay is the tree walk's own markers plus the
+    # new build's markers: a build that logs nothing reads as "the request never
+    # arrived", which is the one wrong answer that costs a full round trip.
+    for token in (b"scene: probe begin", b"scene: probe end",
+                  b"scene: window level", b"scene: carrier view", b"scene: live scenes",
+                  b"win: begin manager", b"win: scenes=", b"win: calling _createScene"):
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the probe would never reach SpringBoard")

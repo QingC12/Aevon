@@ -55,66 +55,19 @@ enum SceneProbe {
 
     // MARK: - What to ask about
 
-    /// Classes the master's carrier is built out of (all A-level evidence from
-    /// the reverse notes), plus the two system-level ones that tell us whether
-    /// SpringBoard still has a scene manager at all.
-    private static let probeClasses = [
-        "UIScenePresentationManager",
-        "UIScenePresentation",
-        "_UIContextLayerHostView",
-        "SBDeviceApplicationSceneViewController",
-        "SBDeviceApplicationSceneView",
-        "SBDeviceApplicationSceneHandle",
-        "FBSceneManager",
-        "FBScene",
-        "FBSMutableSceneSettings",
-        "SBFluidSwitcherViewController",
-        "SBMainWorkspace",
-        "SBSceneManager",
-        "SBWindowScene",
-        "UIApplicationSceneDeactivationManager",
-    ]
-
-    /// Selectors worth having a type encoding for. The first two decide whether
-    /// P1 is buildable at all; the rest are the ones the master hooks.
-    private static let probeSelectors = [
-        "createPresenterWithIdentifier:priority:",
-        "initWithWindowScene:",
-        "setWindowScene:",
-        "_scene:interceptUpdateWithNewSettings:",
-        "_setDeactivationReasons:onScene:withSettings:reason:",
-        "enumerateScenesWithBlock:",
-        "initWithSceneLayer:",
-        "setWindowLevel:",
-    ]
-
-    /// asked of live objects: presence only, never called.
-    private static let probeResponses = [
-        "_sceneIdentifier", "_bundleIdentifier", "identifier", "settings",
-        "clientSettings", "definition", "sceneHandle", "displayConfiguration",
-    ]
-
     // MARK: - Running
 
+    /// "转储场景与窗口" — the live tree only.
+    ///
+    /// The class/selector encoding half of this dump (`dumpClasses`) was retired
+    /// in 0.0.14: every line it printed is already written up in
+    /// docs/REVERSE-NOTES.md, and the dylib is 1.2 KB over its 320 KB budget
+    /// while a window build needs that room more. The button stays, because the
+    /// tree walk is still the cheapest way to see what SpringBoard owns.
     static func run() {
         Log.write("scene: probe begin")
-        dumpClasses()
         dumpLiveTree()
         Log.write("scene: probe end")
-    }
-
-    private static func dumpClasses() {
-        for name in probeClasses {
-            guard let cls = NSClassFromString(name) else {
-                Log.write("scene: class missing " + name)
-                continue
-            }
-            Log.write("scene: class found " + name + " chain=" + chain(of: cls))
-            for selector in probeSelectors {
-                guard let types = encoding(cls, selector) else { continue }
-                Log.write("scene: selector enc " + name + " " + selector + " " + types)
-            }
-        }
     }
 
     /// Live scene tree + every window on it + a search for carrier-shaped views.
@@ -135,7 +88,8 @@ enum SceneProbe {
             let delegate = scene.delegate.map { String(describing: type(of: $0)) } ?? "none"
             Log.write("scene: live " + name + " id=" + identifier + " state=" + state
                       + " delegate=" + delegate)
-            Log.write("scene: accepts " + name + " " + accepted(scene))
+            Log.write("scene: accepts " + name + " "
+                      + accepted(scene, ["definition", "settings", "clientSettings"]))
 
             guard let windowScene = scene as? UIWindowScene else { continue }
             let bounds = windowScene.screen.bounds
@@ -1021,41 +975,9 @@ zStackParticipantDidChange:
         return application
     }
 
-    /// Instance or class method, whichever exists, as the runtime spells it.
-    private static func encoding(_ cls: AnyClass, _ name: String) -> String? {
-        let selector = NSSelectorFromString(name)
-        if let method = class_getInstanceMethod(cls, selector),
-           let types = method_getTypeEncoding(method) {
-            return String(cString: types)
-        }
-        if let meta = object_getClass(cls), let method = class_getClassMethod(meta, selector),
-           let types = method_getTypeEncoding(method) {
-            return String(cString: types)
-        }
-        return nil
-    }
-
-    /// "Class <- Super <- NSObject": tells us at a glance whether a class is
-    /// still the UIKit/FrontBoard one the master knew.
-    private static func chain(of cls: AnyClass) -> String {
-        var names: [String] = []
-        var cursor: AnyClass? = cls
-        var hops = 0
-        while let current = cursor, hops < 6 {
-            names.append(NSStringFromClass(current))
-            cursor = class_getSuperclass(current)
-            hops += 1
-        }
-        return names.joined(separator: "<-")
-    }
-
-    /// Which of the interesting selectors a live object answers. Presence only:
-    /// calling an unknown getter can hand back a struct and crash the caller.
-    private static func accepted(_ object: NSObject) -> String {
-        return matrix(object, probeResponses)
-    }
-
-    private static func matrix(_ object: NSObject, _ names: [String]) -> String {
+    /// Which of `names` a live object answers. Presence only: calling an unknown
+    /// getter can hand back a struct and crash the caller.
+    private static func accepted(_ object: NSObject, _ names: [String]) -> String {
         var hits: [String] = []
         for name in names where object.responds(to: NSSelectorFromString(name)) {
             hits.append(name)
