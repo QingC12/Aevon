@@ -134,6 +134,9 @@ final class PanelController: PSListController {
         if key == "@ring.apps" {
             return RingApps.summary()
         }
+        if key == "@ring.star" {
+            return RingApps.starSummary()
+        }
         if key == "@ring.grip" {
             return GripLayout.describe()
         }

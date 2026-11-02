@@ -133,6 +133,10 @@ final class RingHost: NSObject {
             || updated.speed != config.speed
             || updated.damping != config.damping
             || updated.customSpring != config.customSpring
+            || updated.star != config.star
+            || updated.haptic != config.haptic
+            || updated.intensity != config.intensity
+            || updated.desktop != config.desktop
         config = updated
 
         // The app list is a separate file with its own lifecycle: it changes on
@@ -355,6 +359,21 @@ final class RingHost: NSObject {
         ring.onPick = { [weak self] app in
             self?.launch(app)
         }
+        // 回收站 / 收藏 / 拖拽旋转 all end up in one file (apps.plist) or in the
+        // runtime snapshot. The view never writes anything itself, so the two
+        // hosts cannot disagree about who owns the data.
+        ring.onRemove = { [weak self] app in
+            self?.trash(app)
+        }
+        ring.onPin = { [weak self] app in
+            self?.pin(app)
+        }
+        ring.onConfigChange = { [weak self] edited in
+            self?.persistGeometry(edited)
+        }
+        ring.onBackgroundTap = { [weak self] in
+            self?.collapse(animated: true)
+        }
         host.addSubview(ring)
         if let pad = gripPad { host.bringSubviewToFront(pad) }
         self.ring = ring
@@ -403,6 +422,57 @@ final class RingHost: NSObject {
         if expanded, !apps.isEmpty {
             ring?.rebuild(config: config, apps: apps)
         }
+    }
+
+    // MARK: - 托盘编辑（桌面侧）
+
+    /// 回收站: the operator dragged the icon into the middle of the ring.
+    private func trash(_ app: RingApp) {
+        let ok = RingApps.remove(app.bundleID)
+        let result = ok ? "ok" : "write failed"
+        Log.write("ring: trash " + app.bundleID + " -> " + result)
+        reloadApps()
+        // Nothing left to show. Keeping an empty ring on screen would look like
+        // the delete broke the shape instead of emptying it.
+        if apps.isEmpty {
+            collapse(animated: true)
+        }
+    }
+
+    /// 收藏 (`Star`). A pinned app moves to the head of the ring, which is the
+    /// only ordering the master's ring has.
+    private func pin(_ app: RingApp) {
+        let ok = RingApps.togglePin(app.bundleID)
+        let now = RingApps.isPinned(app.bundleID)
+        Log.write("ring: pin " + app.bundleID + " -> " + (now ? "on" : "off")
+                  + (ok ? "" : " (write failed)"))
+        reloadApps()
+    }
+
+    /// Geometry set by dragging (旋转角, or 尾角 in the 任意 shape). Written to
+    /// the runtime snapshot so the ring comes back the way it was left; the
+    /// settings sliders stay the master control, so the next write from
+    /// Settings wins.
+    private func persistGeometry(_ edited: RingConfig) {
+        var snapshot = RingConfig.loadRuntime()
+        snapshot.rotation = edited.rotation
+        snapshot.tail = edited.tail
+        config.rotation = edited.rotation
+        config.tail = edited.tail
+        if snapshot.writeSnapshot() {
+            Log.write("ring: rotate -> " + config.summary)
+        }
+    }
+
+    /// Re-reads apps.plist and rebuilds the open ring. Cheap: the icon images
+    /// are cached by bundle id, so this is an array sort, not a redraw of the
+    /// whole catalogue.
+    private func reloadApps() {
+        let loaded = RingApps.resolved(limit: 12)
+        apps = loaded.apps
+        appsSignature = RingApps.signature()
+        Log.write("ring: apps -> " + String(apps.count) + " (" + loaded.source.rawValue + ")")
+        ring?.reload(apps: apps)
     }
 
     // MARK: - Launching

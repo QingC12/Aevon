@@ -78,8 +78,26 @@ def tracked_files():
     return files
 
 
+def gate():
+    """推送前的本地闸门。它不编译，只验证「要推的东西是否自洽」。
+
+    之前连续几次 CI 失败，原因都是本地就能查出来的：审计断言了一个被 strip
+    掉的类型名、清单里混进了交付报告。等 CI 两分钟才发现，成本高且没必要。
+    所以这里默认强制先过闸门 —— 想过也过不去，除非显式设置 AEVON_SKIP_GATE=1。
+    """
+    if os.environ.get("AEVON_SKIP_GATE") == "1":
+        print("!! 跳过本地闸门（AEVON_SKIP_GATE=1）—— 失败风险自负")
+        return
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "push-gate.py")
+    result = subprocess.run([sys.executable, script, "--quiet"], cwd=os.getcwd())
+    if result.returncode != 0:
+        sys.exit("\n本地闸门未通过，已停止推送。先修好上面列出的项，再推。")
+
+
 def main():
     message = sys.argv[1] if len(sys.argv) > 1 else "update"
+    gate()
+
     files = tracked_files()
     if not files:
         sys.exit("没有跟踪的文件")

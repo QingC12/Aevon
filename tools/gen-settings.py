@@ -316,6 +316,16 @@ def build_panel(panel_id, title, intro, items):
                       "key": "@ring.grip", "default": "右下角（默认）", "defaults": DOMAIN})
         specs.append({"cell": "PSButtonCell", "label": "握把复位到右下角",
                       "action": "resetGrip:", "defaults": DOMAIN})
+
+        # 手势：母本把这些写进 GestureIntroduction 原文，圆盘这边没有独立设置项，
+        # 但功能必须能被发现 —— 一个只有作者知道的长按，等于没有做。
+        specs.append({"cell": "PSGroupCell", "label": "手势",
+                      "footerText": "点图标启动 App。按住图标拖动可移动，拖到圆盘中心松手"
+                                    "即从托盘移除（回收站）。长按图标收藏 / 取消收藏，"
+                                    "收藏的排在圆盘最前。在图标之间的空档拖动可整体旋转；"
+                                    "「任意角度」形状下拖动最后一个图标即定形（尾角）。"})
+        specs.append({"cell": "PSTitleValueCell", "label": "已收藏（长按图标）",
+                      "key": "@ring.star", "default": "—", "defaults": DOMAIN})
     specs.append({"cell": "PSGroupCell", "label": title, "footerText": intro})
     for it in items:
         specs.append(BUILDERS[it["cell"]](it))

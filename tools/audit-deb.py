@@ -321,7 +321,10 @@ def main():
         actions = [item.get("action") for item in ring_items]
         keys = [item.get("key") for item in ring_items]
         shapes = [k for k in keys if k in ("RTSIF", "RTSIH", "RTSIQ", "RTSIZ")]
-        if "previewRing:" not in actions:
+        if "@ring.star" not in keys:
+            bad("ring: no 收藏 row — 长按收藏 exists in the view but nothing "
+                "in Settings can show what is pinned")
+        elif "previewRing:" not in actions:
             bad("ring: no previewRing: row — the carrier shape is unreachable")
         elif "@ring.summary" not in keys:
             bad("ring: no @ring.summary row — nothing reports the live geometry")
@@ -342,6 +345,7 @@ def main():
                   b"PanelController", b"previewRing:", b"editApps:", b"resetGrip:",
                   b"AppListController", b"AppPickerController",
                   b"prefs: open app list", b"prefs: grip reset",
+                  b"prefs: preview trash", b"prefs: preview pin",
                   b"_applicationIconImageForBundleIdentifier:"):
         if token not in prefs:
             bad(f"ring: {token.decode()} missing from the bundle binary")
@@ -352,7 +356,8 @@ def main():
     # the class, the private API it calls, and the line it logs on mount.
     dylib_early = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
     for token in (b"RingHost", b"ring: hosted on desktop", b"LSApplicationWorkspace",
-                  b"(operator list)", b"ring: grip moved to"):
+                  b"(operator list)", b"ring: grip moved to",
+                  b"ring: trash ", b"ring: pin ", b"ring: rotate -> "):
         if token not in dylib_early:
             bad(f"host: {token.decode()} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")

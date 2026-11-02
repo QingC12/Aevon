@@ -16,8 +16,8 @@ import UIKit
 
 final class RingPreviewController: UIViewController {
 
-    private let config: RingConfig
-    private let apps: [RingApp]
+    private var config: RingConfig
+    private var apps: [RingApp]
     private let source: IconSource
 
     private var ring: RingView?
@@ -67,6 +67,13 @@ final class RingPreviewController: UIViewController {
         if ring == nil {
             let ring = RingView(frame: view.bounds, config: config, apps: apps, pivot: pivot)
             ring.onPick = { [weak self] app in self?.showToast(app.name) }
+            // The preview is the only place these can be tried without a
+            // respring, so it has to exercise the same callbacks the desktop
+            // host does — otherwise it is a picture, not a test.
+            ring.onRemove = { [weak self] app in self?.remove(app) }
+            ring.onPin = { [weak self] app in self?.pin(app) }
+            ring.onConfigChange = { [weak self] edited in self?.persist(edited) }
+            ring.onBackgroundTap = { [weak self] in self?.showToast("点图标启动 · 拖动旋转 · 长按收藏") }
             view.addSubview(ring)
             bringChromeToFront()
             self.ring = ring
@@ -189,6 +196,39 @@ final class RingPreviewController: UIViewController {
     }
 
     // MARK: Actions
+
+    // MARK: Live editing (same file the desktop reads)
+
+    private func reloadApps() {
+        let loaded = RingApps.resolved(limit: 12)
+        apps = loaded.apps
+        ring?.reload(apps: apps)
+    }
+
+    private func remove(_ app: RingApp) {
+        RingApps.remove(app.bundleID)
+        Log.write("prefs: preview trash " + app.bundleID)
+        showToast("已从托盘移除 " + app.name)
+        reloadApps()
+    }
+
+    private func pin(_ app: RingApp) {
+        RingApps.togglePin(app.bundleID)
+        let pinned = RingApps.isPinned(app.bundleID)
+        Log.write("prefs: preview pin " + app.bundleID + " -> " + (pinned ? "on" : "off"))
+        showToast(pinned ? "已收藏 " + app.name : "已取消收藏 " + app.name)
+        reloadApps()
+    }
+
+    private func persist(_ edited: RingConfig) {
+        config.rotation = edited.rotation
+        config.tail = edited.tail
+        var snapshot = RingConfig.loadRuntime()
+        snapshot.rotation = edited.rotation
+        snapshot.tail = edited.tail
+        snapshot.writeSnapshot()
+        Log.write("prefs: preview geometry -> " + config.summary)
+    }
 
     @objc private func closeTapped() {
         if let ring = ring {
