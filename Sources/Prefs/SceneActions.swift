@@ -16,28 +16,35 @@ import UIKit
 enum SceneActions {
 
     static func probeScene(from controller: UIViewController) {
-        try? FileManager.default.createDirectory(atPath: Aevon.stateDir,
-                                                 withIntermediateDirectories: true)
-        let stamp = String(Int(Date().timeIntervalSince1970))
-        let wrote = (try? stamp.write(toFile: Aevon.probePath, atomically: true,
-                                     encoding: .utf8)) != nil
+        request("tree", from: controller, title: "已请求场景探针")
+    }
+
+    /// Second dump: the call surface P1 needs, not the tree. Kept as its own
+    /// button because it is the one probe that messages FrontBoard, and a
+    /// measurement that can crash SpringBoard should not be reachable by the
+    /// button an operator taps first.
+    static func probeSurface(from controller: UIViewController) {
+        request("api", from: controller, title: "已请求接口面探针")
+    }
+
+    private static func request(_ mode: String, from controller: UIViewController, title: String) {
+        let wrote = SceneProbe.request(mode)
         if wrote {
             // Same note the host already listens to: no new observer, no new
             // failure mode.
             notifyPost(Aevon.notePrefs)
         }
-        Log.write("prefs: scene probe requested -> " + (wrote ? "ok" : "write failed"))
-
-        report(wrote, from: controller)
+        Log.write("prefs: scene probe requested -> " + mode + " " + (wrote ? "ok" : "write failed"))
+        report(wrote, title: title, from: controller)
     }
 
-    private static func report(_ ok: Bool, from controller: UIViewController) {
-        let title = ok ? "已请求场景探针" : "请求失败"
+    private static func report(_ ok: Bool, title: String, from controller: UIViewController) {
         let message = ok
-            ? "SpringBoard 会在一秒内把场景树写进 /var/mobile/Aevon.log，"
-            + "以 scene: 开头。这次转储只发生一次，不会在下次开机重放。"
+            ? "SpringBoard 会在一秒内把结果写进 /var/mobile/Aevon.log。"
+            + "这次转储只发生一次，不会在下次开机重放。"
             : "无法写入 " + Aevon.probePath + "，请检查该目录权限。"
-        let sheet = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        let sheet = UIAlertController(title: ok ? title : "请求失败",
+                                      message: message, preferredStyle: .alert)
         sheet.addAction(UIAlertAction(title: "好", style: .default, handler: nil))
         controller.present(sheet, animated: true)
     }

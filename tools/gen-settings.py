@@ -282,11 +282,14 @@ def build_panel(panel_id, title, intro, items):
         specs.append({"cell": "PSGroupCell", "label": "探针",
                       "footerText": "浮窗不是塞进桌面的视图，而是自建 UIScene，"
                                     "需要先知道这台 iOS 上场景接口长什么样。"
-                                    "点下面的按钮，SpringBoard 会把类、选择子签名、"
-                                    "当前场景与窗口清单写进 /var/mobile/Aevon.log，"
-                                    "以 scene: 开头；只转储一次，不会在开机时重放。"})
+                                    "两个按钮都把结果写进 /var/mobile/Aevon.log："
+                                    "第一个以 scene: 开头，是当前场景与窗口清单；"
+                                    "第二个以 scene2: 开头，是承载层的真实方法表。"
+                                    "各只转储一次，不会在开机时重放。"})
         specs.append({"cell": "PSButtonCell", "label": "转储场景与窗口（写 Aevon.log）",
                       "action": "sceneProbe:", "defaults": DOMAIN})
+        specs.append({"cell": "PSButtonCell", "label": "转储承载接口面（方法表）",
+                      "action": "sceneSurface:", "defaults": DOMAIN})
 
     if panel_id == "Ring":
         # 预览放在最上面：这一节剩下的 12 项都是它的参数，先能看见形状，

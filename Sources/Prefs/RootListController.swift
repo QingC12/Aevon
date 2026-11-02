@@ -229,6 +229,10 @@ final class RootListController: PSListController {
         SceneActions.probeScene(from: self)
     }
 
+    @objc func sceneSurface(_ specifier: PSSpecifier) {
+        SceneActions.probeSurface(from: self)
+    }
+
     private func alert(_ title: String, _ message: String) {
         let sheet = UIAlertController(title: title, message: message, preferredStyle: .alert)
         sheet.addAction(UIAlertAction(title: "好", style: .default, handler: nil))

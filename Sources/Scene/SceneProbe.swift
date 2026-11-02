@@ -35,12 +35,16 @@ enum SceneProbe {
     /// Settings side. Writing the request file *is* the request: the tweak's
     /// prefs observer sees the notification and runs the dump inside
     /// SpringBoard, which is the only process that has the real scene tree.
-    static func request() -> Bool {
+    ///
+    /// The file's *content* picks the dump. Two dumps instead of one button
+    /// because they answer different questions and each has its own blast
+    /// radius: the tree walk only reads, the surface walk sends two messages to
+    /// FrontBoard.
+    static func request(_ mode: String) -> Bool {
         try? FileManager.default.createDirectory(atPath: Aevon.stateDir,
                                                  withIntermediateDirectories: true)
-        let stamp = String(Int(Date().timeIntervalSince1970))
         do {
-            try stamp.write(toFile: Aevon.probePath, atomically: true, encoding: .utf8)
+            try mode.write(toFile: Aevon.probePath, atomically: true, encoding: .utf8)
             return true
         } catch {
             return false
@@ -52,8 +56,13 @@ enum SceneProbe {
     @discardableResult
     static func consumeRequest() -> Bool {
         guard FileManager.default.fileExists(atPath: Aevon.probePath) else { return false }
+        let mode = (try? String(contentsOfFile: Aevon.probePath, encoding: .utf8)) ?? ""
         try? FileManager.default.removeItem(atPath: Aevon.probePath)
-        run()
+        if mode.trimmingCharacters(in: .whitespacesAndNewlines) == "api" {
+            runSurface()
+        } else {
+            run()
+        }
         return true
     }
 
@@ -192,6 +201,219 @@ enum SceneProbe {
         }
     }
 
+    // MARK: - Surface probe (what P1 would actually have to call)
+
+    /// The first dump answered "the classes exist". It could not answer the
+    /// only question that matters for building: *which* selector turns an app's
+    /// scene into a view I can hold. So this dump walks the runtime instead of a
+    /// hand-written list — `_UIScenePresenter` and friends never appear in a
+    /// strings dump, because Swift only ever names them through selectors.
+    private static let censusNeedles = [
+        "Presenter", "Presentation", "SceneSpecification", "SceneDefinition",
+        "SceneParameters", "ContextLayer", "SceneLayer",
+    ]
+
+    /// Classes worth a full method list: both carrier controllers, both carrier
+    /// views, all three handle classes, and the presentation pair.
+    private static let surfaceClasses = [
+        "SBDeviceApplicationSceneViewController",
+        "SBApplicationSceneViewController",
+        "SBSceneViewController",
+        "SBApplicationSceneView",
+        "SBSceneView",
+        "SBDeviceApplicationSceneHandle",
+        "SBApplicationSceneHandle",
+        "SBSceneHandle",
+        "_UIContextLayerHostView",
+        "_UIScenePresentationView",
+        "UIScenePresentationManager",
+        "UIWindowScene",
+        "FBSceneManager",
+        "FBScene",
+        "FBSMutableSceneDefinition",
+        "FBSMutableSceneParameters",
+        "FBSSceneSpecification",
+        "FBSSceneIdentity",
+        "FBSSceneClientIdentity",
+    ]
+
+    /// A full method list would be unreadable and mostly irrelevant; this keeps
+    /// only the selectors that could possibly be part of the carrier.
+    private static let surfaceNeedles = [
+        "init", "scene", "Scene", "handle", "Handle", "present", "Present",
+        "activat", "Activat", "layer", "Layer", "view", "View",
+    ]
+
+    private static let applicationSelectors = [
+        "_scenePresentationManager", "scenePresentationManager", "_presentationManager",
+        "_windowScene", "_mainScene", "_sceneManager", "connectedScenes",
+    ]
+
+    private static let applicationSceneSelectors = [
+        "bundleIdentifier", "mainSceneHandle", "sceneHandleForSceneIdentifier:",
+        "mainSceneIdentifier", "sceneIdentifier", "sceneHandles", "displayIdentity",
+        "processState",
+    ]
+
+    private static let fbsManagerSelectors = [
+        "sharedInstance", "sharedManager", "sceneWithIdentifier:", "enumerateScenesWithBlock:",
+        "_createSceneWithDefinition:settings:initialClientSettings:transitionContext:fromRemnant:usingClientProvider:completion:",
+        "createSceneWithDefinition:",
+    ]
+
+    private static let sceneSurfaceSelectors = [
+        "identifier", "specification", "layers", "clientProcess", "settings",
+        "definition", "definitionIdentifier",
+    ]
+
+    static func runSurface() {
+        Log.write("scene2: api probe begin")
+        censusClasses()
+        for name in surfaceClasses { dumpMethods(name) }
+        dumpApplicationIvars()
+        dumpInstalledApps()
+        // Last on purpose: this is the only part that sends a message to
+        // FrontBoard, so if anything here is unwelcome the data above survives.
+        dumpFrontBoardScenes()
+        Log.write("scene2: api probe end")
+    }
+
+    /// Every class in the process whose name looks like part of a scene carrier.
+    /// Capped: SpringBoard carries thousands of classes and this walks them on
+    /// the main thread.
+    private static func censusClasses() {
+        var count: UInt32 = 0
+        guard let classes = objc_copyClassList(&count) else { return }
+        var matched = 0
+        var printed = 0
+        var owners: [String] = []
+        for index in 0..<Int(count) {
+            let cls: AnyClass = classes[index]
+            let name = NSStringFromClass(cls)
+            guard censusNeedles.contains(where: { name.contains($0) }) else { continue }
+            matched += 1
+            if printed < 80 {
+                printed += 1
+                let parent = class_getSuperclass(cls).map { NSStringFromClass($0) } ?? "nil"
+                Log.write("scene2: class census " + name + " <- " + parent)
+            }
+            if owners.count < 6, name.contains("Presenter") || name.contains("Specification") {
+                owners.append(name)
+            }
+        }
+        free(classes)
+        Log.write("scene2: census total " + String(matched) + " of " + String(count))
+        for name in owners { dumpMethods(name) }
+    }
+
+    private static func dumpMethods(_ name: String) {
+        guard let cls = NSClassFromString(name) else {
+            Log.write("scene2: class missing " + name)
+            return
+        }
+        dumpMethods(cls, label: name, prefix: "-")
+        if let meta = object_getClass(cls) {
+            dumpMethods(meta, label: name, prefix: "+")
+        }
+    }
+
+    private static func dumpMethods(_ cls: AnyClass, label: String, prefix: String) {
+        var count: UInt32 = 0
+        guard let methods = class_copyMethodList(cls, &count) else { return }
+        var printed = 0
+        for index in 0..<Int(count) {
+            let method = methods[index]
+            let selector = NSStringFromSelector(method_getName(method))
+            guard surfaceNeedles.contains(where: { selector.contains($0) }) else { continue }
+            if printed >= 90 { break }
+            printed += 1
+            let types = method_getTypeEncoding(method).map { String(cString: $0) } ?? "?"
+            Log.write("scene2: method sel " + label + " " + prefix + selector + " " + types)
+        }
+        free(methods)
+        Log.write("scene2: method total " + label + prefix + " " + String(count)
+                  + " printed " + String(printed))
+    }
+
+    /// Workspace is the one place SpringBoard would keep a presentation manager
+    /// for its own windows. Ivars are read through `object_getIvar`, and only
+    /// when the type encoding says object — reading a CGRect as an object is a
+    /// crash, not a curiosity.
+    private static func dumpApplicationIvars() {
+        guard let application = sharedApplication() else { return }
+        Log.write("scene2: app accepts " + matrix(application, applicationSelectors))
+        dumpIvars(of: application, needles: ["scene", "present"])
+    }
+
+    private static func dumpInstalledApps() {
+        guard let cls = NSClassFromString("SBApplicationController") as? NSObject.Type else {
+            Log.write("scene2: class missing SBApplicationController")
+            return
+        }
+        let shared = NSSelectorFromString("sharedInstance")
+        guard cls.responds(to: shared),
+              let controller = cls.perform(shared)?.takeUnretainedValue() as? NSObject else {
+            Log.write("scene2: no SBApplicationController instance")
+            return
+        }
+        let listSelector = NSSelectorFromString("allApplications")
+        guard controller.responds(to: listSelector),
+              let list = controller.perform(listSelector)?.takeUnretainedValue() as? NSArray else {
+            Log.write("scene2: no allApplications")
+            return
+        }
+        Log.write("scene2: apps total " + String(list.count))
+        for index in 0..<Swift.min(3, list.count) {
+            guard let app = list[index] as? NSObject else { continue }
+            var bundle = "?"
+            let bundleSelector = NSSelectorFromString("bundleIdentifier")
+            if app.responds(to: bundleSelector),
+               let value = app.perform(bundleSelector)?.takeUnretainedValue() as? String {
+                bundle = value
+            }
+            Log.write("scene2: app bundle " + bundle + " "
+                      + NSStringFromClass(type(of: app)))
+            Log.write("scene2: app accepts " + matrix(app, applicationSceneSelectors))
+            dumpIvars(of: app, needles: ["scene", "present"])
+        }
+    }
+
+    /// FrontBoard's facade, without ever handing it a block. An earlier draft
+    /// called `enumerateScenesWithBlock:`, which needs the Swift closure
+    /// bit-cast into an ObjC block — a trick that either compiles and works or
+    /// compiles and crashes, with no way to tell locally. The method list plus
+    /// one guarded `sceneWithIdentifier:` answers the same question for free.
+    private static func dumpFrontBoardScenes() {
+        guard let cls = NSClassFromString("FBSceneManager") as? NSObject.Type else {
+            Log.write("scene2: fbs manager absent")
+            return
+        }
+        Log.write("scene2: fbs manager class " + matrix(cls, fbsManagerSelectors))
+        let shared = NSSelectorFromString("sharedInstance")
+        guard cls.responds(to: shared),
+              let manager = cls.perform(shared)?.takeUnretainedValue() as? NSObject else {
+            Log.write("scene2: fbs manager has no instance")
+            return
+        }
+        Log.write("scene2: fbs manager found " + NSStringFromClass(type(of: manager)))
+        Log.write("scene2: fbs manager accepts " + matrix(manager, fbsManagerSelectors))
+
+        let lookup = NSSelectorFromString("sceneWithIdentifier:")
+        guard manager.responds(to: lookup) else {
+            Log.write("scene2: fbs manager cannot look up")
+            return
+        }
+        // SpringBoard's own scene is the one identifier we can name without
+        // enumerating; it is also the scene a floating window would live on.
+        guard let scene = manager.perform(lookup, with: "com.apple.springboard")?
+                .takeUnretainedValue() as? NSObject else {
+            Log.write("scene2: fbs springboard scene absent")
+            return
+        }
+        Log.write("scene2: fbs scene found " + NSStringFromClass(type(of: scene)) + " "
+                  + matrix(scene, sceneSurfaceSelectors))
+    }
+
     // MARK: - Runtime helpers
 
     /// Same guard as RingHost: `UIApplication.shared` is force-unwrapped, and a
@@ -238,10 +460,62 @@ enum SceneProbe {
     /// Which of the interesting selectors a live object answers. Presence only:
     /// calling an unknown getter can hand back a struct and crash the caller.
     private static func accepted(_ object: NSObject) -> String {
+        return matrix(object, probeResponses)
+    }
+
+    private static func matrix(_ object: NSObject, _ names: [String]) -> String {
         var hits: [String] = []
-        for name in probeResponses where object.responds(to: NSSelectorFromString(name)) {
+        for name in names where object.responds(to: NSSelectorFromString(name)) {
             hits.append(name)
         }
         return "[" + hits.joined(separator: ",") + "]"
+    }
+
+    /// Same question asked of a class instead of an instance: `+sharedInstance`
+    /// and friends are what tell us whether a facade is reachable at all.
+    private static func matrix(_ cls: NSObject.Type, _ names: [String]) -> String {
+        var hits: [String] = []
+        for name in names where cls.responds(to: NSSelectorFromString(name)) {
+            hits.append(name)
+        }
+        return "[" + hits.joined(separator: ",") + "]"
+    }
+
+    /// Instance variables up the whole chain, objects only. `class_copyIvarList`
+    /// stops at the class it was asked about, so an ivar declared on the base
+    /// class of `SBApplication` would otherwise be invisible.
+    private static func dumpIvars(of object: NSObject, needles: [String]) {
+        var cursor: AnyClass? = type(of: object)
+        var hops = 0
+        while let current = cursor, hops < 4 {
+            let owner = NSStringFromClass(current)
+            var count: UInt32 = 0
+            if let ivars = class_copyIvarList(current, &count) {
+                var printed = 0
+                for index in 0..<Int(count) {
+                    let ivar = ivars[index]
+                    guard let pointer = ivar_getName(ivar) else { continue }
+                    let name = String(cString: pointer)
+                    let lowered = name.lowercased()
+                    guard needles.contains(where: { lowered.contains($0) }) else { continue }
+                    if printed >= 40 { break }
+                    printed += 1
+                    var note = " type=?"
+                    if let typePointer = ivar_getTypeEncoding(ivar) {
+                        let type = String(cString: typePointer)
+                        if type.hasPrefix("@") {
+                            let value = object_getIvar(object, ivar)
+                            note = value.map { " obj=" + String(describing: type(of: $0)) } ?? " obj=nil"
+                        } else {
+                            note = " type=" + type
+                        }
+                    }
+                    Log.write("scene2: app ivar " + owner + "." + name + note)
+                }
+                free(ivars)
+            }
+            cursor = class_getSuperclass(current)
+            hops += 1
+        }
     }
 }

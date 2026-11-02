@@ -198,6 +198,11 @@ final class PanelController: PSListController {
         SceneActions.probeScene(from: self)
     }
 
+    /// 窗口与场景 · 接口面探针. The dump that decides how P1 is built.
+    @objc func sceneSurface(_ specifier: PSSpecifier) {
+        SceneActions.probeSurface(from: self)
+    }
+
     /// Keys driven by a slider. A drag produces a value per touch event, so
     /// these are coalesced; a switch produces exactly one and is written at
     /// once.

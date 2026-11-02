@@ -393,10 +393,12 @@ def main():
             bad("probe: no sceneProbe: row on 窗口与场景 — the scene tree cannot be measured")
         elif "探针" not in window_labels:
             bad("probe: the 探针 group lost its label")
+        elif "sceneSurface:" not in window_actions:
+            bad("probe: no sceneSurface: row — the carrier call surface stays a guess")
         else:
-            ok("probe: 窗口与场景 has the 探针 group and its button")
+            ok("probe: 窗口与场景 has the 探针 group and both of its buttons")
 
-    for token in (b"sceneProbe:", b"prefs: scene probe requested"):
+    for token in (b"sceneProbe:", b"sceneSurface:", b"prefs: scene probe requested"):
         if token not in prefs:
             bad(f"probe: {token.decode()} missing from the bundle binary")
 
@@ -405,6 +407,17 @@ def main():
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the probe would never reach SpringBoard")
+
+    # The surface dump is the one that decides how P1 is built: if any of its
+    # sections falls out of the stripped binary, the log comes back with a
+    # convincing partial answer and no way to tell what was missing.
+    for token in (b"scene2: api probe begin", b"scene2: api probe end",
+                  b"scene2: census total ", b"scene2: method sel ",
+                  b"scene2: fbs manager accepts ", b"scene2: fbs scene found ",
+                  b"scene2: app bundle ", b"scene2: app ivar "):
+        if token not in dylib_early:
+            bad(f"probe: {token.decode()} missing from Aevon.dylib — "
+                "the surface dump would come back half empty")
 
     probe_path = b"/var/mobile/Library/Logs/Aevon/probe.request"
     if probe_path not in prefs or probe_path not in dylib_early:
