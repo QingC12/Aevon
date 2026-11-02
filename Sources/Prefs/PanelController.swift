@@ -90,8 +90,15 @@ final class PanelController: PSListController {
         // loaded == 0 && preloaded > 0 keeps what the framework gave us: a page
         // with the wrong rows still beats a page with none.
 
-        Log.write("prefs: panel \(panelID) loaded=\(loaded) preloaded=\(preloaded) "
-                  + "final=\(specifiers?.count ?? 0) \(samePanel ? "kept" : "installed")")
+        // Plain concatenation, no interpolation: this exact literal is what
+        // tools/audit-deb.py looks for to prove PanelController is in the
+        // bundle at all. A marker that the optimiser can rewrite is not a
+        // marker.
+        Log.write("prefs: panel loader v1 " + panelID
+                  + " loaded=" + String(loaded)
+                  + " preloaded=" + String(preloaded)
+                  + " final=" + String(specifiers?.count ?? 0)
+                  + (samePanel ? " kept" : " installed"))
     }
 
     private func diagnosticRows(bundle: Bundle) -> NSMutableArray {

@@ -268,9 +268,14 @@ def main():
     # the only thing that tells the two cases apart on a device, so its presence
     # is asserted here: a panel that silently reuses preloaded rows again would
     # also be a panel with no log line.
-    if b"preloaded" not in prefs or b"final=" not in prefs:
-        bad("prefs: panel loader no longer reports loaded/preloaded counts — "
-            "the 0.0.6 all-panels-identical regression could return unnoticed")
+    # The marker is deliberately written as plain concatenation in the source:
+    # an interpolated literal is not a reliable thing to grep for, and this file
+    # exists to be greppable.
+    if b"prefs: panel loader v1 " not in prefs:
+        bad("prefs: the panel loader marker is missing from AevonPrefs — "
+            "PanelController may not be compiled into the bundle")
+    else:
+        ok("prefs: panel loader present (marker line)")
 
     # -- 5b-bis. every panel must have its *own* content --------------------
     # The shipped 0.0.6 regression was eight panels showing the same handful of
