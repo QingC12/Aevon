@@ -60,11 +60,11 @@ final class RootListController: PSListController {
         let bundle = Bundle(for: RootListController.self)
 
         var list = loadSpecifiers(fromPlistName: "Root", target: self)
-        if list == nil || list.count == 0,
+        if (list?.count ?? 0) == 0,
            responds(to: NSSelectorFromString("loadSpecifiersFromPlistName:target:bundle:")) {
             list = loadSpecifiers(fromPlistName: "Root", target: self, bundle: bundle)
         }
-        if list == nil || list.count == 0 {
+        if (list?.count ?? 0) == 0 {
             list = diagnosticRows(bundle: bundle)
         }
 
@@ -72,12 +72,12 @@ final class RootListController: PSListController {
         Log.write("prefs: \(specifiers?.count ?? 0) rows, bundle=\(bundle.bundlePath)")
     }
 
-    /// One group cell with a readable explanation. Uses only emptyGroupSpecifier
+    /// One group cell with a readable explanation. Uses only emptyGroup
     /// and string properties — no factory call whose cell-type constant could
     /// differ across iOS versions, so this path cannot itself fail.
     private func diagnosticRows(bundle: Bundle) -> NSMutableArray {
         let plist = bundle.path(forResource: "Root", ofType: "plist") ?? "缺失"
-        let group = PSSpecifier.emptyGroupSpecifier()
+        let group = PSSpecifier.emptyGroup()
         group.setProperty("界面未能加载", forKey: "label")
         group.setProperty("""
             这不是崩溃，是面板文件没被读到。请把这段文字连同 /var/mobile/Aevon.log 一起反馈。

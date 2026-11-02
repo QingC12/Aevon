@@ -30,7 +30,7 @@ Aevon_FRAMEWORKS := Foundation
 # Swift metadata is the bulk of a Swift dylib; dead-strip keeps it honest.
 # The rpath is where iOS keeps libswiftCore (12.2+); harmless if Theos already
 # adds it, fatal if nobody does.
-Aevon_LDFLAGS := -Wl,-dead_strip -Wl,-rpath,/usr/lib/swift
+Aevon_LDFLAGS := -Wl,-dead_strip
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
@@ -46,7 +46,7 @@ BUNDLE_NAME := AevonPrefs
 AevonPrefs_FILES := $(AE_CORE) Sources/Prefs/RootListController.swift
 AevonPrefs_INSTALL_PATH := /Library/PreferenceBundles
 AevonPrefs_FRAMEWORKS := Foundation UIKit
-AevonPrefs_LDFLAGS := -Wl,-undefined,dynamic_lookup -Wl,-dead_strip -Wl,-rpath,/usr/lib/swift
+AevonPrefs_LDFLAGS := -Wl,-undefined,dynamic_lookup -Wl,-dead_strip
 
 include $(THEOS_MAKE_PATH)/bundle.mk
 
