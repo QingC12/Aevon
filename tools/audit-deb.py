@@ -429,13 +429,18 @@ def main():
     # stop`, `no scene built`) are gone on purpose: that call killed SpringBoard
     # once and the mother ship never makes it. What must stay is one line per
     # step of the chain, so a refusal at step three is still readable.
+    # Two shorter fragments are deliberately NOT asserted: ` no presenter` and
+    # ` no layer host` share the prefix ` no `, and LLVM merged the two constants
+    # into one blob at link time, so neither survives as its own byte string.
+    # That is the same trap as 0.0.14's interpolated strings, one level lower:
+    # assert the long distinctive half, never the shared one.
     for token in (b"scene: probe begin", b"scene: probe end",
                   b"scene: window level", b"scene: carrier view", b"scene: live scenes",
                   b"win: begin manager",
                   b" uiPresentationManager absent", b" uiPresentationManager cls=",
-                  b" no presenter", b" presenter activate=",
+                  b" presenter activate=",
                   b" presentationView absent", b" presentationView cls=",
-                  b" no layer host", b" layer host cls=",
+                  b" layer host cls=",
                   b" resizesHostedContext=", b"win: nothing presented",
                   b"census %@ super=%@", b"presenter %@ -> %@", b"layer host -> %@"):
         if token not in dylib_early:
