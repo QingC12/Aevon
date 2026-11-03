@@ -1,27 +1,33 @@
 //
 //  RingHost.swift — Aevon, the carrier shape on the home screen.
 //
-//  This is the part that makes the settings panel mean something. Until 0.0.5
-//  the ring only existed inside a full-screen preview: the sliders wrote
-//  values, the preview read them, and nothing on the desktop ever changed.
-//  0.0.6 hosts the very same RingView in SpringBoard, so:
+//  0.0.42 — the disc is no longer this package's own RingView. It is the
+//  operator's archived implementation (D:\备份源码\Aevon, their own code from
+//  the 0.2.x/0.3.x line), moved over file by file and kept 1:1:
 //
-//      Settings → 半径/图标宽度/形状/旋转角/速度  →  ring.plist + Darwin
-//      →  RingHost.refresh()  →  the ring on screen changes
+//      AevonRingMenu        the disc: hub, tracks, hover jump, unfold, rotation
+//      AevonHoverKeyframes  the GIF-measured rise/land keyframes (V0.3.22)
+//      AevonRingUnfold      the scale-from-a-point entrance (V0.3.23)
+//      AevonSpring          one response/ζ spring family for every motion
+//      AevonRingStore       RingApps list, 36 cap, snapshot, quick-action seed
+//
+//  What stays here is everything that is genuinely host-side:
+//
+//    · the window (level normal+1) and the passthrough hit testing,
+//    · the grip dot — tap to summon, drag to move (this package's entry; the
+//      old plugin summoned from a screen-edge bar, which this phone's build
+//      replaced with a dot on purpose),
+//    · wiring the menu's three hooks (launch / panel / grip visibility) to
+//      this package's SceneProbe card route and Settings page,
+//    · the Darwin-notification refresh path.
 //
 //  Deliberate limits, because this runs inside SpringBoard:
 //
 //    · It never runs when Gate.evaluate() said anything but .pass.
-//    · It owns one window at level normal+1, and that window returns nil from
-//      hitTest everywhere except the grip and the icons. Everything else falls
-//      through, so the home screen keeps every touch it had before.
-//    · The ring starts collapsed: one 12 pt grip in the bottom-right corner.
-//      No gesture hijack, no always-on overlay, nothing that can eat a swipe.
+//    · The window returns nil from hitTest everywhere except the disc and the
+//      grip. Everything else falls through to the home screen.
 //    · `!ring.desktop = false` in Settings removes the window entirely without
 //      a respring.
-//
-//  Gesture takeover (edge swipe to summon) is the last thing to be added, not
-//  the first: a bad hit region is the one bug that makes a phone unusable.
 //
 
 import UIKit
@@ -32,25 +38,22 @@ final class RingHost: NSObject {
 
     /// Preference key for "put the grip on the home screen". Ships on, because
     /// a shape nobody can see is not a feature. Prefixed with "!" to stay out
-    /// of the master's 81 keys and out of the generated 64-item table.
+    /// of the master's 81 keys and out of the generated table.
     static let enabledKey = "!ring.desktop"
 
     private var window: UIWindow?
     private var grip: UIView?
     private var gripPad: UIView?
-    private var ring: RingView?
-
-    private var config = RingConfig()
-    private var apps: [RingApp] = []
-    private var expanded = false
-    private var preloaded = false
 
     /// Where the drag that is in progress started. Only used while a pan is
     /// live; the durable value is the normalised point in layout.plist.
     private var dragOrigin: CGPoint = .zero
 
+    private var config = RingConfig()
+    private var expanded = false
+
     /// Cheap change detectors. Comparing a string costs nothing and lets a
-    /// rotation or a slider drag skip the icon rebuild entirely.
+    /// rotation or a slider drag skip the rebuild entirely.
     private var appsSignature = ""
 
     private var observers: [NSObjectProtocol] = []
@@ -84,12 +87,25 @@ final class RingHost: NSObject {
         window.isHidden = false
         self.window = window
 
+        // The menu's three exits into the world. Set once, before anything can
+        // present the disc, so the first tap already has a route home.
+        AevonWindowManager.launchHandler = { [weak self] bundleID in
+            self?.openFromRing(bundleID)
+        }
+        AevonEdgeEntry.openPanelHandler = { [weak self] in
+            self?.openPanel()
+        }
+        AevonRingGrip.setVisibleHandler = { [weak self] visible in
+            self?.setGripVisible(visible)
+        }
+
         addGrip()
         layout()
+        seedStore()
 
         observe()
-        Log.write("ring: hosted on desktop (radius=\(Int(config.radius)) "
-                  + "icon=\(Int(config.iconWidth)) shape=圆盘)")
+        Log.write("ring: hosted on desktop (旧版圆盘 1:1 · AevonRingMenu "
+                  + "\(AevonRingStore.bundleIDs().count)/\(AevonRingStore.maxCount))")
 
         // Warm the icon cache off the critical path. The first tap must not
         // pay for a LaunchServices enumeration; one second after mount is a
@@ -100,7 +116,8 @@ final class RingHost: NSObject {
     }
 
     func stop() {
-        collapse(animated: false)
+        AevonRingMenu.dismissCurrent()
+        expanded = false
         for observer in observers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -115,8 +132,8 @@ final class RingHost: NSObject {
         Log.write("ring: removed from desktop (switch off)")
     }
 
-    /// Settings changed. Re-read the snapshot and either install, remove or
-    /// reshape — never respring, never reload SpringBoard.
+    /// Settings changed. Re-read the snapshot, refresh the app store, and
+    /// either install, remove or reload — never respring.
     func refresh() {
         guard isEnabled else {
             if window != nil { stop() }
@@ -124,41 +141,18 @@ final class RingHost: NSObject {
         }
         guard window != nil else { start(); return }
 
-        let updated = RingConfig.loadRuntime()
-        let changed = updated.radius != config.radius
-            || updated.iconWidth != config.iconWidth
-            || updated.rotation != config.rotation
-            || updated.speed != config.speed
-            || updated.damping != config.damping
-            || updated.customSpring != config.customSpring
-            || updated.star != config.star
-            || updated.haptic != config.haptic
-            || updated.intensity != config.intensity
-            || updated.desktop != config.desktop
-        config = updated
+        config = RingConfig.loadRuntime()
 
-        // The app list is a separate file with its own lifecycle: it changes on
-        // add / remove / reorder, not on a slider drag, so it gets its own
-        // check instead of forcing a rebuild every time.
-        let signature = RingApps.signature()
-        var appsChanged = false
+        // The app list is a separate store with its own lifecycle: the editor
+        // writes it, the Darwin notification says "look now", and only a real
+        // change is worth a re-read (a slider drag also lands here).
+        AevonRingStore.refreshFromSettings()
+        let count = AevonRingStore.bundleIDs().count
+        let signature = "\(count)/" + AevonRingStore.bundleIDs().joined(separator: ",")
         if signature != appsSignature {
             appsSignature = signature
-            let loaded = RingApps.resolved(limit: RingApps.maxCount)
-            apps = loaded.apps
-            appsChanged = true
-            Log.write("ring: apps -> \(apps.count) (\(loaded.source.rawValue)), "
-                      + (signature == "auto" ? "automatic list" : "operator list"))
-        }
-
-        // Applies a reset or a move made from Settings; harmless when the grip
-        // has not moved.
-        layout()
-
-        guard changed || appsChanged else { return }
-        if changed { Log.write("ring: live update -> \(config.summary)") }
-        if expanded {
-            ring?.rebuild(config: config, apps: apps.isEmpty ? nil : apps)
+            Log.write("ring: apps -> \(count) "
+                      + (AevonRingStore.bundleIDs().isEmpty ? "(automatic list)" : "(operator list)"))
         }
     }
 
@@ -232,11 +226,6 @@ final class RingHost: NSObject {
         // every layout pass is one property write and keeps it visible through
         // that switch.
         paintGrip()
-
-        if let ring = ring {
-            ring.frame = bounds
-            ring.movePivot(point)
-        }
     }
 
     /// Where the grip belongs: the operator's own position when one was saved,
@@ -296,27 +285,24 @@ final class RingHost: NSObject {
         paintGrip()
     }
 
+    /// The menu hides the dot while it is open and asks for it back on the way
+    /// down (`AevonRingGrip.setVisible(true)` in dismiss). The dot stays
+    /// visible here — tapping it again is this build's way of closing the disc
+    /// — but the hook exists so the menu's own dismiss path stays 1:1 with the
+    /// file it came from.
+    private func setGripVisible(_ visible: Bool) {
+        guard let pad = gripPad else { return }
+        pad.isUserInteractionEnabled = true
+        UIView.animate(withDuration: 0.18) {
+            pad.alpha = visible ? 1 : 0.72
+        }
+    }
+
     /// 0.0.39 — the dot has to be visible on whatever is behind it.
     ///
-    /// 0.0.38 painted it white at 22% with a 1 pt white border. On a white
-    /// page — which is what a full-screen light-mode app is — that is not a
-    /// faint dot, it is no dot: white on white with a white edge. Aevon(37)
-    /// is the first log where the operator opened a light app and could not
-    /// find it at all.
-    ///
-    /// The master has no desktop dot to copy the shape from: its handle is the
-    /// edge bar (`EgdeGestureView`, `AppearEdge`, `_edgeWidth`) and it is
-    /// summoned from the screen edge, not tapped. What the master does have,
-    /// and what is copied here, is `_colorScheme` on `RingView` and on every
-    /// capsule control: the chrome is repainted for the current appearance
-    /// instead of assuming a dark one.
-    ///
-    /// So the dot is no longer one colour with one edge. It is a white core
-    /// with a black outline, which is the only pair that reads on both a white
-    /// page and a black one — the light core carries a dark screen, the dark
-    /// outline carries a light one — and the outline thickens in light mode,
-    /// where a hairline white-on-white would still be invisible at arm's
-    /// length.
+    /// A white core with a black outline is the only pair that reads on both a
+    /// white page and a black one; the outline thickens in light mode, where a
+    /// hairline white-on-white would still be invisible at arm's length.
     private func paintGrip() {
         guard let grip = grip else { return }
         let dark = window?.traitCollection.userInterfaceStyle == .dark
@@ -334,7 +320,7 @@ final class RingHost: NSObject {
     }
 
     @objc private func toggle() {
-        if expanded { collapse(animated: true) } else { expand() }
+        if expanded { collapse() } else { expand() }
     }
 
     /// Moving the grip is the one gesture this project takes for itself, so it
@@ -347,7 +333,8 @@ final class RingHost: NSObject {
         switch gesture.state {
         case .began:
             dragOrigin = pad.center
-            if expanded { collapse(animated: true) }
+            pad.isUserInteractionEnabled = true
+            if expanded { collapse() }
 
         case .changed:
             let translation = gesture.translation(in: host)
@@ -355,7 +342,6 @@ final class RingHost: NSObject {
                                          y: dragOrigin.y + translation.y),
                                  in: host.bounds)
             pad.center = target
-            ring?.movePivot(target)
 
         case .ended, .cancelled, .failed:
             let bounds = host.bounds
@@ -373,159 +359,71 @@ final class RingHost: NSObject {
         }
     }
 
-    private func animateGrip(expanded: Bool) {
-        // 0.0.39 — 0.45 while expanded was another way of losing the dot: the
-        // ring is drawn around it, and the only way to put the ring away is to
-        // tap this. It now dims without becoming hard to find.
-        UIView.animate(withDuration: 0.18, delay: 0, options: [.beginFromCurrentState]) {
-            self.grip?.alpha = expanded ? 0.72 : 1
-        }
-    }
-
-    // MARK: - Ring
+    // MARK: - Disc (AevonRingMenu, 1:1)
 
     private func expand() {
         guard !expanded, let host = window?.rootViewController?.view else { return }
         expanded = true
 
-        let pivot = gripPad?.center ?? CGPoint(x: host.bounds.midX, y: host.bounds.midY)
-        let apps = currentApps()
-
-        let ring = RingView(frame: host.bounds, config: config, apps: apps, pivot: pivot)
-        ring.onPick = { [weak self] app in
-            self?.open(app)
-        }
-        // 收藏 / 拖拽旋转 all end up in one file (apps.plist) or in the runtime
-        // snapshot. The view never writes anything itself, so the two hosts
-        // cannot disagree about who owns the data.
-        //
-        // 0.0.41 — 回收站 is gone. Deleting an app belonged to a drag that only
-        // ever happened by accident (the same drag rotates the disc), and it
-        // wrote to a file the operator could not see while doing it.
-        ring.onPin = { [weak self] app in
-            self?.pin(app)
-        }
-        ring.onConfigChange = { [weak self] edited in
-            self?.persistGeometry(edited)
-        }
-        ring.onBackgroundTap = { [weak self] in
-            self?.collapse(animated: true)
-        }
-        host.addSubview(ring)
-        if let pad = gripPad { host.bringSubviewToFront(pad) }
-        self.ring = ring
-        ring.appear()
-        animateGrip(expanded: true)
+        // The disc reads the store itself, plays its own unfold
+        // (`AevonRingUnfold` — the whole cluster grows from one point, the
+        // GIF's own entrance) and owns every touch until it goes away.
+        AevonRingMenu.present(in: host)
+        Log.write("ring: expanded (\(AevonRingStore.bundleIDs().count) apps)")
     }
 
-    private func collapse(animated: Bool) {
-        guard expanded || ring != nil else { return }
+    private func collapse() {
+        guard expanded else { return }
         expanded = false
+        AevonRingMenu.dismissCurrent()
+        Log.write("ring: collapsed")
+    }
 
-        let dying = ring
-        ring = nil
-        guard let dying = dying else {
-            animateGrip(expanded: false)
+    // MARK: - Store seeding
+
+    /// First run: the store is empty, so the disc would be an empty circle.
+    /// Seed the first ten catalogue apps once — the old `AevonRingStore` wrote
+    /// the same seed from its own catalogue; this package's catalogue is
+    /// RingIcons.
+    private func seedStore() {
+        guard AevonRingStore.bundleIDs().isEmpty else {
+            Log.write("ring: \(AevonRingStore.bundleIDs().count) apps in store "
+                      + "(operator list)")
             return
         }
-        if animated {
-            dying.disappear { dying.removeFromSuperview() }
-        } else {
-            dying.removeFromSuperview()
-        }
-        animateGrip(expanded: false)
-    }
-
-    private func currentApps() -> [RingApp] {
-        if apps.isEmpty { preloadIcons() }
-        return apps
+        AevonRingStore.seedIfNeeded(from: RingIcons.catalogue())
+        Log.write("ring: seeded \(AevonRingStore.bundleIDs().count) apps "
+                  + "(first run, editable in Settings)")
     }
 
     private func preloadIcons() {
-        guard !preloaded else { return }
-        preloaded = true
-        // Main thread on purpose: the icon lookup walks LaunchServices and
-        // draws placeholder tiles, and neither is documented as thread-safe.
-        // Mount + 1 s is a quiet moment, so the cost is invisible.
+        // The menu draws its own icons through AevonAppIcon; this warm-up just
+        // pays the LaunchServices enumeration once, off the critical path.
         let started = Date()
-        let loaded = RingApps.resolved(limit: RingApps.maxCount)
-        apps = loaded.apps
-        appsSignature = RingApps.signature()
-
+        let catalogue = RingIcons.catalogue()
         let milliseconds = Int(Date().timeIntervalSince(started) * 1000)
-        Log.write("ring: \(loaded.apps.count) apps via \(loaded.source.rawValue) in \(milliseconds)ms"
-                  + (appsSignature == "auto" ? " (automatic)" : " (operator list)"))
-
-        if expanded, !apps.isEmpty {
-            ring?.rebuild(config: config, apps: apps)
-        }
-    }
-
-    // MARK: - 托盘编辑（桌面侧）
-
-    /// 收藏 (`Star`). A pinned app moves to the head of the ring, which is the
-    /// only ordering the master's ring has.
-    private func pin(_ app: RingApp) {
-        let ok = RingApps.togglePin(app.bundleID)
-        let now = RingApps.isPinned(app.bundleID)
-        Log.write("ring: pin toggle " + app.bundleID + " -> " + (now ? "on" : "off")
-                  + (ok ? "" : " (write failed)"))
-        reloadApps()
-    }
-
-    /// 旋转角 set by dragging the empty arc. Written to the runtime snapshot so
-    /// the ring comes back the way it was left; the settings slider stays the
-    /// master control, so the next write from Settings wins.
-    private func persistGeometry(_ edited: RingConfig) {
-        var snapshot = RingConfig.loadRuntime()
-        snapshot.rotation = edited.rotation
-        config.rotation = edited.rotation
-        if snapshot.writeSnapshot() {
-            Log.write("ring: rotate -> " + config.summary)
-        }
-    }
-
-    /// Re-reads apps.plist and rebuilds the open ring. Cheap: the icon images
-    /// are cached by bundle id, so this is an array sort, not a redraw of the
-    /// whole catalogue.
-    private func reloadApps() {
-        let loaded = RingApps.resolved(limit: RingApps.maxCount)
-        apps = loaded.apps
-        appsSignature = RingApps.signature()
-        Log.write("ring: apps -> " + String(apps.count) + " (" + loaded.source.rawValue + ")")
-        ring?.reload(apps: apps)
+        Log.write("ring: \(catalogue.count) apps via LaunchServices in \(milliseconds)ms")
     }
 
     // MARK: - Launching
 
-    /// 0.0.38 — the icon opens the app *as a floating card*, not full screen.
-    ///
-    /// Until this version the only way to a card was Settings → 窗口与场景 →
-    /// arm → six seconds → switch to the app → swipe up to the desktop. The
-    /// ring is already the operator's own list of apps, so a tap on it is the
-    /// same request with one gesture instead of five.
-    ///
-    /// `SceneProbe.openCard` owns the whole route; this only decides what to do
-    /// when it declines. A tap must never be a dead end: a suspended launch the
-    /// system refuses, or a scene that never appears in four seconds, means the
-    /// operator asked for an app and gets the app — plainly, full screen.
-    private func open(_ app: RingApp) {
-        collapse(animated: true)
-        guard !app.bundleID.hasPrefix("placeholder.") else { return }
-        SceneProbe.openCard(app.bundleID) { [weak self] reason in
-            Log.write("ring: card route declined (" + reason + "), opening " + app.bundleID)
-            self?.launch(app)
+    /// The disc's activate path. `AevonWindowManager.launchAndOpen` is the old
+    /// name; the hook routes it here. Same contract as 0.0.38's ring tap: the
+    /// card route first, a plain full-screen launch as the fallback — a tap
+    /// must never be a dead end.
+    private func openFromRing(_ bundleID: String) {
+        guard !bundleID.hasPrefix("placeholder.") else { return }
+        SceneProbe.openCard(bundleID) { [weak self] reason in
+            Log.write("ring: card route declined (" + reason + "), opening " + bundleID)
+            self?.launch(bundleID)
         }
     }
 
     /// The old behaviour, kept as the fallback and unchanged: the same private
-    /// entry point SpringBoard itself uses. Guarded at every step: on a system
-    /// without it the tap simply does nothing, which is a far better failure
-    /// than an unrecognized selector inside SpringBoard.
-    private func launch(_ app: RingApp) {
-        guard !app.bundleID.hasPrefix("placeholder.") else { return }
+    /// entry point SpringBoard itself uses. Guarded at every step.
+    private func launch(_ bundleID: String) {
         guard let meta = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type else {
-            Log.write("ring: LSApplicationWorkspace unavailable, cannot open \(app.bundleID)")
+            Log.write("ring: LSApplicationWorkspace unavailable, cannot open \(bundleID)")
             return
         }
         let defaultSelector = NSSelectorFromString("defaultWorkspace")
@@ -536,8 +434,16 @@ final class RingHost: NSObject {
         let openSelector = NSSelectorFromString("openApplicationWithBundleID:")
         guard workspace.responds(to: openSelector) else { return }
 
-        Log.write("ring: launch \(app.bundleID)")
-        _ = workspace.perform(openSelector, with: app.bundleID)
+        Log.write("ring: launch \(bundleID)")
+        _ = workspace.perform(openSelector, with: bundleID)
+    }
+
+    /// 圆心（四宫格面板入口）→ 设置。The old plugin opened an in-SpringBoard app
+    /// panel here; this package's panel is the Settings editor (圆盘 App), and
+    /// opening the Settings app is the one honest route a tweak has.
+    private func openPanel() {
+        Log.write("ring: center panel -> Settings (圆盘 App editor)")
+        launch("com.apple.Preferences")
     }
 }
 

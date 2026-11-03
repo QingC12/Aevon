@@ -16,20 +16,26 @@ export THEOS_PACKAGE_SCHEME := roothide
 
 include $(THEOS)/makefiles/common.mk
 
-# Shared, platform-free core. The same three files are compiled into both
+# Shared, platform-free core. The same files are compiled into both
 # binaries, so SpringBoard and Settings can never disagree about paths/gates.
+# 0.0.42 joins the old plugin's quick actions (screenshot / recording) to the
+# core, because the disc's two action slots live in the editor and the menu —
+# both binaries — and AevonCompat is the seam layer the ported files call into.
 AE_CORE := Sources/Core/Paths.swift Sources/Core/Log.swift Sources/Core/Gate.swift \
-           Sources/Core/GripLayout.swift Sources/Core/CardLayout.swift
+           Sources/Core/GripLayout.swift Sources/Core/CardLayout.swift \
+           Sources/Core/AevonCompat.swift Sources/Core/AevonQuickAction.swift \
+           Sources/Core/AevonRecProbe.swift
 
-# The ring's model + icons + view are compiled into BOTH binaries on purpose:
-# the settings preview and the home-screen host must render the same shape from
-# the same numbers, or "it looks different on the desktop" becomes
-# unfalsifiable.
-#
-# RingApps joins them in 0.1.0: the icon list is written by Settings and read by
-# SpringBoard, and both sides have to resolve it the same way.
+# The disc is the archived plugin's implementation, moved over 1:1 in 0.0.42
+# (AevonRingMenu + keyframes + unfold + spring + store) and compiled into BOTH
+# binaries: the settings preview and the home-screen host must render the same
+# shape from the same code, or "it looks different on the desktop" becomes
+# unfalsifiable. RingModel keeps only the cross-process config plumbing;
+# RingIcons is still the catalogue/icon source both sides share.
 AE_RING := Sources/Ring/RingModel.swift Sources/Ring/RingIcons.swift \
-           Sources/Ring/RingApps.swift Sources/Ring/RingView.swift
+           Sources/Ring/AevonRingStore.swift Sources/Ring/AevonRingMenu.swift \
+           Sources/Ring/AevonHoverKeyframes.swift Sources/Ring/AevonRingUnfold.swift \
+           Sources/Ring/AevonSpring.swift
 
 # ---------------------------------------------------------------------------
 # SpringBoard tweak. One C file (the load-time constructor Swift cannot
@@ -39,7 +45,7 @@ TWEAK_NAME := Aevon
 Aevon_FILES := Sources/AevonBoot.m Sources/AevonScene.m Sources/Boot.swift $(AE_CORE) $(AE_RING) \
                Sources/Ring/RingHost.swift Sources/Scene/SceneProbe.swift \
                Sources/Scene/FloatHost.swift
-Aevon_FRAMEWORKS := Foundation UIKit
+Aevon_FRAMEWORKS := Foundation UIKit ReplayKit Photos AVFoundation AudioToolbox
 # Swift metadata is the bulk of a Swift dylib; dead-strip keeps it honest.
 # `-x` drops the local symbol table at link time. A Swift object carries one
 # mangled name per declaration (`_$s5Aevon...`), and those names are pure weight
@@ -73,7 +79,7 @@ AevonPrefs_FILES := $(AE_CORE) $(AE_RING) \
                     Sources/Prefs/PanelController.swift \
                     Sources/Prefs/RootListController.swift
 AevonPrefs_INSTALL_PATH := /Library/PreferenceBundles
-AevonPrefs_FRAMEWORKS := Foundation UIKit
+AevonPrefs_FRAMEWORKS := Foundation UIKit ReplayKit Photos AVFoundation AudioToolbox
 AevonPrefs_LDFLAGS := -Wl,-undefined,dynamic_lookup -Wl,-dead_strip
 
 include $(THEOS_MAKE_PATH)/bundle.mk

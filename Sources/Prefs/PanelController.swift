@@ -132,10 +132,10 @@ final class PanelController: PSListController {
                 : "开关已关闭（桌面无握把）"
         }
         if key == "@ring.apps" {
-            return RingApps.summary()
+            return "已选 \(AevonRingStore.bundleIDs().count) / 上限 \(AevonRingStore.maxCount)（设置内编辑）"
         }
         if key == "@ring.star" {
-            return RingApps.starSummary()
+            return "收藏随圆盘本体移交旧版实现（0.0.42），不再单独计数"
         }
         if key == "@ring.grip" {
             return GripLayout.describe()
@@ -145,28 +145,6 @@ final class PanelController: PSListController {
 
     override func setPreferenceValue(_ value: Any?, specifier: PSSpecifier) {
         let key = (specifier.property(forKey: "key") as? String) ?? ""
-
-        // The four shapes are a radio group in the master's UI. Turning one on
-        // switches the other three off in the same write, otherwise the ring
-        // would be asked to be a circle and a quarter-circle at once and the
-        // answer would depend on the order the switches were tapped in.
-        if ["RTSIF", "RTSIH", "RTSIQ", "RTSIZ"].contains(key) {
-            let on = (value as? NSNumber)?.boolValue ?? false
-            if on {
-                let store = UserDefaults(suiteName: Aevon.domain)
-                for other in ["RTSIF", "RTSIH", "RTSIQ", "RTSIZ"] where other != key {
-                    store?.set(false, forKey: other)
-                }
-                store?.synchronize()
-            }
-            super.setPreferenceValue(value, specifier: specifier)
-            ringChanged(named: key, value: on)
-            // The other three switches have just been switched off in the
-            // domain; without this their rows would still look on until the
-            // page is re-entered. Deferred so the tap animation is not cut.
-            DispatchQueue.main.async { [weak self] in self?.reload() }
-            return
-        }
 
         super.setPreferenceValue(value, specifier: specifier)
 

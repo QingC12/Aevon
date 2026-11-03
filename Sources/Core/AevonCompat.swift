@@ -1,0 +1,276 @@
+//
+//  AevonCompat.swift — Aevon 0.0.42, the seams the old plugin's files expect.
+//
+//  0.0.42 moves the operator's own ring implementation over from the archived
+//  plugin (D:\备份源码\Aevon — the user's own code, versions up to V0.3.x)
+//  essentially verbatim: AevonRingMenu, AevonRingIcon, AevonHoverKeyframes,
+//  AevonRingUnfold, AevonSpring, AevonRingStore, AevonQuickAction and
+//  AevonRecProbe all keep their original names, constants and comments, because
+//  "1:1" is the requirement and a rename is a rewrite.
+//
+//  What this file buys is the small set of external symbols those files call
+//  that the old binary provided and this one spells differently:
+//
+//    AevonLog           -> Log.write (same file, same format)
+//    AevonPrefs         -> CFPreferences on the one domain this package owns
+//    AevonFloatMotion   -> only the haptic entry was needed by the menu
+//    AevonAppIcon       -> RingIcons (icon lookup + the same 22.37% rounding)
+//    AevonWindowManager -> name lookup + a launch hook set by RingHost
+//    AevonRingGrip      -> the old edge bar; here the grip is RingHost's dot
+//    AevonEdgeEntry     -> presentation hooks set by RingHost / no-ops
+//    AevonTrySystem…    -> the two ObjC shims, as Swift (responds check first)
+//    AevonWindowLevels,
+//    AevonPassthroughWindow,
+//    AevonHostWindow    -> overlay window for toast / recording badge
+//
+//  Everything here is glue, not logic: the smallest body that satisfies the
+//  caller, with the caller's own comment preserved where it explains why.
+//
+
+import UIKit
+import ObjectiveC.runtime
+import ReplayKit
+
+// MARK: - Log
+
+/// The old plugin's logger. `info` and `warn` both land in
+/// /var/mobile/Aevon.log through the same Log.write the rest of this package
+/// uses — one file, one tail command, no second logging path to babysit.
+enum AevonLog {
+    static func info(_ text: String)    { Log.write(text) }
+    static func warn(_ text: String)    { Log.write(text) }
+}
+
+// MARK: - Preferences
+
+/// CFPreferences reader on this package's own domain. The old plugin's domain
+/// was `com.Aevon` (capital A); this package ships as `com.aevon` and writes
+/// every other key there, so the store joins the same domain instead of
+/// splitting the operator's settings across two files.
+///
+/// The old file's warning is reprinted because it is still true: reading here
+/// is an IPC round trip. Keep it out of per-frame paths.
+enum AevonPrefs {
+    static let domain = Aevon.domain as CFString
+
+    static func rawValue(_ key: String) -> Any? {
+        return CFPreferencesCopyAppValue(key as CFString, domain)
+    }
+
+    static func synchronize() {
+        CFPreferencesAppSynchronize(domain)
+    }
+
+    static func bool(_ key: String, default defaultValue: Bool) -> Bool {
+        if let value = rawValue(key) as? NSNumber { return value.boolValue }
+        return defaultValue
+    }
+
+    static func double(_ key: String, default defaultValue: Double) -> Double {
+        if let value = rawValue(key) as? NSNumber { return value.doubleValue }
+        if let text = rawValue(key) as? String, let parsed = Double(text) { return parsed }
+        return defaultValue
+    }
+}
+
+// MARK: - Haptics
+
+/// Only the haptic entry of the old `AevonFloatMotion` is called by the ring
+/// menu (rotation-mode feedback), so only that entry came over. Intensity is
+/// resolved the same way the old file did: the private
+/// `impactOccurredWithIntensity:` when the system has it, the public API when
+/// it does not — never a crash over a vibration.
+enum AevonFloatMotion {
+
+    static func hapticIntensity(for style: UIImpactFeedbackGenerator.FeedbackStyle) -> CGFloat {
+        switch style {
+        case .light:  return 0.55
+        case .medium: return 0.85
+        case .heavy:  return 1.00
+        case .soft:   return 0.45
+        case .rigid:  return 0.70
+        @unknown default: return 0.85
+        }
+    }
+
+    static func haptic(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
+        let generator = UIImpactFeedbackGenerator(style: style)
+        let selector = NSSelectorFromString("impactOccurredWithIntensity:")
+        guard let method = class_getInstanceMethod(UIImpactFeedbackGenerator.self, selector) else {
+            generator.impactOccurred()
+            return
+        }
+        typealias IntensityFn = @convention(c) (AnyObject, Selector, CGFloat) -> Void
+        let function = unsafeBitCast(method_getImplementation(method), to: IntensityFn.self)
+        function(generator, selector, hapticIntensity(for: style))
+    }
+}
+
+// MARK: - Icons
+
+/// The old plugin resolved icons through an ObjC shim (`AevonIconImage`); this
+/// package already has RingIcons doing the same LaunchServices → bundle scan
+/// walk. The adapter keeps the old call shape (nil when there is no *real*
+/// icon, so the ring's letter-tile fallback still fires) and adds the same
+/// 22.37 % corner rounding the old renderer applied.
+enum AevonAppIcon {
+    private static var cache: [String: UIImage] = [:]
+    private static var failed = Set<String>()
+
+    static func image(bundleID: String, size: CGFloat) -> UIImage? {
+        if bundleID.isEmpty { return nil }
+        if let cached = cache[bundleID] { return cached }
+        if failed.contains(bundleID) { return nil }
+        guard let item = RingIcons.item(for: bundleID),
+              let source = RingIcons.realIcon(for: item) else {
+            failed.insert(bundleID)
+            return nil
+        }
+        let target = CGSize(width: size, height: size)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.opaque = false
+        format.scale = UIScreen.main.scale
+        let renderer = UIGraphicsImageRenderer(size: target, format: format)
+        let rounded = renderer.image { _ in
+            let rect = CGRect(origin: .zero, size: target)
+            UIBezierPath(roundedRect: rect, cornerRadius: size * 0.2237).addClip()
+            source.draw(in: rect)
+        }
+        cache[bundleID] = rounded
+        return rounded
+    }
+}
+
+// MARK: - Window plumbing
+
+/// Overlay window level. Same numbers as the old `AevonWindowLevels`: the
+/// toast and the recording badge must sit above everything this package makes.
+enum AevonWindowLevels {
+    static let overlay = UIWindow.Level(rawValue: 10_000_100)
+}
+
+/// Passthrough window: an unanswered hit falls through. Copied because the
+/// toast and badge windows must never eat a touch themselves.
+class AevonPassthroughWindow: UIWindow {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        return hit === self ? nil : hit
+    }
+}
+
+/// Overlay window factory. The old one lived on `AevonHostWindow` with a
+/// scene-scoring walk; here the first connected scene is enough — the toast
+/// and the badge are the only tenants and both tolerate a missing scene by
+/// simply not showing (the callers already guard on nil).
+enum AevonHostWindow {
+    /// SpringBoard 里 `UIApplication.shared` 不是可以裸碰的东西（本仓库的铁律）：
+    /// 走运行时拿 sharedApplication，拿不到就让调用方走「不显示」分支。
+    static func firstWindowScene() -> UIWindowScene? {
+        let selector = NSSelectorFromString("sharedApplication")
+        guard let meta = NSClassFromString("UIApplication") as? NSObject.Type,
+              meta.responds(to: selector),
+              let unmanaged = meta.perform(selector),
+              let application = unmanaged.takeUnretainedValue() as? UIApplication else {
+            return nil
+        }
+        return application.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    }
+
+    static func makeOverlayWindow() -> UIWindow? {
+        guard let scene = firstWindowScene() else {
+            AevonLog.warn("[窗口] 创建外部图层窗口失败：没有可用的前台场景")
+            return nil
+        }
+        let overlay = AevonPassthroughWindow(windowScene: scene)
+        overlay.frame = UIScreen.main.bounds
+        overlay.backgroundColor = .clear
+        overlay.windowLevel = AevonWindowLevels.overlay
+
+        let root = UIViewController()
+        root.view.backgroundColor = .clear
+        root.view.isUserInteractionEnabled = false
+        overlay.rootViewController = root
+        overlay.isHidden = false
+        return overlay
+    }
+}
+
+// MARK: - Recording shims
+
+/// The two ObjC shims from AevonAssertionShim.m, as Swift. The @try around the
+/// old call sites cannot come across (Swift does not catch ObjC exceptions);
+/// the respondsToSelector gate stays, which is the check that decides the
+/// branch on every iOS this targets.
+func AevonTrySystemRecordingStart(_ recorder: AnyObject?, handler: (@convention(block) (NSError?) -> Void)?) -> Bool {
+    guard let recorder = recorder else { return false }
+    let sel = NSSelectorFromString("startSystemRecordingWithMicrophoneEnabled:handler:")
+    guard (recorder as NSObject).responds(to: sel) else { return false }
+    (recorder as NSObject).perform(sel, with: true, with: handler as AnyObject?)
+    return true
+}
+
+func AevonTrySystemRecordingStop(_ recorder: AnyObject?) -> Bool {
+    guard let recorder = recorder else { return false }
+    let sel = NSSelectorFromString("stopSystemRecording:")
+    guard (recorder as NSObject).responds(to: sel) else { return false }
+    (recorder as NSObject).perform(sel, with: nil)
+    return true
+}
+
+// MARK: - Ring integration hooks
+
+/// The menu's three calls into the old edge-entry system. This package has no
+/// edge entry — the disc is summoned by tapping RingHost's grip dot — so these
+/// are hooks RingHost fills in at start(), and no-ops everywhere else. That is
+/// also what lets the settings preview host the same menu without a host
+/// process behind it.
+enum AevonEdgeEntry {
+    /// Set by RingHost: opens the app panel. The old panel was an in-SB picker;
+    /// here it is the Settings page (the editor lives there now).
+    static var openPanelHandler: (() -> Void)?
+    static func openPanel() { openPanelHandler?() }
+
+    /// The old call tore the summon finger's adoption down. There is no adopter
+    /// here, so there is nothing to tear down — kept as a call site so the
+    /// menu's dismiss path stays byte-identical.
+    static func ringDidDismiss() {}
+
+    /// The old 1.5 s re-summon guard for the swipe entry. The entry here is a
+    /// deliberate tap on a dot, not a swipe that can double-fire, so the guard
+    /// has nothing to guard.
+    static func noteSelectionCooldown() {}
+}
+
+/// The old edge bar. `setVisible` shows/hides the summon handle while the disc
+/// is open; `hasActiveGripTouch` fed the menu's idle watchdog. The grip here is
+/// RingHost's dot in the same window, so `setVisible` is a hook it fills in,
+/// and the touch query is answered by RingHost when it owns that state.
+enum AevonRingGrip {
+    static var setVisibleHandler: ((Bool) -> Void)?
+    static func setVisible(_ visible: Bool) { setVisibleHandler?(visible) }
+
+    /// The watchdog treats "grip touch alive" as a reason not to auto-dismiss.
+    /// The dot is a tap target — no gesture tracks a finger across it — so
+    /// there is never a live touch to report. UIKit's own touch count on the
+    /// menu view (checked first by the watchdog) covers the real cases.
+    static var hasActiveGripTouch: Bool { return false }
+}
+
+/// The old window manager, reduced to the two things the menu calls:
+/// a display name, and the launch. The launch goes through a hook so the
+/// SpringBoard binary routes it through SceneProbe's card path while the
+/// settings preview intercepts it instead.
+enum AevonWindowManager {
+    /// Set by RingHost in SpringBoard; the preview sets its own.
+    static var launchHandler: ((String) -> Void)?
+
+    static func launchAndOpen(bundleID: String) {
+        launchHandler?(bundleID)
+    }
+
+    static func title(for bundleID: String) -> String {
+        // V0.2.62（AevonQuickActionV262）：截图 / 录屏是圆盘里的动作槽，不是 App。
+        if let action = AevonQuickAction.title(for: bundleID) { return action }
+        return RingIcons.item(for: bundleID)?.name ?? bundleID
+    }
+}

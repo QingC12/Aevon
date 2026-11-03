@@ -39,10 +39,10 @@ def control_version():
 
 VERSION = control_version()
 
-# 真正接通的键：半径、图标宽度、旋转角。这三个值写进 ring.plist 后由
-# SpringBoard 的 RingHost 直接读取并作用于桌面上的环。
-# 收藏 / 旋转自适应 / 立即 / 延迟（Star、IOMI0-2）目前只写域，不能算接通。
-WIRED_KEYS = {"Radius", "IconWidth", "RotationAngle"}
+# 0.0.42 起圆盘本体换成旧版插件的实现（几何内定 64 / 46 / 40，见
+# AevonRingMenu.swift），Ring 面板里不再有「写一个数值、桌面立刻变」的母本键
+# —— 圆盘的增删排序走编辑器，几何不走滑条。接通口径改为按面板逐项核对。
+WIRED_KEYS = set()
 
 # 0.0.41 明确放弃的母本键。界面里没有它们，代码里也没有读取它们的地方 ——
 # 但 81 键的对账必须继续成立，所以放弃本身要记账，而不是让总数悄悄少五位。
@@ -52,6 +52,10 @@ DROPPED = [
     ("RTSIZ", "任意角度", "只要圆盘，任意角度自 0.0.41 起不实现"),
     ("RTSIF", "圆盘", "唯一的形状，不再需要开关 —— 常开即没有开关"),
     ("LastIconAngle", "尾角", "只对任意角度有意义的开口角度"),
+    ("Radius", "半径", "0.0.42 圆盘本体换成旧版实现，几何内定（内圈 64 / 弧距 46 / 图标 40），滑条没有读取方"),
+    ("IconWidth", "图标宽度", "同上：旧版圆盘的图标尺寸按每圈弧距自适应（上限 40pt），不再由设置决定"),
+    ("RotationAngle", "旋转角", "同上：起点固定在正上方，旋转交给「按住圆心 1 秒」的旋转模式"),
+    ("Star", "收藏", "旧版圆盘没有收藏（长按图标）功能，0.0.42 随本体一并移交；增删排序全部走编辑器"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -98,15 +102,7 @@ PANELS = [
              note="等动画结束再旋转窗口，避免旋转与缩放同时插值。"),
     ]),
 
-    ("Ring", "承载形状", "只做圆盘：内圈半径、图标宽度、起点角，多出来的图标自动向外扩一圈。", [
-        dict(k="Radius", cn="半径", cell="slider", d=64.0, rng=(40.0, 120.0),
-             note="内圈半径，单位 pt。图标多了不缩圆圈，而是在外面再加一圈。"),
-        dict(k="IconWidth", cn="图标宽度", cell="slider", d=44.0, rng=(28.0, 64.0),
-             note="单个图标的边长；它同时决定两圈之间的距离（图标 + 6pt）。"),
-        dict(k="RotationAngle", cn="旋转角", cell="slider", d=0.0, rng=(-180.0, 180.0),
-             note="起点角。第一个 App 落在这一条半径上，其余顺时针排。"),
-        dict(k="Star", cn="收藏", cell="switch", d=False,
-             note="把当前 App 标为收藏，托盘里置顶。"),
+    ("Ring", "承载形状", "旧版插件的圆盘整体移入（0.0.42）：呼出、展开、划过、旋转与收藏列表全部按旧版实现 1:1。", [
         dict(k="IOMI0", cn="旋转 自适应", cell="switch", d=True,
              note="让系统决定何时旋转。三选一，建议只开一个。"),
         dict(k="IOMI1", cn="旋转 立即", cell="switch", d=False,
@@ -300,11 +296,11 @@ def build_panel(panel_id, title, intro, items):
                       "action": "sceneWindow:", "defaults": DOMAIN})
 
     if panel_id == "Ring":
-        # 预览放在最上面：这一节剩下的 12 项都是它的参数，先能看见形状，
-        # 后面的半径/图标宽度/旋转角才有意义。
+        # 预览放在最上面：预览里跑的就是桌面那一份 AevonRingMenu（旧版 1:1），
+        # 展开动画、划过跳跃、阻尼旋转全部是本体，只有「开 App」被拦下弹提示。
         specs.append({"cell": "PSGroupCell", "label": "预览",
-                      "footerText": "半径、图标宽度、旋转角、动画参数全部取本节当前值。"
-                                    "改完参数回到这一行点「预览」，就是一次真实验证。"})
+                      "footerText": "预览跑的就是桌面那份圆盘（旧版实现 1:1）。"
+                                    "动画全是真的，只有开 App 被拦成提示。"})
         specs.append({"cell": "PSTitleValueCell", "label": "当前承载",
                       "key": "@ring.summary", "default": "—", "defaults": DOMAIN})
         specs.append({"cell": "PSButtonCell", "label": "预览承载形状（全屏）",
@@ -314,8 +310,8 @@ def build_panel(panel_id, title, intro, items):
         # 这两个 key 不属于母本 81 键，所以加 "!" 前缀单独记账。
         specs.append({"cell": "PSGroupCell", "label": "桌面",
                       "footerText": "开启后桌面右下角出现一个小握把（14pt 圆点）。"
-                                    "点它展开圆盘，点图标启动 App，再点握把收起。"
-                                    "本节任何参数改动都会立刻作用到桌面上的环，不需要重载桌面。"})
+                                    "点它呼出旧版圆盘：点图标启动 App，按住圆心 1 秒旋转，"
+                                    "抬手落在盘外或图标间隙收起，再点握把也能收。"})
         specs.append({"cell": "PSSwitchCell", "label": "桌面显示握把",
                       "key": "!ring.desktop", "default": True, "defaults": DOMAIN})
         specs.append({"cell": "PSTitleValueCell", "label": "桌面状态",
@@ -323,10 +319,10 @@ def build_panel(panel_id, title, intro, items):
 
         # 应用：这一版起这份清单由操作者自己决定，顺序就是托盘顺序。
         specs.append({"cell": "PSGroupCell", "label": "应用",
-                      "footerText": "托盘里放哪些 App、按什么顺序，全部由这一节决定。"
-                                    "顺序即落位顺序：第一个 App 在起始角上，顺时针排满内圈，"
-                                    "多出来的向外扩一圈，圈数由数量自己决定。"
-                                    "不指定时退回系统自动挑选的前 24 个。"})
+                      "footerText": "托盘里放哪些 App、按什么顺序，全部由编辑器决定"
+                                    "（上限 36 个，含「截图 / 录屏」两个动作槽）。"
+                                    "顺序就是落位顺序：内圈装不下的向外扩圈，"
+                                    "圈数由数量自己决定。改动立刻生效，不需要重载。"})
         specs.append({"cell": "PSTitleValueCell", "label": "已选应用",
                       "key": "@ring.apps", "default": "自动", "defaults": DOMAIN})
         specs.append({"cell": "PSButtonCell", "label": "编辑应用（添加 / 删除 / 排序）",
@@ -345,11 +341,10 @@ def build_panel(panel_id, title, intro, items):
         # 手势：母本把这些写进 GestureIntroduction 原文，圆盘这边没有独立设置项，
         # 但功能必须能被发现 —— 一个只有作者知道的长按，等于没有做。
         specs.append({"cell": "PSGroupCell", "label": "手势",
-                      "footerText": "点图标启动 App。长按图标收藏 / 取消收藏，收藏的排在圆盘最前。"
-                                    "在图标之间的空档拖动可整体旋转。上一版的「拖到圆盘中心删除」"
-                                    "已经移除：删除 App 走「应用 → 编辑应用」，那里能看见整个列表。"})
-        specs.append({"cell": "PSTitleValueCell", "label": "已收藏（长按图标）",
-                      "key": "@ring.star", "default": "—", "defaults": DOMAIN})
+                      "footerText": "手指划过图标：图标跳起并停住，离开后沉下（GIF 量出的关键帧）。"
+                                    "按住圆心 1 秒进入旋转模式（圆心变青绿），再按 1 秒退出。"
+                                    "抬手落在图标上=打开，落在圆心=打开本面板，"
+                                    "落在盘外或图标间隙=收起。删除 App 只走编辑器。"})
     specs.append({"cell": "PSGroupCell", "label": title, "footerText": intro})
     for it in items:
         specs.append(BUILDERS[it["cell"]](it))
@@ -397,8 +392,8 @@ def build_root(panel_items, wired):
 
     items.append({"cell": "PSGroupCell", "label": "功能设置",
                   "footerText": f"下面 8 个面板共 {total} 项，键名与母本一一对应"
-                                f"（母本 81 键中有 {len(DROPPED)} 项在 0.0.41 明确放弃，"
-                                f"见交付说明）。点任一项进入该面板；承载形状一节已经接通，"
+                                f"（母本 81 键中有 {len(DROPPED)} 项已明确放弃，"
+                                f"名单见交付说明）。点任一项进入该面板；承载形状已整体换成旧版实现，"
                                 f"其余面板的开关会写入 com.aevon 域，等对应功能落地后即生效。"})
     for pid, title, _intro in [(p[0], p[1], p[2]) for p in PANELS]:
         # PSButtonCell + 显式 action：0.0.5 用 PSChildPaneSpecifier，这一版 iOS
@@ -421,10 +416,10 @@ def build_root(panel_items, wired):
 
     items.append({"cell": "PSGroupCell", "label": "关于",
                   "footerText": f"Aevon {VERSION} · Swift · arm64e · 8 个面板全部可进入。"
-                                f"承载形状：圆盘，半径/图标宽度/旋转角可改，"
-                                f"图标按顺序填满内圈后向外扩圈；"
-                                f"应用可增删排序，握把可拖动，全部在桌面上实时生效。"
-                                f"其余 {total - wired} 项写入域待功能落地。"
+                                f"承载形状：旧版圆盘 1:1 移入——点握把呼出，划过跳跃、"
+                                f"阻尼旋转、逐点展开全是本体；应用在编辑器里增删排序"
+                                f"（上限 36，含截图 / 录屏动作槽），握把可拖动。"
+                                f"其余面板的开关写入域、随对应功能落地。"
                                 f"所有改动只写 {DOMAIN}，不触碰系统文件。"})
 
     return {"title": "Aevon", "items": items}

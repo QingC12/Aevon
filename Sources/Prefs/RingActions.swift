@@ -8,8 +8,8 @@
 //  bug as the dead rows in 0.0.5, one layer down.
 //
 //  Every action here is harmless by construction:
-//    · preview    reads values, writes nothing
-//    · edit apps  edits one file under /var/mobile/Library/Logs/Aevon
+//    · preview    hosts the real disc (AevonRingMenu) with launch intercepted
+//    · edit apps  edits the store the disc reads (AevonRingStore)
 //    · reset grip deletes one file and asks the host to re-read
 //
 
@@ -17,20 +17,10 @@ import UIKit
 
 enum RingActions {
 
-    /// Full-screen preview. Everything on it comes from the panel's live
-    /// values, so it is a test, not a mock-up.
+    /// Full-screen preview. It is the real disc with the real animations —
+    /// a test, not a mock-up.
     static func preview(from controller: UIViewController) {
-        let started = Date()
-        let config = RingConfig.load()
-        let loaded = RingApps.resolved(limit: RingApps.maxCount)
-        let milliseconds = Int(Date().timeIntervalSince(started) * 1000)
-        Log.write("prefs: ring preview icons=\(loaded.apps.count) "
-                  + "rings=\(config.ringCount(for: loaded.apps.count)) "
-                  + "source=\(loaded.source.rawValue) in \(milliseconds)ms")
-
-        let preview = RingPreviewController(config: config,
-                                            apps: loaded.apps,
-                                            source: loaded.source)
+        let preview = RingPreviewController()
         controller.present(preview, animated: true)
     }
 

@@ -96,6 +96,15 @@ enum RingIcons {
         return placeholderIcon(name)
     }
 
+    /// The real icon or nil — the seam `AevonAppIcon` (the old plugin's icon
+    /// adapter) needs: the ring menu's letter-tile fallback only fires when
+    /// this returns nil, while `image(for:)` never does. The raw query, not
+    /// the cache: a cached tile may be the placeholder, and the placeholder
+    /// must read as "no real icon" here.
+    static func realIcon(for item: InstalledApp) -> UIImage? {
+        return icon(for: item.bundleID, bundlePath: item.path)
+    }
+
     /// A ring-ready app from a bare bundle identifier.
     static func ringApp(for bundleID: String) -> RingApp {
         if let item = item(for: bundleID) {

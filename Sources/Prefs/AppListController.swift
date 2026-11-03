@@ -1,237 +1,207 @@
 //
-//  AppListController.swift — Aevon, the operator's own icon list.
+//  AppListController.swift — Aevon, the disc app editor (圆盘 App).
 //
-//  This build adds what the settings could not do before: choose which apps the
-//  shape carries, drop the ones that should not be there, and put them in a
-//  specific order. The list is the thing SpringBoard reads, so a change here
-//  is visible on the desktop without a respring.
+//  0.0.42 — a 1:1 port of the archived plugin's `AevonRingEditorController.m`
+//  (the user's own code, V0.0.27 → V0.3.x). Same title, same bar buttons,
+//  same numbered rows, same reorder / swipe-delete / cap, same footer text —
+//  translated from ObjC to Swift because this bundle is Swift, in the same
+//  file order, with the same comments where they explain a decision.
 //
-//  Why a plain table view and not a PSSpecifier page: reordering and swipe-to-
-//  delete are table-view behaviours. Re-implementing them on top of the
-//  Preferences cell machinery would mean writing drag bookkeeping by hand for
-//  no gain, and the whole point of this release is that the panel stops being
-//  a picture of settings.
+//  Why a plain table view and not a PSSpecifier page (from the original):
+//  specifier arrays and the preference array are two sets of indices, drag
+//  reordering needs its own mapping, and PSListController has no edit-mode
+//  entry. A UIViewController + UITableView keeps behaviour fully controllable.
 //
-//  Everything is written through RingApps, which is the single source of truth
-//  for both binaries. No local copy of the list is ever kept in memory between
-//  appearances — the file is read back, so Settings and SpringBoard cannot
-//  drift.
+//  Storage goes through AevonRingStore — the exact store the disc reads — and
+//  every change is broadcast to SpringBoard immediately, no respring.
 //
 
 import UIKit
 
-final class AppListController: UIViewController {
+final class AppListController: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
     private let table = UITableView(frame: .zero, style: .insetGrouped)
-    private var ids: [String] = []
-    private let emptyLabel = UILabel()
+    private var items: [String] = []
+    private var nameCache: [String: String] = [:]
 
     // MARK: Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "应用与排序"
-        view.backgroundColor = .systemGroupedBackground
+        title = "圆盘 App"
+        view.backgroundColor = .systemBackground
 
         table.dataSource = self
         table.delegate = self
+        table.rowHeight = 56
+        table.allowsSelectionDuringEditing = false
+        table.setEditing(false, animated: false)
+        if #available(iOS 15.0, *) {
+            table.sectionHeaderTopPadding = 0
+        }
         table.frame = view.bounds
         table.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        table.backgroundColor = .clear
-        table.keyboardDismissMode = .onDrag
         view.addSubview(table)
 
-        emptyLabel.text = """
-        还没有选择任何 App。
-        现在托盘显示系统自动挑选的前 12 个。
-        点右上角「+」从已安装应用里添加,
-        或用手指拖动右侧把手调整顺序。
-        """
-        emptyLabel.numberOfLines = 0
-        emptyLabel.textAlignment = .center
-        emptyLabel.textColor = .secondaryLabel
-        emptyLabel.font = .preferredFont(forTextStyle: .footnote)
-        table.backgroundView = emptyLabel
-
-        navigationItem.rightBarButtonItems = [
-            UIBarButtonItem(barButtonSystemItem: .add, target: self,
-                            action: #selector(addApps)),
-            UIBarButtonItem(title: "排序", style: .plain, target: self,
-                            action: #selector(toggleEditing)),
-        ]
-
-        reloadList()
+        updateBarButtons()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        // Coming back from the picker: re-read the file, never a cached array.
-        reloadList()
+        reloadFromPrefs()
     }
 
-    // MARK: Data
-
-    private func reloadList() {
-        ids = RingApps.selectedIDs()
-        if ids.isEmpty {
-            table.backgroundView = emptyLabel
-        } else {
-            table.backgroundView = nil
-        }
+    private func reloadFromPrefs() {
+        items = AevonRingStore.bundleIDs()
         table.reloadData()
-        updateEditButton()
     }
 
-    private var showsClearRow: Bool {
-        return !ids.isEmpty && !table.isEditing
+    // MARK: Bar buttons
+
+    /// 非编辑态：右上 `+`（添加）与「编辑」；编辑态：右上只留「完成」，左上关闭隐藏
+    private func updateBarButtons() {
+        let edit = UIBarButtonItem(title: table.isEditing ? "完成" : "编辑",
+                                   style: .plain, target: self,
+                                   action: #selector(toggleEditing))
+
+        if table.isEditing {
+            navigationItem.rightBarButtonItems = [edit]
+            navigationItem.leftBarButtonItem = nil
+            return
+        }
+
+        let add = UIBarButtonItem(barButtonSystemItem: .add, target: self,
+                                  action: #selector(openAdd))
+        navigationItem.rightBarButtonItems = [add, edit]
+        navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .close,
+                                                           target: self,
+                                                           action: #selector(closeEditor))
     }
 
-    private func updateEditButton() {
-        let item = navigationItem.rightBarButtonItems?.last
-        item?.title = table.isEditing ? "完成" : "排序"
-        item?.isEnabled = !ids.isEmpty
+    @objc private func closeEditor() {
+        if let navigation = navigationController, navigation.viewControllers.count > 1 {
+            navigationController?.popViewController(animated: true)
+        } else {
+            dismiss(animated: true)
+        }
     }
 
     @objc private func toggleEditing() {
         table.setEditing(!table.isEditing, animated: true)
-        table.reloadData()          // the clear row comes and goes with the mode
-        updateEditButton()
+        updateBarButtons()
     }
 
-    @objc private func addApps() {
-        let picker = AppPickerController()
-        picker.onChange = { [weak self] in
-            self?.reloadList()
+    @objc private func openAdd() {
+        let add = AppPickerController()
+        navigationController?.pushViewController(add, animated: true)
+    }
+
+    // MARK: Names
+
+    private func name(for bundleID: String) -> String {
+        if let cached = nameCache[bundleID], !cached.isEmpty { return cached }
+        // V0.2.63（AevonQuickEditableV263）：截图 / 录屏是「动作」不是 App，
+        // LSApplicationProxy 查不到，这里给它们一个正常名字。
+        if bundleID == AevonQuickAction.screenshotID {
+            nameCache[bundleID] = "截图（系统）"
+            return "截图（系统）"
         }
-        if let navigation = navigationController {
-            navigation.pushViewController(picker, animated: true)
-        } else {
-            present(UINavigationController(rootViewController: picker), animated: true)
+        if bundleID == AevonQuickAction.recordingID {
+            nameCache[bundleID] = "录屏（系统）"
+            return "录屏（系统）"
         }
+        let name = RingIcons.item(for: bundleID)?.name ?? bundleID
+        nameCache[bundleID] = name
+        return name
     }
 
-    /// One write path, so "changed something" can never forget to tell the
-    /// desktop.
-    private func committed(_ ids: [String], _ what: String, reloadNow: Bool = true) {
-        let ok = RingApps.save(ids)
-        self.ids = RingApps.selectedIDs()
-        notifyPost(Aevon.notePrefs)
-        Log.write("prefs: apps \(what) -> \(self.ids.count) \(ok ? "" : "(write failed)")")
-
-        if reloadNow {
-            // Delete needs the table and the model to agree before the batch
-            // ends, otherwise UIKit counts a row that no longer exists.
-            table.reloadData()
-            updateEditButton()
-        } else {
-            // A move has already happened on screen; only the model needs to
-            // catch up, and doing that mid-batch is how rows end up misplaced.
-            DispatchQueue.main.async { [weak self] in self?.reloadList() }
-        }
-    }
-
-    private func confirmClear() {
-        let sheet = UIAlertController(
-            title: "恢复为自动列表？",
-            message: "当前选择的 \(ids.count) 个 App 与顺序会被清空，托盘改回系统自动挑选。",
-            preferredStyle: .alert)
-        sheet.addAction(UIAlertAction(title: "取消", style: .cancel, handler: nil))
-        sheet.addAction(UIAlertAction(title: "清除", style: .destructive) { [weak self] _ in
-            RingApps.reset()
-            self?.reloadList()
-            notifyPost(Aevon.notePrefs)
-            Log.write("prefs: apps cleared, back to automatic")
-        })
-        present(sheet, animated: true)
-    }
-}
-
-// MARK: - Table
-
-extension AppListController: UITableViewDataSource, UITableViewDelegate {
-
-    func numberOfSections(in tableView: UITableView) -> Int { return 1 }
+    // MARK: Table
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        return ids.count + (showsClearRow ? 1 : 0)
+        return items.count
     }
 
-    func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-        let config = RingConfig.load()
-        let inner = config.perRing(0)
-        return "顺序即托盘顺序：第一个 App 落在内圈的起始角上，其余顺时针排满内圈后向外扩一圈。"
-             + "当前内圈 \(inner) 个，外圈按半径自动增加容量；列表最多可存 \(RingApps.maxCount) 个。"
-             + "改动立即作用到桌面，不需要重载。"
-    }
-
-    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: "app")
-            ?? UITableViewCell(style: .subtitle, reuseIdentifier: "app")
-
-        guard indexPath.row < ids.count else {
-            cell.textLabel?.text = "恢复为自动列表"
-            cell.textLabel?.textColor = .systemRed
-            cell.textLabel?.textAlignment = .center
-            cell.detailTextLabel?.text = nil
-            cell.imageView?.image = nil
-            cell.selectionStyle = .default
-            cell.showsReorderControl = false
-            return cell
-        }
-
-        let id = ids[indexPath.row]
-        let item = RingIcons.item(for: id) ?? InstalledApp(bundleID: id, name: id, path: nil)
-        cell.textLabel?.textAlignment = .natural
-        cell.textLabel?.textColor = .label
-        cell.textLabel?.text = item.name
-        cell.detailTextLabel?.text = item.bundleID
-        cell.imageView?.image = RingIcons.image(for: item)
-        cell.imageView?.contentMode = .scaleAspectFit
-        cell.selectionStyle = .none
+    func tableView(_ tableView: UITableView,
+                   cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: "AevonRingEditorCell")
+            ?? UITableViewCell(style: .subtitle, reuseIdentifier: "AevonRingEditorCell")
+        let bundleID = indexPath.row < items.count ? items[indexPath.row] : ""
+        let name = self.name(for: bundleID)
+        cell.textLabel?.text = "\(indexPath.row + 1). \(name)"
+        cell.detailTextLabel?.text = bundleID
+        cell.detailTextLabel?.textColor = .secondaryLabel
+        cell.detailTextLabel?.font = .systemFont(ofSize: 11)
+        let icon = AevonAppIcon.image(bundleID: bundleID, size: 32)
+            ?? letterIcon(name: name, bundleID: bundleID, size: 32)
+        cell.imageView?.image = icon
         cell.showsReorderControl = true
         return cell
     }
 
+    /// 名字首字的色块图标（取不到原生图标时的兜底）——原版逐行照搬。
+    private func letterIcon(name: String, bundleID: String, size: CGFloat) -> UIImage {
+        let size = max(size, 8)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.opaque = false
+        format.scale = UIScreen.main.scale
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: size, height: size),
+                                               format: format)
+        return renderer.image { _ in
+            var hasher = UInt(bitPattern: bundleID.hashValue)
+            hasher = hasher &* 31 &+ 0x9E37
+            let hue = CGFloat(hasher % 360) / 360.0
+            UIColor(hue: hue, saturation: 0.55, brightness: 0.78, alpha: 1).setFill()
+            UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: size, height: size),
+                         cornerRadius: size * 0.24).fill()
+            let letter = String(name.prefix(1))
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: size * 0.52, weight: .semibold),
+                .foregroundColor: UIColor.white,
+            ]
+            let textSize = (letter as NSString).size(withAttributes: attrs)
+            (letter as NSString).draw(at: CGPoint(x: (size - textSize.width) / 2,
+                                                  y: (size - textSize.height) / 2),
+                                      withAttributes: attrs)
+        }
+    }
+
+    func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool {
+        return true
+    }
+
     func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool {
-        return indexPath.row < ids.count
+        return true
     }
 
     func tableView(_ tableView: UITableView,
-                   moveRowAt sourceIndexPath: IndexPath,
-                   to destinationIndexPath: IndexPath) {
-        var updated = ids
-        guard sourceIndexPath.row < updated.count else { return }
-        let id = updated.remove(at: sourceIndexPath.row)
-        updated.insert(id, at: Swift.min(destinationIndexPath.row, updated.count))
-        committed(updated, "reorder \(sourceIndexPath.row)->\(destinationIndexPath.row)",
-                  reloadNow: false)
+                   editingStyleForRowAt indexPath: IndexPath) -> UITableViewCell.EditingStyle {
+        return .delete
     }
 
     func tableView(_ tableView: UITableView,
                    commit editingStyle: UITableViewCell.EditingStyle,
                    forRowAt indexPath: IndexPath) {
-        guard editingStyle == .delete, indexPath.row < ids.count else { return }
-        let id = ids[indexPath.row]
-
-        // Update the model, then delete exactly that row. Calling reloadData()
-        // inside a swipe's commit block makes UIKit compare two different row
-        // counts inside one batch — that is an assertion, not a redraw.
-        var updated = ids
-        updated.remove(at: indexPath.row)
-        ids = updated
-        let ok = RingApps.save(updated)
-        notifyPost(Aevon.notePrefs)
-        Log.write("prefs: apps remove \(id) -> \(ids.count) \(ok ? "" : "(write failed)")")
-
+        guard editingStyle == .delete, indexPath.row < items.count else { return }
+        items.remove(at: indexPath.row)
         tableView.deleteRows(at: [indexPath], with: .automatic)
-        // The footer (capacity) and the empty view come from the model, so a
-        // deferred reload keeps them honest without touching this batch.
-        DispatchQueue.main.async { [weak self] in self?.reloadList() }
+        AevonRingStore.save(items)
+        notifyPost(Aevon.notePrefs)
     }
 
-    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        tableView.deselectRow(at: indexPath, animated: true)
-        guard indexPath.row >= ids.count else { return }
-        confirmClear()
+    func tableView(_ tableView: UITableView,
+                   moveRowAt sourceIndexPath: IndexPath,
+                   to destinationIndexPath: IndexPath) {
+        guard sourceIndexPath.row < items.count else { return }
+        let moved = items.remove(at: sourceIndexPath.row)
+        let target = Swift.min(destinationIndexPath.row, items.count)
+        items.insert(moved, at: target)
+        AevonRingStore.save(items)
+        notifyPost(Aevon.notePrefs)
+    }
+
+    func tableView(_ tableView: UITableView,
+                   titleForFooterInSection section: Int) -> String? {
+        return "共 \(items.count) 个（上限 \(AevonRingStore.maxCount)）。"
+             + "点右上「编辑」后，按住右侧把手上下拖动即可排序，左滑删除。"
     }
 }

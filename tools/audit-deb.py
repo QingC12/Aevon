@@ -353,15 +353,17 @@ def main():
         ring_items = plistlib.loads(ring_plist).get("items", [])
         actions = [item.get("action") for item in ring_items]
         keys = [item.get("key") for item in ring_items]
-        # 0.0.41 — 圆盘 only. The four shape switches and 尾角 are gone from the
-        # panel on purpose (the operator asked for one shape, and a control that
-        # writes a key nothing reads is a lie), so the assertion is now that
-        # they are *absent*: a re-added RTSIH row would be a regression.
+        # 0.0.41/0.0.42 — 圆盘 only, and the disc is now the archived plugin's
+        # implementation with its own fixed geometry. The shape switches, 尾角,
+        # the three geometry sliders and 收藏 are all gone from the panel on
+        # purpose (a control that writes a key nothing reads is a lie), so the
+        # assertion is that they are *absent*: a re-added row is a regression.
         shapes = [k for k in keys if k in ("RTSIF", "RTSIH", "RTSIQ", "RTSIZ",
-                                           "LastIconAngle")]
-        if "@ring.star" not in keys:
-            bad("ring: no 收藏 row — 长按收藏 exists in the view but nothing "
-                "in Settings can show what is pinned")
+                                           "LastIconAngle", "Radius", "IconWidth",
+                                           "RotationAngle", "Star")]
+        if "@ring.star" in keys:
+            bad("ring: @ring.star still in the panel — 收藏 moved into the old "
+                "disc's hands (there is no pin) and the row lies")
         elif "previewRing:" not in actions:
             bad("ring: no previewRing: row — the carrier shape is unreachable")
         elif "@ring.summary" not in keys:
@@ -377,13 +379,13 @@ def main():
         elif "@ring.apps" not in keys or "@ring.grip" not in keys:
             bad("ring: the app list / grip position has no live row")
         else:
-            ok("ring: 圆盘 only, live summary, preview, apps, grip reset, desktop switch")
+            ok("ring: 旧版圆盘, live summary, preview, apps, grip reset, desktop switch")
 
-    for token in (b"RingView", b"RingPreviewController", b"openPanel:",
+    for token in (b"RingPreviewController", b"openPanel:",
                   b"PanelController", b"previewRing:", b"editApps:", b"resetGrip:",
                   b"AppListController", b"AppPickerController",
                   b"prefs: open app list", b"prefs: grip reset",
-                  b"prefs: preview pin",
+                  "\u5706\u76d8 App".encode("utf-8"),
                   b"_applicationIconImageForBundleIdentifier:"):
         if token not in prefs:
             bad(f"ring: {token.decode()} missing from the bundle binary")
@@ -400,12 +402,20 @@ def main():
     dylib_early = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
     for token in (b"RingHost", b"ring: hosted on desktop", b"LSApplicationWorkspace",
                   b"(operator list)", b"ring: grip moved to",
-                  b"ring: pin toggle ", b"ring: rotate -> "):
+                  # 0.0.42 — the ported disc must be in the dylib: its three
+                  # marker tags are the version tags the old plugin used, and
+                  # the unfolded-ring log line is the one the operator greps.
+                  b"AevonKeyframeHoverV320", b"AevonGifHoverV322", b"AevonRingIcon40V323",
+                  b"AevonRingUnfoldV323", b"AevonQuickScreenshotV262",
+                  b"AevonQuickRecordingV262", b"RingSpringDamping"):
         if token not in dylib_early:
-            bad(f"host: {token.decode()} missing from Aevon.dylib — "
+            bad(f"host: {token.decode(errors='replace')} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")
-    if b"/var/mobile/Library/Logs/Aevon/apps.plist" not in dylib_early:
-        bad("host: apps.plist path missing from the tweak — the operator's list would be ignored")
+    # The app list moved from the file store to the old plugin's snapshot store
+    # (UserDefaults suite + RingAppsSnapshot, V0.0.31 semantics kept verbatim).
+    if b"RingAppsSnapshot" not in dylib_early:
+        bad("host: RingAppsSnapshot missing from the tweak — the disc's list store "
+            "did not come across with the port")
     if b"/var/mobile/Library/Logs/Aevon/layout.plist" not in dylib_early:
         bad("host: layout.plist path missing from the tweak — a dragged grip could not persist")
     if b"com.aevon.prefs" not in prefs:
@@ -517,14 +527,17 @@ def main():
                   # 0.0.39 — 位置/大小记忆与吸附、手指滑过高亮。两条各自
                   # 是「记不住」和「高亮不跟随」的唯一证据。
                   b"win: card remembered ",
-                  b"ring: hover icon ",
+                  # 0.0.42 — 高亮跟随的证据换成人：旧版圆盘的划过关键帧标记
+                  # （AevonHoverTrailV319）与展开日志标记（AevonRingMultiRing），
+                  # 都在 AevonRingMenu.swift 的源码里，逐字可查。
+                  b"AevonHoverTrailV319",
+                  b"AevonRingMultiRing",
                   b"win: icon launch ",
                   b"win: icon scene up after ",
-                  # 0.0.41 — 多圈。0.0.38-0.0.40 断言的是「几何让步」那一行：
-                  # 圆盘只有一圈，塞不下就只能扩半径或缩图标。现在没有让步可做，
-                  # 这一行报的是圈数与每圈几个 —— 「9 个图标怎么就显示了 9 个」
-                  # 从这行读，不用截图。
-                  b"ring: ring layout ",
+                  # 0.0.42 — 多圈几何随旧版圆盘移交：布局规则（外圈一定比内圈多、
+                  # 相邻圈错开半格）在 AevonRingMenu.distribution / radii 里，
+                  # 标记 AevonRingDenseV29 是它的版本名。
+                  b"AevonRingDenseV29",
                   # 0.0.34 — the mother ship's 区域 × 动作 matrix replaced our
                   # pinch-and-drag shell. Aevon(38) cut it down to five cells:
                   # both sides move and dock on a tap, the bottom band moves and
