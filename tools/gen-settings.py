@@ -287,9 +287,9 @@ def build_panel(panel_id, title, intro, items):
                                     "第二个以 scene2: 开头，是承载层的真实方法表（已退役，只剩一行）；"
                                     "第三个以 calls: 开头，把母本用到的每一条调用"
                                     "核对到这台 iOS 上真正定义它的类与签名；"
-                                    "第四个以 win: 开头，先把现成场景的 definition / settings / "
-                                    "clientSettings 打进日志，再用它们的副本真的建一个新场景 —— "
-                                    "前三个只读，第四个会写系统，失败时桌面可能注销一次。"
+                                    "第四个以 win: 开头：先装母本那套停用管理钩子（带自检），6 秒后记住你切到的那个 App，"
+                                    "你上滑回桌面时卡片才出现。前三个只读；第四个会装钩子，"
+                                    "失败时 SpringBoard 可能注销一次。"
                                     "各只执行一次，不会在开机时重放。"})
         specs.append({"cell": "PSButtonCell", "label": "转储场景与窗口（写 Aevon.log）",
                       "action": "sceneProbe:", "defaults": DOMAIN})
@@ -297,7 +297,7 @@ def build_panel(panel_id, title, intro, items):
                       "action": "sceneSurface:", "defaults": DOMAIN})
         specs.append({"cell": "PSButtonCell", "label": "核对调用点（母本 123 条调用）",
                       "action": "sceneCalls:", "defaults": DOMAIN})
-        specs.append({"cell": "PSButtonCell", "label": "建浮窗（点完后 6 秒内切到目标 App）",
+        specs.append({"cell": "PSButtonCell", "label": "装钩子并建浮窗（切到目标 App，再上滑回桌面）",
                       "action": "sceneWindow:", "defaults": DOMAIN})
 
     if panel_id == "Ring":

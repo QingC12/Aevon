@@ -777,12 +777,18 @@ zStackParticipantDidChange:
     static func runWindow() {
         reportLastStep()
 
-        // The button lives inside Settings, so at the instant it is pressed the
-        // app the operator wants to float is guaranteed to be in the background
-        // — and a scene in the background pushes no layers to anybody. 0.0.22
-        // hosted exactly that: a live presenter, `hosting=yes active=yes`, and
-        // one empty sublayer. Six seconds is the window to switch apps, and the
-        // scene is chosen when the timer fires rather than when the tap lands.
+        // 0.0.27 puts the mother ship's mechanism in place before anything else
+        // happens, because the last three versions were solving a problem she
+        // does not have. Her route is in the reverse notes, with the encodings
+        // read off this phone: a `UIApplicationSceneDeactivationManager` whose
+        // `_setDeactivationReasons:onScene:withSettings:reason:` is how the
+        // system decides whether a scene may go to sleep, and a scene that is
+        // allowed to stay awake keeps drawing after the app has left the screen.
+        // Hiding SpringBoard's views was never needed; the desktop is already
+        // underneath, it was only covered by a full-screen app that is now gone.
+        mark("hook-install")
+        emitNotes(AevonHookInstall())
+        unmark()
         Log.write("win: armed, building in 6s (switch to the target app now)")
         DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
             // Asked again on purpose: a manager captured six seconds ago is a
@@ -795,8 +801,101 @@ zStackParticipantDidChange:
                 Log.write("win: no app scene in the list this run")
                 return
             }
-            float(scene)
+            watch(scene)
         }
+    }
+
+    /// Holds the scene open and builds the card the moment the operator leaves
+    /// it.
+    ///
+    /// The order matters and it is the reverse of 0.0.22—0.0.26. Those versions
+    /// built a card while the app was full screen, which is the one moment a
+    /// scene's layers cannot be in two places: the card took them and the screen
+    /// went black. Here the app is asked to stay alive *before* it leaves, and
+    /// the card is only built once it has, so the layers have exactly one home
+    /// and the desktop is what shows around it.
+    private static func watch(_ scene: NSObject) {
+        let identifier = value(of: scene, "identifier").map { String(describing: $0) } ?? ""
+        var bundle = identifier.hasPrefix("sceneID:")
+            ? String(identifier.dropFirst(8)) : identifier
+        if let dash = bundle.range(of: "-default") {
+            bundle = String(bundle[..<dash.lowerBound])
+        }
+        guard !bundle.isEmpty else {
+            Log.write("win: the target scene will not name itself, nothing to hold")
+            return
+        }
+        // The marker is written before the hold and cleared after it, so a
+        // process that dies anywhere in between names the step on the next
+        // launch instead of leaving the log to be read backwards. It is the one
+        // call in this file that changes what SpringBoard does to a scene, and
+        // it deserves the witness the hook route never got to use.
+        mark("APP-hold")
+        AevonHookArm(bundle)
+        Log.write("win: holding " + bundle
+                  + " reasons=" + reasonsOf(scene)
+                  + " layers=" + String(count(of: value(of: scene, "layerManager"), "layers")))
+        Log.write("win: now swipe up to the desktop - the card follows")
+
+        // 250 ms is four looks per second: fast enough to catch the moment the
+        // app stops being the front scene, slow enough that twenty seconds of
+        // waiting costs nothing. Twenty seconds is the ceiling because a run
+        // that never gets an answer has to end by itself.
+        var poll: (() -> Void)!
+        var ticks = 0
+        var sawFront = false
+        poll = {
+            ticks += 1
+            let running = AevonBoolOf(scene, "accessibilitySceneIsRunningInForeground")
+            let visible = AevonBoolOf(scene, "accessibilitySceneIsForegroundVisible")
+            let settings = value(of: scene, "settings")
+            let foreground = settings.map { AevonBoolOf($0, "isForeground") } ?? -1
+            let front = running == 1 || visible == 1 || foreground == 1
+            if front { sawFront = true }
+            // The card is built on the way *out* of the app and never before.
+            // 0.0.24—0.0.26 built it while the app was still full screen and took
+            // the scene's layers away from it, which is the black phone. So a run
+            // that never saw this scene in front builds nothing at all: three
+            // unreadable answers must not be read as "the operator already left".
+            let left = sawFront && !front
+            guard left || ticks >= 80 else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { poll() }
+                return
+            }
+            guard left else {
+                Log.write("win: never saw it leave the front, nothing built"
+                          + " running=" + flag(running)
+                          + " visible=" + flag(visible)
+                          + " fg=" + flag(foreground))
+                AevonHookDisarm()
+                unmark()
+                return
+            }
+            Log.write("win: left the app at " + String(ticks * 250) + "ms"
+                      + " running=" + flag(running)
+                      + " visible=" + flag(visible)
+                      + " fg=" + flag(foreground)
+                      + " reasons=" + reasonsOf(scene))
+            emitNotes(AevonHookSummary())
+            float(scene)
+            // The card comes down after eight seconds, and the scene has to be
+            // allowed to sleep again afterwards: a scene nobody releases keeps a
+            // display link running for as long as this process lives, which is
+            // the one failure mode of this route that outlasts the test.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
+                AevonHookDisarm()
+                unmark()
+                emitNotes(AevonHookSummary())
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { poll() }
+    }
+
+    /// The system's own answer to "may this scene go to sleep", as a number.
+    /// `absent` means the method is not there, which is not the same as 0.
+    private static func reasonsOf(_ scene: NSObject) -> String {
+        let value = AevonReasonsOf(scene)
+        return value == UInt64.max ? "absent" : String(value)
     }
 
     /// The scene a floating window would host.
@@ -920,39 +1019,20 @@ zStackParticipantDidChange:
                   + " active=" + flag(AevonBoolOf(presenter, "isActive")))
         Log.write("win: view sublayers=" + String(view.layer.sublayers?.count ?? 0))
 
-        // Aevon(22) settled the question the last three versions were asking.
-        // The card does hold the picture, and in the same run the rest of the
-        // screen went black — because a scene's layers are hosted by one
-        // container at a time. Taking them into the card emptied the container
-        // SpringBoard had built for the full-screen app, and an empty container
-        // draws its own black. The mother ship does not mirror (her symbol
-        // table has one `presentationView` and no mirror entry); her shape is
-        // "the app lives in the card, the desktop is outside". So the emptied
-        // container is taken out of sight — alpha only, recorded, restored on
-        // close — and what shows through is whatever SpringBoard still has
-        // underneath it.
-        demoteFullScreen(scene)
-
-        // One second later, does the scene still consider itself on screen? A
-        // hidden full-screen container can make SpringBoard retire the scene,
-        // and a retired scene would freeze the card. This is the one reading
-        // that tells "the desktop is black" apart from "the scene was put to
-        // sleep", and they need opposite fixes.
+        // Nothing on this screen is hidden any more. 0.0.24 hid one view,
+        // 0.0.25 hid the wrong window, 0.0.26 emptied every app-level window and
+        // the operator got a black phone that eight seconds of restoring did not
+        // bring back: a scene's layers are hosted by one container at a time, so
+        // a card that holds them leaves the full-screen container empty, and an
+        // empty container paints its own black. The mother ship solves this by
+        // never being in that position — the app is in the background and the
+        // desktop is the backdrop — so what is left here is one reading, one
+        // second later, of whether a kept-alive scene really is still drawing.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            let layers = view.layer.sublayers?.count ?? 0
-            Log.write("win: after demote presenter hosting=" + flag(AevonBoolOf(presenter, "isHosting"))
+            Log.write("win: after 1s presenter hosting=" + flag(AevonBoolOf(presenter, "isHosting"))
                       + " active=" + flag(AevonBoolOf(presenter, "isActive"))
-                      + " sublayers=" + String(layers))
-            inspectDesktop()
-            recheckAlpha()
-            // The card going empty is the one answer that says the scene was
-            // retired rather than that the desktop is not drawn. Put the full
-            // screen back at once: a frozen card over a hidden picture is the
-            // worst of both.
-            if layers == 0 {
-                restoreFullScreen()
-                Log.write("win: card went empty, full screen put back")
-            }
+                      + " sublayers=" + String(view.layer.sublayers?.count ?? 0)
+                      + " reasons=" + reasonsOf(scene))
         }
 
         // The counters that separate the three ways a card can be blank, none
@@ -973,320 +1053,7 @@ zStackParticipantDidChange:
             _ = AevonCallVoid(presenter, "deactivate")
             _ = AevonCallVoid(presenter, "invalidate")
             FloatHost.hide()
-            // After the presenter is gone the layers go back to the container
-            // SpringBoard built, so it has to be visible again before anyone
-            // notices it was taken away.
-            restoreFullScreen()
             Log.write("win: closed after 8s")
-        }
-    }
-
-    // MARK: - Taking the emptied full screen out of sight
-
-    /// A view that carries a scene's picture, and the window SpringBoard keeps
-    /// it in.
-    private struct Carrier {
-        let view: UIView
-        let top: UIView
-        let window: UIWindow
-        let name: String
-        let ident: String
-    }
-
-    /// One view that was taken out of sight, kept with everything needed to put
-    /// it back exactly as it was.
-    private struct Saved {
-        let view: UIView
-        let alpha: CGFloat
-        let background: UIColor?
-        let name: String
-    }
-
-    private static var saved: [Saved] = []
-    private static var savedWindow: (window: UIWindow, background: UIColor?,
-                                     opaque: Bool, alpha: CGFloat, name: String)?
-    private static var savedExtra: [(window: UIWindow, background: UIColor?,
-                                     opaque: Bool, name: String)] = []
-
-    /// The classes SpringBoard puts between a window and a scene's picture.
-    ///
-    /// Deliberately narrow: the desktop, the icon layer and the status bar are
-    /// the three things that must survive this, so a name that mentions any of
-    /// them is never a candidate — on this phone the desktop showing through is
-    /// the entire point of the change.
-    private static func isCarrier(_ name: String) -> Bool {
-        isAppCarrier(name) || name.contains("_UIScenePresentationView")
-    }
-
-    /// Only the three classes SpringBoard uses for an *application* scene.
-    ///
-    /// `_UIScenePresentationView` is deliberately not in this list: it is also
-    /// what the wallpaper is drawn into, and Aevon(24) showed what that costs —
-    /// with the operator still in Settings, the search named the wallpaper's
-    /// presenter as the only carrier and the run refused to build anything. A
-    /// carrier that cannot name its own scene is only trusted when its class is
-    /// one of these.
-    private static func isAppCarrier(_ name: String) -> Bool {
-        return name.contains("SBDeviceApplicationSceneView")
-            || name.contains("SBAppContainerView")
-            || name.contains("SBSceneContainerView")
-    }
-
-    /// What a view says its scene is, in the spellings SpringBoard uses. An
-    /// empty answer is not a failure — `_UIScenePresentationView` keeps its
-    /// identity on the presenter, not on itself.
-    private static func sceneIdentifier(of view: UIView) -> String {
-        for key in ["sceneIdentifier", "_sceneIdentifier"] {
-            if let text = value(of: view, key) as? String, !text.isEmpty { return text }
-        }
-        if let handle = value(of: view, "sceneHandle") {
-            for key in ["sceneIdentifier", "identifier"] {
-                if let text = value(of: handle, key) as? String, !text.isEmpty { return text }
-            }
-        }
-        if let scene = value(of: view, "scene") {
-            for key in ["identifier", "sceneIdentifier"] {
-                if let text = value(of: scene, key) as? String, !text.isEmpty { return text }
-            }
-        }
-        return ""
-    }
-
-    /// The child of the window that contains `node`. Hiding this instead of the
-    /// carrier itself is the difference between "the picture is gone" and "the
-    /// picture is gone and so is the black parent behind it".
-    private static func container(of node: UIView, in window: UIWindow) -> UIView? {
-        var current = node
-        var steps = 0
-        while let parent = current.superview, parent !== window {
-            current = parent
-            steps += 1
-            if steps > 64 { return nil }
-        }
-        return current.superview === window ? current : nil
-    }
-
-    /// Finds the full-screen presentation of the scene we are drawing in the
-    /// card and sets its alpha to 0. Nothing is removed, nothing is hidden, no
-    /// selector is invented: alpha is a property every UIView has, and it is
-    /// put back to its previous value on teardown.
-    private static func demoteFullScreen(_ scene: NSObject) {
-        let identifier = value(of: scene, "identifier").map { String(describing: $0) } ?? ""
-        let wanted = identifier.hasPrefix("sceneID:") ? String(identifier.dropFirst(8)) : identifier
-        var bundle = wanted
-        if let dash = wanted.range(of: "-default") {
-            bundle = String(wanted[..<dash.lowerBound])
-        }
-
-        guard let app = sharedApplication() else {
-            Log.write("win: no application to search for the full screen")
-            return
-        }
-
-        var windows = 0
-        var matched: Carrier?
-        var spare: Carrier?
-
-        for window in app.windows {
-            if window is FloatWindow { continue }
-            windows += 1
-            let windowClass = NSStringFromClass(type(of: window))
-            Log.write("win: springboard window " + windowClass
-                      + " level=" + String(format: "%.0f", window.windowLevel.rawValue)
-                      + " hidden=" + (window.isHidden ? "yes" : "no")
-                      + " alpha=" + String(format: "%.1f", window.alpha)
-                      + " size=" + String(format: "%.0fx%.0f",
-                                          window.bounds.width, window.bounds.height))
-            if matched != nil { continue }
-
-            var queue: [UIView] = [window]
-            var head = 0
-            while head < queue.count && head < 4000 {
-                let node = queue[head]
-                head += 1
-                let name = NSStringFromClass(type(of: node))
-                if isCarrier(name), let top = container(of: node, in: window) {
-                    let ident = sceneIdentifier(of: node)
-                    let carrier = Carrier(view: node, top: top, window: window,
-                                          name: name, ident: ident)
-                    let hit = !wanted.isEmpty
-                        && (ident.contains(wanted) || (!bundle.isEmpty && ident.contains(bundle)))
-                    if hit {
-                        matched = carrier
-                        Log.write("win: presentation carrier " + name
-                                  + " ident=" + ident
-                                  + " top=" + NSStringFromClass(type(of: top)))
-                        break
-                    }
-                    // A carrier that cannot name its scene is only used when it
-                    // is the full screen, because the one thing this step must
-                    // never do is take the desktop out of sight.
-                    if spare == nil, ident.isEmpty {
-                        let area = top.window?.bounds ?? .zero
-                        let covers = area.width > 64 && area.height > 64
-                            && top.frame.width >= area.width * 0.8
-                            && top.frame.height >= area.height * 0.8
-                        if covers {
-                            spare = carrier
-                            Log.write("win: presentation carrier " + name
-                                      + " ident=?"
-                                      + " top=" + NSStringFromClass(type(of: top)))
-                        }
-                    }
-                }
-                queue.append(contentsOf: node.subviews)
-            }
-        }
-
-        guard let chosen = matched ?? spare else {
-            Log.write("win: no full screen container (windows=" + String(windows) + ")")
-            return
-        }
-        if matched == nil {
-            Log.write("win: no carrier named the scene, using the only one found")
-        }
-
-        let window = chosen.window
-        let windowName = NSStringFromClass(type(of: window))
-        guard !windowName.contains("HomeScreen"), !windowName.contains("Wallpaper") else {
-            Log.write("win: refused to hide a desktop window " + windowName)
-            return
-        }
-
-        // The matched window's own background goes first: a window that paints
-        // black behind its children would keep painting black after the children
-        // are gone.
-        let background = window.backgroundColor
-        let opaqueBefore = window.isOpaque
-        savedWindow = (window, background, opaqueBefore, window.alpha, windowName)
-        window.backgroundColor = .clear
-        window.isOpaque = false
-        Log.write("win: window background cleared " + windowName
-                  + " opaque=" + (opaqueBefore ? "yes" : "no")
-                  + " hadColor=" + (background == nil ? "no" : "yes"))
-
-        // Everything above the desktop goes transparent: the matched window's
-        // direct children first, then the children of every other window sitting
-        // at the app's own level. 0.0.25 proved why the narrow version cannot
-        // work — it took down fifteen views whose top was
-        // `SBFluidSwitcherTouchPassThroughScrollView` (430x1398), i.e. the app
-        // switcher, and the screen did not change at all.
-        //
-        // The one fact that makes the wide version safe is on the same log: the
-        // home screen is a window of its own at level -2 with three live
-        // subviews and three layers (`layers=3`), so emptying the layer above it
-        // can only leave the desktop showing. Nothing here touches that window,
-        // the wallpaper window, the status bar or the dynamic island.
-        var emptied = hideChildren(of: window)
-
-        for other in app.windows {
-            if other === window { continue }
-            let name = NSStringFromClass(type(of: other))
-            if name.contains("Aevon") || name.contains("HomeScreen")
-                || name.contains("Wallpaper") || name.contains("SystemAperture")
-                || name.contains("StatusBar") || name.contains("TextEffects")
-                || name.contains("CoverSheet") || name.contains("ControlCenter")
-                || name.contains("Screenshots") || name.contains("Recording")
-                || name.contains("AlertItem") || name.contains("Keyboard") { continue }
-            let level = other.windowLevel.rawValue
-            guard level >= -2, level <= 9, !other.isHidden, other.alpha > 0 else { continue }
-            Log.write("win: app layer window " + name
-                      + " level=" + String(format: "%.0f", level)
-                      + " children=" + String(other.subviews.count))
-            emptied += hideChildren(of: other)
-            savedExtra.append((other, other.backgroundColor, other.isOpaque, name))
-            other.backgroundColor = .clear
-            other.isOpaque = false
-        }
-        Log.write("win: app layer emptied views=" + String(emptied))
-    }
-
-    /// Takes every direct child of one window out of sight and returns how many
-    /// there were. Direct children rather than a chain: a chain leaves siblings
-    /// behind, and a sibling is exactly what an opaque background view is.
-    private static func hideChildren(of window: UIWindow) -> Int {
-        var count = 0
-        for view in window.subviews {
-            let name = NSStringFromClass(type(of: view))
-            let record = Saved(view: view, alpha: view.alpha,
-                               background: view.backgroundColor, name: name)
-            saved.append(record)
-            view.alpha = 0
-            if let background = view.backgroundColor, background != UIColor.clear {
-                view.backgroundColor = .clear
-            }
-            Log.write("win: hidden child " + name
-                      + " alpha=" + String(format: "%.1f", record.alpha)
-                      + " size=" + String(format: "%.0fx%.0f",
-                                          view.frame.width, view.frame.height)
-                      + " subs=" + String(view.subviews.count))
-            count += 1
-        }
-        return count
-    }
-
-    /// Whether SpringBoard put anything back.
-    ///
-    /// If the system re-applies its own layout a frame later, every alpha change
-    /// this file makes is pointless, and that is worth one line rather than one
-    /// more version spent on the same idea.
-    private static func recheckAlpha() {
-        var reset = 0
-        for item in saved where item.view.alpha > 0.5 {
-            reset += 1
-        }
-        Log.write("win: alpha recheck kept=" + String(saved.count - reset)
-                  + " reset=" + String(reset))
-    }
-
-    /// Puts everything back, newest first. Called on teardown, before this file
-    /// forgets what it changed, so a failed run cannot leave a hole in
-    /// SpringBoard's hierarchy.
-    private static func restoreFullScreen() {
-        if let record = savedWindow {
-            record.window.alpha = record.alpha
-            record.window.backgroundColor = record.background
-            record.window.isOpaque = record.opaque
-            Log.write("win: window restored " + record.name)
-            savedWindow = nil
-        }
-        for item in saved {
-            item.view.alpha = item.alpha
-            item.view.backgroundColor = item.background
-        }
-        if !saved.isEmpty {
-            Log.write("win: fullscreen restored layers=" + String(saved.count))
-        }
-        saved.removeAll()
-        for item in savedExtra {
-            item.window.backgroundColor = item.background
-            item.window.isOpaque = item.opaque
-        }
-        if !savedExtra.isEmpty {
-            Log.write("win: app windows restored count=" + String(savedExtra.count))
-        }
-        savedExtra.removeAll()
-    }
-
-    /// What the desktop looks like right now.
-    ///
-    /// "The outside is still black" has two very different causes and they need
-    /// opposite fixes: the app's picture is still on screen, or the desktop
-    /// stopped being drawn at all. A home screen view with no sublayers is the
-    /// second one, and no amount of alpha on the app's side would ever fix it.
-    private static func inspectDesktop() {
-        guard let app = sharedApplication() else { return }
-        for window in app.windows {
-            let name = NSStringFromClass(type(of: window))
-            guard name.contains("HomeScreen") || name.contains("Wallpaper") else { continue }
-            let root = window.rootViewController?.view
-            let rootClass = window.rootViewController.map {
-                NSStringFromClass(type(of: $0))
-            } ?? "nil"
-            Log.write("win: desktop " + name + " root=" + rootClass
-                      + " alpha=" + String(format: "%.1f", root?.alpha ?? -1)
-                      + " subviews=" + String(root?.subviews.count ?? -1)
-                      + " layers=" + String(root?.layer.sublayers?.count ?? -1))
         }
     }
 

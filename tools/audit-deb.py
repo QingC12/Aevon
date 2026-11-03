@@ -470,6 +470,15 @@ def main():
                   b"win: container cls=",
                   b"win: scale factor=",
                   b"win: closed after 8s",
+                  # 0.0.27 — the mother ship's route. The two selectors are the
+                  # ones her binary calls and hooks; the selftest string is the
+                  # only proof in the package that the write path is exercised
+                  # before SpringBoard is touched at all.
+                  b"win: now swipe up to the desktop - the card follows",
+                  b"win: left the app at ",
+                  b"hook: selftest got=%ld want=102",
+                  b"_setDeactivationReasons:onScene:withSettings:reason:",
+                  b"_scene:interceptUpdateWithNewSettings:",
                   b"presenter %@ -> %@",
                   b"/var/mobile/Library/Logs/Aevon/win.step"):
         if token not in dylib_early:

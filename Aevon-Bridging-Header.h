@@ -36,6 +36,22 @@ NSInteger AevonBoolOf(id _Nullable object, NSString *_Nullable name);
 /// indistinguishable from Swift.
 NSInteger AevonCallVoid(id _Nullable object, NSString *_Nullable name);
 
+/// 0.0.27 — the mother ship's mechanism, installed as replacements instead of
+/// relied on as getters. `AevonHookInstall` answers its own notes (a multi-line
+/// string the caller writes to the log, selftest included); the summary is the
+/// call counters, which are the only honest answer to "is the hook live".
+NSString *AevonHookInstall(void);
+NSString *AevonHookSummary(void);
+
+/// Which scene may be held awake. Empty means nothing is held, which is the
+/// state before the target is known and the state after the card is taken down.
+void AevonHookArm(NSString *_Nullable bundle);
+void AevonHookDisarm(void);
+
+/// `-_deactivationReasonsForScene:withSettings:` as a number, `ULLONG_MAX` when
+/// this system does not answer it. Zero and "absent" are different facts.
+unsigned long long AevonReasonsOf(id _Nullable scene);
+
 @interface UIImage (AevonPrivateIcons)
 + (nullable UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID
                                                        format:(NSInteger)format
