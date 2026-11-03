@@ -94,15 +94,24 @@ final class RingView: UIView {
     /// exactly this one index; the highlight is not a per-view state, because
     /// two highlighted icons would be two answers to "which one will open".
     private var hoverIndex = -1
-    /// `RingEnv._translationPadding`. Below this the finger is *pointing*, above
-    /// it the finger is *dragging*. The master keeps the same field on `RingEnv`
-    /// and on `RingView` — it is the one number that separates "slide across the
-    /// icons to pick one" from "turn the whole shape", and both gestures start
-    /// with the same touch.
+    /// `RingEnv._translationPadding`, applied to the *radius* rather than to the
+    /// distance travelled.
+    ///
+    /// 0.0.39 measured travel and Aevon(38) says the highlight never followed a
+    /// finger. The reason is structural: a pan's `.began` is delivered only after
+    /// ~10 pt of slop, so `hoverStart` was already 10 pt from where the finger
+    /// went down, and the very next frame crossed the threshold — the highlight
+    /// lived for one frame and the shape started turning under it.
+    ///
+    /// A slide across the icons is a *tangential* move: the distance to the pivot
+    /// barely changes. Leaving the band — toward the centre for 回收站, or out
+    /// past the icons — is a *radial* move. One number separates the two, and it
+    /// is the number the master keeps (`_translationPadding`).
     private let dragThreshold: CGFloat = 10
     /// The touch is still in the pick phase (no drag has started yet).
     private var hovering = false
-    private var hoverStart: CGPoint = .zero
+    /// Distance from the pivot when the touch went down.
+    private var hoverRadius: CGFloat = 0
     /// A tap that arrives right after a hover picked an icon must not open a
     /// second app. The two recognisers see the same touch and neither is
     /// cancelled by the other, so the pick owns the next third of a second.
@@ -551,7 +560,16 @@ final class RingView: UIView {
             UIView.animate(withDuration: 0.2) { view.transform = .identity }
         })
         haptic(intensity: config.intensity)
-        onPick?(apps[index % apps.count])
+        // 0.0.40 — the press is allowed to be seen. `open()` collapses the ring
+        // immediately, and the collapse's own display link rewrites every icon's
+        // transform on every frame, which erased the 0.12 s pop before it drew a
+        // single frame. Aevon(38): 「只有圆环展开式动画，没有其他任何动画」.
+        // 90 ms is shorter than a blink at arm's length and long enough for the
+        // scale-up plus the rim to land.
+        let app = apps[index % apps.count]
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.09) { [weak self] in
+            self?.onPick?(app)
+        }
     }
 
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
@@ -572,27 +590,26 @@ final class RingView: UIView {
 
         switch gesture.state {
         case .began:
-            // 0.0.39 — every touch starts as a pick, and only becomes a drag
-            // once it has travelled `dragThreshold`. The master orders it the
-            // same way: `PanGestureSubType` has both `icon` and `window`, and
-            // the same touch reaches both — a touch that stays put is picking,
-            // a touch that travels is turning.
-            hoverStart = point
-            hovering = true
+            // 0.0.40 — a touch that lands on an icon is picking; one that lands
+            // on the empty arc is turning the shape. Only the first can become a
+            // hover, because only the first has anything to hover.
             panMode = .none
-            updateHover(at: point)
+            hoverRadius = radial(point)
+            hovering = iconIndex(at: point) >= 0
+            if hovering {
+                updateHover(at: point)
+            } else {
+                beginPan(at: point)
+            }
         case .changed:
             if hovering {
-                let dx = point.x - hoverStart.x
-                let dy = point.y - hoverStart.y
-                if dx * dx + dy * dy <= dragThreshold * dragThreshold {
+                // Tangential movement keeps the pick alive however far the finger
+                // slides; a radial move hands the touch to the drag path. Written
+                // as a radius test, not a travel test — see `dragThreshold`.
+                if abs(radial(point) - hoverRadius) <= dragThreshold {
                     updateHover(at: point)
                     return
                 }
-                // The finger meant to drag, not to pick. Drop the highlight and
-                // hand this touch to the old path with the anchor taken from
-                // here: an anchor from `.began` would be a dozen points stale
-                // and the shape would jump on the first frame of the drag.
                 hovering = false
                 clearHover()
                 beginPan(at: point)
@@ -628,6 +645,29 @@ final class RingView: UIView {
     /// highlight between every pair.
     private func updateHover(at point: CGPoint) {
         guard progress >= 0.999 else { return }
+        let target = iconIndex(at: point)
+        guard target != hoverIndex else { return }
+        hoverIndex = target
+        applyHover()
+        // One line per icon crossed. This is the only evidence in the log that a
+        // slide across the shape is being read at all — without it "the highlight
+        // does not follow my finger" is indistinguishable from "the ring never saw
+        // the touch".
+        if target >= 0 {
+            Log.write("ring: hover icon " + String(target) + " of "
+                      + String(iconViews.count))
+            // One soft click per icon crossed, not per frame: this function
+            // already returned early when the index did not change.
+            haptic(intensity: Swift.max(0.3, config.intensity * 0.6))
+        }
+    }
+
+    /// Which icon the finger is on, or -1. Distance to the centre rather than a
+    /// frame test: the icons sit on an arc, so a rectangle test picks a neighbour
+    /// whenever the finger passes between two of them. The reach is a little wider
+    /// than half an icon so sliding along the arc never falls into a dead gap and
+    /// blanks the highlight between every pair.
+    private func iconIndex(at point: CGPoint) -> Int {
         var best = -1
         var bestDistance = CGFloat.greatestFiniteMagnitude
         for (index, view) in iconViews.enumerated() where view.alpha > 0.3 {
@@ -639,22 +679,15 @@ final class RingView: UIView {
                 best = index
             }
         }
-        let reach = geo.iconWidth * 0.85
-        let target = bestDistance <= reach ? best : -1
-        guard target != hoverIndex else { return }
-        hoverIndex = target
-        applyHover()
-        // One line per icon crossed. This is the only evidence in the log that
-        // a slide across the shape is being read at all — without it "the
-        // highlight does not follow my finger" is indistinguishable from "the
-        // ring never saw the touch".
-        if target >= 0 {
-            Log.write("ring: hover icon " + String(target) + " of "
-                      + String(iconViews.count))
-            // One soft click per icon crossed, not per frame: `updateHover`
-            // already returned early when the index did not change.
-            haptic(intensity: Swift.max(0.3, config.intensity * 0.6))
-        }
+        return bestDistance <= geo.iconWidth * 0.85 ? best : -1
+    }
+
+    /// Distance from the pivot — the one coordinate a slide along the arc leaves
+    /// alone.
+    private func radial(_ point: CGPoint) -> CGFloat {
+        let dx = point.x - pivot.x
+        let dy = point.y - pivot.y
+        return sqrt(dx * dx + dy * dy)
     }
 
     private func clearHover() {

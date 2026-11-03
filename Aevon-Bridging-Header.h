@@ -52,6 +52,14 @@ void AevonHookDisarm(void);
 /// this system does not answer it. Zero and "absent" are different facts.
 unsigned long long AevonReasonsOf(id _Nullable scene);
 
+/// 0.0.40 — how many times the system has tried to set deactivation reasons on
+/// any scene since launch. The counter only ever moves when FrontBoard runs its
+/// own update path, so a change during a card's life is the one moment the
+/// system is taking the scene away — the moment the picture can go black.
+/// Reading it is free; acting on it is one push, which the clock already knows
+/// how to do.
+long AevonDeactCount(void);
+
 /// 0.0.31 — ask the system to treat this scene as being in front, so its app
 /// starts committing frames again. `foreground=YES` and `backgrounded=NO` are
 /// written through whichever door the method table actually offers, and the

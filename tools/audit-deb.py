@@ -486,12 +486,11 @@ def main():
                   b"win: after 1s hosted=",
                   b"win: scale factor=",
                   # 0.0.33 — the card stays, so the eight second line is gone.
-                  # What replaces it is the three things a card can now be told
-                  # to do: move, resize, close. All three print, because a card
-                  # that moves without logging leaves no way to tell a drag from
-                  # a card that jumped.
+                  # What replaces it is what a card can now be told to do. 0.0.40
+                  # dropped resize (both corner drags left), so move, dock and
+                  # close are the three, and all three print: a card that moves
+                  # without logging leaves no way to tell a drag from a jump.
                   b"win: card moved to ",
-                  b"win: card resized ",
                   # 0.0.35 — the band moved outside the card, so these two strings
                   # are the proof that a gesture surface exists at all and that it
                   # is a ring rather than a band on the inside of the picture:
@@ -501,12 +500,11 @@ def main():
                   b"win: grip touch at ",
                   # 0.0.36 — Aevon(33) and Aevon(34) both reported "the gesture
                   # does not fire" while the log proved the ring existed and was
-                  # never touched once. These two lines are how the next run
-                  # separates "the finger never found the band" (the band is now
-                  # painted, `grip map hole=` says where) from "the touch never
-                  # reached this window at all" (`event hit #n` prints the touch
-                  # as it enters, with the hitTest answer beside it).
-                  b"win: grip map hole=",
+                  # never touched once. `event hit #n` is how the next run
+                  # separates "the finger never found the band" from "the touch
+                  # never reached this window at all": it prints the touch as it
+                  # enters, with the hitTest answer beside it. (The painted band
+                  # served its purpose and left in 0.0.40.)
                   b"win: event hit #",
                   # 0.0.38 — 图标 → 悬浮窗。三条：挂起启动的门口、场景等到的时刻、
                   # 承载形状装不下时几何让步的那一行。少了第一条，「点图标没反应」
@@ -519,13 +517,19 @@ def main():
                   b"win: icon scene up after ",
                   b"ring: capacity fit ",
                   # 0.0.34 — the mother ship's 区域 × 动作 matrix replaced our
-                  # pinch-and-drag shell. These four strings are the only proof
-                  # in the package that a band flick can close, that two taps
-                  # minimise, and that 长按 mapped onto this chain's reset.
+                  # pinch-and-drag shell. Aevon(38) cut it down to five cells:
+                  # both sides move and dock on a tap, the bottom band moves and
+                  # closes on a flick, the bottom corners reset on a long press,
+                  # and the whole top strip answers nothing at all.
                   b"win: gesture grab zone=",
                   b"win: gesture edge-middle flick up=",
-                  b"win: gesture double tap minimised ",
                   b"win: card reset to ",
+                  # 0.0.40 — 吸附 is a tap and the way back is the window itself.
+                  b"win: card docked ",
+                  b"win: card undocked ",
+                  # 0.0.40 — 闪黑。这一行只在系统真的动过场景的休眠状态时出现，
+                  # 它是「黑一下」来自场景被收走 还是 来自合成器 的唯一分界。
+                  b"win: scene deactivation #",
                   b"win: close requested by ",
                   # 0.0.27 — the mother ship's route. The two selectors are the
                   # ones her binary calls and hooks; the selftest string is the

@@ -1201,6 +1201,14 @@ zStackParticipantDidChange:
         var misses = 0
         var wrote = 0
         var marked = false
+        // 0.0.40 — Aevon(38): the picture goes black for a moment whenever the
+        // screen changes owner (desktop → app, app → desktop). Two candidates,
+        // and they need different fixes: the scene really is being taken away
+        // (then the clock is too slow and has to push sooner), or it is not and
+        // the gap is in the compositor (then no write will help). This counter is
+        // the one thing that tells them apart — it moves only when the system runs
+        // its own deactivation path.
+        var deact = AevonDeactCount()
         // The clock has to be able to stop from the outside, and 0.0.33 gives it
         // a second reason to: the card no longer disappears on a timer, so the
         // only thing that ends this loop is `closeCard` setting `stopped`.
@@ -1210,6 +1218,14 @@ zStackParticipantDidChange:
             let live = value(of: scene, "settings")
             let fg = live.map { AevonBoolOf($0, "isForeground") } ?? -1
             let bg = live.map { AevonBoolOf($0, "isBackgrounded") } ?? -1
+            // Read before the push, so the line below describes what the system
+            // did rather than what this turn did.
+            let attempts = AevonDeactCount()
+            if attempts != deact {
+                deact = attempts
+                Log.write("win: scene deactivation #" + String(attempts)
+                          + " fg=" + flag(fg))
+            }
             var door = 0
             if fg == 1 {
                 misses = 0
@@ -1257,8 +1273,16 @@ zStackParticipantDidChange:
             // The clock runs for the life of the card, not for eight seconds.
             // `stopped` is the only exit, and `closeCard` is the only thing that
             // sets it.
+            //
+            // 0.0.40 — 250 ms is a quarter of a second of black whenever the
+            // scene is not in front, and that is exactly the length of the gap
+            // Aevon(38) describes. While anything is off the beat tightens to
+            // 60 ms, so the recovery costs a few frames instead of a blink. The
+            // steady state keeps the old interval: a clock that writes 16 lines a
+            // second forever is a log nobody can read.
+            let wait: Double = fg == 1 ? 0.25 : 0.06
             if !stopped {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { keep() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + wait) { keep() }
             } else if marked {
                 unmark()
             }

@@ -754,6 +754,13 @@ NSString *AevonHookSummary(void) {
     return out;
 }
 
+/// 0.0.40 — the count of deactivation attempts, for the card's clock. Exposed as
+/// a function rather than a global so Swift reads it the same way it reads
+/// everything else in this file, and cannot cache it by accident.
+long AevonDeactCount(void) {
+    return AevonDeactSetCalls;
+}
+
 /// The system's own answer to "may this scene go to sleep". `ULLONG_MAX` means
 /// the method is not there, which is not the same answer as zero.
 unsigned long long AevonReasonsOf(id scene) {

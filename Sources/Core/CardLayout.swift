@@ -145,38 +145,10 @@ public enum CardLayout {
         }
     }
 
-    // MARK: Docking
-
-    /// Does this frame belong to an edge?
-    ///
-    /// The band is measured from the card's own edge to the screen's edge, not
-    /// from the finger: a card whose left side is within `edgeWidth` of the
-    /// screen's left side is a card the operator was trying to put on the left.
-    /// Anything further in is a free position and keeps whichever side it is
-    /// already on — a card must not jump across the screen because it was
-    /// nudged two points past the centre line.
-    ///
-    /// Returns nil for "free": the caller keeps the current edge.
-    public static func dockEdge(_ frame: CGRect, in bounds: CGRect) -> Edge? {
-        guard bounds.width > 0, bounds.height > 0 else { return nil }
-        // Both edges within the band can only happen on a card nearly as wide
-        // as the screen; the nearer one wins, so a docked card never sits in
-        // the middle declaring itself on both sides.
-        let toLeft = frame.minX
-        let toRight = bounds.maxX - frame.maxX
-        if toLeft <= edgeWidth && toLeft <= toRight { return .left }
-        if toRight <= edgeWidth { return .right }
-        return nil
-    }
-
-    /// Where a docked card actually sits: hard against the edge, minus the
-    /// window margin, so the close button is not under the screen's rounded
-    /// corner.
-    public static func dockOrigin(_ edge: Edge, width: CGFloat,
-                                  in bounds: CGRect, margin: CGFloat) -> CGPoint {
-        let x = edge == .left ? margin : bounds.maxX - width - margin
-        return CGPoint(x: x, y: 0)
-    }
+    // 0.0.40 — `dockEdge` / `dockOrigin` are gone with the drag-snap. 吸附 is
+    // now a tap on a side band (the card becomes a 停靠小窗), and a drag simply
+    // leaves the card where the finger let go. Keeping a second meaning of the
+    // same word would have meant two rules for one edge.
 
     /// One line for the settings row, in the same shape as `GripLayout.describe`.
     public static func describe() -> String {
