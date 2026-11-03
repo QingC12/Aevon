@@ -85,6 +85,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var content: UIView?
     private var close: UIControl?
     private var grip: GripView?
+    /// 0.0.36 — debug only. The band drawn on screen, so "the gesture does not
+    /// fire" stops being a matter of opinion. Delete with `installGrip`'s call.
+    private var map: GripMap?
     private var onClose: ((String) -> Void)?
     /// The scene's own size. Every resize is this shape, scaled — the card never
     /// gets an aspect the picture does not have.
@@ -200,6 +203,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let cell = " cell=" + String(format: "%.0f", FloatHost.cell(in: card.bounds.size).width)
         Log.write(ring + cell
                   + " 外侧 (边中 上滑关/双击缩, 边角 滑缩放/长按复位, 其余 滑移动/长按滑缩放)")
+        // The painted band and the real band are the same rectangle or they are
+        // two different bugs. This line is the comparison, printed once.
+        if let grip = host.grip {
+            let rect = "win: grip map hole=" + String(format: "%.0f,%.0f %.0fx%.0f",
+                                                      grip.hole.origin.x, grip.hole.origin.y,
+                                                      grip.hole.width, grip.hole.height)
+            let out = " ring=" + String(format: "%.0f,%.0f %.0fx%.0f",
+                                        grip.frame.origin.x, grip.frame.origin.y,
+                                        grip.bounds.width, grip.bounds.height)
+            Log.write(rect + out)
+        }
         return window.isHidden ? nil : host
     }
 
@@ -219,6 +233,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         grip?.removeFromSuperview()
         card?.removeFromSuperview()
         grip = nil
+        map = nil
         card = nil
         content = nil
         close = nil
@@ -316,14 +331,35 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// The ring is the card's frame grown by `band` on all four sides, with the
     /// card's own rect declared as a hole. Nothing else about it is special:
     /// it has no background, it draws nothing, it exists to be touched.
+    ///
+    /// 0.0.36 puts a `GripMap` inside it. That is a paint job, not a feature:
+    /// Aevon(33) and Aevon(34) both reported "the gesture does not fire" with a
+    /// log that proves the ring was built and never touched once. Two very
+    /// different defects look identical from the log alone — the finger went to
+    /// the picture instead of the band (the picture is 320x694, the band is 40
+    /// wide, and nothing on screen said where the line is), or the touch was
+    /// lost before it reached us. A band you can see settles which one it is on
+    /// the next screenshot. Remove the two `map` lines and the class below when
+    /// the gesture is confirmed.
     private func installGrip(on root: UIView) {
         guard let card = card else { return }
         let grip = GripView(frame: card.frame.insetBy(dx: -band, dy: -band))
         grip.backgroundColor = .clear
         grip.isUserInteractionEnabled = true
         grip.hole = CGRect(x: band, y: band, width: card.bounds.width, height: card.bounds.height)
+
+        // Inside the ring, above the picture, and deaf: `isUserInteractionEnabled`
+        // is false so hit testing walks straight through it to the ring itself.
+        let map = GripMap(frame: grip.bounds)
+        map.isUserInteractionEnabled = false
+        map.backgroundColor = .clear
+        map.contentMode = .redraw
+        grip.addSubview(map)
+
         root.addSubview(grip)
         self.grip = grip
+        self.map = map
+        syncGrip()
     }
 
     /// Every frame change goes through here. A ring that lags its card by one
@@ -333,6 +369,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         grip.frame = card.frame.insetBy(dx: -band, dy: -band)
         grip.hole = CGRect(x: band, y: band,
                            width: card.bounds.width, height: card.bounds.height)
+        guard let map = map else { return }
+        map.frame = grip.bounds
+        map.hole = grip.hole
+        map.cell = FloatHost.cell(in: card.bounds.size)
+        map.setNeedsDisplay()
     }
 
     /// 竖屏上下, 横屏左右 — the card is always the scene's portrait shape here, so
@@ -671,12 +712,98 @@ final class GripView: UIView {
     }
 }
 
+/// The band, painted. Debug only — 0.0.36.
+///
+/// It draws exactly the rectangle `GripView` answers `true` for: yellow for the
+/// four side strips, cyan for 边中 (the middle third of the top and bottom band,
+/// the one that closes on a flick), orange for 边角 (the four corner squares
+/// that resize). The card's rect is left untouched, so the picture is still the
+/// picture and this cannot be mistaken for a UI element.
+///
+/// The reason it exists: Aevon(33) and Aevon(34) both said the gesture does not
+/// fire, and both logs proved the ring was built and never touched. A band
+/// nobody can see is a band a thumb can miss by exactly the amount that matters
+/// — the card is 320x694 and the band is 40pt outside it. Once the gesture is
+/// confirmed, remove `map` from FloatHost and this class.
+final class GripMap: UIView {
+    /// The card's rect, in this view's coordinates. Nothing is painted there.
+    var hole: CGRect = .zero
+    /// The middle third of the card's width — 边中.
+    var cell: CGRect = .zero
+
+    override func draw(_ rect: CGRect) {
+        let w = bounds.width
+        let h = bounds.height
+        let bx = hole.minX
+        let by = hole.minY
+        let top = CGRect(x: 0, y: 0, width: w, height: by)
+        let bottom = CGRect(x: 0, y: hole.maxY, width: w, height: h - hole.maxY)
+        let left = CGRect(x: 0, y: hole.minY, width: bx, height: hole.height)
+        let right = CGRect(x: hole.maxX, y: hole.minY,
+                           width: w - hole.maxX, height: hole.height)
+
+        UIColor.systemYellow.withAlphaComponent(0.22).setFill()
+        UIRectFill(top)
+        UIRectFill(bottom)
+        UIRectFill(left)
+        UIRectFill(right)
+
+        UIColor.systemCyan.withAlphaComponent(0.55).setFill()
+        UIRectFill(CGRect(x: hole.minX + cell.minX, y: 0, width: cell.width, height: by))
+        UIRectFill(CGRect(x: hole.minX + cell.minX, y: hole.maxY,
+                          width: cell.width, height: h - hole.maxY))
+
+        UIColor.systemOrange.withAlphaComponent(0.65).setFill()
+        UIRectFill(CGRect(x: 0, y: 0, width: bx, height: by))
+        UIRectFill(CGRect(x: hole.maxX, y: 0, width: w - hole.maxX, height: by))
+        UIRectFill(CGRect(x: 0, y: hole.maxY, width: bx, height: h - hole.maxY))
+        UIRectFill(CGRect(x: hole.maxX, y: hole.maxY, width: w - hole.maxX, height: h - hole.maxY))
+
+        let font = UIFont.systemFont(ofSize: 9, weight: .semibold)
+        let ink: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.white]
+        ("边中" as NSString).draw(in: CGRect(x: hole.minX + cell.minX, y: 0,
+                                            width: cell.width, height: by),
+                                 withAttributes: ink)
+        ("角" as NSString).draw(in: CGRect(x: 0, y: 0, width: bx, height: by),
+                               withAttributes: ink)
+        ("移动" as NSString).draw(in: CGRect(x: 0, y: hole.minY, width: bx, height: hole.height),
+                                withAttributes: ink)
+    }
+}
+
 /// A window that is only answerable where its content is. Everything else falls
 /// through to the app underneath, which is what makes a floating card usable
 /// while a full-screen app is running.
 final class FloatWindow: UIWindow {
+    /// 0.0.36 — the first few touches, printed where they enter the window and
+    /// before any hit testing of our own. Two reports in a row have ended with
+    /// "the gesture does not fire" and an empty `grip touch` probe, and an empty
+    /// probe means either the touch never reached this window or it reached it
+    /// and missed the ring. `sendEvent` is the one place that can tell those
+    /// apart: it runs for every touch that arrives, whatever the answer to
+    /// hitTest turns out to be, and it can print that answer next to it.
+    private var seen = 0
+
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let hit = super.hitTest(point, with: event)
-        return hit === self ? nil : hit
+        // The card is answerable only where something is drawn in it. The bare
+        // root view is not a thing to answer with: letting it take the touch
+        // costs the desktop its icons and gains nothing, because it has no
+        // recognizers and no controls on it.
+        if hit === self || hit === rootViewController?.view { return nil }
+        return hit
+    }
+
+    override func sendEvent(_ event: UIEvent) {
+        if seen < 6, let touch = event.allTouches?.first, touch.phase == .began {
+            seen += 1
+            let point = touch.location(in: self)
+            let target = hitTest(point, with: event)
+            let who = target.map { NSStringFromClass(type(of: $0)) } ?? "nil"
+            Log.write("win: event hit #" + String(seen)
+                      + " at " + String(format: "%.0f,%.0f", point.x, point.y)
+                      + " -> " + who)
+        }
+        super.sendEvent(event)
     }
 }

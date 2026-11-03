@@ -483,6 +483,15 @@ def main():
                   # attached to a view that owns its touches.
                   b"win: grip ring band=",
                   b"win: grip touch at ",
+                  # 0.0.36 — Aevon(33) and Aevon(34) both reported "the gesture
+                  # does not fire" while the log proved the ring existed and was
+                  # never touched once. These two lines are how the next run
+                  # separates "the finger never found the band" (the band is now
+                  # painted, `grip map hole=` says where) from "the touch never
+                  # reached this window at all" (`event hit #n` prints the touch
+                  # as it enters, with the hitTest answer beside it).
+                  b"win: grip map hole=",
+                  b"win: event hit #",
                   # 0.0.34 — the mother ship's 区域 × 动作 matrix replaced our
                   # pinch-and-drag shell. These four strings are the only proof
                   # in the package that a band flick can close, that two taps
