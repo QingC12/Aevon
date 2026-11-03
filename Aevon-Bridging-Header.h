@@ -55,6 +55,11 @@ id _Nullable AevonLayerHost(id _Nullable layer);
 BOOL AevonSetResizesHostedContext(id _Nullable view, BOOL flag);
 BOOL AevonCan(id _Nullable object, NSString *_Nullable name);
 
+/// 0.0.17 — the device, not a string table, answers what exists. Returns one
+/// class name per line for every runtime class whose name contains one of the
+/// comma-separated keys. Sends no message to any class.
+NSString *_Nullable AevonFindClasses(NSString *_Nullable keys, NSInteger limit);
+
 @interface UIImage (AevonPrivateIcons)
 + (nullable UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID
                                                        format:(NSInteger)format

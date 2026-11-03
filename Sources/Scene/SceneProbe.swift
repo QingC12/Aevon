@@ -752,32 +752,26 @@ zStackParticipantDidChange:
         return Set(lines)
     }
 
-    // MARK: - Window build (0.0.16): present a real scene, never build one
+    // MARK: - Window build (0.0.17): the device answers, we do not guess
 
-    /// One press, one read-only walk through the chain the mother ship actually
-    /// uses. 0.0.15 ended at `_createSceneWithDefinition:` with four nils and
-    /// SpringBoard died inside the call; the mother ship never builds a scene —
-    /// she hooks FBSceneManager, FBScene and SBMainWorkspace, keeps the app as a
-    /// system scene, and only presents it. So this run does her chain on a scene
-    /// that already exists:
+    /// Two SpringBoard deaths in a row, both on a name we took from another
+    /// binary's string table and trusted:
+    ///   0.0.15  `_createSceneWithDefinition:`  — four nils, one of them a block
+    ///   0.0.16  right after `presentationView`, i.e. inside the layer host's
+    ///           initialiser — `_UIContextLayerHostView initWithSceneLayer:`
+    /// The mother ship runs on this exact system, so both names must exist here
+    /// somehow. If our call kills the process, the call is wrong, not the name.
     ///
-    ///     uiPresentationManager
-    ///       -> createPresenterWithIdentifier:priority:
-    ///       -> presentationView
-    ///       -> _UIContextLayerHostView initWithSceneLayer:
-    ///       -> setResizesHostedContext:YES
-    ///
-    /// Every step logs what it handed back, including the two names we have
-    /// never dared to call — `activate` and `invalidate` — asked for with
-    /// `respondsToSelector:` so that asking cannot be what kills the process.
-    /// Nothing is attached to a window and nothing on screen changes.
-    ///
-    /// The census still runs first: it costs one line per method and it is the
-    /// only way to see `clientIdentity` (0.0.15's filter was case-sensitive and
-    /// skipped it), which is the setter a scene definition really needs.
-
-
+    /// So this version calls nothing that has not already returned on the
+    /// device, and it asks the runtime instead of assuming:
+    ///   - which classes exist whose name mentions a layer host / scene layer;
+    ///   - what the real presenter class answers to;
+    ///   - and, for every remaining call, it leaves a step marker on disk
+    ///     first, so a death is reported by name at the next boot instead of
+    ///     being inferred from where the log stopped.
     static func runWindow() {
+        reportLastStep()
+
         guard let manager = AevonSceneManager() as? NSObject else {
             Log.write("win: no manager")
             return
@@ -785,6 +779,13 @@ zStackParticipantDidChange:
         Log.write("win: begin manager cls=" + NSStringFromClass(type(of: manager)))
 
         census()
+
+        // Device truth about the names we were about to invent. Nothing is
+        // messaged here: this is a class-list walk, and every class that shows
+        // up can be asked about itself in a later run.
+        for line in lines(AevonFindClasses("LayerHost,SceneLayer,Presentation,Presenter", 20)) {
+            Log.write("win: class " + line)
+        }
 
         var springboard: NSObject?
         var keyboard: NSObject?
@@ -800,23 +801,40 @@ zStackParticipantDidChange:
         AevonEnumerateScenes(manager, visit)
         Log.write("win: scenes=" + String(seen))
 
-        // SpringBoard's own scene first, because it is the one scene that is
-        // certainly presentable inside this very process. The keyboard scene
-        // second: different specification, same host, proven presentable by
-        // this very manager. Both are only read and presented from; neither is
-        // mutated, activated or invalidated.
-        let plans: [(String, NSObject?)] = [("SB", springboard), ("KB", keyboard)]
-        var presented = false
-        for (tag, scene) in plans {
-            guard let scene = scene else {
-                Log.write("win: " + tag + " template absent")
-                continue
+        // 0.0.16 got exactly this far on both templates: the manager, the
+        // presenter and the presentation view all came back, and the process
+        // died after the view's class was printed. Everything up to here has
+        // therefore returned on this phone, which is the only reason it is
+        // still called.
+        if let scene = springboard { present(scene, tag: "SB") }
+        if let scene = keyboard { present(scene, tag: "KB") }
+    }
+
+    /// Says which call the previous run was inside when it died, then clears
+    /// the marker. A marker that is never cleared is the only witness a
+    /// watchdog kill leaves behind.
+    private static func reportLastStep() {
+        let path = Aevon.winStepPath
+        if let text = try? String(contentsOfFile: path, encoding: .utf8) {
+            let step = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !step.isEmpty {
+                Log.write("win: previous run died at " + step)
             }
-            if present(scene, tag: tag) { presented = true }
         }
-        if !presented {
-            Log.write("win: nothing presented")
-        }
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    private static func mark(_ step: String) {
+        try? step.write(toFile: Aevon.winStepPath, atomically: true, encoding: .utf8)
+    }
+
+    private static func unmark() {
+        try? FileManager.default.removeItem(atPath: Aevon.winStepPath)
+    }
+
+    private static func lines(_ text: String?) -> [String] {
+        guard let text = text else { return [] }
+        return text.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
     }
 
     /// Asks the classes that have to be built how they are built. Filtered to
@@ -841,59 +859,55 @@ zStackParticipantDidChange:
         }
     }
 
-    /// The mother ship's presenting chain, one step at a time, on a scene that
-    /// already exists. Each step answers false for "this system will not do it"
-    /// and says which step, so a refusal at step three still leaves steps one
-    /// and two on disk. The only mutation anywhere in here is
-    /// `setResizesHostedContext:YES`, and only on a view this function itself
-    /// created: no live scene, window or layer is touched.
-    private static func present(_ scene: NSObject, tag: String) -> Bool {
-        guard let manager = value(of: scene, "uiPresentationManager") else {
+    /// The three calls that have already returned on this device, and then a
+    /// full stop. Every one of them is marked first.
+    ///
+    /// The stop is the whole point: the next call in the chain is the one that
+    /// killed 0.0.16, so it waits until the device has named the class and its
+    /// initialiser in the census below — not one run earlier.
+    private static func present(_ scene: NSObject, tag: String) {
+        mark(tag + "-manager")
+        let rawManager = value(of: scene, "uiPresentationManager")
+        unmark()
+        guard let manager = rawManager else {
             Log.write("win: " + tag + " uiPresentationManager absent")
-            return false
+            return
         }
         Log.write("win: " + tag + " uiPresentationManager cls="
                   + NSStringFromClass(type(of: manager)))
 
-        let ident = "com.aevon.presenter." + tag.lowercased()
-        guard let made = AevonCreatePresenter(manager, ident, 0),
-              let presenter = made as? NSObject else {
+        mark(tag + "-presenter")
+        let made = AevonCreatePresenter(manager, "com.aevon.presenter." + tag.lowercased(), 0)
+        unmark()
+        guard let raw = made, let presenter = raw as? NSObject else {
             Log.write("win: " + tag + " no presenter")
             emitNotes(AevonTakeNotes())
-            return false
+            return
         }
-        // The two names the mother ship never calls and we have never dared to.
-        // Asking whether they exist costs nothing; calling one of them is how a
-        // probe stops being a probe.
-        Log.write("win: " + tag + " presenter activate="
-                  + (AevonCan(presenter, "activate") ? "yes" : "no")
-                  + " invalidate=" + (AevonCan(presenter, "invalidate") ? "yes" : "no"))
+        let presenterCls = NSStringFromClass(type(of: presenter))
+        Log.write("win: " + tag + " presenter cls=" + presenterCls)
 
-        guard let view = value(of: presenter, "presentationView") else {
+        mark(tag + "-view")
+        let rawView = value(of: presenter, "presentationView")
+        unmark()
+        guard let view = rawView else {
             Log.write("win: " + tag + " presentationView absent")
             emitNotes(AevonTakeNotes())
-            return false
+            return
         }
-        Log.write("win: " + tag + " presentationView cls="
-                  + NSStringFromClass(type(of: view)))
+        let viewCls = NSStringFromClass(type(of: view))
+        Log.write("win: " + tag + " presentationView cls=" + viewCls)
 
-        guard let layer = value(of: view, "layer") else {
-            Log.write("win: " + tag + " view layer absent")
-            emitNotes(AevonTakeNotes())
-            return false
-        }
-        guard let builtHost = AevonLayerHost(layer),
-              let host = builtHost as? NSObject else {
-            Log.write("win: " + tag + " no layer host")
-            emitNotes(AevonTakeNotes())
-            return false
-        }
-        Log.write("win: " + tag + " layer host cls=" + NSStringFromClass(type(of: host)))
-        let resizes = AevonSetResizesHostedContext(host, true)
-        Log.write("win: " + tag + " resizesHostedContext="
-                  + (resizes ? "accepted" : "refused"))
-        emitNotes(AevonTakeNotes())
-        return true
+        // What the device says these three classes can actually do. This list is
+        // the whole menu the next version may choose from — no name outside it
+        // gets called, however plausible it looks in a string table.
+        emitNotes(AevonClassCensus(presenterCls,
+                                   "activate,invalidate,present,view,layer,window,super,host,scene"))
+        emitNotes(AevonClassCensus(NSStringFromClass(type(of: manager)),
+                                   "present,view,layer,window,super,host,scene,create"))
+        emitNotes(AevonClassCensus(viewCls, "layer,host,super,window,present"))
+
+        Log.write("win: " + tag + " stopping before layer host")
     }
 
     private static func value(of object: NSObject, _ key: String) -> NSObject? {

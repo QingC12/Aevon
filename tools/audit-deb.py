@@ -424,11 +424,11 @@ def main():
     # arrived", which is the one wrong answer that costs a full round trip.
     # 0.0.15 adds the census and the identity path. Every planned exit has its own
     # line, because the failing run is exactly the one whose log is all there is.
-    # 0.0.16 replaced the build with the mother ship's presenting chain. The
-    # build's three exits (`calling _createSceneWithDefinition:`, `immutable,
-    # stop`, `no scene built`) are gone on purpose: that call killed SpringBoard
-    # once and the mother ship never makes it. What must stay is one line per
-    # step of the chain, so a refusal at step three is still readable.
+    # 0.0.16 replaced the build with the mother ship's presenting chain; 0.0.17
+    # stops one call earlier, at the layer host, because that is exactly where
+    # SpringBoard died. What must stay is one line per step the probe still
+    # takes, plus the two witnesses that make the next death readable instead of
+    # inferable: the step marker path, and the line that reports it at boot.
     # Two shorter fragments are deliberately NOT asserted: ` no presenter` and
     # ` no layer host` share the prefix ` no `, and LLVM merged the two constants
     # into one blob at link time, so neither survives as its own byte string.
@@ -438,11 +438,13 @@ def main():
                   b"scene: window level", b"scene: carrier view", b"scene: live scenes",
                   b"win: begin manager",
                   b" uiPresentationManager absent", b" uiPresentationManager cls=",
-                  b" presenter activate=",
+                  b" presenter cls=",
                   b" presentationView absent", b" presentationView cls=",
-                  b" layer host cls=",
-                  b" resizesHostedContext=", b"win: nothing presented",
-                  b"census %@ super=%@", b"presenter %@ -> %@", b"layer host -> %@"):
+                  b" stopping before layer host",
+                  b"win: previous run died at ",
+                  b"win: class ",
+                  b"/var/mobile/Library/Logs/Aevon/win.step",
+                  b"census %@ super=%@", b"presenter %@ -> %@"):
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the probe would never reach SpringBoard")

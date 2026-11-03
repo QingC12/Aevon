@@ -301,3 +301,39 @@ BOOL AevonCan(id object, NSString *name) {
     if (object == nil || name == nil) return NO;
     return [object respondsToSelector:NSSelectorFromString(name)];
 }
+
+#pragma mark - What the device actually has (0.0.17)
+
+/// Every runtime class whose name contains one of the comma-separated keys.
+///
+/// Two SpringBoard deaths in a row came from names we read out of another
+/// binary's string table and trusted: `_createSceneWithDefinition:` and
+/// `_UIContextLayerHostView`. The device is the authority on what exists and
+/// what it is called, and asking costs one class-list walk — no message is sent
+/// to anything, so no class can misbehave while it is asked.
+NSString *AevonFindClasses(NSString *keys, NSInteger limit) {
+    if (keys == nil || limit <= 0) return nil;
+    NSArray<NSString *> *wanted = [keys componentsSeparatedByString:@","];
+    int total = objc_getClassList(NULL, 0);
+    if (total <= 0) return nil;
+    Class *classes = (Class *)malloc(sizeof(Class) * (size_t)total);
+    if (classes == NULL) return nil;
+    total = objc_getClassList(classes, total);
+
+    NSMutableArray<NSString *> *hits = [NSMutableArray array];
+    for (int i = 0; i < total && (NSInteger)hits.count < limit; i++) {
+        const char *raw = class_getName(classes[i]);
+        if (raw == NULL) continue;
+        NSString *name = [NSString stringWithUTF8String:raw];
+        if (name == nil) continue;
+        for (NSString *key in wanted) {
+            if (key.length == 0) continue;
+            if ([name rangeOfString:key options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                [hits addObject:name];
+                break;
+            }
+        }
+    }
+    free(classes);
+    return [hits componentsJoinedByString:@"\n"];
+}
