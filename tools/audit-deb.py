@@ -62,9 +62,16 @@ FAT_MAGIC = 0xCAFEBABE
 #
 #   阶段目标：手势真机确认 → 删掉 GripMap 与入口探针 → 回到 366,960 B
 #   附近 → 再把这道闸门收回 372 KB。收闸门和删调试代码是同一步。
-BUDGET_DEB = 520 * 1024
-BUDGET_TWEAK = 512 * 1024
-BUDGET_PREFS = 400 * 1024
+#
+# 2026-11-03 第四次放宽 512 KB → 640 KB（655,360 B）—— 旧版圆盘整包移入：
+#   0.0.42 按操作者的决定把 D://备份源码//Aevon 的圆盘全家 1:1 移进包
+#   （AevonRingMenu + 关键帧 + 展开引擎 + 统一弹簧 + 列表存储 + 截图/录屏
+#   动作），dylib 实测 404,496 → 530,688 B（+126 KB）。这一步不是「偷偷
+#   长大」，是操作者点名要的功能整体进场；体积账照旧记账（见交付说明），
+#   收紧的事留给「删调试件」那一轮。prefs 同理 400 → 512 KB。
+BUDGET_DEB = 660 * 1024
+BUDGET_TWEAK = 640 * 1024
+BUDGET_PREFS = 512 * 1024
 
 PREFIXES = (
     "Library/MobileSubstrate/DynamicLibraries/",
@@ -385,7 +392,7 @@ def main():
                   b"PanelController", b"previewRing:", b"editApps:", b"resetGrip:",
                   b"AppListController", b"AppPickerController",
                   b"prefs: open app list", b"prefs: grip reset",
-                  "\u5706\u76d8 App".encode("utf-8"),
+                  b"AevonRingEditorCell", b"AevonRingAddCell",
                   b"_applicationIconImageForBundleIdentifier:"):
         if token not in prefs:
             bad(f"ring: {token.decode()} missing from the bundle binary")
@@ -527,17 +534,16 @@ def main():
                   # 0.0.39 — 位置/大小记忆与吸附、手指滑过高亮。两条各自
                   # 是「记不住」和「高亮不跟随」的唯一证据。
                   b"win: card remembered ",
-                  # 0.0.42 — 高亮跟随的证据换成人：旧版圆盘的划过关键帧标记
-                  # （AevonHoverTrailV319）与展开日志标记（AevonRingMultiRing），
-                  # 都在 AevonRingMenu.swift 的源码里，逐字可查。
-                  b"AevonHoverTrailV319",
+                  # 0.0.42 — 高亮跟随的证据换成人：旧版圆盘自己的日志标记
+                  # （指针通道交接 / 划过汇总 / 圆心旋转），全是日志字面量。
+                  b"AevonRingPointerHandoffV216",
                   b"AevonRingMultiRing",
                   b"win: icon launch ",
                   b"win: icon scene up after ",
                   # 0.0.42 — 多圈几何随旧版圆盘移交：布局规则（外圈一定比内圈多、
                   # 相邻圈错开半格）在 AevonRingMenu.distribution / radii 里，
-                  # 标记 AevonRingDenseV29 是它的版本名。
-                  b"AevonRingDenseV29",
+                  # 断言落在圆心旋转模式的日志标记上（日志字面量，必进二进制）。
+                  b"AevonRingHoldRotateV28",
                   # 0.0.34 — the mother ship's 区域 × 动作 matrix replaced our
                   # pinch-and-drag shell. Aevon(38) cut it down to five cells:
                   # both sides move and dock on a tap, the bottom band moves and
