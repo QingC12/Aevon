@@ -424,12 +424,20 @@ def main():
     # arrived", which is the one wrong answer that costs a full round trip.
     # 0.0.15 adds the census and the identity path. Every planned exit has its own
     # line, because the failing run is exactly the one whose log is all there is.
+    # 0.0.16 replaced the build with the mother ship's presenting chain. The
+    # build's three exits (`calling _createSceneWithDefinition:`, `immutable,
+    # stop`, `no scene built`) are gone on purpose: that call killed SpringBoard
+    # once and the mother ship never makes it. What must stay is one line per
+    # step of the chain, so a refusal at step three is still readable.
     for token in (b"scene: probe begin", b"scene: probe end",
                   b"scene: window level", b"scene: carrier view", b"scene: live scenes",
                   b"win: begin manager",
-                  b" calling _createSceneWithDefinition: now",
-                  b"win: no scene built", b" definition is immutable, stop",
-                  b"census %@ super=%@"):
+                  b" uiPresentationManager absent", b" uiPresentationManager cls=",
+                  b" no presenter", b" presenter activate=",
+                  b" presentationView absent", b" presentationView cls=",
+                  b" no layer host", b" layer host cls=",
+                  b" resizesHostedContext=", b"win: nothing presented",
+                  b"census %@ super=%@", b"presenter %@ -> %@", b"layer host -> %@"):
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the probe would never reach SpringBoard")

@@ -217,7 +217,14 @@ NSString *AevonClassCensus(NSString *name, NSString *keys) {
             NSString *sel = NSStringFromSelector(method_getName(methods[i]));
             BOOL hit = NO;
             for (NSString *key in wanted) {
-                if (key.length > 0 && [sel rangeOfString:key].location != NSNotFound) { hit = YES; break; }
+                // Case-insensitive on purpose: 0.0.15's census skipped
+                // `clientIdentity` because every key was lowercase and the
+                // capital I never matched. A census that hides the one setter
+                // the definition actually needs is worse than no census.
+                if (key.length > 0 &&
+                    [sel rangeOfString:key options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                    hit = YES; break;
+                }
             }
             if (!hit) continue;
             AevonNote(@"  %@ %@", (side == 0 ? @"+" : @"-"), sel);
@@ -225,4 +232,72 @@ NSString *AevonClassCensus(NSString *name, NSString *keys) {
         free(methods);
     }
     return AevonTakeNotes();
+}
+
+#pragma mark - The presenting route (0.0.16)
+
+// 0.0.15 called `_createSceneWithDefinition:...` with four nils and SpringBoard
+// died inside it. The mother ship never does that: it has FBSceneManagerHook,
+// FBSceneHook and SBMainWorkspaceHook, keeps the app as a system scene, and only
+// ever *presents* one. So this side of the file now does what she does —
+// `uiPresentationManager` → `createPresenterWithIdentifier:priority:` →
+// `presentationView` → `_UIContextLayerHostView initWithSceneLayer:` — and
+// nothing else. Building a scene is retired, not deferred.
+
+/// `createPresenterWithIdentifier:priority:` on a UIScenePresentationManager.
+/// Returns the presenter, or nil when the manager will not make one.
+id AevonCreatePresenter(id manager, NSString *identifier, NSInteger priority) {
+    if (manager == nil || identifier == nil) return nil;
+    SEL sel = NSSelectorFromString(@"createPresenterWithIdentifier:priority:");
+    if (![manager respondsToSelector:sel]) {
+        AevonNote(@"presenter: selector absent on %@", NSStringFromClass([manager class]));
+        return nil;
+    }
+    id (*call)(id, SEL, id, NSInteger) = (id (*)(id, SEL, id, NSInteger))objc_msgSend;
+    id presenter = call(manager, sel, identifier, priority);
+    AevonNote(@"presenter %@ -> %@", identifier,
+              presenter ? NSStringFromClass([presenter class]) : @"nil");
+    return presenter;
+}
+
+/// `[[_UIContextLayerHostView alloc] initWithSceneLayer:]`. The class is private
+/// and its initialiser takes one object, so both steps live here rather than in
+/// Swift where `alloc` + a private selector needs casts the compiler may reject.
+id AevonLayerHost(id layer) {
+    if (layer == nil) return nil;
+    Class cls = NSClassFromString(@"_UIContextLayerHostView");
+    if (cls == Nil) {
+        AevonNote(@"layer host: no _UIContextLayerHostView");
+        return nil;
+    }
+    id alloc = [cls alloc];
+    SEL sel = NSSelectorFromString(@"initWithSceneLayer:");
+    if (![alloc respondsToSelector:sel]) {
+        AevonNote(@"layer host: no initWithSceneLayer:");
+        return nil;
+    }
+    id (*call)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
+    id view = call(alloc, sel, layer);
+    AevonNote(@"layer host -> %@", view ? NSStringFromClass([view class]) : @"nil");
+    return view;
+}
+
+/// `setResizesHostedContext:`. BOOL in the third register, which is why this is
+/// a cast and not `perform`.
+BOOL AevonSetResizesHostedContext(id view, BOOL flag) {
+    if (view == nil) return NO;
+    SEL sel = NSSelectorFromString(@"setResizesHostedContext:");
+    if (![view respondsToSelector:sel]) return NO;
+    void (*call)(id, SEL, BOOL) = (void (*)(id, SEL, BOOL))objc_msgSend;
+    call(view, sel, flag);
+    return YES;
+}
+
+/// Answers "does this object have that selector" without calling it. Used to
+/// settle `activate` / `invalidate` — two names that were hits=0 in the mother
+/// ship and have stayed unresolved ever since, and that must not be *called*
+/// just to find out.
+BOOL AevonCan(id object, NSString *name) {
+    if (object == nil || name == nil) return NO;
+    return [object respondsToSelector:NSSelectorFromString(name)];
 }

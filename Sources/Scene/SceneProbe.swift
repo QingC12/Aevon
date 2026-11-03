@@ -752,33 +752,31 @@ zStackParticipantDidChange:
         return Set(lines)
     }
 
-    // MARK: - Window build (0.0.14): read a real scene, then try to create one
+    // MARK: - Window build (0.0.16): present a real scene, never build one
 
-    /// Two phases in one run, in this order on purpose.
+    /// One press, one read-only walk through the chain the mother ship actually
+    /// uses. 0.0.15 ended at `_createSceneWithDefinition:` with four nils and
+    /// SpringBoard died inside the call; the mother ship never builds a scene —
+    /// she hooks FBSceneManager, FBScene and SBMainWorkspace, keeps the app as a
+    /// system scene, and only presents it. So this run does her chain on a scene
+    /// that already exists:
     ///
-    /// Phase 1 is read-only: walk the scenes SpringBoard already owns and print
-    /// what their definition / settings / clientSettings actually contain. The
-    /// mother ship never built those objects field by field — it has no
-    /// `FBSMutableSceneDefinition` reference and no settings setter at all, only
-    /// `valueForKey:` — so copying a live one is not a shortcut, it is her
-    /// method. Phase 1 is also the part that survives a crash in phase 2,
-    /// because every line is flushed before the next one is written.
+    ///     uiPresentationManager
+    ///       -> createPresenterWithIdentifier:priority:
+    ///       -> presentationView
+    ///       -> _UIContextLayerHostView initWithSceneLayer:
+    ///       -> setResizesHostedContext:YES
     ///
-    /// Phase 2 mutates copies of exactly those objects and hands them to
-    /// `-[FBSceneManager _createSceneWithDefinition:settings:initialClientSettings:
-    /// transitionContext:fromRemnant:usingClientProvider:completion:]`. It is
-    /// deliberately the smallest possible build: no presenter, no window, no
-    /// deactivation reasons. The question this run answers is "does a scene
-    /// come back", and nothing beyond it.
-    /// Two stages in one press, because stage 1's output is stage 2's input and
-    /// a second trip to the phone doubles the cost of the same information.
+    /// Every step logs what it handed back, including the two names we have
+    /// never dared to call — `activate` and `invalidate` — asked for with
+    /// `respondsToSelector:` so that asking cannot be what kills the process.
+    /// Nothing is attached to a window and nothing on screen changes.
     ///
-    /// Stage 1 reads: six scenes, their definitions, their presentation managers.
-    /// Stage 2 builds: a copy of one definition with a new identity, handed to
-    /// `_createSceneWithDefinition:`. Between the two sits a method census,
-    /// because the previous run proved the blocker is not "which class" but
-    /// "how is an identity constructed" — and that is a question the runtime
-    /// answers in one line if it is asked.
+    /// The census still runs first: it costs one line per method and it is the
+    /// only way to see `clientIdentity` (0.0.15's filter was case-sensitive and
+    /// skipped it), which is the setter a scene definition really needs.
+
+
     static func runWindow() {
         guard let manager = AevonSceneManager() as? NSObject else {
             Log.write("win: no manager")
@@ -802,19 +800,23 @@ zStackParticipantDidChange:
         AevonEnumerateScenes(manager, visit)
         Log.write("win: scenes=" + String(seen))
 
-        // SpringBoard's own scene first: its client identity is SpringBoard, so
-        // a scene built from it is hosted by the process that is building it.
-        // The keyboard scene second: different specification, same host, and it
-        // is the one that is demonstrably presentable by this very manager.
+        // SpringBoard's own scene first, because it is the one scene that is
+        // certainly presentable inside this very process. The keyboard scene
+        // second: different specification, same host, proven presentable by
+        // this very manager. Both are only read and presented from; neither is
+        // mutated, activated or invalidated.
         let plans: [(String, NSObject?)] = [("SB", springboard), ("KB", keyboard)]
-        for (tag, model) in plans {
-            guard let model = model else {
-                Log.write("win: no " + tag + " template")
+        var presented = false
+        for (tag, scene) in plans {
+            guard let scene = scene else {
+                Log.write("win: " + tag + " template absent")
                 continue
             }
-            if attempt(model, manager: manager, tag: tag) { return }
+            if present(scene, tag: tag) { presented = true }
         }
-        Log.write("win: no scene built")
+        if !presented {
+            Log.write("win: nothing presented")
+        }
     }
 
     /// Asks the classes that have to be built how they are built. Filtered to
@@ -839,76 +841,59 @@ zStackParticipantDidChange:
         }
     }
 
-    /// One build attempt. Returns true only when the manager handed back a
-    /// scene, so the caller can stop instead of building a second one on top of
-    /// a success.
-    private static func attempt(_ model: NSObject, manager: NSObject, tag: String) -> Bool {
-        guard let made = AevonGetGetter(model, "definition") else {
-            Log.write("win: " + tag + " no definition")
+    /// The mother ship's presenting chain, one step at a time, on a scene that
+    /// already exists. Each step answers false for "this system will not do it"
+    /// and says which step, so a refusal at step three still leaves steps one
+    /// and two on disk. The only mutation anywhere in here is
+    /// `setResizesHostedContext:YES`, and only on a view this function itself
+    /// created: no live scene, window or layer is touched.
+    private static func present(_ scene: NSObject, tag: String) -> Bool {
+        guard let manager = value(of: scene, "uiPresentationManager") else {
+            Log.write("win: " + tag + " uiPresentationManager absent")
             return false
         }
-        let specName = AevonGetIvar(made, "_specification")
-            .map { NSStringFromClass(type(of: $0 as AnyObject)) } ?? "?"
-        Log.write("win: " + tag + " spec=" + specName)
+        Log.write("win: " + tag + " uiPresentationManager cls="
+                  + NSStringFromClass(type(of: manager)))
 
-        let definition = AevonMutableCopy(made)
-        guard let definition = definition else {
-            Log.write("win: " + tag + " no copy")
+        let ident = "com.aevon.presenter." + tag.lowercased()
+        guard let made = AevonCreatePresenter(manager, ident, 0),
+              let presenter = made as? NSObject else {
+            Log.write("win: " + tag + " no presenter")
             emitNotes(AevonTakeNotes())
             return false
         }
-        // An immutable class copies to itself. Writing through that copy would
-        // rename the live scene it belongs to, so the attempt stops here rather
-        // than trading a floater for a broken SpringBoard.
-        if String(describing: type(of: definition)) == String(describing: type(of: made)) {
-            Log.write("win: " + tag + " definition is immutable, stop")
-            emitNotes(AevonTakeNotes())
-            return false
-        }
+        // The two names the mother ship never calls and we have never dared to.
+        // Asking whether they exist costs nothing; calling one of them is how a
+        // probe stops being a probe.
+        Log.write("win: " + tag + " presenter activate="
+                  + (AevonCan(presenter, "activate") ? "yes" : "no")
+                  + " invalidate=" + (AevonCan(presenter, "invalidate") ? "yes" : "no"))
 
-        let template = AevonGetIvar(made, "_identity")
-        let identity = AevonRenameIdentity(template, "com.aevon.floater." + tag.lowercased())
-        guard let identity = identity else {
-            Log.write("win: " + tag + " no identity")
+        guard let view = value(of: presenter, "presentationView") else {
+            Log.write("win: " + tag + " presentationView absent")
             emitNotes(AevonTakeNotes())
             return false
         }
-        if !AevonSetIdentity(definition, identity) {
-            Log.write("win: " + tag + " identity refused")
-            emitNotes(AevonTakeNotes())
-            return false
-        }
+        Log.write("win: " + tag + " presentationView cls="
+                  + NSStringFromClass(type(of: view)))
 
-        let settings = AevonMutableCopy(AevonGetGetter(model, "settings"))
-        let client = AevonMutableCopy(AevonGetGetter(model, "clientSettings"))
+        guard let layer = value(of: view, "layer") else {
+            Log.write("win: " + tag + " view layer absent")
+            emitNotes(AevonTakeNotes())
+            return false
+        }
+        guard let builtHost = AevonLayerHost(layer),
+              let host = builtHost as? NSObject else {
+            Log.write("win: " + tag + " no layer host")
+            emitNotes(AevonTakeNotes())
+            return false
+        }
+        Log.write("win: " + tag + " layer host cls=" + NSStringFromClass(type(of: host)))
+        let resizes = AevonSetResizesHostedContext(host, true)
+        Log.write("win: " + tag + " resizesHostedContext="
+                  + (resizes ? "accepted" : "refused"))
         emitNotes(AevonTakeNotes())
-
-        Log.write("win: " + tag + " calling _createSceneWithDefinition: now")
-        // The completion may arrive after this call returns, so success is read
-        // from both places: the block sets the flag, the return value is the
-        // object the manager already had. Believing only one of them would
-        // either log a success as a failure or build a second scene on top of
-        // the first.
-        var built = false
-        let done: (Any?, Any?) -> Void = { scene, error in
-            if let scene = scene as? NSObject {
-                Log.write("win: " + tag + " created " + NSStringFromClass(type(of: scene)))
-                dumpScene(scene, tag: "new")
-                built = true
-            } else {
-                Log.write("win: " + tag + " failed err=" + String(describing: error))
-            }
-        }
-        let returned = AevonCreateScene(manager, definition, settings, client,
-                                        nil, nil, nil, done)
-        if built { return true }
-        if let scene = returned as? NSObject {
-            Log.write("win: " + tag + " returned " + NSStringFromClass(type(of: scene))
-                      + " before its completion ran")
-            return true
-        }
-        Log.write("win: " + tag + " call returned nil, completion not called yet")
-        return false
+        return true
     }
 
     private static func value(of object: NSObject, _ key: String) -> NSObject? {

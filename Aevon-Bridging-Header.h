@@ -44,6 +44,17 @@ BOOL AevonSetIdentity(id _Nullable definition, id _Nullable identity);
 
 id _Nullable AevonSceneManager(void);
 
+/// 0.0.16 — the presenting route, which is the mother ship's own route: take a
+/// live scene's `uiPresentationManager`, ask it for a presenter, take that
+/// presenter's `presentationView`, and hand its layer to `_UIContextLayerHostView`.
+/// None of these traps; a nil answer means "this system will not present it".
+id _Nullable AevonCreatePresenter(id _Nullable manager,
+                                  NSString *_Nullable identifier,
+                                  NSInteger priority);
+id _Nullable AevonLayerHost(id _Nullable layer);
+BOOL AevonSetResizesHostedContext(id _Nullable view, BOOL flag);
+BOOL AevonCan(id _Nullable object, NSString *_Nullable name);
+
 @interface UIImage (AevonPrivateIcons)
 + (nullable UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID
                                                        format:(NSInteger)format
