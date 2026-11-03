@@ -789,6 +789,7 @@ zStackParticipantDidChange:
         mark("hook-install")
         emitNotes(AevonHookInstall())
         unmark()
+        censusOnce()
         Log.write("win: armed, building in 6s (switch to the target app now)")
         DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
             // Asked again on purpose: a manager captured six seconds ago is a
@@ -803,6 +804,26 @@ zStackParticipantDidChange:
             }
             watch(scene)
         }
+    }
+
+    /// The three classes the next decision is chosen from, named by the runtime
+    /// rather than by this file. 0.0.27 looked for
+    /// `_scene:interceptUpdateWithNewSettings:` on `FBScene` and found it on
+    /// `SBSceneManager` with a different shape, so the hook that the mother ship
+    /// keeps a scene awake with went uninstalled by a guess. One line per class
+    /// is cheaper than the round it costs to discover the same thing twice.
+    private static var censusDone = false
+    private static func censusOnce() {
+        guard !censusDone else { return }
+        censusDone = true
+        Log.write("win: runtime census SBDeviceApplicationSceneViewController "
+                  + AevonCensus("SBDeviceApplicationSceneViewController",
+                                "scene,host,activ,render,foreground,offscreen"))
+        Log.write("win: runtime census SBSceneManager "
+                  + AevonCensus("SBSceneManager", "intercept,settings,scene,fore,activ"))
+        Log.write("win: runtime census deactivation "
+                  + AevonCensus("UIApplicationSceneDeactivationManager",
+                                "deact,reason,scene,assert"))
     }
 
     /// Holds the scene open and builds the card the moment the operator leaves
@@ -983,6 +1004,18 @@ zStackParticipantDidChange:
         Log.write("win: scene layerManager="
                   + (layerManager.map { NSStringFromClass(type(of: $0)) } ?? "nil")
                   + " layers=" + String(count(of: layerManager, "layers")))
+        // 0.0.27 printed `layers=-1` here and `hosted=-1` two steps later, which
+        // is three dashes where the whole decision was supposed to be. Those
+        // numbers were about the names in this file, not about the scene. The
+        // real names are read off the method table now, and every getter that
+        // mentions layers, activity or content is reported next to its value.
+        Log.write("win: scene objects "
+                  + AevonReadObjects(scene, "layer,content,state,manager"))
+        Log.write("win: scene flags " + AevonReadFlags(scene,
+                                                       "active,foreground,valid,visib,deact"))
+        Log.write("win: scene settings objects "
+                  + AevonReadObjects(value(of: scene, "settings"), "foreground,background,active"))
+        Log.write("win: layer manager objects " + AevonReadObjects(layerManager, "layer"))
 
         guard let made = AevonCreatePresenter(manager, "com.aevon.float", 0),
               let presenter = made as? NSObject else {
@@ -991,6 +1024,18 @@ zStackParticipantDidChange:
             return
         }
         Log.write("win: presenter cls=" + NSStringFromClass(type(of: presenter)))
+
+        // The one call both reference implementations make and this tweak never
+        // did. `setResizesHostedContext:` (blueprint 2.1, marked there as the
+        // ★★★ of the chain) tells the presenter to resize the scene's hosted
+        // context to the presenter instead of expecting the presenter to be the
+        // scene's own size. Without it a card that is a fifth of the screen is
+        // asking a full-screen surface to shrink itself, and an unshrunk surface
+        // in a cropped view is not necessarily a picture.
+        let resized = AevonCallSetBool(presenter, "setResizesHostedContext:", true)
+        Log.write("win: hosted context resizes="
+                  + (resized == 1 ? "set" : "no such setter")
+                  + " reads=" + flag(AevonBoolOf(presenter, "resizesHostedContext")))
 
         guard let raw = value(of: presenter, "presentationView"),
               let view = raw as? UIView else {
@@ -1040,11 +1085,27 @@ zStackParticipantDidChange:
         //   layers=absent                 the scene has nothing to give
         //   nonHosted>0, hosted=0         layers exist but were not attached
         //   hosted>0 and still blank      geometry, not content
-        let container = value(of: view, "hostContainerView")
+        //
+        // `hostContainerView` did not answer in 0.0.27, so the container is also
+        // looked for by class among the view's own children: the one sublayer a
+        // presentation view carries is that container, and it can say what it is
+        // hosting even when the property name is wrong.
+        var container = value(of: view, "hostContainerView")
+        if container == nil {
+            container = view.subviews.first {
+                NSStringFromClass(type(of: $0)).contains("HostContainer")
+            }
+        }
         Log.write("win: container cls="
                   + (container.map { NSStringFromClass(type(of: $0)) } ?? "nil")
                   + " hosted=" + String(count(of: container, "hostedLayers"))
                   + " nonHosted=" + String(count(of: container, "nonHostedLayers")))
+        if let container = container {
+            Log.write("win: container objects " + AevonReadObjects(container, "host,layer"))
+            Log.write("win: container flags " + AevonReadFlags(container, "host,hidden"))
+        }
+        Log.write("win: presenter objects " + AevonReadObjects(presenter, "host,active,valid"))
+        Log.write("win: presenter flags " + AevonReadFlags(presenter, "host,active,valid"))
 
         // It comes down by itself: a window whose only job is to prove the chain
         // has no business staying on screen, and one that stays is one that can

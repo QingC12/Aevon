@@ -52,6 +52,18 @@ void AevonHookDisarm(void);
 /// this system does not answer it. Zero and "absent" are different facts.
 unsigned long long AevonReasonsOf(id _Nullable scene);
 
+/// 0.0.28 — `- (void)name:(BOOL)`. 1 for "ran", 0 for "no such setter".
+NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL value);
+
+/// 0.0.28 — the accessor names come from the runtime instead of this source
+/// file. `AevonCensus` lists what a class declares (nothing is called);
+/// `AevonReadObjects` / `AevonReadFlags` call only no-argument getters whose name
+/// mentions a keyword and report `name=value` beside each other. An empty answer
+/// is a fact about this system, and a missing key is a fact about the name.
+NSString *AevonCensus(NSString *_Nullable className, NSString *_Nullable keywords);
+NSString *AevonReadObjects(id _Nullable object, NSString *_Nullable keywords);
+NSString *AevonReadFlags(id _Nullable object, NSString *_Nullable keywords);
+
 @interface UIImage (AevonPrivateIcons)
 + (nullable UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID
                                                        format:(NSInteger)format

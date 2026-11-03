@@ -129,6 +129,159 @@ NSInteger AevonCallVoid(id object, NSString *name) {
     return 1;
 }
 
+/// `- (void)name:(BOOL)value`. 1 when it ran, 0 when the object does not answer
+/// it. Reading the answer back is the caller's job with `AevonBoolOf`: a setter
+/// that ran and a setter that stored the other value look the same from here.
+NSInteger AevonCallSetBool(id object, NSString *name, BOOL value) {
+    if (object == nil || name == nil) return 0;
+    SEL sel = NSSelectorFromString(name);
+    if (![object respondsToSelector:sel]) return 0;
+    void (*call)(id, SEL, BOOL) = (void (*)(id, SEL, BOOL))objc_msgSend;
+    call(object, sel, value);
+    return 1;
+}
+
+// MARK: - Reading the real method table (0.0.28)
+
+// 0.0.27 asked for three readings and got `absent` three times:
+// `FBSceneLayerManager.layers`, `_UISceneLayerHostContainerView.hostedLayers`
+// and the deactivation-reason getter. Those answers were about the *names* in
+// this source file, not about the scene, and the difference decided which of
+// three fixes came next. Guessing a private accessor twice is two rounds lost,
+// so the names come from the runtime from now on: walk the method table, call
+// only the no-argument getters whose name mentions a keyword, and print the name
+// beside the value. A name that answers is a name that exists; a keyword with no
+// hits says the word is not in this class instead of leaving a dash in the log.
+
+/// Names a class actually declares, for the keywords given. Nothing is called.
+/// `keywords` is a comma-separated list. Answers "none" for a class that is not
+/// on this system, which is a fact worth logging on its own.
+NSString *AevonCensus(NSString *className, NSString *keywords) {
+    Class cls = className ? NSClassFromString(className) : Nil;
+    if (cls == Nil) return @"class absent";
+    NSArray<NSString *> *words = [[keywords lowercaseString]
+                                  componentsSeparatedByString:@","];
+    NSMutableArray<NSString *> *hits = [NSMutableArray array];
+    for (Class c = cls; c != Nil && c != [NSObject class]; c = class_getSuperclass(c)) {
+        unsigned int count = 0;
+        Method *list = class_copyMethodList(c, &count);
+        if (list == NULL) continue;
+        for (unsigned int i = 0; i < count && hits.count < 60; i++) {
+            NSString *name = NSStringFromSelector(method_getName(list[i]));
+            NSString *lower = [name lowercaseString];
+            for (NSString *word in words) {
+                if (word.length < 3) continue;
+                if (![lower containsString:word]) continue;
+                NSString *entry = (c == cls) ? name
+                    : [NSString stringWithFormat:@"%@/%@", NSStringFromClass(c), name];
+                if (![hits containsObject:entry]) [hits addObject:entry];
+                break;
+            }
+        }
+        free(list);
+    }
+    if (hits.count == 0) return @"no name matched";
+    return [hits componentsJoinedByString:@" "];
+}
+
+static BOOL AevonNameIsSafe(NSString *name) {
+    for (NSString *bad in @[@"init", @"new", @"copy", @"alloc", @"dealloc",
+                            @"retain", @"release", @"autorelease", @"invalidate",
+                            @"destroy", @"suspend", @"terminate", @"kill",
+                            @"set", @"remove", @"delete", @"reset"]) {
+        if ([name.lowercaseString hasPrefix:bad]) return NO;
+    }
+    return YES;
+}
+
+/// Every no-argument getter on this object whose name mentions a keyword, read
+/// and reported as `name=value`. Object returns are reported as a count when
+/// they are a collection, `nil` when they are nil, and `obj` when they are
+/// something else. `-1` in the log means the call happened and the value is a
+/// collection of no length; a missing key means no such method.
+///
+/// Only zero-argument methods whose type encoding says they return an object are
+/// called, and mutator-shaped prefixes are skipped: the point is to look, and
+/// looking has no business changing anything.
+NSString *AevonReadObjects(id object, NSString *keywords) {
+    if (object == nil) return @"object nil";
+    NSArray<NSString *> *words = [[keywords lowercaseString]
+                                  componentsSeparatedByString:@","];
+    NSMutableArray<NSString *> *hits = [NSMutableArray array];
+    Class cls = [object class];
+    for (Class c = cls; c != Nil && c != [NSObject class]; c = class_getSuperclass(c)) {
+        unsigned int count = 0;
+        Method *list = class_copyMethodList(c, &count);
+        if (list == NULL) continue;
+        for (unsigned int i = 0; i < count && hits.count < 10; i++) {
+            SEL sel = method_getName(list[i]);
+            NSString *name = NSStringFromSelector(sel);
+            NSString *lower = name.lowercaseString;
+            BOOL matched = NO;
+            for (NSString *word in words) {
+                if (word.length < 3) continue;
+                if ([lower containsString:word]) { matched = YES; break; }
+            }
+            if (!matched || !AevonNameIsSafe(name)) continue;
+            if ([name rangeOfString:@":"].location != NSNotFound) continue;
+            const char *types = method_getTypeEncoding(list[i]);
+            if (types == NULL || types[0] != '@') continue;
+            id got = ((id (*)(id, SEL))objc_msgSend)(object, sel);
+            NSString *shown;
+            if (got == nil) {
+                shown = @"nil";
+            } else if ([got respondsToSelector:@selector(count)]) {
+                // `performSelector` returns an object pointer, and casting one to
+                // an integer is what ARC forbids; the count is read with the ABI
+                // it really has instead.
+                NSUInteger n = ((NSUInteger (*)(id, SEL))objc_msgSend)(got,
+                                                                      @selector(count));
+                shown = [NSString stringWithFormat:@"%lu", (unsigned long)n];
+            } else {
+                shown = @"obj";
+            }
+            [hits addObject:[NSString stringWithFormat:@"%@=%@", name, shown]];
+        }
+        free(list);
+    }
+    if (hits.count == 0) return @"no getter matched";
+    return [hits componentsJoinedByString:@" "];
+}
+
+/// The same walk for `BOOL` answers, which is where "is it still active" lives.
+NSString *AevonReadFlags(id object, NSString *keywords) {
+    if (object == nil) return @"object nil";
+    NSArray<NSString *> *words = [[keywords lowercaseString]
+                                  componentsSeparatedByString:@","];
+    NSMutableArray<NSString *> *hits = [NSMutableArray array];
+    Class cls = [object class];
+    for (Class c = cls; c != Nil && c != [NSObject class]; c = class_getSuperclass(c)) {
+        unsigned int count = 0;
+        Method *list = class_copyMethodList(c, &count);
+        if (list == NULL) continue;
+        for (unsigned int i = 0; i < count && hits.count < 10; i++) {
+            SEL sel = method_getName(list[i]);
+            NSString *name = NSStringFromSelector(sel);
+            NSString *lower = name.lowercaseString;
+            BOOL matched = NO;
+            for (NSString *word in words) {
+                if (word.length < 3) continue;
+                if ([lower containsString:word]) { matched = YES; break; }
+            }
+            if (!matched || !AevonNameIsSafe(name)) continue;
+            if ([name rangeOfString:@":"].location != NSNotFound) continue;
+            const char *types = method_getTypeEncoding(list[i]);
+            if (types == NULL || (types[0] != 'c' && types[0] != 'B')) continue;
+            BOOL got = ((BOOL (*)(id, SEL))objc_msgSend)(object, sel);
+            [hits addObject:[NSString stringWithFormat:@"%@=%@", name,
+                             got ? @"yes" : @"no"]];
+        }
+        free(list);
+    }
+    if (hits.count == 0) return @"no flag matched";
+    return [hits componentsJoinedByString:@" "];
+}
+
 // MARK: - Hooks (0.0.27)
 
 // The mother ship's own way in, and why 0.0.21's refusal is worth another look.
