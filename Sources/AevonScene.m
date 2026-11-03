@@ -520,7 +520,7 @@ static BOOL AevonCallBlockMethod(id target, NSString *name, void (^block)(id)) {
 /// say where the chain stops: 1 scene update, 2 manager amendment, 0 no door.
 /// Throttled and capped: this is called from inside a system callback that can
 /// fire dozens of times a second, and a loop here is a SpringBoard watchdog kill.
-NSInteger AevonForceForeground(id scene) {
+NSInteger AevonPushForeground(id scene) {
     if (scene == nil || !AevonIsArmed()) return 0;
     if (AevonInPush) return 0;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -763,7 +763,7 @@ NSString *AevonHookInstall(void) {
                 // already in front gets no push, or the six seconds between the
                 // tap and the swipe would spend the whole budget on nothing.
                 if (mine && (reasons != 0 || AevonFlagOf(settings, "isForeground") == 0)) {
-                    AevonForceForeground(scene);
+                    AevonPushForeground(scene);
                 }
                 void (*original)(id, SEL, unsigned long long, id, id, id) =
                     (void (*)(id, SEL, unsigned long long, id, id, id))slot->original;

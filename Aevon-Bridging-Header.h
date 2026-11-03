@@ -58,7 +58,7 @@ unsigned long long AevonReasonsOf(id _Nullable scene);
 /// answer is which door that was: 1 the scene's own update method, 2 the
 /// deactivation manager's amendment entry, 0 no door — in which case the next
 /// version has to hook something instead.
-NSInteger AevonForceForeground(id _Nullable scene);
+NSInteger AevonPushForeground(id _Nullable scene);
 
 /// 0.0.28 — `- (void)name:(BOOL)`. 1 for "ran", 0 for "no such setter".
 NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL value);

@@ -1083,7 +1083,7 @@ zStackParticipantDidChange:
                   + AevonCensus("FBScene", "update,settings,transition,foreground"))
         for delay in [0.3, 1.2, 2.6] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                let door = AevonForceForeground(scene)
+                let door = AevonPushForeground(scene)
                 let live = value(of: scene, "settings")
                 let fg: String = live.map { flag(AevonBoolOf($0, "isForeground")) } ?? "nil"
                 let bg: String = live.map { flag(AevonBoolOf($0, "isBackgrounded")) } ?? "nil"
