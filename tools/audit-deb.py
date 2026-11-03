@@ -458,7 +458,7 @@ def main():
                   b"win: no app scene in the list this run",
                   b"win: scene candidate ",
                   b"win: enumerating scenes ",
-                  b" foreground=absent (best available)",
+                  b" background, nothing to float",
                   b"win: no uiPresentationManager",
                   b"win: no presentationView",
                   b"win: no window - nothing activated",

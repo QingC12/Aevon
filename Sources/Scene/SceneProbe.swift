@@ -854,9 +854,16 @@ zStackParticipantDidChange:
             Log.write("win: target " + frontName + " foreground=yes")
             return scene
         }
-        if let scene = spare {
-            Log.write("win: target " + spareName + " foreground=absent (best available)")
-            return scene
+        // Aevon(24) made the shape of this case unmistakable: the operator stayed
+        // in Settings, and 6 seconds later Settings was full screen while the
+        // card sat black. A background scene pushes no layers to anybody, so the
+        // card cannot hold a picture no matter what is activated. Falling back to
+        // "the best available scene" only ever produced that black card, so the
+        // run now says so and builds nothing.
+        if spare != nil {
+            Log.write("win: target " + spareName + " is in the background, nothing to float")
+        } else {
+            Log.write("win: no app scene at all this run")
         }
         return nil
     }
@@ -937,6 +944,7 @@ zStackParticipantDidChange:
                       + " active=" + flag(AevonBoolOf(presenter, "isActive"))
                       + " sublayers=" + String(layers))
             inspectDesktop()
+            recheckAlpha()
             // The card going empty is the one answer that says the scene was
             // retired rather than that the desktop is not drawn. Put the full
             // screen back at once: a frozen card over a hidden picture is the
@@ -1007,15 +1015,21 @@ zStackParticipantDidChange:
     /// them is never a candidate — on this phone the desktop showing through is
     /// the entire point of the change.
     private static func isCarrier(_ name: String) -> Bool {
-        if name.contains("HomeScreen") || name.contains("Icon")
-            || name.contains("StatusBar") || name.contains("Wallpaper")
-            || name.contains("Snapsh") || name.contains("Switcher") {
-            return false
-        }
+        isAppCarrier(name) || name.contains("_UIScenePresentationView")
+    }
+
+    /// Only the three classes SpringBoard uses for an *application* scene.
+    ///
+    /// `_UIScenePresentationView` is deliberately not in this list: it is also
+    /// what the wallpaper is drawn into, and Aevon(24) showed what that costs —
+    /// with the operator still in Settings, the search named the wallpaper's
+    /// presenter as the only carrier and the run refused to build anything. A
+    /// carrier that cannot name its own scene is only trusted when its class is
+    /// one of these.
+    private static func isAppCarrier(_ name: String) -> Bool {
         return name.contains("SBDeviceApplicationSceneView")
             || name.contains("SBAppContainerView")
             || name.contains("SBSceneContainerView")
-            || name.contains("_UIScenePresentationView")
     }
 
     /// What a view says its scene is, in the spellings SpringBoard uses. An
@@ -1139,36 +1153,9 @@ zStackParticipantDidChange:
             return
         }
 
-        // Take the whole chain down, not just its top. 0.0.24 set the window's
-        // direct child to alpha 0 and the outside was still black, so the black
-        // is drawn by something else on the same chain: an opaque parent, a
-        // sibling above the carrier, or the window's own background colour. All
-        // three are covered here — every view from the carrier up to (but not
-        // including) the window goes transparent, and the window's background
-        // is cleared.
-        var chain: [UIView] = []
-        var cursor: UIView? = chosen.view
-        var steps = 0
-        while let view = cursor, view !== window, steps < 64 {
-            chain.append(view)
-            cursor = view.superview
-            steps += 1
-        }
-        for view in chain.reversed() {
-            let name = NSStringFromClass(type(of: view))
-            let record = Saved(view: view, alpha: view.alpha,
-                               background: view.backgroundColor, name: name)
-            saved.append(record)
-            view.alpha = 0
-            if let background = view.backgroundColor, background != UIColor.clear {
-                view.backgroundColor = .clear
-            }
-            Log.write("win: hidden layer " + name
-                      + " alpha=" + String(format: "%.1f", record.alpha)
-                      + " size=" + String(format: "%.0fx%.0f",
-                                          view.frame.width, view.frame.height))
-        }
-
+        // The matched window's own background goes first: a window that paints
+        // black behind its children would keep painting black after the children
+        // are gone.
         let background = window.backgroundColor
         let opaqueBefore = window.isOpaque
         savedWindow = (window, background, opaqueBefore, window.alpha, windowName)
@@ -1177,41 +1164,79 @@ zStackParticipantDidChange:
         Log.write("win: window background cleared " + windowName
                   + " opaque=" + (opaqueBefore ? "yes" : "no")
                   + " hadColor=" + (background == nil ? "no" : "yes"))
-        Log.write("win: fullscreen demoted layers=" + String(chain.count)
-                  + " from=" + chosen.name)
 
-        // SpringBoard keeps a window of its own between the desktop and the app:
-        // aevon(23) logged `SBWindow level=-1 hidden=no alpha=1.0` sitting
-        // between the home screen (-2) and the app's root scene (0). An opaque
-        // window there is a black screen no matter how transparent everything
-        // above it becomes, so every window at the app's own level has its
-        // background cleared and its contents counted.
+        // Everything above the desktop goes transparent: the matched window's
+        // direct children first, then the children of every other window sitting
+        // at the app's own level. 0.0.25 proved why the narrow version cannot
+        // work — it took down fifteen views whose top was
+        // `SBFluidSwitcherTouchPassThroughScrollView` (430x1398), i.e. the app
+        // switcher, and the screen did not change at all.
         //
-        // Alpha is deliberately left alone here. This is the one layer that
-        // might be the desktop's own host, and a black outside is a much better
-        // outcome than a black everything.
+        // The one fact that makes the wide version safe is on the same log: the
+        // home screen is a window of its own at level -2 with three live
+        // subviews and three layers (`layers=3`), so emptying the layer above it
+        // can only leave the desktop showing. Nothing here touches that window,
+        // the wallpaper window, the status bar or the dynamic island.
+        var emptied = hideChildren(of: window)
+
         for other in app.windows {
             if other === window { continue }
             let name = NSStringFromClass(type(of: other))
             if name.contains("Aevon") || name.contains("HomeScreen")
                 || name.contains("Wallpaper") || name.contains("SystemAperture")
-                || name.contains("StatusBar") { continue }
+                || name.contains("StatusBar") || name.contains("TextEffects")
+                || name.contains("CoverSheet") || name.contains("ControlCenter")
+                || name.contains("Screenshots") || name.contains("Recording")
+                || name.contains("AlertItem") || name.contains("Keyboard") { continue }
             let level = other.windowLevel.rawValue
-            guard level >= -2, level <= 1, !other.isHidden, other.alpha > 0 else { continue }
-            let root = other.rootViewController?.view
-            let rootClass = other.rootViewController.map {
-                NSStringFromClass(type(of: $0))
-            } ?? "nil"
-            Log.write("win: app window " + name
+            guard level >= -2, level <= 9, !other.isHidden, other.alpha > 0 else { continue }
+            Log.write("win: app layer window " + name
                       + " level=" + String(format: "%.0f", level)
-                      + " root=" + rootClass
-                      + " subviews=" + String(root?.subviews.count ?? -1)
-                      + " bg=" + (other.backgroundColor == nil ? "nil" : "set")
-                      + " opaque=" + (other.isOpaque ? "yes" : "no"))
+                      + " children=" + String(other.subviews.count))
+            emptied += hideChildren(of: other)
             savedExtra.append((other, other.backgroundColor, other.isOpaque, name))
             other.backgroundColor = .clear
             other.isOpaque = false
         }
+        Log.write("win: app layer emptied views=" + String(emptied))
+    }
+
+    /// Takes every direct child of one window out of sight and returns how many
+    /// there were. Direct children rather than a chain: a chain leaves siblings
+    /// behind, and a sibling is exactly what an opaque background view is.
+    private static func hideChildren(of window: UIWindow) -> Int {
+        var count = 0
+        for view in window.subviews {
+            let name = NSStringFromClass(type(of: view))
+            let record = Saved(view: view, alpha: view.alpha,
+                               background: view.backgroundColor, name: name)
+            saved.append(record)
+            view.alpha = 0
+            if let background = view.backgroundColor, background != UIColor.clear {
+                view.backgroundColor = .clear
+            }
+            Log.write("win: hidden child " + name
+                      + " alpha=" + String(format: "%.1f", record.alpha)
+                      + " size=" + String(format: "%.0fx%.0f",
+                                          view.frame.width, view.frame.height)
+                      + " subs=" + String(view.subviews.count))
+            count += 1
+        }
+        return count
+    }
+
+    /// Whether SpringBoard put anything back.
+    ///
+    /// If the system re-applies its own layout a frame later, every alpha change
+    /// this file makes is pointless, and that is worth one line rather than one
+    /// more version spent on the same idea.
+    private static func recheckAlpha() {
+        var reset = 0
+        for item in saved where item.view.alpha > 0.5 {
+            reset += 1
+        }
+        Log.write("win: alpha recheck kept=" + String(saved.count - reset)
+                  + " reset=" + String(reset))
     }
 
     /// Puts everything back, newest first. Called on teardown, before this file
