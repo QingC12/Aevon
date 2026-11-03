@@ -752,31 +752,28 @@ zStackParticipantDidChange:
         return Set(lines)
     }
 
-    // MARK: - Window build (0.0.21): the mother ship's route, heard
+    // MARK: - Floating window (0.0.22): the mother ship's chain, end to end
 
-    /// Four SpringBoard deaths and one black screen taught the same lesson:
-    ///   0.0.15  `_createSceneWithDefinition:` — four nils, one of them a block
-    ///   0.0.16  `_UIContextLayerHostView initWithSceneLayer:` — the class name
-    ///           was right, but the argument was a CALayer where an FBSceneLayer
-    ///           is read; 0.0.19 got the encoding, `@24@0:8@16`, so the ABI was
-    ///           never the problem
-    ///   0.0.20  `-activate` on a presenter of our own, on three live scenes.
-    ///           Every one of them went `hosting=no active=no` ->
-    ///           `hosting=yes active=yes` with `superview=nil`, and the phone
-    ///           went black while SpringBoard kept answering heartbeats.
+    /// Stheno's own scene vocabulary, counted in her binary rather than borrowed
+    /// from somebody else's project: `createPresenterWithIdentifier:priority:`,
+    /// `presentationView`, `initWithSceneLayer:` and `_UIContextLayerHostView`
+    /// are the scene symbols she carries, while `layerManager`, `layers` and
+    /// `hostManager` appear exactly zero times in both the const and the
+    /// cstring section. Her route is one presenter plus one window — never a
+    /// layer walk.
     ///
-    /// The first two were calls that do not exist. The third *does* exist and
-    /// works — for the object that owns the view and the window it goes into.
-    /// Stheno never makes it: her selector surface
-    /// (`analysis/extracts/stheno-selector-surface.txt`) has no `activate`,
-    /// `createPresenterWithIdentifier:priority:` sits in `__const` where a hook
-    /// target lives, and `analysis/scene-lifecycle-model.md` lists
-    /// `UIScenePresentationManagerHook` among her hook groups. She reads the
-    /// presenter the system activated for itself.
+    /// 0.0.20 walked that chain and stopped one step short. It activated the
+    /// presenter and never put the view into a window: `hosting=yes active=yes`
+    /// with `superview=nil`, the scene's layers hosted by nothing that draws,
+    /// and the phone black until it was restarted.
     ///
-    /// So this version reads that presenter, then listens for the next one the
-    /// system makes. It creates nothing, activates nothing, moves nothing. A
-    /// latch file and two timers make sure the listening stops by itself.
+    /// This version takes the missing step, in the only order that cannot
+    /// repeat it:
+    ///   presenter -> presentationView -> window -> activate
+    /// The window is on screen and already holds the view before a single layer
+    /// is claimed, so there is never a moment where the scene is hosted by
+    /// nobody. SpringBoard's own scene and the keyboard's are not touched:
+    /// taking the desktop's presentation is what blacked the screen.
     static func runWindow() {
         reportLastStep()
 
@@ -784,67 +781,127 @@ zStackParticipantDidChange:
             Log.write("win: no manager")
             return
         }
-        Log.write("win: begin manager cls=" + NSStringFromClass(type(of: manager)))
+        guard let scene = target(manager) else {
+            Log.write("win: no app scene in the list this run")
+            return
+        }
+        float(scene)
+    }
 
-        // The method tables 0.0.20 printed are no longer dumped. Every line of
-        // them is in `Aevon(19)..log` and in docs/REVERSE-NOTES.md, and a dump
-        // that is already on disk costs bytes, seconds and one more chance to
-        // touch a class that does not like being asked. What this run needs is
-        // the two things the tables cannot answer: who the system's live
-        // presenter is, and when the system creates and activates one.
-
-        var foregroundApp: NSObject?
+    /// The scene a floating window would host.
+    ///
+    /// 0.0.21 picked 抖音 while Settings was in front, simply because it was the
+    /// first scene that was neither SpringBoard nor Settings. A background scene
+    /// is exactly the case where a presenter has nothing to show, so the choice
+    /// is made by the scene's own settings now, and the fallback says in the log
+    /// that it fell back.
+    private static func target(_ manager: NSObject) -> NSObject? {
+        var front: NSObject?
+        var frontName = "?"
+        var spare: NSObject?
+        var spareName = "?"
         var seen = 0
         let visit: (Any?) -> Void = { scene in
             guard let scene = scene as? NSObject else { return }
             seen += 1
             let ident = value(of: scene, "identifier").map { String(describing: $0) } ?? "?"
-            if seen <= 10 { Log.write("win: s" + String(seen) + " id=" + ident) }
-            // App scenes arrive as `sceneID:<bundle id>-default`. The first one
-            // that is neither SpringBoard nor Settings is the app the operator
-            // opened, and it is the one a floating window would have to host.
-            //
-            // 0.0.21 stops listing at that one. SpringBoard's scene and the
-            // remote keyboard's are out of scope from here on: 0.0.20 activated
-            // a presenter on each of them, and taking the presentation of the
-            // scene that draws the whole screen is how the phone went black.
-            if ident.hasPrefix("sceneID:") && !ident.contains("com.apple.springboard")
-                && !ident.contains("com.apple.Preferences") {
-                if foregroundApp == nil { foregroundApp = scene }
+            guard ident.hasPrefix("sceneID:"),
+                  !ident.contains("com.apple.springboard"),
+                  !ident.contains("com.apple.Preferences") else { return }
+            if spare == nil { spare = scene; spareName = ident }
+            guard front == nil, let settings = value(of: scene, "settings") else { return }
+            let on = max(AevonBoolOf(settings, "isForeground"), AevonBoolOf(settings, "foreground"))
+            if on == 1 {
+                front = scene
+                frontName = ident
             }
         }
         AevonEnumerateScenes(manager, visit)
         Log.write("win: scenes=" + String(seen))
+        if let scene = front {
+            Log.write("win: target " + frontName + " foreground=yes")
+            return scene
+        }
+        if let scene = spare {
+            Log.write("win: target " + spareName + " foreground=unknown (fallback)")
+            return scene
+        }
+        return nil
+    }
 
-        // What an app scene is actually made of. This is the object a floating
-        // window would host, so its shape decides whether a layer can be taken
-        // from it at all.
-        guard let app = foregroundApp else {
-            Log.write("win: no app scene in the list this run")
-            installHooks()
+    /// The chain, in the mother ship's order, with the one step she never has to
+    /// take because the system takes it for her.
+    private static func float(_ scene: NSObject) {
+        guard let manager = value(of: scene, "uiPresentationManager") else {
+            Log.write("win: no uiPresentationManager")
             return
         }
-        dumpScene(app, tag: "APP")
 
-        // 0.0.21 — read the presenter the system already activated, instead of
-        // building one and activating it. This is the whole difference between
-        // 0.0.20 and the mother ship, and it is free: `activePrioritizedPresenter`
-        // and `presentationView` are getters.
-        inspectLive(app)
+        guard let made = AevonCreatePresenter(manager, "com.aevon.float", 0),
+              let presenter = made as? NSObject else {
+            Log.write("win: no presenter")
+            emitNotes(AevonTakeNotes())
+            return
+        }
+        Log.write("win: presenter cls=" + NSStringFromClass(type(of: presenter)))
 
-        // Then listen. Nothing below touches a view, a presenter or a window.
-        installHooks()
+        guard let raw = value(of: presenter, "presentationView"),
+              let view = raw as? UIView else {
+            Log.write("win: no presentationView")
+            emitNotes(AevonTakeNotes())
+            return
+        }
+        Log.write("win: view cls=" + NSStringFromClass(type(of: view))
+                  + " attached=" + (view.superview == nil ? "no" : "yes"))
+
+        // Window first, activate second. This is the whole difference from
+        // 0.0.20, and the difference between a picture and a black phone.
+        guard let host = FloatHost.show(view) else {
+            Log.write("win: no window - nothing activated")
+            return
+        }
+        Log.write("win: window up level=" + String(format: "%.0f", host.level))
+
+        mark("APP-activate")
+        let ran = AevonCallVoid(presenter, "activate")
+        unmark()
+        Log.write("win: activate ran=" + (ran == 1 ? "yes" : "no such method"))
+        Log.write("win: state hosting=" + flag(AevonBoolOf(presenter, "isHosting"))
+                  + " active=" + flag(AevonBoolOf(presenter, "isActive")))
+        Log.write("win: view sublayers=" + String(view.layer.sublayers?.count ?? 0))
+
+        // It comes down by itself: a window whose only job is to prove the chain
+        // has no business staying on screen, and one that stays is one that can
+        // be left behind.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
+            _ = AevonCallVoid(presenter, "deactivate")
+            _ = AevonCallVoid(presenter, "invalidate")
+            FloatHost.hide()
+            Log.write("win: closed after 8s")
+        }
+    }
+
+    /// The one witness a kill leaves behind: which call the process was inside.
+    /// A getter never kills, but `activate` is not a getter, and this is the only
+    /// way the next run can name it instead of inferring it from where the log
+    /// stops.
+    private static func mark(_ step: String) {
+        try? step.write(toFile: Aevon.winStepPath, atomically: true, encoding: .utf8)
+    }
+
+    private static func unmark() {
+        try? FileManager.default.removeItem(atPath: Aevon.winStepPath)
     }
 
     /// Says which call the previous run was inside when it died, then clears
     /// the marker. A marker that is never cleared is the only witness a
     /// watchdog kill leaves behind.
     ///
-    /// 0.0.21 no longer writes new markers from here: the only calls this
-    /// version makes are getters, and a getter that kills a process is not the
-    /// thing that goes wrong next. The latch file is the new witness, and it
-    /// covers the failure 0.0.20 produced — a run that finished, left something
-    /// installed, and took the screen with it.
+    /// 0.0.22 writes one marker again, because it makes one call that is not a
+    /// getter: `-activate`. A marker that is never cleared is the only witness a
+    /// kill leaves behind, and it is the difference between "died inside
+    /// activate" and "died somewhere after the last line" — 0.0.16 cost a whole
+    /// round to that difference.
     private static func reportLastStep() {
         let path = Aevon.winStepPath
         if let text = try? String(contentsOfFile: path, encoding: .utf8) {
@@ -868,220 +925,6 @@ zStackParticipantDidChange:
         }
     }
 
-    /// 0.0.21 — read the presenter the system already activated.
-    ///
-    /// 0.0.20 built a presenter of its own and called `-activate` on it. On all
-    /// three live scenes the answer was identical: `hosting=no active=no` ->
-    /// `hosting=yes active=yes`, sublayers 0 -> 1, host container view absent ->
-    /// `_UISceneLayerHostContainerView`, and `superview=nil` the entire time.
-    /// The presenter took the scene's layers and put them in a view that
-    /// belongs to no window, so nothing was drawn and no touch had a target.
-    /// SpringBoard stayed alive — `heartbeat: 60s uptime reached` is in that
-    /// log — and the phone was black until it was restarted.
-    ///
-    /// Stheno never calls `-activate`. Her selector surface has no such entry;
-    /// `createPresenterWithIdentifier:priority:` is in `__const`, where a hook
-    /// target lives, and `scene-lifecycle-model.md` lists
-    /// `UIScenePresentationManagerHook` among her hook groups. She takes the
-    /// presenter the system activated for itself. That presenter already
-    /// exists in this process — `_UIScenePresenterOwner` sits in the manager's
-    /// ivars, and 0.0.20 printed its method table.
-    ///
-    /// So this walks to it and reads four getters. `activePrioritizedPresenter`
-    /// is the owner's own answer to "which of my presenters is the live one";
-    /// that is the object whose view a floating window would take, and the only
-    /// question left is where the system keeps it.
-    private static func inspectLive(_ scene: NSObject) {
-        guard let manager = value(of: scene, "uiPresentationManager") else {
-            Log.write("win: APP uiPresentationManager absent")
-            return
-        }
-        // An ivar, not a getter: 0.0.20 printed `_scenePresenterOwner` from
-        // `_ivarDescription:`, and no method of that name exists.
-        guard let owner = AevonGetIvar(manager, "_scenePresenterOwner") as? NSObject else {
-            Log.write("win: APP owner ivar absent")
-            return
-        }
-        Log.write("win: APP owner cls=" + NSStringFromClass(type(of: owner)))
-
-        guard let live = value(of: owner, "activePrioritizedPresenter") else {
-            // Not a failure: it means the system holds no live presenter for
-            // this scene right now, which is itself the reason a float window
-            // built on `activate` could only ever steal one.
-            Log.write("win: APP owner has no active presenter")
-            return
-        }
-        Log.write("win: APP live presenter cls=" + NSStringFromClass(type(of: live))
-                  + " id=" + (value(of: live, "identifier").map { String(describing: $0) } ?? "?"))
-        Log.write("win: APP live presenter state"
-                  + " hosting=" + flag(AevonBoolOf(live, "isHosting"))
-                  + " active=" + flag(AevonBoolOf(live, "isActive"))
-                  + " invalidated=" + flag(AevonBoolOf(live, "isInvalidated")))
-
-        guard let view = value(of: live, "presentationView") else {
-            Log.write("win: APP live presenter has no presentationView")
-            return
-        }
-        Log.write("win: APP live view cls=" + NSStringFromClass(type(of: view)))
-        describe(view, tag: "APP.live")
-        // Where the system keeps it. Two levels is enough to tell "pinned under
-        // the scene's own view controller" from "inside a wrapper we would have
-        // to unwrap", and the window answer says whether it is on screen at all.
-        walkParents(view, depth: 3)
-    }
-
-    /// The parent chain of a view, plus the window it lives in. `UIView.window`
-    /// walks the chain itself and answers nil when the view is detached, which
-    /// is exactly the difference 0.0.20 could not see.
-    private static func walkParents(_ view: NSObject, depth: Int) {
-        guard let ui = view as? UIView else { return }
-        var node: UIView? = ui
-        var level = 0
-        while let current = node, level < depth {
-            let f = current.frame
-            Log.write("win: parent level " + String(level) + " "
-                      + NSStringFromClass(type(of: current))
-                      + " frame=" + String(format: "%.0fx%.0f at %.0f,%.0f",
-                                           f.size.width, f.size.height,
-                                           f.origin.x, f.origin.y)
-                      + " subviews=" + String(current.subviews.count))
-            node = current.superview
-            level += 1
-        }
-        if let window = ui.window {
-            // `windowLevel.rawValue`: UIWindow.Level is a RawRepresentable
-            // struct, and `String(format:)` wants a CVarArg. The first build of
-            // this line did not compile — one run, one line, which is the price
-            // of having no swiftc on this machine.
-            Log.write("win: live view window=" + NSStringFromClass(type(of: window))
-                      + " level=" + String(format: "%.1f", window.windowLevel.rawValue)
-                      + " hidden=" + (window.isHidden ? "yes" : "no"))
-        } else {
-            Log.write("win: live view is not in any window")
-        }
-    }
-
-    // MARK: - Hooks, and the four ways out
-
-    /// Replaces the two ends of the mother ship's route with calls that forward
-    /// everything and write a line. Nothing is created, nothing is activated,
-    /// nothing is moved: this version can only observe.
-    ///
-    /// Four answers to "what if it goes wrong", because 0.0.20's failure was
-    /// invisible to every guard this project already had — nothing crashed, the
-    /// screen just went black and stayed black:
-    ///
-    ///   1. a latch file written *before* the first IMP is replaced, deleted
-    ///      only after a full revert. Still on disk next time = the last run
-    ///      never got out = do not install again.
-    ///   2. all-or-nothing inside the C side: if either end of the route fails
-    ///      to hand back its original IMP, everything already replaced is put
-    ///      back and the answer is 0.
-    ///   3. a soft timer: 30 s with no system presenter traffic means the hook
-    ///      is not going to hear anything today, so it goes away early.
-    ///   4. a hard timer: 90 s and it is reverted whatever happened. A
-    ///      replacement left in a system class is the one thing this version
-    ///      must never do.
-    private static func installHooks() {
-        let manager = FileManager.default
-
-        // Pressed twice inside the same 90 s window. The originals are already
-        // replaced in this process; replacing a replacement would hand us our
-        // own IMP back as the "original" and the route would never come back.
-        if AevonHooksLive() > 0 {
-            Log.write("win: hooks from this process are still live — request ignored")
-            return
-        }
-
-        if manager.fileExists(atPath: Aevon.hookLatchPath) {
-            Log.write("win: hook latch from the previous run is still on disk"
-                      + " — that run never reverted. Not installing.")
-            try? manager.removeItem(atPath: Aevon.hookLatchPath)
-            Log.write("win: latch cleared; the next request may install again")
-            return
-        }
-
-        do {
-            try "hook\n".write(toFile: Aevon.hookLatchPath, atomically: true, encoding: .utf8)
-        } catch {
-            Log.write("win: latch not writable — refusing to install")
-            return
-        }
-
-        let live = AevonInstallHooks()
-        // Drained immediately: the install itself writes which selector it
-        // refused, and "hooks live=0" alone would not say why.
-        drainHooks(AevonTakeHookLog() ?? "")
-        guard live > 0 else {
-            Log.write("win: hooks not installed (route incomplete) — nothing replaced")
-            try? manager.removeItem(atPath: Aevon.hookLatchPath)
-            return
-        }
-        Log.write("win: hooks live=" + String(live)
-                  + " soft=30s hard=90s")
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
-            guard AevonHooksLive() > 0 else { return }
-            let heard = AevonTakeHookLog() ?? ""
-            drainHooks(heard)
-            if heard.isEmpty {
-                revertHooks("soft: no presenter traffic in 30s")
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 90) {
-            guard AevonHooksLive() > 0 else { return }
-            drainHooks(AevonTakeHookLog() ?? "")
-            revertHooks("hard: 90s elapsed")
-        }
-    }
-
-    /// Puts every original back and clears the latch only when nothing is left
-    /// replaced. A revert that reports success while an IMP is still ours would
-    /// be worse than not reverting at all.
-    private static func revertHooks(_ why: String) {
-        let back = AevonRemoveHooks()
-        let still = AevonHooksLive()
-        if still == 0 {
-            try? FileManager.default.removeItem(atPath: Aevon.hookLatchPath)
-            Log.write("win: hooks reverted " + String(back) + " — " + why)
-        } else {
-            Log.write("win: hooks still live=" + String(still)
-                      + " after revert — " + why)
-        }
-    }
-
-    private static func drainHooks(_ text: String) {
-        for raw in text.split(separator: "\n") {
-            Log.write("win: hook " + raw.trimmingCharacters(in: .whitespaces))
-        }
-    }
-
-    /// Frame, layer tree and host container of a presentation view. A view that
-    /// is not in a window has no superview and its own coordinate space — that
-    /// is the difference between "the presenter made a view" and "the presenter
-    /// is hosting", and this line is where the difference shows.
-    private static func describe(_ view: NSObject, tag: String) {
-        guard let ui = view as? UIView else {
-            Log.write("win: " + tag + " not a UIView, cls=" + NSStringFromClass(type(of: view)))
-            return
-        }
-        let f = ui.frame
-        Log.write("win: " + tag + " frame="
-                  + String(format: "%.0fx%.0f at %.0f,%.0f", f.size.width, f.size.height,
-                           f.origin.x, f.origin.y)
-                  + " hidden=" + (ui.isHidden ? "yes" : "no")
-                  + " superview=" + (ui.superview.map { NSStringFromClass(type(of: $0)) } ?? "nil")
-                  + " sublayers=" + String(ui.layer.sublayers?.count ?? 0))
-        if let host = value(of: view, "hostContainerView") {
-            Log.write("win: " + tag + " host container view=" + NSStringFromClass(type(of: host)))
-        } else {
-            Log.write("win: " + tag + " host container view absent")
-        }
-        if let context = value(of: view, "currentPresentationContext") {
-            Log.write("win: " + tag + " presentation context=" + NSStringFromClass(type(of: context)))
-        }
-    }
-
     /// -1 is "no such method", which is a different answer from 0.
     private static func flag(_ value: Int) -> String {
         switch value {
@@ -1095,40 +938,6 @@ zStackParticipantDidChange:
         let sel = NSSelectorFromString(key)
         guard object.responds(to: sel) else { return nil }
         return object.perform(sel)?.takeUnretainedValue() as? NSObject
-    }
-
-    /// What a live scene is made of, in its own words. `_ivarDescription` is the
-    /// only reader that works on a FrontBoard object without knowing its shape,
-    /// which is exactly the situation: headers are not available, and guessing
-    /// a field name is how a probe lies to itself.
-    private static func dumpScene(_ scene: NSObject, tag: String) {
-        let ident = value(of: scene, "identifier").map { String(describing: $0) } ?? "?"
-        Log.write("win: " + tag + " " + NSStringFromClass(type(of: scene)) + " id=" + ident)
-        for key in ["definition", "settings", "clientSettings", "uiPresentationManager"] {
-            guard let obj = value(of: scene, key) else {
-                Log.write("win: " + tag + " " + key + " absent")
-                continue
-            }
-            Log.write("win: " + tag + " " + key + " cls=" + NSStringFromClass(type(of: obj)))
-            emitIvars(obj, tag: tag + "." + key)
-        }
-    }
-
-    private static func emitIvars(_ object: NSObject, tag: String) {
-        let sel = NSSelectorFromString("_ivarDescription")
-        guard object.responds(to: sel),
-              let text = object.perform(sel)?.takeUnretainedValue() as? String else {
-            Log.write("win: " + tag + " no ivars")
-            return
-        }
-        var printed = 0
-        for raw in text.split(separator: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            if line.isEmpty { continue }
-            if printed >= 20 { Log.write("win: " + tag + " …capped"); return }
-            Log.write("win: " + tag + " " + line)
-            printed += 1
-        }
     }
 
     /// Called once at boot, before anything else touches the runtime. If the

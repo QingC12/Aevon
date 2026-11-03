@@ -14,97 +14,27 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// AevonScene.m — the two private calls that carry more arguments than
-/// `perform` can. Both return nil when the selector is absent, so the Swift
-/// side treats "nil" as "this system will not do it" and logs it.
-id _Nullable AevonCreateScene(id _Nullable manager,
-                              id _Nullable definition,
-                              id _Nullable settings,
-                              id _Nullable clientSettings,
-                              id _Nullable transitionContext,
-                              id _Nullable remnant,
-                              id _Nullable clientProvider,
-                              void (^_Nullable completion)(id _Nullable scene,
-                                                           id _Nullable error));
-
+/// AevonScene.m — the calls that carry more arguments than `perform` can, plus
+/// the two that have to read a non-object return value. Every one of them
+/// answers nil / -1 / 0 rather than trapping, and the Swift side treats that as
+/// "this system will not do it" and logs it.
 void AevonEnumerateScenes(id _Nullable manager, void (^_Nullable block)(id _Nullable scene));
-
-/// Reading and rebuilding the pieces of a scene definition. Every one of these
-/// answers nil/NO rather than trapping, and every attempt it makes is recorded
-/// in the note buffer, which the caller drains with AevonTakeNotes before doing
-/// anything that can take the process down.
-NSString *_Nullable AevonTakeNotes(void);
-NSString *_Nullable AevonClassCensus(NSString *_Nullable name, NSString *_Nullable keys);
-id _Nullable AevonGetGetter(id _Nullable object, NSString *_Nullable name);
-id _Nullable AevonGetIvar(id _Nullable object, NSString *_Nullable name);
-BOOL AevonSetIvar(id _Nullable object, NSString *_Nullable name, id _Nullable value);
-id _Nullable AevonMutableCopy(id _Nullable object);
-id _Nullable AevonRenameIdentity(id _Nullable template, NSString *_Nullable identifier);
-BOOL AevonSetIdentity(id _Nullable definition, id _Nullable identity);
-
 id _Nullable AevonSceneManager(void);
+NSString *_Nullable AevonTakeNotes(void);
 
-/// 0.0.16 — the presenting route, which is the mother ship's own route: take a
-/// live scene's `uiPresentationManager`, ask it for a presenter, take that
-/// presenter's `presentationView`, and hand its layer to `_UIContextLayerHostView`.
-/// None of these traps; a nil answer means "this system will not present it".
+/// 0.0.16 / 0.0.22 — the mother ship's route: a scene's `uiPresentationManager`
+/// asked for a presenter. A nil answer means "this system will not present it".
 id _Nullable AevonCreatePresenter(id _Nullable manager,
                                   NSString *_Nullable identifier,
                                   NSInteger priority);
-id _Nullable AevonLayerHost(id _Nullable layer);
-BOOL AevonSetResizesHostedContext(id _Nullable view, BOOL flag);
-BOOL AevonCan(id _Nullable object, NSString *_Nullable name);
 
-/// 0.0.17 — the device, not a string table, answers what exists. Returns one
-/// class name per line for every runtime class whose name contains one of the
-/// comma-separated keys. Sends no message to any class.
-NSString *_Nullable AevonFindClasses(NSString *_Nullable keys, NSInteger limit);
-
-/// 0.0.18 — the mother ship's own chain, located instead of remembered.
-/// `AevonSelectorHome` answers "which classes implement these selectors" with
-/// `class_getInstanceMethod`, which sends no message; `AevonFullCensus` lists a
-/// class's own methods with no filter; `AevonBoolOf` reads a BOOL getter with
-/// the right ABI and returns -1 for "no such method".
-NSString *_Nullable AevonSelectorHome(NSString *_Nullable selectors, NSInteger limit);
-NSString *_Nullable AevonFullCensus(NSString *_Nullable name, NSInteger limit);
+/// 0.0.18 — a BOOL getter read with the right ABI, -1 for "no such method".
 NSInteger AevonBoolOf(id _Nullable object, NSString *_Nullable name);
 
-/// 0.0.19 — the mother ship was written for iOS 16 and this phone runs 17, so
-/// every name she uses is a question rather than an assumption.
-/// `AevonLayerNameScan` lists every method in the process whose selector
-/// mentions a scene layer, a layer host or a context layer, with its real type
-/// encoding; `AevonSelectorInfo` reports one selector on one class, the
-/// encoding, and the class in the chain that actually defines it.
-NSString *_Nullable AevonLayerNameScan(NSInteger limit);
-NSString *_Nullable AevonSelectorInfo(NSString *_Nullable className,
-                                      NSString *_Nullable selectors);
-
-/// 0.0.20 — the two questions that cannot be answered by reading.
-/// `AevonClassMethods` lists the `+` side (class_copyMethodList on a class
-/// returns instance methods only, which is why UISceneLayerTargetFactory looked
-/// empty). `AevonCallVoid` runs a no-argument void method and answers 1 for
-/// "ran", 0 for "no such method" — a call that never happened and a call that
-/// returned nil are otherwise indistinguishable from Swift.
-NSString *_Nullable AevonClassMethods(NSString *_Nullable name, NSInteger limit);
+/// 0.0.20 — run a no-argument void method: 1 for "ran", 0 for "no such method".
+/// A call that never happened and a call that returned nil are otherwise
+/// indistinguishable from Swift.
 NSInteger AevonCallVoid(id _Nullable object, NSString *_Nullable name);
-
-/// 0.0.21 — the mother ship's route, heard instead of forced.
-///
-/// 0.0.20 activated presenters it had built for three live scenes and kept the
-/// phone black until reboot. Stheno never calls `-activate`: she replaces
-/// `createPresenterWithIdentifier:priority:` and takes the presentation view of
-/// the presenter the system activates by itself. These five functions replace
-/// the two ends of that route with calls that forward everything and write a
-/// line — no create, no activate, no view moved.
-///
-/// `AevonInstallHooks` answers how many replacements are live and is
-/// all-or-nothing: 0 means the route is not fully observable here and nothing
-/// was left installed. `AevonRemoveHooks` is safe to call twice.
-NSInteger AevonInstallHooks(void);
-NSInteger AevonRemoveHooks(void);
-NSInteger AevonHooksLive(void);
-void AevonHooksQuiet(BOOL quiet);
-NSString *_Nullable AevonTakeHookLog(void);
 
 @interface UIImage (AevonPrivateIcons)
 + (nullable UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID

@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.0.21"
+    public static let version = "0.0.22"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -93,7 +93,6 @@ public enum Aevon {
     /// because nothing crashed. 0.0.20 left three live scenes' presenters
     /// activated with no way back and the phone went black while SpringBoard
     /// kept answering heartbeats.
-    public static let hookLatchPath = "/var/mobile/Library/Logs/Aevon/win.hook"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"
