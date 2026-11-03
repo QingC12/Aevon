@@ -337,9 +337,10 @@ static long AevonSceneLifeCalls = 0;
 /// `NSString` there is work nobody asked for. The first four calls per hook are
 /// the interesting ones; after that only the counters move.
 ///
-/// Sixteen, not eight: 0.0.27 filled all eight with the deactivation hook alone
-/// and the interceptor — the hook this version is about — had nowhere to write.
-static char AevonTrace[16][192];
+/// Sixteen became twenty-four in 0.0.30: the deactivation hook alone still fills
+/// the first eight (four `deact-set`, four `stripped`), and the push traces are
+/// the ones this version is read from.
+static char AevonTrace[24][192];
 static long AevonTraceCount = 0;
 
 static void AevonRawTrace(const char *tag, const char *format, ...) {
@@ -436,6 +437,147 @@ static void AevonForceForeground(id settings) {
                       class_getName(object_getClass(settings)),
                       AevonFlagOf(settings, "isForeground"));
     }
+}
+
+// MARK: - Pushing a scene into the foreground (0.0.30)
+
+/// 0.0.29 installed the interceptor the mother ship's route is built on, and the
+/// device answered `wrote=yes back=… exact`, and then ran for eight seconds with
+/// `intercept=0`. A hook that is installed and never called is the same thing as
+/// no hook, and Aevon(28) proved it: the same scene reported `layers=2`,
+/// `hostedLayers=2`, `nonHostedLayers=0`, a card that was still black, and
+/// settings that said `isForeground=no isBackgrounded=yes`.
+///
+/// So the settings are pushed rather than awaited. The scene object is already
+/// in hand; the question is only by which door, and the doors are read off the
+/// method table before any of them is used. A door whose encoding does not match
+/// is stepped past, not guessed at.
+
+/// The deactivation manager, captured from the first argument of the one hook
+/// the device has actually called. `AevonReasonsOf` spent two versions printing
+/// `absent` because it looked for a singleton that this system does not vend;
+/// the instance was arriving in that hook all along.
+static id AevonDeactManager = nil;
+
+static long AevonPushTried = 0;
+static long AevonPushWrote = 0;
+/// 1 = pushed through the scene's own update method, 2 = through the
+/// manager's amendment entry, 0 = no door opened.
+static long AevonPushPath = 0;
+static CFAbsoluteTime AevonLastPush = 0;
+/// Re-entry is not theoretical: the amendment entry calls back into the
+/// deactivation setter this file hooks, and that hook pushes again.
+static volatile int AevonInPush = 0;
+
+/// `foreground = YES, backgrounded = NO` on whatever settings object is offered,
+/// with each setter asked for before it is used. Returns whether anything was
+/// actually written — a class without these setters is a fact worth a trace line,
+/// not a crash.
+static BOOL AevonWriteForeground(id settings) {
+    if (settings == nil) return NO;
+    BOOL wrote = NO;
+    const char *ons[2] = {"setForeground:", "_setForeground:"};
+    const char *offs[2] = {"setBackgrounded:", "_setBackgrounded:"};
+    for (int i = 0; i < 2; i++) {
+        SEL sel = sel_registerName(ons[i]);
+        if (![settings respondsToSelector:sel]) continue;
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(settings, sel, YES);
+        wrote = YES;
+    }
+    for (int i = 0; i < 2; i++) {
+        SEL sel = sel_registerName(offs[i]);
+        if (![settings respondsToSelector:sel]) continue;
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(settings, sel, NO);
+    }
+    return wrote;
+}
+
+/// A method that takes a block and returns nothing, called with the block the
+/// caller built. `@?` in the encoding is the part that matters: it is the only
+/// evidence that the third argument really is a settings block and not, say, an
+/// object that would be messaged as one.
+static BOOL AevonCallBlockMethod(id target, NSString *name, void (^block)(id)) {
+    if (target == nil || name == nil || block == nil) return NO;
+    SEL sel = NSSelectorFromString(name);
+    if (sel == NULL || ![target respondsToSelector:sel]) return NO;
+    Method method = class_getInstanceMethod(object_getClass(target), sel);
+    if (method == NULL) return NO;
+    const char *encoding = method_getTypeEncoding(method);
+    unsigned int arguments = method_getNumberOfArguments(method);
+    if (encoding == NULL || encoding[0] != 'v' || strstr(encoding, "@?") == NULL) return NO;
+    if (arguments == 4) {
+        ((void (*)(id, SEL, id, id))objc_msgSend)(target, sel, block, nil);
+        return YES;
+    }
+    if (arguments == 3) {
+        ((void (*)(id, SEL, id))objc_msgSend)(target, sel, block);
+        return YES;
+    }
+    return NO;
+}
+
+/// One attempt at "you are in front". Answers the door it used so the log can
+/// say where the chain stops: 1 scene update, 2 manager amendment, 0 no door.
+/// Throttled and capped: this is called from inside a system callback that can
+/// fire dozens of times a second, and a loop here is a SpringBoard watchdog kill.
+NSInteger AevonForceForeground(id scene) {
+    if (scene == nil || !AevonIsArmed()) return 0;
+    if (AevonInPush) return 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - AevonLastPush < 0.3) return 0;
+    if (__sync_fetch_and_add(&AevonPushTried, 1) > 60) return 0;
+    AevonLastPush = now;
+    AevonInPush = 1;
+
+    long attempt = AevonPushTried;
+    SEL settingsSel = sel_registerName("settings");
+    id current = nil;
+    if ([scene respondsToSelector:settingsSel]) {
+        current = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
+    }
+    // A mutable copy is tried first because a copy cannot be rejected by a class
+    // that only accepts its own kind; the original is the fallback for settings
+    // that are already mutable.
+    id candidate = [current mutableCopy];
+    BOOL inlineWrite = AevonWriteForeground(candidate != nil ? candidate : current);
+
+    void (^amend)(id) = [^(id settings) {
+        AevonWriteForeground(settings);
+    } copy];
+
+    NSInteger path = 0;
+    if (AevonCallBlockMethod(scene, @"updateSettings:withTransitionContext:", amend)
+        || AevonCallBlockMethod(scene, @"updateSettings:", amend)
+        || AevonCallBlockMethod(scene, @"updateSettingsWithBlock:", amend)) {
+        path = 1;
+    } else if (AevonDeactManager != nil) {
+        id manager = AevonDeactManager;
+        SEL amendSel = NSSelectorFromString(@"amendSceneSettings:forScene:");
+        if ([manager respondsToSelector:amendSel]) {
+            Method method = class_getInstanceMethod(object_getClass(manager), amendSel);
+            const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
+            unsigned int arguments = method != NULL ? method_getNumberOfArguments(method) : 0;
+            if (encoding != NULL && encoding[0] == 'v' && arguments == 4) {
+                ((void (*)(id, SEL, id, id))objc_msgSend)(manager, amendSel,
+                                                          candidate != nil ? candidate : current,
+                                                          scene);
+                path = 2;
+            }
+        }
+    }
+
+    if (path != 0) {
+        __sync_fetch_and_add(&AevonPushWrote, 1);
+        AevonPushPath = path;
+    }
+    if (attempt < 6) {
+        AevonRawTrace("push", "path=%ld wrote=%d fg=%d settings=%s", path,
+                      inlineWrite ? 1 : 0,
+                      AevonFlagOf(candidate != nil ? candidate : current, "isForeground"),
+                      current != nil ? class_getName(object_getClass(current)) : "nil");
+    }
+    AevonInPush = 0;
+    return path;
 }
 
 /// The first class whose *own* method list contains this selector. Own list, not
@@ -596,6 +738,9 @@ NSString *AevonHookInstall(void) {
             id block = ^(id manager, unsigned long long reasons, id scene,
                          id settings, id reason) {
                 long seen = __sync_fetch_and_add(&AevonDeactSetCalls, 1);
+                // The instance this file spent two versions failing to find is
+                // the first argument of the one hook the device does call.
+                if (AevonDeactManager == nil) AevonDeactManager = manager;
                 BOOL mine = AevonSceneIsMine(scene);
                 if (seen < 4) {
                     AevonRawTrace("deact-set", "reasons=%llu mine=%d scene=%s",
@@ -608,6 +753,17 @@ NSString *AevonHookInstall(void) {
                         AevonRawTrace("stripped", "%llu->0 scene=%s",
                                       reasons, AevonSceneName(scene));
                     }
+                }
+                // Keeping the scene awake is half of it. Aevon(28) had that half
+                // working — `stripped=8` — and a black card, because the app had
+                // been told it was in the background and had stopped drawing. The
+                // system keeps saying so; this says otherwise, every time it does.
+                //
+                // Only when there is something to contradict: a scene that is
+                // already in front gets no push, or the six seconds between the
+                // tap and the swipe would spend the whole budget on nothing.
+                if (mine && (reasons != 0 || AevonFlagOf(settings, "isForeground") == 0)) {
+                    AevonForceForeground(scene);
                 }
                 void (*original)(id, SEL, unsigned long long, id, id, id) =
                     (void (*)(id, SEL, unsigned long long, id, id, id))slot->original;
@@ -727,9 +883,10 @@ NSString *AevonHookInstall(void) {
 NSString *AevonHookSummary(void) {
     NSMutableString *out = [NSMutableString string];
     [out appendFormat:@"hook: live=%d deact_set=%ld stripped=%ld intercept=%ld"
-     " forced=%ld/%ld scene_life=%ld armed=%@\n",
+     " forced=%ld/%ld push=%ld/%ld door=%ld scene_life=%ld armed=%@\n",
      AevonSlotCount, AevonDeactSetCalls, AevonDeactStripped,
      AevonInterceptCalls, AevonInterceptWrote, AevonInterceptTried,
+     AevonPushWrote, AevonPushTried, AevonPushPath,
      AevonSceneLifeCalls,
      AevonIsArmed() ? [NSString stringWithUTF8String:AevonArmed] : @"no"];
     long total = AevonTraceCount;
@@ -749,9 +906,12 @@ unsigned long long AevonReasonsOf(id scene) {
     SEL getter = NSSelectorFromString(@"_deactivationReasonsForScene:withSettings:");
     SEL setter = NSSelectorFromString(@"_setDeactivationReasons:onScene:withSettings:reason:");
 
-    id manager = nil;
+    id manager = AevonDeactManager;
     Class cls = NSClassFromString(@"UIApplicationSceneDeactivationManager");
-    if (cls != Nil) {
+    // The captured instance first: this system vends no singleton under any of
+    // the three names below, which is why two versions printed `absent` for a
+    // method the census could see.
+    if (manager == nil && cls != Nil) {
         for (NSString *name in @[@"sharedInstance", @"sharedManager", @"defaultManager"]) {
             SEL sel = NSSelectorFromString(name);
             if (![cls respondsToSelector:sel]) continue;

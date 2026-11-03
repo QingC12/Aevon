@@ -1071,6 +1071,28 @@ zStackParticipantDidChange:
                   + " active=" + flag(AevonBoolOf(presenter, "isActive")))
         Log.write("win: view sublayers=" + String(view.layer.sublayers?.count ?? 0))
 
+        // 0.0.30 — the half that was missing. Aevon(28) proved the hold works
+        // (`stripped=8`), that the layers are there (`layers=2`) and in our
+        // container (`hostedLayers=2 nonHostedLayers=0`), and that the card is
+        // still black because the app was told `isForeground=no` and stopped
+        // committing frames. 0.0.29 waited for a system callback to fix that and
+        // the callback never came: `intercept=0` after eight seconds. So the
+        // settings are pushed instead, three times — the system re-sends its own
+        // opinion constantly, and one push would be overwritten within a frame.
+        Log.write("win: scene update methods "
+                  + AevonCensus("FBScene", "update,settings,transition,foreground"))
+        for delay in [0.3, 1.2, 2.6] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                let door = AevonForceForeground(scene)
+                let now = value(of: scene, "settings")
+                Log.write("win: force foreground door=" + String(door)
+                          + " fg=" + (now.map { flag(AevonBoolOf($0, "isForeground")) } ?? "nil")
+                          + " bg=" + (now.map { flag(AevonBoolOf($0, "isBackgrounded")) } ?? "nil")
+                          + " reasons=" + reasonsOf(scene)
+                          + " sublayers=" + String(view.layer.sublayers?.count ?? 0))
+            }
+        }
+
         // Nothing on this screen is hidden any more. 0.0.24 hid one view,
         // 0.0.25 hid the wrong window, 0.0.26 emptied every app-level window and
         // the operator got a black phone that eight seconds of restoring did not
