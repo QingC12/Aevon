@@ -61,10 +61,16 @@ final class RingHost: NSObject {
 
     /// Strip geometry. 8 x 56 reads as a handle rather than a control, and it
     /// is 4x the dot's target area without covering an icon.
+    ///
+    /// 0.0.47 — the pad grew to 46 x 150. Aevon(45) #1 is 「触发不灵敏，需要多次
+    /// 点击或滑动」, and a 40 x 112 target a thumb has to hit exactly is one of
+    /// the two things that produces that sentence (the other one is the overlay
+    /// timer hiding the pad, fixed below). The strip itself does not change:
+    /// what grew is the part nobody sees.
     private let barWidth: CGFloat = 8
     private let barHeight: CGFloat = 56
-    private let padWidth: CGFloat = 40
-    private let padHeight: CGFloat = 112
+    private let padWidth: CGFloat = 46
+    private let padHeight: CGFloat = 150
 
     /// The last percentage that was laid out, so a slider drag logs one line per
     /// real change instead of one per refresh.
@@ -78,6 +84,11 @@ final class RingHost: NSObject {
     private var overlayTimer: Timer?
     private var overlayCheckedAt: CFTimeInterval = 0
     private var overlayUp = false
+    /// 0.0.47 — 连续两次判真才隐藏。见 `syncOverlayVisibility`。
+    private var overlayStrikes = 0
+    /// 0.0.47 — 垫子上落过几次手指。前 20 次写进日志，用来分开「没落上」与
+    /// 「落上了没被当手势」。
+    private var padProbe = 0
 
     private var config = RingConfig()
     private var expanded = false
@@ -123,7 +134,12 @@ final class RingHost: NSObject {
         // centre and the lock screen cover sheet live — so even if the timer
         // below is late, the system's own panels win. The level is not the
         // exemption, it is the layer; the exemption is `systemOverlayUp`.
-        window.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 1)
+        // `statusBar + 2` (1002) — 0.0.47 raised it one step. The float card's
+        // gesture ring now lives in a window of its own at `statusBar + 1` (see
+        // `FloatHost.makeBand`), and that ring covers the right edge where the
+        // bar sits. One step above keeps the bar the first thing a thumb finds,
+        // which is what 「任何页面都能呼出」 needs.
+        window.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 2)
         window.rootViewController = UIViewController()
         window.rootViewController?.view = PassthroughView(frame: window.bounds)
         window.rootViewController?.view.backgroundColor = .clear
@@ -176,6 +192,8 @@ final class RingHost: NSObject {
         overlayTimer = nil
         AevonRingGrip.activeTouchHandler = nil
         barHeld = false
+        overlayStrikes = 0
+        padProbe = 0
 
         bar?.removeFromSuperview()
         barPad?.removeFromSuperview()
@@ -315,12 +333,18 @@ final class RingHost: NSObject {
     private func addBar() {
         guard let host = window?.rootViewController?.view else { return }
 
-        // The pad is the target, the bar is the paint job. 40 pt of pad means a
+        // The pad is the target, the bar is the paint job. 46 pt of pad means a
         // thumb that lands half an inch from the edge still finds it; the pad is
         // flush with the screen edge so nothing has to be aimed at.
-        let pad = UIView(frame: .zero)
+        let pad = BarPad(frame: .zero)
         pad.backgroundColor = .clear
         pad.isUserInteractionEnabled = true
+        pad.onDown = { [weak self] point in
+            guard let self = self, self.padProbe < 20 else { return }
+            self.padProbe += 1
+            Log.write("ring: bar touch at " + String(format: "%.0f,%.0f", point.x, point.y)
+                      + " #" + String(self.padProbe))
+        }
         pad.addGestureRecognizer(UITapGestureRecognizer(target: self,
                                                         action: #selector(toggle)))
         // 0.0.45 — 滑动呼出改成**按住拖动**，这是 Aevon(43) #5 的原话：
@@ -511,7 +535,20 @@ final class RingHost: NSObject {
 
     private func syncOverlayVisibility() {
         guard let pad = barPad else { return }
-        let hidden = systemOverlayUp
+        // 0.0.47 — 一次判真不算数。
+        //
+        // Aevon(45) #1 是「有时会无法触发，需要多次点击或滑动」。这个定时器就是
+        // 那个「有时」：`systemOverlayUp` 是 0.35 秒缓存的单次采样，转场里读到
+        // 一次「面板在上面」，`pad.isHidden` 就置真 —— 而隐藏的视图不参与命中，
+        // 这一段时间里按上去什么都不会发生。两次连续判真才藏（0.4 秒一 tick，
+        // 缓存 0.35 秒，两次采样互相独立），并且手指还在垫子上（`barHeld`）时
+        // 一律不藏。
+        if systemOverlayUp && !barHeld {
+            overlayStrikes = Swift.min(overlayStrikes + 1, 2)
+        } else {
+            overlayStrikes = 0
+        }
+        let hidden = overlayStrikes >= 2 && !barHeld
         guard pad.isHidden != hidden else { return }
         pad.isHidden = hidden
         Log.write("ring: summon bar " + (hidden ? "hidden (system overlay up)"
@@ -610,6 +647,22 @@ final class RingHost: NSObject {
 
 /// The window must never be the hit target. Returning nil for itself makes
 /// every point that no subview claims fall through to SpringBoard below.
+/// 0.0.47 — 落指就先报一声的触摸垫。
+///
+/// 「触发不灵敏」有两种事实：手指没落到垫子上，或者落上了但没被当成手势（手势
+/// 仲裁、被别的窗口拿走、垫子被藏起来）。垫子在 `touchesBegan` 报一次，日志就能
+/// 把这两种分开 —— 在此之前三轮里它们长得一模一样。
+final class BarPad: UIView {
+    var onDown: ((CGPoint) -> Void)?
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if let touch = touches.first {
+            onDown?(touch.location(in: superview))
+        }
+        super.touchesBegan(touches, with: event)
+    }
+}
+
 private final class PassthroughWindow: UIWindow {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let hit = super.hitTest(point, with: event)

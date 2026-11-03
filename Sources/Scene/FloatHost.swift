@@ -11,17 +11,13 @@ import UIKit
 /// the app, so recognizers on the card's own view never fired (Aevon(33)). The
 /// band has to be a sibling ring *outside* the picture.
 ///
-/// 0.0.40 is the operator's own map, and it is smaller than the master's:
+/// 0.0.40 is the operator's own map, and 0.0.47 gives the top edge its gestures
+/// back so that the map is a perimeter rather than three edges:
 ///
-///          ┌─────────── 顶部：不接，触摸穿透 ───────────┐
-///          │                                             │
-///   左侧   │   ╔═══════════════════════════════╗         │   右侧
-///   拖动   │   ║        the card — the app      ║         │   拖动
-///   点吸附 │   ╚═══════════════════════════════╝         │   点吸附
-///          │                                             │
-///          ├──────────┬─────────────────┬───────────────┤
-///          │ 缩放/复位 │ 拖动移动/上滑关   │   缩放/复位    │
-///          └──────────┴─────────────────┴───────────────┘
+///    · 四周（含顶部）：拖动 = 移动窗口
+///    · 左侧 / 右侧：点一下 = 贴边吸附
+///    · 底边中段：上滑 = 关闭
+///    · 左下 / 右下角：拖动 = 缩放，长按 = 复位
 ///
 /// 0.0.43 — the corners resize again. 0.0.40 removed the two resize cells on
 /// the honest grounds that a resize reachable only through the dead top strip
@@ -32,14 +28,13 @@ import UIKit
 /// geometry reset. The card's aspect never changes: the picture is one shape
 /// scaled, so a resize is a height choice and the width follows.
 ///
-/// Why the top strip is empty. 0.0.35-0.0.39 had four cells up there — 边中's
-/// flick-to-close and the two top corners' resize — copied from the master's
-/// `GestureIntroduction`. Both were reachable only by aiming at a band that sits
-/// on top of the picture, and the operator asked for them gone. A band that
-/// answers nothing is worse than no band, because it eats touches that belong to
-/// the app, so the top strip is punched out of the hit area entirely instead of
-/// being left as dead weight. The close gesture did not disappear with it: 边中's
-/// 快速上滑 lives on the bottom band now, where the same text applies ("竖屏上下").
+/// Why the top strip came back. 0.0.35-0.0.39 had four cells up there — 边中's
+/// flick-to-close and the two top corners' resize — and 0.0.40 punched the strip
+/// out when those cells left. 0.0.47 restores it as plain 拖动: the master's own
+/// caption is 「浮窗手势区域为边缘外侧」— a perimeter, all four sides — and
+/// Aevon(44)/(45) reporting 「四边手势依旧失效」 three rounds running is what a
+/// perimeter with one dead edge looks like from the outside. The strip still
+/// answers no tap and no long press, so nothing docks or resets by accident.
 ///
 /// 吸附 changed meaning in this version. It used to be a drag that snapped to an
 /// edge and a double tap that minimised. Both are gone. 吸附 is now one tap on a
@@ -54,11 +49,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private enum Zone {
         case left
         case right
+        case top
         case bottomMiddle
         case bottomCorner
     }
 
     private var window: FloatWindow?
+    /// 0.0.47 — 手势面自己的窗口，层级 statusBar+1。见 `makeBand()`。
+    private var bandWindow: BandWindow?
+    /// 手势环相对卡片的四边内嵌量。卡片贴到某一边时，那一边的环就被屏幕截短，
+    /// 所以它是算出来的，不是常数 `reach`。
+    private var bandInset: CGPoint = .zero
     private var card: UIView?
     private var content: UIView?
     private var close: UIControl?
@@ -84,13 +85,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var resizeFromLeft = false
     /// The frame to come back to. Non-nil is the only definition of "docked".
     private var miniFrame: CGRect?
-    /// 0.0.46 — how many outer touches `ringHitTest` has routed. Bounded, like
-    /// every other probe here: SpringBoard's log is not the place for a stream.
+    /// 0.0.47 — how many hitTest questions the band window has answered (and
+    /// written down). Bounded, like every other probe here: SpringBoard's log is
+    /// not the place for a stream.
     private var ringProbe = 0
 
     private let cardWidth: CGFloat = 320
     private let cardHeight: CGFloat = 480
-    private let corner: CGFloat = 12
     private let edge: CGFloat = 2
     private let margin: CGFloat = 8
     /// 0.0.45 — 吸附 (docked) size, from the master's 「贴边缩小」.
@@ -174,11 +175,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
         let card = UIView(frame: plan.frame)
         card.backgroundColor = .clear
-        card.layer.cornerRadius = host.corner
         card.layer.borderWidth = host.edge
         card.layer.borderColor = UIColor.white.cgColor
         card.clipsToBounds = true
         card.isUserInteractionEnabled = true
+        host.card = card
+        host.content = view
+        host.natural = source
+        host.applyCorner(scale: plan.scale)
 
         // The scene view keeps the scene's own coordinate space and is scaled as
         // a whole — setting `frame` instead rewrites that space, which is what
@@ -192,14 +196,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         root.addSubview(card)
 
         host.window = window
-        host.card = card
-        host.content = view
-        host.natural = source
         host.installClose()
-        // The ring goes in last, so it is above the card in the window. Its own
-        // hitTest hands back nothing inside the card's rect, so a touch on the
-        // picture still reaches the app — the ring is above, not in the way.
-        host.installGrip(on: root)
+        // 0.0.47 — 手势环搬到 band 窗口（statusBar+1）。卡片留在这一层，所以
+        // 里头的点击滑动照旧；伸手的那一圈在一个不会被任何 App 窗口盖住的层。
+        host.installGrip(on: host.makeBand() ?? root)
         host.installGestures()
 
         Log.write("win: card "
@@ -225,8 +225,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                                      window.bounds.width - card.frame.maxX,
                                      card.frame.minY,
                                      window.bounds.height - card.frame.maxY)
-        Log.write(ring + cell + room
-                  + " 外侧 (左右 拖动/点吸附, 底中 拖动/上滑关, 底角 缩放/长按复位, 顶部不接)")
+        // 0.0.47 — 环实际铺到哪儿，和圆角一起打印。`inset` 是环相对卡片的内嵌量
+        // （卡片贴边时那一边会小于 60），`corner` 是缩放后的屏幕圆角。
+        let fit = " inset=" + String(format: "%.0f/%.0f", host.bandInset.x, host.bandInset.y)
+            + " corner=" + String(format: "%.0f", card.layer.cornerRadius)
+        Log.write(ring + cell + room + fit
+                  + " 外侧 (四边 拖动, 左右 点吸附, 底中 上滑关, 底角 缩放/长按复位)")
         return window.isHidden ? nil : host
     }
 
@@ -279,6 +283,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     private func teardown() {
         guard let window = window else {
+            bandWindow?.isHidden = true
+            bandWindow = nil
             onClose = nil
             return
         }
@@ -295,8 +301,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         tap = nil
         miniFrame = nil
         ringProbe = 0
+        bandInset = .zero
         onClose = nil
-        window.ringHit = nil
+        // The band's window goes with it. It is full-screen and one level below
+        // the summon bar; leaving it up would be a transparent sheet over the
+        // desktop for as long as SpringBoard lives.
+        bandWindow?.isHidden = true
+        bandWindow = nil
         window.isHidden = true
         window.rootViewController = nil
         self.window = nil
@@ -309,6 +320,46 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return window
         }
         return FloatWindow(frame: UIScreen.main.bounds)
+    }
+
+    /// 0.0.47 — 手势面所在的那一层。
+    ///
+    /// 母本自己的证据（Stheno 0.1.23）：Preference 的文案里有
+    /// `StatusBarEmbeddedWindow = 嵌入状态栏窗口`，类表里有
+    /// `_TtC6Stheno21UIStatusBarWindowHook`，`SthenoWindow` 又自己实现了
+    /// `-hitTest:withEvent:`。三件事合起来是一句话：母本不把浮窗的手势面放在
+    /// 普通层级的窗口里，它挂到系统最上层去。
+    ///
+    /// 我们这边的证据一样硬：0.0.46 的几何是对的（环 399x710，四边各留 66），
+    /// 但 Aevon(44)/(45) 两份日志里，卡片所在的那个窗口一共只收到**一个**触摸
+    /// —— 就是 ✕ 关闭键。触摸根本没到窗口，几何再准也没有机会生效。所以手势面
+    /// 搬上来，卡片留在下面：内容照样能点能滑，伸手的那一圈在一个 App 窗口盖
+    /// 不到的高度。
+    private func makeBand() -> UIView? {
+        guard let scene = mainScene() else { return nil }
+        let window = BandWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        // 竖条搬到 statusBar+2（见 RingHost.start），比这一层高一级：卡片开着
+        // 的时候，右侧的环正好压在竖条原来的位置上，竖条必须在上面才抢得到手指。
+        window.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 1)
+        let root = BandRoot(frame: window.bounds)
+        root.backgroundColor = .clear
+        root.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        let controller = UIViewController()
+        controller.view = root
+        window.rootViewController = controller
+        window.isHidden = false
+        window.probe = { [weak self] point, hit in
+            guard let self = self, self.ringProbe < 20 else { return }
+            self.ringProbe += 1
+            Log.write("win: band probe " + String(format: "%.0f,%.0f", point.x, point.y)
+                      + " -> " + hit)
+        }
+        bandWindow = window
+        Log.write("win: band window up level=" + String(Int(window.windowLevel.rawValue)))
+        return root
     }
 
     /// The card is the picture's shape, so there is no leftover to show as a
@@ -416,64 +467,90 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     // MARK: - ring
 
-    /// The ring is the card's frame grown by `band` on all four sides, with the
-    /// card's own rect declared as a hole and the top strip declared dead.
-    /// Nothing about it is special: it has no background, it draws nothing, it
-    /// exists to be touched.
+    /// The ring is the card's frame grown by `reach` on all four sides, with the
+    /// card's own rect declared as a hole. Nothing about it is special: it has no
+    /// background, it draws nothing, it exists to be touched.
+    ///
+    /// 0.0.47 — 手势环：卡片四周一圈，厚度 `reach`，但**按屏幕截断**，一路铺到
+    /// 屏幕边缘。
+    ///
+    /// 0.0.46 用的是 `card.frame.insetBy(dx: -66, dy: -66)`。卡片居中时四周各
+    /// 剩 82 pt，环只吃 66，靠屏幕边的最后 16 pt 是死区 —— 而「从屏幕边缘往里
+    /// 划」正是伸手的第一个动作，那一划正好落在死区里。
     private func installGrip(on root: UIView) {
         guard let card = card else { return }
-        let grip = GripView(frame: card.frame.insetBy(dx: -reach, dy: -reach))
+        let shape = bandRect(for: card)
+        let grip = GripView(frame: shape.frame)
         grip.backgroundColor = .clear
         grip.isUserInteractionEnabled = true
-        grip.hole = CGRect(x: reach, y: reach,
-                           width: card.bounds.width, height: card.bounds.height)
+        grip.hole = shape.hole
         root.addSubview(grip)
         self.grip = grip
-        // 0.0.46 — the window decides ring membership itself, in window
-        // coordinates, before UIKit walks the view tree. Two rounds in a row
-        // have ended with 「外侧手势失效」 while the ring existed, was above the
-        // card and answered `point(inside:)` correctly; making the window route
-        // the touch removes the whole class of "a sibling in between" answers.
-        window?.ringHit = { [weak self] point in self?.ringHitTest(point) }
         syncGrip()
     }
 
-    /// The probe for the next round. Three lines can differ and each has one
-    /// meaning:
+    /// 环的 frame、卡片在环里的位置、以及环相对卡片的四边内嵌量。三者出自同
+    /// 一次计算，所以「环在哪」和「zone 怎么算」不可能各说各话。
+    private func bandRect(for card: UIView) -> (frame: CGRect, hole: CGRect, inset: CGPoint) {
+        let bounds = window?.bounds ?? UIScreen.main.bounds
+        let left = Swift.min(reach, Swift.max(0, card.frame.minX))
+        let right = Swift.min(reach, Swift.max(0, bounds.maxX - card.frame.maxX))
+        let top = Swift.min(reach, Swift.max(0, card.frame.minY))
+        let bottom = Swift.min(reach, Swift.max(0, bounds.maxY - card.frame.maxY))
+        let frame = CGRect(x: card.frame.minX - left,
+                           y: card.frame.minY - top,
+                           width: card.frame.width + left + right,
+                           height: card.frame.height + top + bottom)
+        let hole = CGRect(x: left, y: top,
+                          width: card.frame.width, height: card.frame.height)
+        return (frame, hole, CGPoint(x: left, y: top))
+    }
+
+    /// 0.0.47 — 圆角。
     ///
-    ///   · `event hit #n … -> GripView`  the window got the touch and routed it
-    ///   · `ring hit zone=right …`       the ring got it and the zone decides
-    ///   · neither, again                the touch never reached this window
-    private func ringHitTest(_ point: CGPoint) -> UIView? {
-        guard let grip = grip else { return nil }
-        let local = grip.convert(point, from: window)
-        guard grip.bounds.contains(local) else { return nil }
-        // The picture keeps its own touches: tapping, scrolling and liking
-        // inside the card belong to the hosted app.
-        guard !grip.hole.contains(local) else { return nil }
-        // No gesture lives on the top strip, and a band that answers nothing but
-        // still eats the touch is worse than no band at all.
-        guard local.y >= grip.hole.minY else { return nil }
-        if ringProbe < 20 {
-            ringProbe += 1
-            Log.write("win: ring hit zone=" + name(zoneFor(cardPoint(local)))
-                      + " at " + String(format: "%.0f,%.0f", local.x, local.y)
-                      + " #" + String(ringProbe))
+    /// 母本的数据：`DeviceEnv` 有 `cornerRadius` 字段，二进制 `__cstring` 里有
+    /// `_displayCornerRadius` 这个键，`ReflectManager` 有 `finalCardCorner` ——
+    /// 也就是说圆角不是拍出来的常数，取的是**设备自己的屏幕圆角**，再按卡片
+    /// 的缩放比缩一遍，并且和 frame 一起被动画。
+    ///
+    /// 这里照做：卡片是 430x932 的画面按 0.62 缩小，屏幕圆角 55 就落成 34。
+    private func applyCorner(scale: CGFloat) {
+        guard let card = card else { return }
+        let radius = Swift.max(6, Swift.min(FloatHost.deviceCorner() * scale,
+                                            card.bounds.height / 2))
+        card.layer.cornerRadius = radius
+        card.layer.cornerCurve = .continuous
+        card.layer.masksToBounds = true
+    }
+
+    /// The screen's own corner radius, asked for at runtime. roothide's SpringBoard
+    /// answers `_displayCornerRadius`; a device that does not gets the value every
+    /// full-screen iPhone since the X has used, which is close enough to look right.
+    private static func deviceCorner() -> CGFloat {
+        let selector = NSSelectorFromString("_displayCornerRadius")
+        if UIScreen.main.responds(to: selector),
+           let value = UIScreen.main.value(forKey: "_displayCornerRadius") as? NSNumber,
+           value.doubleValue > 1 {
+            return CGFloat(value.doubleValue)
         }
-        return grip
+        return 55
     }
 
     /// Every frame change goes through here. A ring that lags its card by one
     /// event is a ring the finger misses by one band.
     private func syncGrip() {
         guard let card = card, let grip = grip else { return }
-        grip.frame = card.frame.insetBy(dx: -reach, dy: -reach)
-        grip.hole = CGRect(x: reach, y: reach,
-                           width: card.bounds.width, height: card.bounds.height)
+        let shape = bandRect(for: card)
+        grip.frame = shape.frame
+        grip.hole = shape.hole
+        bandInset = shape.inset
     }
 
     /// The bottom band's middle third — the cell that closes on a flick and
-    /// moves otherwise. The rest of the bottom band is 边角.
+    /// moves otherwise. The rest of the bottom band is 边角. The top band is its
+    /// own zone: the master's caption puts the whole perimeter under gestures
+    /// (「浮窗手势区域为边缘外侧」), and a perimeter with one dead edge is what
+    /// three rounds of 「四边手势失效」 were actually reporting.
     private func zoneFor(_ point: CGPoint) -> Zone {
         guard let card = card else { return .bottomCorner }
         let size = card.bounds.size
@@ -482,6 +559,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             let middle = point.x >= cell.minX && point.x <= cell.maxX
             return middle ? .bottomMiddle : .bottomCorner
         }
+        if point.y < 0 { return .top }
         return point.x < 0 ? .left : .right
     }
 
@@ -496,6 +574,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         switch zone {
         case .left: return "left"
         case .right: return "right"
+        case .top: return "top"
         case .bottomMiddle: return "bottom-middle"
         case .bottomCorner: return "bottom-corner"
         }
@@ -505,7 +584,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// the geometry are written in. A point outside the card comes back negative
     /// or past the size, and that is precisely how a band is recognised.
     private func cardPoint(_ point: CGPoint) -> CGPoint {
-        CGPoint(x: point.x - reach, y: point.y - reach)
+        CGPoint(x: point.x - bandInset.x, y: point.y - bandInset.y)
     }
 
     // MARK: - gestures
@@ -576,7 +655,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // Every delta is measured in the window, never in the card or the
             // ring. Both are being resized and moved by this very gesture, so
             // their coordinate spaces are rulers that stretch.
-            let total = gesture.translation(in: window)
+            // `nil` = 本手势所在窗口的坐标系（也就是 band 那一层）。手势面
+            // 0.0.47 起和卡片不在同一个窗口，跨窗口换算没有必要：两层都是全屏、
+            // 原点重合，而 band 窗口在整个拖动过程中不动，是唯一稳定的尺子。
+            let total = gesture.translation(in: nil)
             let dx = total.x - panStep.x
             let dy = total.y - panStep.y
             panStep = total
@@ -652,8 +734,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // Travel is the whole path and cannot flip. Speed stays as the second
             // reading, because a short hard flick barely travels and is still a
             // flick.
-            let total = gesture.translation(in: window)
-            let speed = gesture.velocity(in: window)
+            let total = gesture.translation(in: nil)
+            let speed = gesture.velocity(in: nil)
             let lift = -total.y
             let up = -speed.y
             let byTravel = lift > 50 && abs(total.y) > abs(total.x)
@@ -764,6 +846,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         content.center = CGPoint(x: card.bounds.midX, y: card.bounds.midY)
         let scale = card.bounds.height / natural.height
         content.transform = CGAffineTransform(scaleX: scale, y: scale)
+        // A resized card is the same device at another scale, so the corner is
+        // the same screen corner at another scale. Leaving the old radius on a
+        // shrunk card reads as a rounded rectangle that has been sanded down.
+        applyCorner(scale: scale)
     }
 
     /// 重启, as much of it as a window can do by itself: back to the frame the
@@ -837,6 +923,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 /// from hitTest, so the touch goes to the card, to the presentation view, and to
 /// the app — tapping, scrolling and liking inside the floating window behave like
 /// a real window.
+///
+/// 0.0.47 — 这一圈住进了自己的窗口（`FloatHost.makeBand`），所以它不再和卡片
+/// 抢同一个窗口的命中，也不再有「被某个兄弟视图挡在前面」这种可能。
 final class GripView: UIView {
     /// The card's rect in this view's own coordinates.
     var hole: CGRect = .zero
@@ -866,12 +955,7 @@ final class GripView: UIView {
     // subclass with one property and no pixels.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         guard super.point(inside: point, with: event) else { return false }
-        if hole.contains(point) { return false }
-        // 0.0.40 — the whole top strip is dead. It has no gesture any more, and a
-        // band that answers nothing but still eats the touch is worse than no
-        // band: the picture underneath loses taps for no benefit.
-        if point.y < hole.minY { return false }
-        return true
+        return !hole.contains(point)
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -887,20 +971,14 @@ final class GripView: UIView {
 /// through to the app underneath, which is what makes a floating card usable
 /// while a full-screen app is running.
 final class FloatWindow: UIWindow {
-    /// 0.0.46 — asked before UIKit's own search. Returns the ring view when the
-    /// point is outside the picture and inside the band, nil otherwise. Set by
-    /// `FloatHost.installGrip` and cleared on teardown.
-    var ringHit: ((CGPoint) -> UIView?)?
-
     /// The first few touches, printed as they enter the window and before any hit
     /// testing of our own. Two reports in a row have ended with "the gesture does
     /// not fire" and an empty probe, and an empty probe means either the touch
     /// never reached this window or it reached it and missed the ring.
     /// `sendEvent` is the one place that can tell those apart.
-    private var seen = 0   // 0.0.45 — 8 → 20, same reason as `GripView.proven`
+    private var seen = 0
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        if let ring = ringHit, let view = ring(point) { return view }
         let hit = super.hitTest(point, with: event)
         // The bare root view is not a thing to answer with: letting it take the
         // touch costs the desktop its icons and gains nothing, because it has no
@@ -920,5 +998,32 @@ final class FloatWindow: UIWindow {
                       + " -> " + who)
         }
         super.sendEvent(event)
+    }
+}
+
+/// 0.0.47 — 手势面的窗口。层级 statusBar+1：任何 App 的窗口都在它下面，所以
+/// 「浮窗外侧」这一圈不会因为某个窗口盖在上面而收不到触摸。
+///
+/// `hitTest` 只回答一件事：命中环（`GripView`）就返回环，别处一律 nil —— 桌面
+/// 图标、卡片里的 App 都还归别人。前 20 次提问写进日志：点在哪、答的哪个类。
+/// 下一份日志因此能一句话分开「窗口没收到触摸」和「收到了但环判错」，这正是
+/// 0.0.44-0.0.46 三轮里始终分不开的那两件事。
+final class BandWindow: UIWindow {
+    var probe: ((CGPoint, String) -> Void)?
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        let answer = (hit === self || hit === rootViewController?.view) ? nil : hit
+        probe?(point, answer.map { String(cString: object_getClassName($0)) } ?? "nil")
+        return answer
+    }
+}
+
+/// 这一层的根视图，和竖条那层一样：自己什么都不接，接住的只有环。一张全屏且
+/// 会答话的透明视图，就是一张桌面点不动的透明纸。
+final class BandRoot: UIView {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        return hit === self ? nil : hit
     }
 }

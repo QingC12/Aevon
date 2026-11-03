@@ -442,6 +442,7 @@ def main():
                   # 「按住呼出」是这版的核心改动：没有这一行，圆盘就还是
                   # 0.0.44 那种「手指抬起后才出现」的形态。
                   b"ring: held open at ", b"ring: bar released at ",
+                  b"ring: bar touch at ",
                   b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",
                   # 0.0.42 — the ported disc must be in the dylib. These tags are
@@ -599,12 +600,13 @@ def main():
                   # attached to a view that owns its touches.
                   b"win: grip ring band=",
                   b"win: grip touch at ",
-                  # 0.0.46 — 窗口自己判定环带归属（窗口坐标系，先于 UIKit 的
-                  # 视图树搜索）。上一轮的失败是几何：卡片 365 pt 宽放在 430 pt
-                  # 屏上，右边只剩 8 pt，也就是右边带只有 8 pt。这一行是该判定
-                  # 生效的唯一证据：有它而 zone 不对，是分格问题；没它，是触摸
-                  # 根本没到窗口。
-                  b"win: ring hit zone=",
+                  # 0.0.47 — 手势面搬进自己的窗口（statusBar+1，见
+                  # FloatHost.makeBand）。两条：`band window up level=` 证明那一
+                  # 层真的建起来了，`band probe` 是该窗口收到的每一次命中提问（点
+                  # 与答案）。有 probe 而答案 nil，是环判错；一条 probe 都没有，
+                  # 是触摸连这一层都没到 —— 这正是 0.0.44-0.0.46 分不开的两件事。
+                  b"win: band window up level=",
+                  b"win: band probe ",
                   # 0.0.36 — Aevon(33) and Aevon(34) both reported "the gesture
                   # does not fire" while the log proved the ring existed and was
                   # never touched once. `event hit #n` is how the next run

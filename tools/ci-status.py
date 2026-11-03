@@ -18,8 +18,10 @@ import urllib.error
 REPO = os.environ.get("AEVON_REPO", "QingC12/Aevon")
 TOKEN = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
 
-for _k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-    os.environ.pop(_k, None)
+# 0.0.46 — 同 gh-push：这台机器出网必须走代理，留开关，默认行为不变。
+if os.environ.get("AEVON_KEEP_PROXY") != "1":
+    for _k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+        os.environ.pop(_k, None)
 
 HEAD = {
     "Accept": "application/vnd.github+json",
