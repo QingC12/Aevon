@@ -328,13 +328,18 @@ static char AevonArmed[128];
 static long AevonDeactSetCalls = 0;
 static long AevonDeactStripped = 0;
 static long AevonInterceptCalls = 0;
+static long AevonInterceptTried = 0;
+static long AevonInterceptWrote = 0;
 static long AevonSceneLifeCalls = 0;
 
 /// Eight lines of what the hooks actually saw, written as C strings on purpose:
 /// these run inside SpringBoard's scene-update path, and formatting an
 /// `NSString` there is work nobody asked for. The first four calls per hook are
 /// the interesting ones; after that only the counters move.
-static char AevonTrace[8][192];
+///
+/// Sixteen, not eight: 0.0.27 filled all eight with the deactivation hook alone
+/// and the interceptor — the hook this version is about — had nowhere to write.
+static char AevonTrace[16][192];
 static long AevonTraceCount = 0;
 
 static void AevonRawTrace(const char *tag, const char *format, ...) {
@@ -378,6 +383,59 @@ void AevonHookArm(NSString *bundle) {
 
 void AevonHookDisarm(void) {
     AevonArmed[0] = '\0';
+}
+
+/// A `BOOL` getter read with the ABI it has, as a number, `-1` for "no such
+/// method". C, not Swift, because this runs inside the settings path.
+static int AevonFlagOf(id object, const char *name) {
+    if (object == nil || name == NULL) return -1;
+    SEL sel = sel_registerName(name);
+    if (![object respondsToSelector:sel]) return -1;
+    return ((BOOL (*)(id, SEL))objc_msgSend)(object, sel) ? 1 : 0;
+}
+
+/// When this was last attempted, in seconds since the reference date.
+static CFAbsoluteTime AevonLastForegroundSet = 0;
+
+/// The one thing the mother ship does that this tweak has never done: keep a
+/// scene believing it is still in front, so its app keeps committing frames
+/// after the operator has gone to the desktop.
+///
+/// Aevon(27) is why it is worth doing. That run reported two layers on the
+/// scene, both hosted in our container, no layer left unhosted — and a black
+/// card. Layers that are present, hosted and empty are being fed by an app that
+/// has stopped drawing, and the app stopped drawing because its settings said
+/// `foreground=no`. Whether the settings object handed to the interceptor can
+/// be changed is a fact about this system, so it is asked rather than assumed:
+/// `respondsToSelector:` first, write second, read back third. A system that
+/// says no gets a trace line instead of a guess, and the trace names the class
+/// it said no on.
+static void AevonForceForeground(id settings) {
+    if (settings == nil) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    // Every settings update of every scene comes through here. Half a second is
+    // slow enough that a scene which keeps proposing `foreground=no` cannot turn
+    // this into a busy loop, and fast enough that the card gets its picture.
+    if (now - AevonLastForegroundSet < 0.5) return;
+    AevonLastForegroundSet = now;
+    long attempt = __sync_fetch_and_add(&AevonInterceptTried, 1);
+    for (NSString *name in @[@"setForeground:", @"_setForeground:"]) {
+        SEL sel = NSSelectorFromString(name);
+        if (![settings respondsToSelector:sel]) continue;
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(settings, sel, YES);
+        long wrote = __sync_fetch_and_add(&AevonInterceptWrote, 1);
+        if (attempt < 6 || wrote < 3) {
+            AevonRawTrace("foreground", "wrote via %s fg=%d class=%s",
+                          [name UTF8String], AevonFlagOf(settings, "isForeground"),
+                          class_getName(object_getClass(settings)));
+        }
+        return;
+    }
+    if (attempt < 6) {
+        AevonRawTrace("foreground", "no setter, class=%s fg=%d",
+                      class_getName(object_getClass(settings)),
+                      AevonFlagOf(settings, "isForeground"));
+    }
 }
 
 /// The first class whose *own* method list contains this selector. Own list, not
@@ -562,10 +620,11 @@ NSString *AevonHookInstall(void) {
         }
     }
 
-    // 2. The interceptor beside it, read-only on this pass: it is installed to
-    //    count and to print the shape of what the system proposes, and it
-    //    returns exactly what the original returned. Modifying settings here is
-    //    the next version's job, once (1) is known to be called at all.
+    // 2. The interceptor beside it. 0.0.27 required an object return, printed
+    //    `types=v32@0:8@16@24`, and left it alone — the device said so itself.
+    //    A void interception is still where settings are proposed before they are
+    //    applied, which makes it the place for the one thing the mother ship does
+    //    and this tweak does not: keeping the scene in front.
     NSString *interceptName = @"_scene:interceptUpdateWithNewSettings:";
     Class interceptor = AevonClassDeclaring(interceptName);
     if (interceptor == Nil) {
@@ -574,26 +633,54 @@ NSString *AevonHookInstall(void) {
         Method shape = class_getInstanceMethod(interceptor, NSSelectorFromString(interceptName));
         const char *encoding = shape != NULL ? method_getTypeEncoding(shape) : NULL;
         unsigned int arguments = shape != NULL ? method_getNumberOfArguments(shape) : 0;
+        BOOL returnsObject = encoding != NULL && encoding[0] == '@';
+        BOOL returnsVoid = encoding != NULL && encoding[0] == 'v';
         [out appendFormat:@"hook intercept cls=%@ types=%s args=%u\n",
          NSStringFromClass(interceptor), encoding != NULL ? encoding : "?", arguments];
-        if (shape == NULL || encoding == NULL || encoding[0] != '@' || arguments != 4) {
-            [out appendString:@"hook intercept: shape is not (id, id, id) -> id, left alone\n"];
-        } else {
+        if (shape == NULL || encoding == NULL || arguments != 4
+            || (!returnsObject && !returnsVoid)) {
+            [out appendFormat:@"hook intercept: shape %s is neither object nor void,"
+             " left alone\n", encoding != NULL ? encoding : "?"];
+        } else if (returnsObject) {
             AevonHookSlot *slot = AevonReserve("intercept");
             if (slot == NULL) {
                 [out appendString:@"hook intercept: no slot\n"];
             } else {
                 id block = ^id(id object, id scene, id settings) {
                     long seen = __sync_fetch_and_add(&AevonInterceptCalls, 1);
-                    if (seen < 4) {
-                        AevonRawTrace("intercept", "scene=%s settings=%s",
-                                      AevonSceneName(scene),
-                                      settings != nil ? class_getName(object_getClass(settings)) : "nil");
+                    BOOL mine = AevonSceneIsMine(scene);
+                    if (seen < 4 || (mine && seen < 12)) {
+                        AevonRawTrace("intercept", "mine=%d fg=%d settings=%s",
+                                      mine ? 1 : 0, AevonFlagOf(settings, "isForeground"),
+                                      settings != nil
+                                          ? class_getName(object_getClass(settings)) : "nil");
                     }
+                    if (mine) AevonForceForeground(settings);
                     id (*original)(id, SEL, id, id) =
                         (id (*)(id, SEL, id, id))slot->original;
                     if (original == NULL) return settings;
                     return original(object, slot->sel, scene, settings);
+                };
+                AevonAttach(out, slot, interceptor, interceptName, block);
+            }
+        } else {
+            AevonHookSlot *slot = AevonReserve("intercept");
+            if (slot == NULL) {
+                [out appendString:@"hook intercept: no slot\n"];
+            } else {
+                void (^block)(id, id, id) = ^(id object, id scene, id settings) {
+                    long seen = __sync_fetch_and_add(&AevonInterceptCalls, 1);
+                    BOOL mine = AevonSceneIsMine(scene);
+                    if (seen < 4 || (mine && seen < 12)) {
+                        AevonRawTrace("intercept", "mine=%d fg=%d settings=%s",
+                                      mine ? 1 : 0, AevonFlagOf(settings, "isForeground"),
+                                      settings != nil
+                                          ? class_getName(object_getClass(settings)) : "nil");
+                    }
+                    if (mine) AevonForceForeground(settings);
+                    void (*original)(id, SEL, id, id) =
+                        (void (*)(id, SEL, id, id))slot->original;
+                    if (original != NULL) original(object, slot->sel, scene, settings);
                 };
                 AevonAttach(out, slot, interceptor, interceptName, block);
             }
@@ -639,9 +726,11 @@ NSString *AevonHookInstall(void) {
 /// taken down.
 NSString *AevonHookSummary(void) {
     NSMutableString *out = [NSMutableString string];
-    [out appendFormat:@"hook: live=%d deact_set=%ld stripped=%ld intercept=%ld scene_life=%ld armed=%@\n",
+    [out appendFormat:@"hook: live=%d deact_set=%ld stripped=%ld intercept=%ld"
+     " forced=%ld/%ld scene_life=%ld armed=%@\n",
      AevonSlotCount, AevonDeactSetCalls, AevonDeactStripped,
-     AevonInterceptCalls, AevonSceneLifeCalls,
+     AevonInterceptCalls, AevonInterceptWrote, AevonInterceptTried,
+     AevonSceneLifeCalls,
      AevonIsArmed() ? [NSString stringWithUTF8String:AevonArmed] : @"no"];
     long total = AevonTraceCount;
     long limit = (long)(sizeof(AevonTrace) / sizeof(AevonTrace[0]));

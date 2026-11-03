@@ -1013,8 +1013,15 @@ zStackParticipantDidChange:
                   + AevonReadObjects(scene, "layer,content,state,manager"))
         Log.write("win: scene flags " + AevonReadFlags(scene,
                                                        "active,foreground,valid,visib,deact"))
+        // 0.0.28 read this with the object-returning probe and printed
+        // `no getter matched`: `foreground` is a BOOL, so the object walk was
+        // answering a question nobody asked. Flags here, objects (content state,
+        // display configuration) beside them.
+        let settings = value(of: scene, "settings")
+        Log.write("win: scene settings flags "
+                  + AevonReadFlags(settings, "foreground,background,active,level,visible"))
         Log.write("win: scene settings objects "
-                  + AevonReadObjects(value(of: scene, "settings"), "foreground,background,active"))
+                  + AevonReadObjects(settings, "state,display,orient,role"))
         Log.write("win: layer manager objects " + AevonReadObjects(layerManager, "layer"))
 
         guard let made = AevonCreatePresenter(manager, "com.aevon.float", 0),
@@ -1103,6 +1110,18 @@ zStackParticipantDidChange:
         if let container = container {
             Log.write("win: container objects " + AevonReadObjects(container, "host,layer"))
             Log.write("win: container flags " + AevonReadFlags(container, "host,hidden"))
+            // Aevon(27) said two layers are hosted and two host views exist, and
+            // the card was still black. Two hosted layers and a black card are
+            // either "the app is not committing" or "the host view has no size",
+            // and a frame separates them for free.
+            if let hosts = value(of: container, "_hostViews") as? NSArray,
+               let first = hosts.firstObject as? UIView {
+                Log.write("win: host view count=" + String(hosts.count)
+                          + " cls=" + NSStringFromClass(type(of: first))
+                          + " frame=" + String(format: "%.0fx%.0f",
+                                               first.frame.width, first.frame.height)
+                          + " hidden=" + (first.isHidden ? "yes" : "no"))
+            }
         }
         Log.write("win: presenter objects " + AevonReadObjects(presenter, "host,active,valid"))
         Log.write("win: presenter flags " + AevonReadFlags(presenter, "host,active,valid"))
