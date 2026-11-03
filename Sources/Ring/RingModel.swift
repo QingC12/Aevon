@@ -38,12 +38,18 @@ struct RingConfig {
     /// nobody can see is not a feature.
     var desktop: Bool = true
 
+    /// 0.0.44 — where the summon strip sits, in percent of the screen height
+    /// (0 = top edge, 100 = bottom edge, 50 = the middle). A percentage rather
+    /// than a point for the same reason the old grip stored a fraction: the
+    /// same number means the same place after a rotation.
+    var barY: CGFloat = 50
+
     /// Every key whose change has to be mirrored to ring.plist. One list, so a
     /// new ring control cannot be added to the UI and forgotten here.
     static let mirroredKeys: Set<String> = [
         "Radius", "IconWidth", "RotationAngle", "Star",
         "DampingFraction", "CustomSpringAnimation", "VIBRATE", "INTENSITY",
-        "Speed", "!ring.desktop",
+        "Speed", "!ring.desktop", "!ring.barY",
     ]
 
     // MARK: Reading
@@ -79,6 +85,7 @@ struct RingConfig {
         config.intensity = clamp(number("INTENSITY", 0.7), 0.10, 1.0)
         config.speed = clamp(number("Speed", 1), 0.2, 2.0)
         config.desktop = flag("!ring.desktop", true)
+        config.barY = clamp(number("!ring.barY", 50), 0, 100)
         return config
     }
 
@@ -105,6 +112,7 @@ struct RingConfig {
             "Speed": Double(speed),
             "summary": summary,
             "desktop": desktop,
+            "barY": Double(barY),
             "writtenAt": Date().timeIntervalSince1970,
         ]
     }
@@ -139,6 +147,7 @@ struct RingConfig {
         config.intensity = clamp(number("INTENSITY", 0.7), 0.10, 1.0)
         config.speed = clamp(number("Speed", 1), 0.2, 2.0)
         config.desktop = flag("desktop", true)
+        config.barY = clamp(number("barY", 50), 0, 100)
         return config
     }
 

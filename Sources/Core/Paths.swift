@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.0.43"
+    public static let version = "0.0.44"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -45,10 +45,14 @@ public enum Aevon {
     /// falls back to the automatic list instead of showing nothing.
     public static let appsPath = "/var/mobile/Library/Logs/Aevon/apps.plist"
 
-    /// Where the grip is. SpringBoard writes it after a drag (that is the only
-    /// place the drag happens), Settings reads it to show the position and
-    /// deletes it to send the grip back to its corner.
-    public static let layoutPath = "/var/mobile/Library/Logs/Aevon/layout.plist"
+    /// 0.0.44 — 谁正在被浮窗承载。
+    ///
+    /// The card's app needs to know one thing no app can learn on its own: that
+    /// another process is showing its scene. Scene settings are supposed to say
+    /// so and may not arrive in the app's own copy, so the host writes this file
+    /// as well; the AevonApp injection (Sources/App/AevonAppHook.m) reads it and
+    /// stops reporting "background" to UIKit. Absent file = nobody is hosted.
+    public static let hostedPath = "/var/mobile/Library/Logs/Aevon/hosted.plist"
 
     /// 0.0.39 — where the floating card sits, and how big it is.
     ///

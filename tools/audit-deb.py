@@ -385,13 +385,27 @@ def main():
             bad("ring: no resetGrip: row — a grip dragged off screen could not be recovered")
         elif "@ring.apps" not in keys or "@ring.grip" not in keys:
             bad("ring: the app list / grip position has no live row")
+        elif "!ring.barY" not in keys:
+            bad("ring: no !ring.barY slider — the summon bar's height cannot be set")
+        elif "!ring.appHook" not in keys:
+            bad("ring: no !ring.appHook switch — an app-side bridge that cannot be "
+                "turned off is a bridge with no way back")
         else:
-            ok("ring: 旧版圆盘, live summary, preview, apps, grip reset, desktop switch")
+            bar = [i for i in ring_items if i.get("key") == "!ring.barY"]
+            if not bar or bar[0].get("cell") != "PSSliderCell":
+                bad("ring: !ring.barY is not a slider — a percentage needs a range")
+            elif not (bar[0].get("min") == 0.0 and bar[0].get("max") == 100.0):
+                bad("ring: !ring.barY range is not 0…100 — the row says percent")
+            elif not bar[0].get("showValue"):
+                bad("ring: !ring.barY does not show its value — 实时百分比 is the point")
+            else:
+                ok("ring: 旧版圆盘, live summary, preview, apps, grip reset, "
+                   "bar position slider, desktop switch, app-side bridge switch")
 
     for token in (b"RingPreviewController", b"openPanel:",
                   b"PanelController", b"previewRing:", b"editApps:", b"resetGrip:",
                   b"AppListController", b"AppPickerController",
-                  b"prefs: open app list", b"prefs: grip reset",
+                  b"prefs: open app list", b"prefs: bar position 50",
                   b"AevonRingEditorCell", b"AevonRingAddCell",
                   b"_applicationIconImageForBundleIdentifier:"):
         if token not in prefs:
@@ -408,7 +422,7 @@ def main():
     # in CI while looking fine locally. tools/push-gate.py enforces the length.
     dylib_early = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
     for token in (b"RingHost", b"ring: hosted on desktop", b"LSApplicationWorkspace",
-                  b"ring: grip moved to", b"ring: expanded (",
+                  b"ring: bar position ", b"ring: expanded (",
                   b"(first run, editable in Settings)",
                   # 0.0.42 — the ported disc must be in the dylib. These tags are
                   # string literals inside the disc's own log lines / source, so
@@ -426,13 +440,51 @@ def main():
     if b"RingAppsSnapshot" not in dylib_early:
         bad("host: RingAppsSnapshot missing from the tweak — the disc's list store "
             "did not come across with the port")
-    if b"/var/mobile/Library/Logs/Aevon/layout.plist" not in dylib_early:
-        bad("host: layout.plist path missing from the tweak — a dragged grip could not persist")
+    # 0.0.44 — the grip dot is gone and so is layout.plist: the bar's height is
+    # a preference, so what has to be in the dylib is the line that proves the
+    # host read it.
+    if b"ring: bar position " not in dylib_early:
+        bad("host: the summon bar never reports its position — the slider would "
+            "move a bar this file cannot prove exists")
+    # 0.0.44 — the hosted mark is the half of the bridge that does not travel
+    # through FrontBoard, so both sides must agree on the path or the app never
+    # learns it is on screen.
+    hosted_path = b"/var/mobile/Library/Logs/Aevon/hosted.plist"
+    if hosted_path not in dylib_early:
+        bad("host: hosted.plist path missing from the tweak — nothing would tell "
+            "the card's app that it is being shown")
+    if b"win: hosted mark " not in dylib_early:
+        bad("host: the hosted mark is never logged — a mark nobody can see is a "
+            "mark nobody can debug")
     if b"com.aevon.prefs" not in prefs:
         bad("host: settings never posts com.aevon.prefs — changes would not reach SpringBoard")
     if b"/var/mobile/Library/Logs/Aevon/ring.plist" not in prefs \
             or b"/var/mobile/Library/Logs/Aevon/ring.plist" not in dylib_early:
         bad("host: ring.plist path missing from one side — the two processes would disagree")
+
+    # -- 5d2. the app-side bridge (0.0.44) ----------------------------------
+    # A second injection point, and the first one in this project that loads
+    # into every app. Two things can go wrong silently: the dylib does not ship
+    # (the card goes back to being a picture you cannot touch), or it grows into
+    # something that has no business sitting in 250 processes.
+    bridge = files.get("Library/MobileSubstrate/DynamicLibraries/AevonApp.dylib", b"")
+    if not bridge:
+        bad("bridge: AevonApp.dylib missing — a hosted app would keep refusing "
+            "the touches the card forwards to it")
+    else:
+        for token in (b"hosted scene claims foreground", b"applicationState",
+                      b"activationState", b"com.apple.springboard",
+                      b"/var/mobile/Library/Logs/Aevon/hosted.plist"):
+            if token not in bridge:
+                bad(f"bridge: {token.decode()} missing from AevonApp.dylib")
+        if len(bridge) > 65536:
+            bad(f"bridge: AevonApp.dylib is {len(bridge)} B — this file loads into "
+                "every app on the phone, 64 KB is the ceiling for 200 lines of ObjC")
+        else:
+            ok(f"bridge: AevonApp.dylib {len(bridge)} B, state bridge + SpringBoard guard")
+    bridge_filter = files.get("Library/MobileSubstrate/DynamicLibraries/AevonApp.plist", b"")
+    if b"com.apple.UIKit" not in bridge_filter:
+        bad("bridge: AevonApp.plist does not filter on UIKit — no app would load the bridge")
 
     # -- 5e. the scene probe (0.0.6, 窗口与场景 P0) -------------------------
     # The probe is the difference between "the master's carrier API is probably

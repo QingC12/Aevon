@@ -41,7 +41,8 @@ PANELS = ["Window", "Ring", "Gesture", "Keyboard",
 # 只有这些东西属于「构建必需」或「工程文档」。其余一律不许进仓库。
 ALLOWED_EXACT = {
     "Makefile", "control", ".gitignore", ".gitattributes", "README.md",
-    "Aevon.plist", "Aevon-Bridging-Header.h", "AevonPrefs-Bridging-Header.h",
+    "Aevon.plist", "AevonApp.plist",
+    "Aevon-Bridging-Header.h", "AevonPrefs-Bridging-Header.h",
 }
 ALLOWED_PREFIX = ("Sources/", "layout/", "tools/", ".github/workflows/")
 ALLOWED_DOC_PREFIX = ("docs/",)
@@ -436,6 +437,15 @@ def check_audit_tokens():
                         parts.append(repr(plistlib.loads(open(path, "rb").read())))
                     except Exception:                            # noqa: BLE001
                         parts.append(read(path))
+    # 根目录的 filter plist（Aevon.plist / AevonApp.plist）也是随包落地的文件，
+    # 审计断言可以直接指向它们 —— 0.0.44 起第二个注入点的 filter 就在这里。
+    for name in sorted(os.listdir(".")):
+        if not name.endswith(".plist"):
+            continue
+        try:
+            parts.append(repr(plistlib.loads(open(name, "rb").read())))
+        except Exception:                                        # noqa: BLE001
+            parts.append(read(name))
     blob = "\n".join(parts)
 
     tokens = set()

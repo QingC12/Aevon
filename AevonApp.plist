@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Filter</key>
+	<dict>
+		<!-- UIKit is loaded by every app on the phone, which is the whole point:
+		     the state this injection repairs is the app's own. See
+		     Sources/App/AevonAppHook.m. It also loads in SpringBoard, which the
+		     constructor skips by name so the first injection point stays the
+		     only owner of that process. -->
+		<key>Bundles</key>
+		<array>
+			<string>com.apple.UIKit</string>
+		</array>
+	</dict>
+</dict>
+</plist>

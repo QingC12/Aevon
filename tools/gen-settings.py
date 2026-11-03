@@ -309,13 +309,26 @@ def build_panel(panel_id, title, intro, items):
         # 桌面承载：0.0.6 起 RingHost 把同一个 RingView 挂到桌面右下角。
         # 这两个 key 不属于母本 81 键，所以加 "!" 前缀单独记账。
         specs.append({"cell": "PSGroupCell", "label": "桌面",
-                      "footerText": "开启后桌面右下角出现一个小握把（14pt 圆点）。"
+                      "footerText": "开启后屏幕右侧贴边出现一条小竖条（8x56pt，颜色取自它背后的画面）。"
                                     "点它呼出旧版圆盘：点图标启动 App，按住圆心 1 秒旋转，"
-                                    "抬手落在盘外或图标间隙收起，再点握把也能收。"})
-        specs.append({"cell": "PSSwitchCell", "label": "桌面显示握把",
+                                    "抬手落在盘外或图标间隙收起，再点竖条也能收。"})
+        specs.append({"cell": "PSSwitchCell", "label": "桌面显示竖条",
                       "key": "!ring.desktop", "default": True, "defaults": DOMAIN})
         specs.append({"cell": "PSTitleValueCell", "label": "桌面状态",
                       "key": "@ring.host", "default": "—", "defaults": DOMAIN})
+
+        # App 侧激活态桥：浮窗里的内容能不能点，取决于 App 自己是否认为
+        # 自己在前台。这一项装在一个独立注入点里（只注入 UIKit，不碰桌面），
+        # 关掉即等于回到 0.0.43 的行为，不需要卸载。
+        specs.append({"cell": "PSGroupCell", "label": "内容交互",
+                      "footerText": "浮窗里的 App 是被另一个进程显示出来的，"
+                                    "它自己会认为「我在后台」，UIKit 于是丢掉转发进来的触摸——"
+                                    "画面在动、声音在放，就是点不动，这就是原因。"
+                                    "开启后，只有当 App 自己的场景设置说「前台」而它自己说「后台」时，"
+                                    "才把这个矛盾按前台解释；正常前后台切换不受影响。"
+                                    "关掉它立刻回到旧行为，改动对之后打开的 App 生效。"})
+        specs.append({"cell": "PSSwitchCell", "label": "内容可点击（App 侧桥接）",
+                      "key": "!ring.appHook", "default": True, "defaults": DOMAIN})
 
         # 应用：这一版起这份清单由操作者自己决定，顺序就是托盘顺序。
         specs.append({"cell": "PSGroupCell", "label": "应用",
@@ -328,15 +341,22 @@ def build_panel(panel_id, title, intro, items):
         specs.append({"cell": "PSButtonCell", "label": "编辑应用（添加 / 删除 / 排序）",
                       "action": "editApps:", "defaults": DOMAIN})
 
-        # 握把位置：桌面上的拖动会写进 layout.plist，这里读回来显示。
-        specs.append({"cell": "PSGroupCell", "label": "握把位置",
-                      "footerText": "在桌面上按住小白点拖动即可改变位置，松手即保存，"
-                                    "横竖屏按屏幕比例还原。这里显示的是当前落位；"
-                                    "复位后回到右下角。"})
+        # 竖条位置：0.0.44 起位置是这一条滑块，不再是「拖到哪算哪」——
+        # 拖动位置要靠人自己发现，滑块就在设置里，还能读出百分比。
+        specs.append({"cell": "PSGroupCell", "label": "竖条位置",
+                      "footerText": "圆盘由屏幕右侧贴边的小短竖条呼出：点一下，"
+                                    "或者从竖条向左滑一下。下面的滑块决定竖条在屏幕上的高度，"
+                                    "单位是屏幕高度的百分比（0 顶部 / 100 底部），"
+                                    "拖动时桌面上的竖条会跟着走，横竖屏按同一比例还原。"})
+        specs.append({"cell": "PSSliderCell", "label": "位置（屏幕高度 %）",
+                      "key": "!ring.barY", "default": 50.0,
+                      "min": 0.0, "max": 100.0, "showValue": True, "defaults": DOMAIN})
         specs.append({"cell": "PSTitleValueCell", "label": "当前位置",
-                      "key": "@ring.grip", "default": "右下角（默认）", "defaults": DOMAIN})
-        specs.append({"cell": "PSButtonCell", "label": "握把复位到右下角",
+                      "key": "@ring.grip",
+                      "default": "屏幕高度的 50%（右侧贴边竖条）", "defaults": DOMAIN})
+        specs.append({"cell": "PSButtonCell", "label": "竖条回到屏幕中央",
                       "action": "resetGrip:", "defaults": DOMAIN})
+
 
         # 手势：母本把这些写进 GestureIntroduction 原文，圆盘这边没有独立设置项，
         # 但功能必须能被发现 —— 一个只有作者知道的长按，等于没有做。
@@ -416,9 +436,9 @@ def build_root(panel_items, wired):
 
     items.append({"cell": "PSGroupCell", "label": "关于",
                   "footerText": f"Aevon {VERSION} · Swift · arm64e · 8 个面板全部可进入。"
-                                f"承载形状：旧版圆盘 1:1 移入——点握把呼出，划过跳跃、"
+                                f"承载形状：旧版圆盘 1:1 移入——点右侧竖条呼出，划过跳跃、"
                                 f"阻尼旋转、逐点展开全是本体；应用在编辑器里增删排序"
-                                f"（上限 36，含截图 / 录屏动作槽），握把可拖动。"
+                                f"（上限 36，含截图 / 录屏动作槽），竖条位置在面板里用滑块调。"
                                 f"其余面板的开关写入域、随对应功能落地。"
                                 f"所有改动只写 {DOMAIN}，不触碰系统文件。"})
 
@@ -506,7 +526,7 @@ def main():
         "明确放弃": [{"key": k, "cn": c, "why": w} for k, c, w in DROPPED],
         # 不属于母本 81 键的 Aevon 自有开关，单独记账，避免它们混进复刻进度。
         "自有项": [
-            {"key": "!ring.desktop", "cn": "桌面显示握把", "cell": "switch",
+            {"key": "!ring.desktop", "cn": "桌面显示竖条", "cell": "switch",
              "default": True, "wired": True},
             {"key": "@ring.host", "cn": "桌面状态", "cell": "title", "wired": True},
             {"key": "@ring.summary", "cn": "当前承载", "cell": "title", "wired": True},

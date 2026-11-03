@@ -14,9 +14,13 @@
 //  What stays here is everything that is genuinely host-side:
 //
 //    · the window (level normal+1) and the passthrough hit testing,
-//    · the grip dot — tap to summon, drag to move (this package's entry; the
-//      old plugin summoned from a screen-edge bar, which this phone's build
-//      replaced with a dot on purpose),
+//    · the summon bar — 0.0.44's entry: a short vertical strip flush with the
+//      right edge. 0.0.14-0.0.43 used a 14 pt dot in the corner, and Aevon(42)
+//      said what a dot in a corner is worth: 「有点不容易触发」. A strip along the
+//      edge can be hit without aiming, it takes its colours from the material
+//      behind it instead of guessing white-on-white, and its height on the
+//      screen is a slider in 承载形状 instead of a drag that had to be
+//      discovered. Tap it, or swipe left across it.
 //    · wiring the menu's three hooks (launch / panel / grip visibility) to
 //      this package's SceneProbe card route and Settings page,
 //    · the Darwin-notification refresh path.
@@ -42,12 +46,25 @@ final class RingHost: NSObject {
     static let enabledKey = "!ring.desktop"
 
     private var window: UIWindow?
-    private var grip: UIView?
-    private var gripPad: UIView?
+    /// The visible strip. Drawn, not drawn *on*: a UIView whose only child is a
+    /// blur, so it picks up whatever is behind it.
+    private var bar: UIView?
+    private var barBlur: UIVisualEffectView?
+    /// The touch pad. Wider than the strip on purpose — a bar flush with the
+    /// edge gives a thumb nothing to aim at, so the pad reaches 40 pt inwards
+    /// while the strip itself stays 8 pt of visible width.
+    private var barPad: UIView?
 
-    /// Where the drag that is in progress started. Only used while a pan is
-    /// live; the durable value is the normalised point in layout.plist.
-    private var dragOrigin: CGPoint = .zero
+    /// Strip geometry. 8 x 56 reads as a handle rather than a control, and it
+    /// is 4x the dot's target area without covering an icon.
+    private let barWidth: CGFloat = 8
+    private let barHeight: CGFloat = 56
+    private let padWidth: CGFloat = 40
+    private let padHeight: CGFloat = 112
+
+    /// The last percentage that was laid out, so a slider drag logs one line per
+    /// real change instead of one per refresh.
+    private var laidOutPercent: Int = -1
 
     private var config = RingConfig()
     private var expanded = false
@@ -99,7 +116,7 @@ final class RingHost: NSObject {
             self?.setGripVisible(visible)
         }
 
-        addGrip()
+        addBar()
         layout()
         seedStore()
 
@@ -123,10 +140,11 @@ final class RingHost: NSObject {
         }
         observers.removeAll()
 
-        grip?.removeFromSuperview()
-        gripPad?.removeFromSuperview()
-        grip = nil
-        gripPad = nil
+        bar?.removeFromSuperview()
+        barPad?.removeFromSuperview()
+        bar = nil
+        barBlur = nil
+        barPad = nil
         window?.isHidden = true
         window = nil
         Log.write("ring: removed from desktop (switch off)")
@@ -142,6 +160,10 @@ final class RingHost: NSObject {
         guard window != nil else { start(); return }
 
         config = RingConfig.loadRuntime()
+        // The bar's height on the screen is one of those sliders, so every
+        // refresh re-lays out. `layout()` is a handful of frame writes; the
+        // cheaper alternative is a bar that only moves after a respring.
+        layout()
 
         // The app list is a separate store with its own lifecycle: the editor
         // writes it, the Darwin notification says "look now", and only a real
@@ -216,147 +238,132 @@ final class RingHost: NSObject {
         let bounds = window.bounds
         guard bounds.width > 0 else { return }
 
-        let point = gripPoint(in: bounds)
-
-        // The grip is a subview of the pad, so only the pad moves. Setting the
-        // dot's centre here would move it in the pad's coordinate space.
-        gripPad?.center = point
+        // Flush with the right edge: `maxX - padWidth` is the pad's left edge
+        // and the strip sits in the pad's last `barWidth` points, so the strip
+        // and the screen edge are the same line. Nothing floats in from the
+        // edge — a strip inset by a margin is a strip a thumb can miss.
+        let centre = barCentreY(in: bounds)
+        barPad?.frame = CGRect(x: bounds.maxX - padWidth,
+                               y: centre - padHeight / 2,
+                               width: padWidth, height: padHeight)
+        bar?.frame = CGRect(x: padWidth - barWidth, y: (padHeight - barHeight) / 2,
+                            width: barWidth, height: barHeight)
         window.rootViewController?.view.frame = bounds
-        // A rotation can switch the appearance under a live dot; repainting on
-        // every layout pass is one property write and keeps it visible through
-        // that switch.
-        paintGrip()
-    }
+        paintBar()
 
-    /// Where the grip belongs: the operator's own position when one was saved,
-    /// the bottom-right corner otherwise. Normalised on purpose — 82% / 91% is
-    /// the same place on the screen after a rotation, a stored point is not.
-    private func gripPoint(in bounds: CGRect) -> CGPoint {
-        if let saved = GripLayout.load() {
-            return clamped(CGPoint(x: saved.x * bounds.width,
-                                   y: saved.y * bounds.height),
-                           in: bounds)
+        let percent = Int((config.barY).rounded())
+        if percent != laidOutPercent {
+            laidOutPercent = percent
+            Log.write("ring: bar position " + String(percent)
+                      + "% of the screen height (right edge)")
         }
-        let inset = window?.safeAreaInsets ?? .zero
-        let margin: CGFloat = 34
-        return CGPoint(x: bounds.maxX - Swift.max(margin, inset.right + 14),
-                       y: bounds.maxY - Swift.max(margin, inset.bottom + 22))
     }
 
-    /// Keeps the whole 40 pt touch pad on screen. A grip dragged half off the
-    /// edge is a grip that cannot be tapped back.
-    private func clamped(_ point: CGPoint, in bounds: CGRect) -> CGPoint {
-        let half: CGFloat = 20
-        let x = Swift.min(bounds.maxX - half, Swift.max(half, point.x))
-        let y = Swift.min(bounds.maxY - half, Swift.max(half, point.y))
-        return CGPoint(x: x, y: y)
+    /// Where the strip's centre sits, as the operator's percentage of the
+    /// screen height. The pad's half-height is the clamp, not the strip's: a
+    /// bar at 0 % must still be reachable, and the thing the finger lands on is
+    /// the pad.
+    private func barCentreY(in bounds: CGRect) -> CGFloat {
+        let half = padHeight / 2
+        let y = bounds.height * config.barY / 100
+        return Swift.min(bounds.maxY - half, Swift.max(half, y))
     }
 
-    // MARK: - Grip
+    // MARK: - Summon bar
 
-    private func addGrip() {
+    private func addBar() {
         guard let host = window?.rootViewController?.view else { return }
 
-        // The dot is 14 pt because it must not look like a control; the touch
-        // area is 40 pt because the corner of a phone is the hardest place to
-        // hit. Same reason the pad is invisible: no chrome, just a target.
-        let padSide: CGFloat = 40
-        let pad = UIView(frame: CGRect(x: 0, y: 0, width: padSide, height: padSide))
+        // The pad is the target, the bar is the paint job. 40 pt of pad means a
+        // thumb that lands half an inch from the edge still finds it; the pad is
+        // flush with the screen edge so nothing has to be aimed at.
+        let pad = UIView(frame: .zero)
         pad.backgroundColor = .clear
         pad.isUserInteractionEnabled = true
         pad.addGestureRecognizer(UITapGestureRecognizer(target: self,
                                                         action: #selector(toggle)))
-        // Drag to move. The tap still wins for a touch that does not travel,
-        // which is why the two recognisers can share the same 40 pt pad.
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleGripPan(_:)))
-        pan.maximumNumberOfTouches = 1
-        pad.addGestureRecognizer(pan)
+        // 0.0.44 — 「点击或者向左滑动时触发」. A swipe recogniser, not a pan: this
+        // one only has to fire, and a pan would need its own failure rules
+        // against the tap.
+        let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swipeOpen))
+        swipe.direction = .left
+        swipe.numberOfTouchesRequired = 1
+        pad.addGestureRecognizer(swipe)
         host.addSubview(pad)
-        gripPad = pad
+        barPad = pad
 
-        let side: CGFloat = 14
-        let grip = UIView(frame: CGRect(x: (padSide - side) / 2, y: (padSide - side) / 2,
-                                        width: side, height: side))
-        grip.layer.cornerRadius = side / 2
-        grip.layer.cornerCurve = .continuous
-        grip.isUserInteractionEnabled = false
-        pad.addSubview(grip)
-        self.grip = grip
-        paintGrip()
+        let bar = UIView(frame: .zero)
+        bar.isUserInteractionEnabled = false
+        bar.layer.cornerRadius = barWidth / 2
+        bar.layer.cornerCurve = .continuous
+        bar.clipsToBounds = true
+        pad.addSubview(bar)
+        self.bar = bar
+
+        // The adaptive half. A `UIVisualEffectView` is the only thing in UIKit
+        // that answers "what colour is behind me" without a screenshot: it
+        // samples the backdrop and keeps a readable contrast over a white page,
+        // a black page and a photograph alike. The border in `paintBar` is the
+        // fallback for the cases where a backdrop is unavailable.
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
+        blur.isUserInteractionEnabled = false
+        blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        bar.addSubview(blur)
+        barBlur = blur
+
+        paintBar()
     }
 
-    /// The menu hides the dot while it is open and asks for it back on the way
-    /// down (`AevonRingGrip.setVisible(true)` in dismiss). The dot stays
-    /// visible here — tapping it again is this build's way of closing the disc
-    /// — but the hook exists so the menu's own dismiss path stays 1:1 with the
-    /// file it came from.
+    /// The disc hides the bar while it is open and asks for it back on the way
+    /// down (`AevonRingGrip.setVisible(true)` in dismiss). Kept on the pad, not
+    /// on the bar: alpha on the pad fades both without touching the material's
+    /// own alpha.
     private func setGripVisible(_ visible: Bool) {
-        guard let pad = gripPad else { return }
+        guard let pad = barPad else { return }
         pad.isUserInteractionEnabled = true
         UIView.animate(withDuration: 0.18) {
             pad.alpha = visible ? 1 : 0.72
         }
     }
 
-    /// 0.0.39 — the dot has to be visible on whatever is behind it.
+    /// 0.0.44 — the strip has to be visible on whatever is behind it, and the
+    /// answer is no longer a guessed pair of colours.
     ///
-    /// A white core with a black outline is the only pair that reads on both a
-    /// white page and a black one; the outline thickens in light mode, where a
-    /// hairline white-on-white would still be invisible at arm's length.
-    private func paintGrip() {
-        guard let grip = grip else { return }
+    /// The material supplies the fill; this supplies the edge. On a light page
+    /// the material is a pale haze and needs a dark hairline; on a dark one it
+    /// is a grey mist and needs the light one. That is one property write per
+    /// layout pass, and it is what keeps the strip off the "invisible, therefore
+    /// broken" list that the dot spent six versions on.
+    private func paintBar() {
+        guard let bar = bar else { return }
         let dark = window?.traitCollection.userInterfaceStyle == .dark
-        // Not `?? .dark`: an unanswered trait collection in SpringBoard is the
-        // light case more often than not, and guessing wrong is what made the
-        // dot vanish. 0.86/0.62 both read; only the outline changes.
-        grip.backgroundColor = UIColor.white.withAlphaComponent(dark ? 0.62 : 0.86)
-        grip.layer.borderWidth = dark ? 1 : 2
-        grip.layer.borderColor = UIColor.black.withAlphaComponent(dark ? 0.45 : 0.55).cgColor
-        grip.layer.shadowColor = UIColor.black.cgColor
-        grip.layer.shadowOpacity = dark ? 0.45 : 0.35
-        grip.layer.shadowRadius = 3
-        grip.layer.shadowOffset = CGSize(width: 0, height: 1)
-        grip.alpha = 1
+        if UIAccessibility.isReduceTransparencyEnabled {
+            // No backdrop to sample: fall back to the dot's own recipe rather
+            // than to an invisible strip.
+            barBlur?.alpha = 0
+            bar.backgroundColor = UIColor.white.withAlphaComponent(dark ? 0.66 : 0.88)
+            bar.layer.borderColor = UIColor.black.withAlphaComponent(dark ? 0.50 : 0.45).cgColor
+        } else {
+            barBlur?.alpha = 1
+            bar.backgroundColor = .clear
+            bar.layer.borderColor = (dark ? UIColor.white : UIColor.black)
+                .withAlphaComponent(0.32).cgColor
+        }
+        bar.layer.borderWidth = 0.5
+        bar.alpha = 1
     }
 
     @objc private func toggle() {
         if expanded { collapse() } else { expand() }
     }
 
-    /// Moving the grip is the one gesture this project takes for itself, so it
-    /// is deliberately narrow: one finger, on a 40 pt pad, and the ring is put
-    /// away the moment the drag starts. No long press, no swipe from an edge —
-    /// a hijacked screen edge is the bug that makes a phone feel broken.
-    @objc private func handleGripPan(_ gesture: UIPanGestureRecognizer) {
-        guard let pad = gripPad, let host = window?.rootViewController?.view else { return }
-
-        switch gesture.state {
-        case .began:
-            dragOrigin = pad.center
-            pad.isUserInteractionEnabled = true
-            if expanded { collapse() }
-
-        case .changed:
-            let translation = gesture.translation(in: host)
-            let target = clamped(CGPoint(x: dragOrigin.x + translation.x,
-                                         y: dragOrigin.y + translation.y),
-                                 in: host.bounds)
-            pad.center = target
-
-        case .ended, .cancelled, .failed:
-            let bounds = host.bounds
-            guard bounds.width > 0, bounds.height > 0 else { return }
-            let normalized = CGPoint(x: pad.center.x / bounds.width,
-                                     y: pad.center.y / bounds.height)
-            if GripLayout.save(normalized) {
-                Log.write("ring: grip moved to \(Int(normalized.x * 100))% / "
-                          + "\(Int(normalized.y * 100))%")
-            }
-            layout()   // re-clamps and re-reads, so the saved value is what is shown
-
-        default:
-            break
-        }
+    /// 向左滑动 → 呼出. The bar sits on the right edge, so the natural gesture is
+    /// the thumb travelling away from the edge. It only ever opens: a swipe that
+    /// closes would fight the disc's own lift-to-dismiss, which already ends in
+    /// the same place.
+    @objc private func swipeOpen(_ gesture: UISwipeGestureRecognizer) {
+        if expanded { return }
+        expand()
     }
 
     // MARK: - Disc (AevonRingMenu, 1:1)

@@ -138,7 +138,10 @@ final class PanelController: PSListController {
             return "收藏随圆盘本体移交旧版实现（0.0.42），不再单独计数"
         }
         if key == "@ring.grip" {
-            return GripLayout.describe()
+            // 0.0.44 — the bar's place on the screen, straight out of the
+            // snapshot the host reads, so this row and the strip cannot disagree.
+            let percent = Int(RingConfig.loadRuntime().barY.rounded())
+            return "屏幕高度的 \(percent)%（右侧贴边竖条）"
         }
         return super.readPreferenceValue(specifier)
     }
@@ -149,7 +152,7 @@ final class PanelController: PSListController {
         super.setPreferenceValue(value, specifier: specifier)
 
         if RingConfig.mirroredKeys.contains(key) {
-            ringChanged(named: key, value: (value as? NSNumber)?.boolValue ?? false)
+            ringChanged(named: key, value: value)
         }
     }
 
@@ -198,7 +201,7 @@ final class PanelController: PSListController {
     /// once.
     private static let sliderKeys: Set<String> = [
         "Radius", "IconWidth", "RotationAngle", "LastIconAngle",
-        "DampingFraction", "INTENSITY", "Speed",
+        "DampingFraction", "INTENSITY", "Speed", "!ring.barY",
     ]
 
     private var lastWrite = Date.distantPast
@@ -212,7 +215,7 @@ final class PanelController: PSListController {
     /// which is exactly the kind of thing that makes a slider feel sticky. The
     /// rate is capped, and a trailing write makes sure the value the finger
     /// stopped on is the value that lands.
-    private func ringChanged(named key: String, value: Bool) {
+    private func ringChanged(named key: String, value: Any?) {
         let isSlider = PanelController.sliderKeys.contains(key)
         if isSlider, Date().timeIntervalSince(lastWrite) < 0.08 {
             flushItem?.cancel()
@@ -226,14 +229,14 @@ final class PanelController: PSListController {
         flushRing(key: key, value: value)
     }
 
-    private func flushRing(key: String, value: Bool) {
+    private func flushRing(key: String, value: Any?) {
         flushItem?.cancel()
         flushItem = nil
         lastWrite = Date()
 
         let config = RingConfig.load()
         if config.writeSnapshot() {
-            Log.write("prefs: \(key)=\(value) -> \(config.summary) "
+            Log.write("prefs: \(key)=\(value.map { "\($0)" } ?? "nil") -> \(config.summary) "
                       + (config.desktop ? "(desktop on)" : "(desktop off)"))
         }
         notifyPost(Aevon.notePrefs)

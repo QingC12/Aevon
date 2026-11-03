@@ -22,7 +22,7 @@ include $(THEOS)/makefiles/common.mk
 # core, because the disc's two action slots live in the editor and the menu —
 # both binaries — and AevonCompat is the seam layer the ported files call into.
 AE_CORE := Sources/Core/Paths.swift Sources/Core/Log.swift Sources/Core/Gate.swift \
-           Sources/Core/GripLayout.swift Sources/Core/CardLayout.swift \
+           Sources/Core/CardLayout.swift \
            Sources/Core/AevonCompat.swift Sources/Core/AevonQuickAction.swift \
            Sources/Core/AevonRecProbe.swift
 
@@ -41,7 +41,7 @@ AE_RING := Sources/Ring/RingModel.swift Sources/Ring/RingIcons.swift \
 # SpringBoard tweak. One C file (the load-time constructor Swift cannot
 # declare), the rest Swift.
 # ---------------------------------------------------------------------------
-TWEAK_NAME := Aevon
+TWEAK_NAME := Aevon AevonApp
 Aevon_FILES := Sources/AevonBoot.m Sources/AevonScene.m Sources/Boot.swift $(AE_CORE) $(AE_RING) \
                Sources/Ring/RingHost.swift Sources/Scene/SceneProbe.swift \
                Sources/Scene/FloatHost.swift
@@ -57,6 +57,25 @@ Aevon_LDFLAGS := -Wl,-dead_strip -Wl,-x
 # help: 46 lines came out in 0.0.14 and the file shrank by 64 bytes, because the
 # weight is type metadata, not instructions.
 Aevon_SWIFTFLAGS := -Osize
+
+# ---------------------------------------------------------------------------
+# App-side bridge (0.0.44). A second injection point, deliberately separate:
+#
+#   Aevon     → SpringBoard only (Aevon.plist) — the host, the card, the disc
+#   AevonApp  → every process that loads UIKit (AevonApp.plist) — the state
+#               bridge that makes a hosted app accept the touches the card
+#               forwards to it
+#
+# Splitting them is not tidiness. The SpringBoard binary carries the scene
+# machinery, the disc and the preference reader; loading that into 250 app
+# processes would multiply the resident cost of the tweak by 250 and give every
+# app a second chance to run SpringBoard-only code. This one is 200 lines of
+# ObjC with no Swift runtime behind it, which is the only shape that is fair to
+# load everywhere.
+# ---------------------------------------------------------------------------
+AevonApp_FILES := Sources/App/AevonAppHook.m
+AevonApp_FRAMEWORKS := Foundation UIKit
+AevonApp_LDFLAGS := -Wl,-dead_strip -Wl,-x
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 

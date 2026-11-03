@@ -947,7 +947,39 @@ zStackParticipantDidChange:
         // Armed before the wait, not after it: a scene that appears and is
         // allowed to sleep in the same half second is a scene found already cold.
         AevonHookArm(bundleID)
+        // 0.0.44 — tell the app itself. The card can forward touches all day;
+        // an app that believes it is in the background drops them before they
+        // reach a window. This is the one signal that does not depend on the
+        // scene settings crossing into the app's own copy.
+        markHosted(bundleID)
         pollForScene(bundleID, ticks: 0, fallback: fallback)
+    }
+
+    // MARK: - 0.0.44 hosted mark
+
+    /// Who the card is showing. `Aevon.hostedPath` is the copy the app reads;
+    /// the static is only here so the log can say whose mark was cleared.
+    private static var hostedBundle: String?
+
+    private static func markHosted(_ bundleID: String) {
+        hostedBundle = bundleID
+        try? FileManager.default.createDirectory(atPath: Aevon.stateDir,
+                                                 withIntermediateDirectories: true)
+        let payload: [String: Any] = [
+            "bundle": bundleID,
+            // Reference-date seconds: the same clock the app-side reader compares
+            // against, so neither side has to know about 1970.
+            "ts": Date().timeIntervalSinceReferenceDate,
+        ]
+        let ok = (payload as NSDictionary).write(toFile: Aevon.hostedPath, atomically: true)
+        Log.write("win: hosted mark " + bundleID + (ok ? "" : " (write failed)"))
+    }
+
+    private static func clearHosted() {
+        guard let bundleID = hostedBundle else { return }
+        hostedBundle = nil
+        try? FileManager.default.removeItem(atPath: Aevon.hostedPath)
+        Log.write("win: hosted mark cleared for " + bundleID)
     }
 
     /// Four seconds of looking, four times a second. A suspended launch is a
@@ -1145,6 +1177,7 @@ zStackParticipantDidChange:
             _ = AevonCallVoid(presenter, "invalidate")
             FloatHost.hide()
             AevonHookDisarm()
+            clearHosted()
             cardUp = false
             emitNotes(AevonHookSummary())
             let back = value(of: scene, "settings").map { AevonBoolOf($0, "isForeground") } ?? -1

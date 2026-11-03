@@ -372,7 +372,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         root.addSubview(grip)
         self.grip = grip
         syncGrip()
-        grip.setNeedsDisplay()
     }
 
     /// Every frame change goes through here. A ring that lags its card by one
@@ -382,7 +381,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         grip.frame = card.frame.insetBy(dx: -reach, dy: -reach)
         grip.hole = CGRect(x: reach, y: reach,
                            width: card.bounds.width, height: card.bounds.height)
-        grip.setNeedsDisplay()
     }
 
     /// The bottom band's middle third — the cell that closes on a flick and
@@ -749,50 +747,19 @@ final class GripView: UIView {
     /// below matches.
     private var proven = 0
 
-    // 0.0.42 — the heat map is back, drawn rather than remembered.
+    // 0.0.44 — the heat map is invisible again, and this time the geometry
+    // stays exactly where it is.
     //
-    // Aevon(39) reported 「移除热区可见性后，四周手势失效」，0.0.41 answered with a
-    // wider ring (40 + 6 slack) and Aevon(40) answered that with 「手势依旧失效」.
-    // The log from that run settles one fact and one fact only: between 16:57:34
-    // and 16:57:57 — twenty-three seconds with the card up — the window's
-    // sendEvent saw exactly one touch, the ✕. Not one band touch ever reached
-    // the window, so nothing in this file can say whether the finger missed the
-    // ring or the ring missed the finger. A visible band ends that ambiguity:
-    // if the colour is where the thumb lands and the log stays empty, the touch
-    // never entered this window; if the colour is not where the thumb lands,
-    // the geometry is the suspect. Diagnosis first, invisibility later.
-    override func draw(_ rect: CGRect) {
-        guard hole.width > 1, hole.height > 1,
-              let context = UIGraphicsGetCurrentContext() else { return }
-
-        // The top strip is dead by design (0.0.40), so it is the one band that
-        // draws nothing: colour there would promise a gesture that does not
-        // exist.
-        let top = hole.minY
-
-        func fill(_ rect: CGRect, _ color: UIColor) {
-            context.setFillColor(color.cgColor)
-            context.fill(rect)
-        }
-
-        let side = UIColor(red: 0.30, green: 0.82, blue: 1.00, alpha: 0.16)
-        fill(CGRect(x: 0, y: top, width: hole.minX, height: bounds.height - top), side)
-        fill(CGRect(x: hole.maxX, y: top,
-                    width: bounds.width - hole.maxX, height: bounds.height - top), side)
-
-        let cell = FloatHost.cell(in: hole.size)
-        let bottom = CGRect(x: 0, y: hole.maxY,
-                            width: bounds.width, height: bounds.height - hole.maxY)
-        fill(CGRect(x: cell.minX, y: bottom.minY,
-                    width: cell.width, height: bottom.height),
-             UIColor(red: 1.00, green: 0.62, blue: 0.20, alpha: 0.20))
-        fill(CGRect(x: 0, y: bottom.minY, width: cell.minX, height: bottom.height),
-             UIColor(red: 0.72, green: 0.52, blue: 1.00, alpha: 0.16))
-        fill(CGRect(x: cell.maxX, y: bottom.minY,
-                    width: bounds.width - cell.maxX, height: bottom.height),
-             UIColor(red: 0.72, green: 0.52, blue: 1.00, alpha: 0.16))
-    }
-
+    // 0.0.42 painted it because Aevon(40) could not say whether a thumb that
+    // landed nowhere had missed the ring or the ring had missed the thumb. That
+    // question is answered: Aevon(41)/(42) show `gesture grab zone=right`,
+    // `bottom-middle` and `bottom-corner` arriving, docking, resizing and
+    // flick-closing. Aevon(42) asks for the colour to go away — while the four
+    // zones stay, because they are what the fingers find.
+    //
+    // So: no fill, no `draw`. The zones are `point(inside:)` and the zone
+    // arithmetic below, which do not need to be visible to work. It is one
+    // subclass with one property and no pixels.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         guard super.point(inside: point, with: event) else { return false }
         if hole.contains(point) { return false }
