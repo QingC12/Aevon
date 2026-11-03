@@ -88,6 +88,24 @@ NSString *_Nullable AevonSelectorInfo(NSString *_Nullable className,
 NSString *_Nullable AevonClassMethods(NSString *_Nullable name, NSInteger limit);
 NSInteger AevonCallVoid(id _Nullable object, NSString *_Nullable name);
 
+/// 0.0.21 — the mother ship's route, heard instead of forced.
+///
+/// 0.0.20 activated presenters it had built for three live scenes and kept the
+/// phone black until reboot. Stheno never calls `-activate`: she replaces
+/// `createPresenterWithIdentifier:priority:` and takes the presentation view of
+/// the presenter the system activates by itself. These five functions replace
+/// the two ends of that route with calls that forward everything and write a
+/// line — no create, no activate, no view moved.
+///
+/// `AevonInstallHooks` answers how many replacements are live and is
+/// all-or-nothing: 0 means the route is not fully observable here and nothing
+/// was left installed. `AevonRemoveHooks` is safe to call twice.
+NSInteger AevonInstallHooks(void);
+NSInteger AevonRemoveHooks(void);
+NSInteger AevonHooksLive(void);
+void AevonHooksQuiet(BOOL quiet);
+NSString *_Nullable AevonTakeHookLog(void);
+
 @interface UIImage (AevonPrivateIcons)
 + (nullable UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID
                                                        format:(NSInteger)format

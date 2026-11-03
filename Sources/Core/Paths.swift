@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.0.20"
+    public static let version = "0.0.21"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -83,6 +83,17 @@ public enum Aevon {
     /// after `presentationView`. Both times the log ended between two lines and
     /// the culprit had to be inferred. With this file the next boot says it.
     public static let winStepPath = "/var/mobile/Library/Logs/Aevon/win.step"
+
+    /// 0.0.21 — the latch a hook leaves behind, and the reason 0.0.20 cannot
+    /// happen twice. Written *before* an IMP is replaced and deleted only after
+    /// every one of them is put back. If it is still on disk at the next
+    /// request, the last run either died inside the hook or was killed with it
+    /// installed, and the answer is to not install it again — a hook that
+    /// survives its own run is the one failure mode a crash counter cannot see,
+    /// because nothing crashed. 0.0.20 left three live scenes' presenters
+    /// activated with no way back and the phone went black while SpringBoard
+    /// kept answering heartbeats.
+    public static let hookLatchPath = "/var/mobile/Library/Logs/Aevon/win.hook"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"

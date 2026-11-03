@@ -13,6 +13,11 @@
 
 #import <Foundation/Foundation.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
+#import <mach/mach.h>
+#import <mach/mach_host.h>
+#import <mach/mach_vm.h>
+#import <mach/vm_prot.h>
 
 /// Returns the created FBScene, or nil when the manager does not answer.
 /// The completion block is the caller's; this function never retains it.
@@ -593,4 +598,336 @@ NSInteger AevonCallVoid(id object, NSString *name) {
     void (*call)(id, SEL) = (void (*)(id, SEL))objc_msgSend;
     call(object, sel);
     return 1;
+}
+
+// ---------------------------------------------------------------------------
+//  0.0.21 — the mother ship's own method, heard instead of forced.
+//
+//  0.0.20 called `-activate` on presenters it had built for three live scenes
+//  and left them activated. Every one of them went `hosting=no active=no` ->
+//  `hosting=yes active=yes` with `superview=nil`, and the phone went black
+//  while SpringBoard kept answering heartbeats: the presentation view took the
+//  scene's layers and put them in a view that belongs to no window, so nothing
+//  was drawn anywhere and no touch had a target.
+//
+//  Stheno never does that. Its selector surface
+//  (`analysis/extracts/stheno-selector-surface.txt`) has no `activate` at all;
+//  `createPresenterWithIdentifier:priority:` sits in `__const`, which is where
+//  a hooked selector goes, and `analysis/scene-lifecycle-model.md` lists
+//  `UIScenePresentationManagerHook` among her hook groups. She takes the
+//  presenter *the system already activated* and reads its `presentationView`.
+//
+//  So this block replaces four methods with functions that call the original
+//  and write a line. Nothing is swallowed, nothing is created, nothing is
+//  activated. The only thing this version can do to the phone is observe it.
+//
+//  What can still go wrong is the replacement itself: a wrong IMP, a swallowed
+//  call, a hook left installed in a system class. Hence three answers, all in
+//  this file:
+//
+//    1. `AevonInstallHooks` is all-or-nothing. If the two ends of the route
+//       (create and activate) do not both hand back their original IMP, every
+//       replacement made so far is put back and the answer is 0.
+//    2. Each replacement checks its original IMP before calling and gets out
+//       of the way if it is NULL — a hook that cannot forward must not run.
+//    3. Every replacement writes at most 40 lines and then only counts. A hook
+//       that grows without bound on a system thread is its own bug.
+//
+//  The Swift side owns the fourth answer: a latch file on disk before install,
+//  removed only after a full revert, and a timer that reverts unconditionally.
+// ---------------------------------------------------------------------------
+
+/// At most this many lines are formatted; after that only `AevonHookDropped`
+/// moves. Formatting a string inside a system call is already a cost.
+static const NSInteger AevonHookCap = 40;
+
+/// Lock token for the hook buffer. Declared before anything uses it, and with
+/// no state of its own: a global NSObject allocated at load time is one more
+/// thing that can go wrong on a phone that has already gone black once.
+@interface AevonSceneMarker : NSObject
+@end
+@implementation AevonSceneMarker
+@end
+
+static IMP AevonOrigCreateWithPriority = NULL;
+static IMP AevonOrigCreatePlain = NULL;
+static IMP AevonOrigActivate = NULL;
+static IMP AevonOrigDeactivate = NULL;
+static IMP AevonOrigInvalidate = NULL;
+
+static NSMutableArray<NSString *> *AevonHookLogLines = nil;
+static NSInteger AevonHookDropped = 0;
+static NSInteger AevonHookInstalled = 0;
+
+/// Set while one of our own calls is inside a hook, so the log can tell the
+/// system's presenter traffic from the probe's. Nothing changes behaviour.
+static BOOL AevonHookInOurCall = NO;
+
+static void AevonHookLine(NSString *line) {
+    if (line == nil) return;
+    @synchronized ([AevonSceneMarker class]) {
+        // alloc/init rather than `+array`: under ARC the static keeps it,
+        // without ARC one array is leaked on purpose instead of dangling when
+        // the pool drains — a hook writing to freed memory would be a new bug
+        // in the one place that must not have one.
+        if (AevonHookLogLines == nil) AevonHookLogLines = [[NSMutableArray alloc] init];
+        if (AevonHookLogLines.count >= AevonHookCap) { AevonHookDropped += 1; return; }
+        [AevonHookLogLines addObject:line];
+    }
+}
+
+/// Forward declaration: install has to be able to undo a half-finished set-up.
+NSInteger AevonRemoveHooks(void);
+
+/// The name of whatever object a hook is looking at, without trusting that the
+/// getter exists. A missing `identifier` is not a reason to skip the line.
+static NSString *AevonHookLabel(id object) {
+    NSString *cls = object ? NSStringFromClass([object class]) : @"nil";
+    SEL sel = NSSelectorFromString(@"identifier");
+    if (object != nil && [object respondsToSelector:sel]) {
+        id got = ((id (*)(id, SEL))objc_msgSend)(object, sel);
+        if ([got isKindOfClass:[NSString class]]) return [NSString stringWithFormat:@"%@ id=%@", cls, got];
+    }
+    return cls;
+}
+
+static id AevonCreateWithPriorityReplacement(id self, SEL _cmd, NSString *identifier, NSInteger priority) {
+    id (*orig)(id, SEL, NSString *, NSInteger) =
+        (id (*)(id, SEL, NSString *, NSInteger))AevonOrigCreateWithPriority;
+    if (orig == NULL) return nil;
+    id made = orig(self, _cmd, identifier, priority);
+    if (!AevonHookInOurCall) {
+        AevonHookLine([NSString stringWithFormat:@"create2 id=%@ pri=%ld -> %@",
+                       identifier, (long)priority, AevonHookLabel(made)]);
+    }
+    return made;
+}
+
+static id AevonCreatePlainReplacement(id self, SEL _cmd, NSString *identifier) {
+    id (*orig)(id, SEL, NSString *) = (id (*)(id, SEL, NSString *))AevonOrigCreatePlain;
+    if (orig == NULL) return nil;
+    id made = orig(self, _cmd, identifier);
+    if (!AevonHookInOurCall) {
+        AevonHookLine([NSString stringWithFormat:@"create1 id=%@ -> %@", identifier, AevonHookLabel(made)]);
+    }
+    return made;
+}
+
+static void AevonActivateReplacement(id self, SEL _cmd) {
+    void (*orig)(id, SEL) = (void (*)(id, SEL))AevonOrigActivate;
+    if (orig == NULL) return;
+    if (!AevonHookInOurCall) {
+        AevonHookLine([NSString stringWithFormat:@"activate %@", AevonHookLabel(self)]);
+    }
+    orig(self, _cmd);
+}
+
+static void AevonDeactivateReplacement(id self, SEL _cmd) {
+    void (*orig)(id, SEL) = (void (*)(id, SEL))AevonOrigDeactivate;
+    if (orig == NULL) return;
+    if (!AevonHookInOurCall) {
+        AevonHookLine([NSString stringWithFormat:@"deactivate %@", AevonHookLabel(self)]);
+    }
+    orig(self, _cmd);
+}
+
+static void AevonInvalidateReplacement(id self, SEL _cmd) {
+    void (*orig)(id, SEL) = (void (*)(id, SEL))AevonOrigInvalidate;
+    if (orig == NULL) return;
+    if (!AevonHookInOurCall) {
+        AevonHookLine([NSString stringWithFormat:@"invalidate %@", AevonHookLabel(self)]);
+    }
+    orig(self, _cmd);
+}
+
+/// iOS 15+ maps the shared cache's `__DATA_CONST` read-only, and a `method_t`
+/// for a class in that cache — every UIKit and FrontBoard class is — lives in
+/// it. Writing the IMP without lifting the page first does not quietly fail; it
+/// faults, inside SpringBoard, the next time the method is called. That is the
+/// exact shape of failure this version must not produce, so the page is opened
+/// before every write and the write is read back afterwards.
+///
+/// Answers NO when the page will not open. The caller then refuses to install
+/// rather than hoping for the best.
+static BOOL AevonOpenPageForWrite(const void *address) {
+    if (address == NULL) return NO;
+    vm_size_t pageSize = 0;
+    if (host_page_size(mach_host_self(), &pageSize) != KERN_SUCCESS || pageSize == 0) {
+        pageSize = 16384;
+    }
+    vm_address_t start = (vm_address_t)address & ~(vm_address_t)(pageSize - 1);
+    vm_prot_t target = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY;
+    if (vm_protect(mach_task_self(), start, pageSize, FALSE, target) == KERN_SUCCESS) return YES;
+    // Some builds refuse COPY on a shared region but allow a plain protection
+    // change. Both are per-map, so neither reaches into another process.
+    return vm_protect(mach_task_self(), start, pageSize, FALSE,
+                      VM_PROT_READ | VM_PROT_WRITE) == KERN_SUCCESS;
+}
+
+/// Replaces one method and hands back what it used to be. `class_addMethod`
+/// first, so an override never touches the class that actually defines the
+/// selector — FrontBoard's and UIKit's method lists are shared with every
+/// other caller in the process, and reach further than this library should.
+///
+/// Every replacement is read back. A `method_setImplementation` that silently
+/// did nothing would leave the hook reporting "live" while the phone ran the
+/// original — a lie that costs a whole run to discover.
+static BOOL AevonReplace(Class cls, NSString *name, IMP replacement, IMP *original) {
+    if (cls == Nil || name == nil || replacement == NULL) return NO;
+    SEL sel = NSSelectorFromString(name);
+    Method method = class_getInstanceMethod(cls, sel);
+    if (method == NULL) return NO;
+    IMP was = method_getImplementation(method);
+    if (was == replacement) return NO;
+    const char *types = method_getTypeEncoding(method);
+    if (types == NULL) return NO;
+
+    if (class_addMethod(cls, sel, replacement, types)) {
+        // The selector was inherited; the original stays where it lives.
+        Method added = class_getInstanceMethod(cls, sel);
+        if (added == NULL || method_getImplementation(added) != replacement) return NO;
+        if (original != NULL) *original = was;
+        return YES;
+    }
+
+    Method own = class_getInstanceMethod(cls, sel);
+    if (own == NULL) return NO;
+    if (!AevonOpenPageForWrite((const void *)own)) return NO;
+    IMP previous = method_setImplementation(own, replacement);
+    if (previous == NULL) return NO;
+    if (method_getImplementation(own) != replacement) return NO;
+    if (original != NULL) *original = previous;
+    return YES;
+}
+
+static BOOL AevonRestore(Class cls, NSString *name, IMP original) {
+    if (cls == Nil || name == nil || original == NULL) return NO;
+    Method method = class_getInstanceMethod(cls, NSSelectorFromString(name));
+    if (method == NULL) return NO;
+    if (!AevonOpenPageForWrite((const void *)method)) return NO;
+    method_setImplementation(method, original);
+    return method_getImplementation(method) == original;
+}
+
+/// All of it or none of it. Answers how many replacements are live: 0 means the
+/// route is not fully observable on this system and nothing was left behind.
+NSInteger AevonInstallHooks(void) {
+    @synchronized ([AevonSceneMarker class]) {
+        if (AevonHookLogLines == nil) AevonHookLogLines = [[NSMutableArray alloc] init];
+        [AevonHookLogLines removeAllObjects];
+        AevonHookDropped = 0;
+    }
+    AevonHookInstalled = 0;
+
+    Class manager = NSClassFromString(@"UIScenePresentationManager");
+    Class presenter = NSClassFromString(@"_UIScenePresenter");
+    if (manager == Nil || presenter == Nil) {
+        AevonHookLine(@"install: manager or presenter class missing");
+        return 0;
+    }
+
+    // The order is deliberate: the two ends of the route first, so a system
+    // where they cannot be replaced leaves the rest untouched. Each answer is
+    // written down, because "hooks live=0" on its own would not say which one
+    // refused, and the next run would have to guess.
+    NSInteger made = 0;
+    if (AevonReplace(manager, @"createPresenterWithIdentifier:priority:",
+                     (IMP)AevonCreateWithPriorityReplacement, &AevonOrigCreateWithPriority)) {
+        made++;
+    } else {
+        AevonHookLine(@"install: createPresenterWithIdentifier:priority: refused");
+    }
+    if (AevonReplace(presenter, @"activate",
+                     (IMP)AevonActivateReplacement, &AevonOrigActivate)) {
+        made++;
+    } else {
+        AevonHookLine(@"install: activate refused");
+    }
+
+    // Both ends, or nothing. A create hook with no activate hook would name the
+    // presenter and never say when it went live; an activate hook with no
+    // create hook cannot tell whose presenter it is looking at.
+    if (AevonOrigCreateWithPriority == NULL || AevonOrigActivate == NULL) {
+        AevonRemoveHooks();
+        return 0;
+    }
+
+    // The rest are optional: they make the log readable, not the route usable.
+    if (AevonReplace(manager, @"createPresenterWithIdentifier:",
+                     (IMP)AevonCreatePlainReplacement, &AevonOrigCreatePlain)) made++;
+    if (AevonReplace(presenter, @"deactivate", (IMP)AevonDeactivateReplacement, &AevonOrigDeactivate)) made++;
+    if (AevonReplace(presenter, @"invalidate", (IMP)AevonInvalidateReplacement, &AevonOrigInvalidate)) made++;
+
+    AevonHookInstalled = made;
+    return made;
+}
+
+/// Puts every original back. Safe to call twice; answers how many were live.
+///
+/// The original IMP is only forgotten once the write-back has been read back
+/// and confirmed. Clearing it while the replacement is still installed would
+/// destroy the only handle on the real implementation and turn a stuck hook
+/// into a permanent one — which is exactly the failure this version exists to
+/// make impossible.
+NSInteger AevonRemoveHooks(void) {
+    NSInteger back = 0;
+    NSInteger stuck = 0;
+    Class manager = NSClassFromString(@"UIScenePresentationManager");
+    Class presenter = NSClassFromString(@"_UIScenePresenter");
+
+    if (AevonOrigCreateWithPriority != NULL) {
+        if (AevonRestore(manager, @"createPresenterWithIdentifier:priority:", AevonOrigCreateWithPriority)) {
+            back++; AevonOrigCreateWithPriority = NULL;
+        } else { stuck++; }
+    }
+    if (AevonOrigCreatePlain != NULL) {
+        if (AevonRestore(manager, @"createPresenterWithIdentifier:", AevonOrigCreatePlain)) {
+            back++; AevonOrigCreatePlain = NULL;
+        } else { stuck++; }
+    }
+    if (AevonOrigActivate != NULL) {
+        if (AevonRestore(presenter, @"activate", AevonOrigActivate)) {
+            back++; AevonOrigActivate = NULL;
+        } else { stuck++; }
+    }
+    if (AevonOrigDeactivate != NULL) {
+        if (AevonRestore(presenter, @"deactivate", AevonOrigDeactivate)) {
+            back++; AevonOrigDeactivate = NULL;
+        } else { stuck++; }
+    }
+    if (AevonOrigInvalidate != NULL) {
+        if (AevonRestore(presenter, @"invalidate", AevonOrigInvalidate)) {
+            back++; AevonOrigInvalidate = NULL;
+        } else { stuck++; }
+    }
+    // "live" now means "still ours": anything that refused to be restored.
+    AevonHookInstalled = stuck;
+    return back;
+}
+
+/// How many replacements are believed live right now.
+NSInteger AevonHooksLive(void) {
+    return AevonHookInstalled;
+}
+
+/// Says one of our own calls is in flight, so its traffic is not written twice.
+void AevonHooksQuiet(BOOL quiet) {
+    AevonHookInOurCall = quiet;
+}
+
+/// Everything the hooks heard since the last drain, plus the drop count. The
+/// buffer is emptied here: a hook line that outlives its run is a leak.
+NSString *AevonTakeHookLog(void) {
+    NSMutableString *out = [NSMutableString string];
+    @synchronized ([AevonSceneMarker class]) {
+        if (AevonHookLogLines != nil) {
+            for (NSString *line in AevonHookLogLines) [out appendFormat:@"%@\n", line];
+            [AevonHookLogLines removeAllObjects];
+        }
+        if (AevonHookDropped > 0) {
+            [out appendFormat:@"…%ld more dropped\n", (long)AevonHookDropped];
+            AevonHookDropped = 0;
+        }
+    }
+    return out;
 }

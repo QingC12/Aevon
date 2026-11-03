@@ -424,16 +424,24 @@ def main():
     # arrived", which is the one wrong answer that costs a full round trip.
     # 0.0.15 adds the census and the identity path. Every planned exit has its own
     # line, because the failing run is exactly the one whose log is all there is.
-    # 0.0.20 is the first version that calls something new since the layer-host
-    # death: `-activate` on a presenter we own. What must stay is one line per
-    # step, the wording that says whether that call ran at all, and the two
-    # witnesses that make a death readable instead of inferable: the step marker
-    # path and the line that reports it at boot.
+    #
+    # 0.0.21 removes every 0.0.20 line that belonged to building a presenter and
+    # activating it: ` presenter ready cls=`, ` activate call ran=`, ` stopping
+    # before window`, `win: reading full method tables` and the rest of that chain
+    # are gone from the source, and an audit that asserts a string the source no
+    # longer contains fails a build that is correct. What replaces them is the
+    # mother ship's route: the latch, both timers, the read of the presenter the
+    # system already activated, and the ObjC install lines. Every one of them is
+    # long and distinctive on purpose — a Swift literal of 15 bytes or fewer is
+    # compiled into an immediate and never reaches the binary, which is how
+    # ` no presenter` and `win: class ` each cost a run before the gate learned
+    # to check for it (tools/push-gate.py now screens for exactly that).
     #
     # Deliberately NOT asserted any more: `home %@ %ld`, ` scan capped at %ld`,
-    # `(%@: capped at %ld)` and `census %@ super=%@`. Those belong to helpers
-    # nothing calls since this round, so whether their constants survive
-    # dead_strip is not something the audit should have an opinion about.
+    # `(%@: capped at %ld)`, `census %@ super=%@`, `full %@ super=%@ own=%u`,
+    # `meta %@ absent` and `presenter %@ -> %@`. Those belong to helpers nothing
+    # calls since this round, so whether their constants survive dead_strip is
+    # not something the audit should have an opinion about.
     # Two shorter fragments are deliberately NOT asserted: ` no presenter` and
     # ` no layer host` share the prefix ` no `, and LLVM merged the two constants
     # into one blob at link time, so neither survives as its own byte string.
@@ -442,23 +450,32 @@ def main():
     for token in (b"scene: probe begin", b"scene: probe end",
                   b"scene: window level", b"scene: carrier view", b"scene: live scenes",
                   b"win: begin manager",
-                  b" uiPresentationManager absent", b" uiPresentationManager cls=",
-                  b" presenter ready cls=",
-                  b" presentationView absent", b" presentationView cls=",
-                  b" stopping before window",
+                  b" uiPresentationManager absent",
                   b"win: previous run died at ",
-                  b"win: reading full method tables",
                   b"win: no app scene in the list this run",
-                  b" presenter state ",
-                  b" presenter identifier=",
-                  b" activate call ran=",
+                  b"win: APP owner ivar absent",
+                  b"win: APP owner has no active presenter",
+                  b"win: APP live presenter cls=",
+                  b"win: APP live presenter state",
+                  b"win: APP live view cls=",
+                  b"win: live view window=", b"win: live view is not in any window",
+                  b"win: parent level ",
                   b" host container view=",
                   b" presentation context=",
-                  b"info %@ -%@ :: %s from %@",
-                  b"full %@ super=%@ own=%u",
-                  b"meta %@ absent",
+                  b"win: latch not writable",
+                  b"win: hook latch from the previous run",
+                  b"win: hooks from this process are still live",
+                  b"win: hooks not installed (route incomplete)",
+                  b"win: hooks reverted ",
+                  b"win: hooks still live=",
+                  b"win: hooks live=",
+                  b"install: createPresenterWithIdentifier:priority: refused",
+                  b"install: activate refused",
+                  b"create2 id=%@ pri=%ld -> %@",
+                  b"create1 id=%@ -> %@",
+                  b"activate %@", b"deactivate %@", b"invalidate %@",
                   b"/var/mobile/Library/Logs/Aevon/win.step",
-                  b"presenter %@ -> %@"):
+                  b"/var/mobile/Library/Logs/Aevon/win.hook"):
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the probe would never reach SpringBoard")
