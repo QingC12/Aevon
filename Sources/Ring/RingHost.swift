@@ -357,7 +357,7 @@ final class RingHost: NSObject {
 
         let ring = RingView(frame: host.bounds, config: config, apps: apps, pivot: pivot)
         ring.onPick = { [weak self] app in
-            self?.launch(app)
+            self?.open(app)
         }
         // 回收站 / 收藏 / 拖拽旋转 all end up in one file (apps.plist) or in the
         // runtime snapshot. The view never writes anything itself, so the two
@@ -477,12 +477,31 @@ final class RingHost: NSObject {
 
     // MARK: - Launching
 
-    /// The same private entry point SpringBoard itself uses. Guarded at every
-    /// step: on a system without it the tap simply does nothing, which is a
-    /// far better failure than an unrecognized selector inside SpringBoard.
-    private func launch(_ app: RingApp) {
+    /// 0.0.38 — the icon opens the app *as a floating card*, not full screen.
+    ///
+    /// Until this version the only way to a card was Settings → 窗口与场景 →
+    /// arm → six seconds → switch to the app → swipe up to the desktop. The
+    /// ring is already the operator's own list of apps, so a tap on it is the
+    /// same request with one gesture instead of five.
+    ///
+    /// `SceneProbe.openCard` owns the whole route; this only decides what to do
+    /// when it declines. A tap must never be a dead end: a suspended launch the
+    /// system refuses, or a scene that never appears in four seconds, means the
+    /// operator asked for an app and gets the app — plainly, full screen.
+    private func open(_ app: RingApp) {
         collapse(animated: true)
+        guard !app.bundleID.hasPrefix("placeholder.") else { return }
+        SceneProbe.openCard(app.bundleID) { [weak self] reason in
+            Log.write("ring: card route declined (" + reason + "), opening " + app.bundleID)
+            self?.launch(app)
+        }
+    }
 
+    /// The old behaviour, kept as the fallback and unchanged: the same private
+    /// entry point SpringBoard itself uses. Guarded at every step: on a system
+    /// without it the tap simply does nothing, which is a far better failure
+    /// than an unrecognized selector inside SpringBoard.
+    private func launch(_ app: RingApp) {
         guard !app.bundleID.hasPrefix("placeholder.") else { return }
         guard let meta = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type else {
             Log.write("ring: LSApplicationWorkspace unavailable, cannot open \(app.bundleID)")

@@ -141,6 +141,37 @@ NSInteger AevonCallSetBool(id object, NSString *name, BOOL value) {
     return 1;
 }
 
+/// `-launchApplicationWithIdentifier:suspended:` — the mother ship's first step.
+///
+/// Her binary calls it on `sharedApplication` and the 0.0.13 alignment table
+/// found exactly that shape on `UIApplication` (PRESENT, `B28@0:8@16B24`), so the
+/// app object is asked first; `LSApplicationWorkspace` carries the same selector
+/// on releases where the app object dropped it, and it already opens apps for the
+/// ring, so it is the one fallback worth trying. Two answers rather than one,
+/// because "there is no such method" and "it refused" lead to different next
+/// steps and used to look identical from Swift.
+NSInteger AevonLaunchSuspended(id application, NSString *bundleID) {
+    if (bundleID == nil || bundleID.length == 0) return 0;
+    SEL sel = NSSelectorFromString(@"launchApplicationWithIdentifier:suspended:");
+
+    id targets[2] = {application, nil};
+    Class workspace = NSClassFromString(@"LSApplicationWorkspace");
+    if (workspace != Nil) {
+        SEL shared = NSSelectorFromString(@"defaultWorkspace");
+        if ([workspace respondsToSelector:shared]) {
+            targets[1] = ((id (*)(id, SEL))objc_msgSend)((id)workspace, shared);
+        }
+    }
+    for (int index = 0; index < 2; index++) {
+        id target = targets[index];
+        if (target == nil || ![target respondsToSelector:sel]) continue;
+        BOOL (*call)(id, SEL, id, BOOL) = (BOOL (*)(id, SEL, id, BOOL))objc_msgSend;
+        BOOL started = call(target, sel, bundleID, YES);
+        return started ? 1 : 2;
+    }
+    return 0;
+}
+
 // MARK: - Reading the real method table (0.0.28)
 
 // 0.0.27 asked for three readings and got `absent` three times:

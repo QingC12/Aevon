@@ -907,7 +907,98 @@ zStackParticipantDidChange:
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { poll() }
     }
 
+    // MARK: - 0.0.38 图标 → 悬浮窗
+
+    /// Where the ring's icon ends up. One tap, no Settings, no six second wait,
+    /// and no swipe to the desktop.
+    ///
+    /// The manual flow is slow for a reason that is not a bug: the card is only
+    /// built once the app has *left* the screen, because a scene's layers can
+    /// only be hosted by one container at a time (0.0.24—0.0.26 took them while
+    /// the app was full screen and the phone went black). Her route removes the
+    /// departure entirely — `launchApplicationWithIdentifier:suspended:` starts
+    /// the app without giving it the screen, so the scene exists, the desktop is
+    /// still the backdrop, and the card is the only thing that ever hosts the
+    /// layers.
+    ///
+    /// Everything after the launch is the chain that already works: arm the hold,
+    /// wait for the scene to exist, then `float`. `float` pushes the scene to
+    /// "in front" on its first beat, which is the same door 0.0.32 proved on a
+    /// scene that had genuinely gone to the background.
+    ///
+    /// `fallback` is called when this route cannot even start: a suspended launch
+    /// that never produces a scene would otherwise be a tap that does nothing,
+    /// and a dead control on the home screen is worse than a full-screen app.
+    static func openCard(_ bundleID: String, fallback: @escaping (String) -> Void) {
+        guard !bundleID.isEmpty, !bundleID.hasPrefix("placeholder.") else { return }
+        guard !cardUp else {
+            Log.write("win: icon " + bundleID + " ignored, a card is already up")
+            return
+        }
+
+        let door = AevonLaunchSuspended(sharedApplication(), bundleID)
+        Log.write("win: icon launch " + bundleID + " suspended door=" + String(door))
+        guard door == 1 else {
+            fallback("suspended door=" + String(door))
+            return
+        }
+
+        mark("ICON-launch")
+        // Armed before the wait, not after it: a scene that appears and is
+        // allowed to sleep in the same half second is a scene found already cold.
+        AevonHookArm(bundleID)
+        pollForScene(bundleID, ticks: 0, fallback: fallback)
+    }
+
+    /// Four seconds of looking, four times a second. A suspended launch is a
+    /// process bring-up, so the first look is expected to miss; the ceiling
+    /// exists so a tap that goes nowhere ends instead of leaving a hold armed.
+    private static func pollForScene(_ bundleID: String, ticks: Int,
+                                     fallback: @escaping (String) -> Void) {
+        if let scene = sceneFor(bundleID) {
+            unmark()
+            Log.write("win: icon scene up after " + String(ticks * 250) + "ms")
+            emitNotes(AevonTakeNotes())
+            float(scene)
+            // A hold with no card under it is a scene that never sleeps again.
+            // `float` answers by raising `cardUp`, so its absence is the answer.
+            guard cardUp else {
+                AevonHookDisarm()
+                Log.write("win: icon card did not come up, hold released")
+                fallback("card did not come up")
+                return
+            }
+            return
+        }
+        guard ticks < 16 else {
+            unmark()
+            AevonHookDisarm()
+            Log.write("win: icon " + bundleID + " produced no scene")
+            fallback("no scene in 4s")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            pollForScene(bundleID, ticks: ticks + 1, fallback: fallback)
+        }
+    }
+
+    /// The scene that answers to this bundle id. Matched on the identifier
+    /// rather than on the app object: `sceneID:com.x.y-default` is the one
+    /// spelling every release has used, and the scene manager is the only door
+    /// that lists scenes across processes.
+    private static func sceneFor(_ bundleID: String) -> NSObject? {
+        guard let manager = AevonSceneManager() as? NSObject else { return nil }
+        var found: NSObject?
+        AevonEnumerateScenes(manager) { scene in
+            guard found == nil, let scene = scene as? NSObject else { return }
+            let identifier = value(of: scene, "identifier").map { String(describing: $0) } ?? ""
+            if identifier.contains(bundleID) { found = scene }
+        }
+        return found
+    }
+
     /// The system's own answer to "may this scene go to sleep", as a number.
+
     /// `absent` means the method is not there, which is not the same as 0.
     private static func reasonsOf(_ scene: NSObject) -> String {
         let value = AevonReasonsOf(scene)

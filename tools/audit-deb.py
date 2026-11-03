@@ -508,6 +508,12 @@ def main():
                   # as it enters, with the hitTest answer beside it).
                   b"win: grip map hole=",
                   b"win: event hit #",
+                  # 0.0.38 — 图标 → 悬浮窗。三条：挂起启动的门口、场景等到的时刻、
+                  # 承载形状装不下时几何让步的那一行。少了第一条，「点图标没反应」
+                  # 就又是一次无法分辨的报告。
+                  b"win: icon launch ",
+                  b"win: icon scene up after ",
+                  b"ring: capacity fit ",
                   # 0.0.34 — the mother ship's 区域 × 动作 matrix replaced our
                   # pinch-and-drag shell. These four strings are the only proof
                   # in the package that a band flick can close, that two taps

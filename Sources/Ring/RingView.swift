@@ -54,6 +54,15 @@ final class RingView: UIView {
     private var apps: [RingApp]
     private var pivot: CGPoint
 
+    /// 0.0.38 — the operator's geometry, adjusted only when their own list does
+    /// not fit in it. `nil` means the sliders' numbers are already the truth,
+    /// which is the normal case and the one that must cost nothing.
+    private var fitted: RingConfig?
+    /// Every geometric read goes through here, never through `config`: a ring
+    /// that lays its icons out with one radius and hit-tests them with another
+    /// is a ring whose icons are not where they are drawn.
+    private var geo: RingConfig { fitted ?? config }
+
     private var iconViews: [UIView] = []
     private var slots: [RingSlot] = []
     private var bornAt: [CFTimeInterval] = []
@@ -129,8 +138,9 @@ final class RingView: UIView {
             return
         }
 
-        iconCount = Swift.min(apps.count, config.capacity)
-        slots = ringSlots(pivot: pivot, count: iconCount, config: config)
+        applyFit(apps.count)
+        iconCount = Swift.min(apps.count, geo.capacity)
+        slots = ringSlots(pivot: pivot, count: iconCount, config: geo)
         bornAt = Array(repeating: 0, count: iconCount)
 
         for (index, _) in slots.enumerated() {
@@ -144,8 +154,31 @@ final class RingView: UIView {
         }
     }
 
+    /// 0.0.38 — resolve "does the operator's list fit the operator's geometry"
+    /// once, before any view exists, and say so in the log when it does not.
+    private func applyFit(_ count: Int) {
+        let target = config.fitted(to: count)
+        guard target.iconWidth != config.iconWidth || target.radius != config.radius else {
+            fitted = nil
+            return
+        }
+        var adjusted = config
+        adjusted.iconWidth = target.iconWidth
+        adjusted.radius = target.radius
+        let changed = fitted.map {
+            $0.iconWidth != adjusted.iconWidth || $0.radius != adjusted.radius
+        } ?? true
+        fitted = adjusted
+        guard changed else { return }
+        // Two lets: one long concatenation of String(Int()) is a type-checker
+        // timeout, and 0.0.30 already lost a build to exactly that.
+        let head = "ring: capacity fit " + String(count) + " icons into R"
+        let tail = " <- " + String(Int(target.radius)) + "/" + String(Int(target.iconWidth))
+        Log.write(head + String(Int(config.radius)) + "/" + String(Int(config.iconWidth)) + tail)
+    }
+
     private func makeIconView(_ app: RingApp) -> UIView {
-        let side = config.iconWidth
+        let side = geo.iconWidth
         let container = UIView(frame: CGRect(x: 0, y: 0, width: side, height: side))
         container.layer.cornerRadius = side * 0.2237     // iOS squircle ratio
         container.layer.cornerCurve = .continuous
@@ -254,8 +287,8 @@ final class RingView: UIView {
 
         // 母本第 4 条: radius / iconWidth 随进度插值. 0.58 is the starting
         // fraction: the arc is already visible, it just grows out of the pivot.
-        let radius = config.radius * (0.58 + 0.42 * p)
-        let side = Swift.max(10, config.iconWidth * (0.55 + 0.45 * p))
+        let radius = geo.radius * (0.58 + 0.42 * p)
+        let side = Swift.max(10, geo.iconWidth * (0.55 + 0.45 * p))
         let arc = config.arc(progress: p)
         let now = CACurrentMediaTime()
 
@@ -318,13 +351,14 @@ final class RingView: UIView {
         // holds a different number of icons. Updating in place would leave
         // `slots` and `iconViews` with different counts, and the guard in
         // placeIcons would then freeze every icon where it stands.
-        let count = Swift.min(apps.count, newConfig.capacity)
+        config = newConfig
+        applyFit(apps.count)
+        let count = Swift.min(apps.count, geo.capacity)
         if count != iconCount {
             rebuild(config: newConfig)
             return
         }
-        config = newConfig
-        slots = ringSlots(pivot: pivot, count: iconCount, config: config)
+        slots = ringSlots(pivot: pivot, count: iconCount, config: geo)
         if bornAt.count != iconCount {
             bornAt = Array(repeating: 0, count: iconCount)
         }
@@ -356,9 +390,10 @@ final class RingView: UIView {
         link?.invalidate()
         link = nil
 
-        let count = Swift.min(newApps.count, config.capacity)
-        let keepsViews = count == iconCount && count > 0
         apps = newApps
+        applyFit(newApps.count)
+        let count = Swift.min(newApps.count, geo.capacity)
+        let keepsViews = count == iconCount && count > 0
 
         if keepsViews {
             // Same number of icons: swap the artwork and let them glide, which
@@ -366,7 +401,7 @@ final class RingView: UIView {
             for (index, view) in iconViews.enumerated() {
                 (view.subviews.first as? UIImageView)?.image = apps[index % apps.count].icon
             }
-            slots = ringSlots(pivot: pivot, count: iconCount, config: config)
+            slots = ringSlots(pivot: pivot, count: iconCount, config: geo)
         } else {
             progress = 0
             build()
@@ -385,7 +420,7 @@ final class RingView: UIView {
     /// changes size. Re-seating is instant: nothing is animating at that point.
     func movePivot(_ point: CGPoint) {
         pivot = point
-        slots = ringSlots(pivot: pivot, count: iconCount, config: config)
+        slots = ringSlots(pivot: pivot, count: iconCount, config: geo)
         placeIcons(progress: progress)
     }
 
@@ -426,8 +461,8 @@ final class RingView: UIView {
         let dx = point.x - pivot.x
         let dy = point.y - pivot.y
         let distance = sqrt(dx * dx + dy * dy)
-        let band = Swift.max(config.iconWidth, 22)
-        guard distance > config.radius - band, distance < config.radius + band else {
+        let band = Swift.max(geo.iconWidth, 22)
+        guard distance > geo.radius - band, distance < geo.radius + band else {
             return false
         }
         let angle = atan2(dx, -dy) * 180 / .pi
@@ -524,14 +559,14 @@ final class RingView: UIView {
             panAnchorAngle = angleOf(point)
             updated.tail = value
             config = updated
-            slots = ringSlots(pivot: pivot, count: iconCount, config: config)
+            slots = ringSlots(pivot: pivot, count: iconCount, config: geo)
             placeIcons(progress: progress)
 
         case .rotate:
             var updated = config
             updated.rotation = normalised(panStartRotation + (angleOf(point) - panAnchorAngle))
             config = updated
-            slots = ringSlots(pivot: pivot, count: iconCount, config: config)
+            slots = ringSlots(pivot: pivot, count: iconCount, config: geo)
             placeIcons(progress: progress)
 
         case .none:
@@ -559,8 +594,8 @@ final class RingView: UIView {
             if panIcon < slots.count {
                 let slot = slots[panIcon]
                 let angle = slot.angle * .pi / 180
-                let target = CGPoint(x: pivot.x + config.radius * sin(angle),
-                                     y: pivot.y - config.radius * cos(angle))
+                let target = CGPoint(x: pivot.x + geo.radius * sin(angle),
+                                     y: pivot.y - geo.radius * cos(angle))
                 UIView.animate(withDuration: 0.22, delay: 0,
                                usingSpringWithDamping: 0.8, initialSpringVelocity: 0.4,
                                options: [.beginFromCurrentState], animations: {
@@ -587,7 +622,7 @@ final class RingView: UIView {
         let dx = point.x - pivot.x
         let dy = point.y - pivot.y
         let distance = sqrt(dx * dx + dy * dy)
-        let inside = distance < Swift.max(44, config.radius * 0.45)
+        let inside = distance < Swift.max(44, geo.radius * 0.45)
         if inside == trashActive { return }
         trashActive = inside
         if inside {

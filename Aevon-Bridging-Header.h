@@ -81,6 +81,18 @@ NSInteger AevonPushBackground(id _Nullable scene);
 /// 0.0.28 — `- (void)name:(BOOL)`. 1 for "ran", 0 for "no such setter".
 NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL value);
 
+/// 0.0.38 — 承载形状的图标直接开悬浮窗，靠的是母本自己的第一步：
+/// `-launchApplicationWithIdentifier:suspended:`，把应用拉起来但不占屏幕。
+/// Encoded `B28@0:8@16B24`, read off this phone in 0.0.13's alignment table
+/// where it answers on `UIApplication` (PRESENT). The scene exists, the desktop
+/// stays in front, and the card has something to present — which is the whole
+/// reason the manual flow needed a six second wait and a swipe home.
+///
+///   1  started suspended
+///   2  the method is there and said no
+///   0  no such method on UIApplication or LSApplicationWorkspace
+NSInteger AevonLaunchSuspended(id _Nullable application, NSString *_Nullable bundleID);
+
 /// 0.0.28 — the accessor names come from the runtime instead of this source
 
 @interface UIImage (AevonPrivateIcons)

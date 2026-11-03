@@ -273,6 +273,47 @@ struct RingConfig {
         return Swift.max(2, Swift.min(12, Int(span / step) + 1))
     }
 
+    /// `capacity` for a geometry this config does not have yet. Written as a
+    /// copy rather than as a second formula: two spellings of one rule is how
+    /// "the ring holds 7" and "the ring holds 8" both end up true.
+    private func capacity(radius r: CGFloat, iconWidth w: CGFloat) -> Int {
+        var probe = self
+        probe.radius = r
+        probe.iconWidth = w
+        return probe.capacity
+    }
+
+    /// 0.0.38 — 图标数量不该被几何偷偷截掉一半。
+    ///
+    /// Aevon(36): the operator put nine apps in the ring, tapped the dot, and
+    /// counted seven. Nothing had failed — `capacity` is a fact about a circle
+    /// (R64 with 44 pt icons holds exactly seven), and the eighth icon was never
+    /// built. Silently truncating the operator's own list is the wrong answer to
+    /// a geometry question, so the geometry gives way instead: the icons shrink
+    /// first (44 → 26 pt, the floor the settings slider already uses), and only
+    /// when that is exhausted does the ring grow (64 → 120 pt, the slider's own
+    /// ceiling). A list that does not fit even at R120 / 26 pt is still cut, and
+    /// the caller logs that instead of pretending.
+    ///
+    /// The operator's own numbers are never written back: this is a rendering
+    /// decision, and the sliders stay the master control.
+    func fitted(to count: Int) -> (radius: CGFloat, iconWidth: CGFloat) {
+        var r = radius
+        var w = iconWidth
+        var steps = 0
+        while capacity(radius: r, iconWidth: w) < count, steps < 64 {
+            steps += 1
+            if w > 26 {
+                w = Swift.max(26, w - 2)
+            } else if r < 120 {
+                r = Swift.min(120, r + 4)
+            } else {
+                break
+            }
+        }
+        return (r, w)
+    }
+
     /// One line for the settings row: what the ring is right now.
     /// Built with interpolation rather than String(format:) on purpose — a
     /// `%d` fed with a Swift Int is a 32/64-bit mismatch waiting to print
