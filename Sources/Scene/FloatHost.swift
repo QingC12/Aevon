@@ -442,8 +442,26 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     }
 
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
-        guard let grip = grip, gesture === tap else { return true }
-        return zoneFor(cardPoint(gesture.location(in: grip))) == .edgeMiddle
+        guard let grip = grip else { return true }
+        let zone = zoneFor(cardPoint(gesture.location(in: grip)))
+        if gesture === tap {
+            // 俩点缩小 — two taps in 边中, and only there: a double tap on the
+            // rest of the ring belongs to nothing, and a double tap inside the
+            // card belongs to the app.
+            return zone == .edgeMiddle
+        }
+        if gesture === press {
+            // 0.0.37 — 边中 does not take a long press at all. Its 长按 is
+            // 切换横竖, which this chain cannot do, so the recognizer was only
+            // there to be reported in the log — and it was, twenty times in
+            // Aevon(35). The cost was not the log line: `handlePress` disables
+            // the pan when it begins, so "press the cyan block, then flick up"
+            // disabled the very recognizer that reads a flick. The close
+            // gesture was never missed; it was switched off half a second
+            // before it started.
+            return zone != .edgeMiddle
+        }
+        return true
     }
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
@@ -495,19 +513,31 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private func finishPan(_ gesture: UIPanGestureRecognizer, card: UIView, window: UIWindow) {
         switch zone {
         case .edgeMiddle:
-            // 边中区域快速上滑关闭. A flick is up-and-fast: the upward component
-            // has to clear the threshold and has to be the larger one, or a
-            // diagonal drag along the band would close a window nobody meant to
-            // close.
+            // 边中区域快速上滑关闭. Two readings, either one closes.
+            //
+            // Travel first. 0.0.36 read speed alone, and Aevon(35) recorded
+            // four attempts at `up=-159 / 0 / -199 / -2327` — not one of them
+            // positive, on a phone where the operator was swiping up. A
+            // velocity sample is the last frame or two of the finger; a thumb
+            // that reaches its target and settles flips the sign without ever
+            // going back down. Travel is the whole path and cannot flip.
+            //
+            // Speed stays as the second reading, because a short hard flick
+            // barely travels and is still a flick.
+            let total = gesture.translation(in: window)
             let speed = gesture.velocity(in: window)
+            let lift = -total.y
             let up = -speed.y
-            if up > flick && up > abs(speed.x) {
+            let byTravel = lift > 50 && abs(total.y) > abs(total.x)
+            let bySpeed = up > flick && up > abs(speed.x)
+            if byTravel || bySpeed {
                 Log.write("win: gesture edge-middle flick up=" + String(Int(up))
-                          + " -> close")
+                          + " dy=" + String(Int(total.y)) + " -> close")
                 requestClose("edge swipe up")
             } else {
                 Log.write("win: gesture edge-middle not a flick up=" + String(Int(up))
-                          + " vx=" + String(Int(speed.x)))
+                          + " vx=" + String(Int(speed.x))
+                          + " dy=" + String(Int(total.y)))
             }
         case .edgeCorner:
             let scale = card.bounds.height / max(natural.height, 1)
@@ -531,14 +561,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // window ends up in two places at once.
             pan?.isEnabled = false
             switch pressZone {
-            case .edgeMiddle:
-                Log.write("win: gesture long press edge-middle, 切换横竖 not wired - "
-                          + "no orientation write in this chain")
             case .edgeCorner:
                 Log.write("win: gesture long press edge-corner, 重启 as geometry reset")
                 resetToPlan(in: window.bounds)
             case .rest:
                 Log.write("win: gesture long press rest, drag to resize")
+            default:
+                // 边中 never reaches here: `gestureRecognizerShouldBegin` refuses
+                // the press there, because 切换横竖 is not wired and disabling the
+                // pan is what killed the flick in 0.0.36.
+                break
             }
         case .changed:
             guard pressZone == .rest else { break }

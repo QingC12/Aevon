@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.0.36</string>
+	<string>0.0.37</string>
 	<key>CFBundleVersion</key>
-	<string>0.0.36</string>
+	<string>0.0.37</string>
 	<key>NSPrincipalClass</key>
 	<string>AevonRootListController</string>
 </dict>
