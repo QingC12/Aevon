@@ -372,7 +372,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         map.frame = grip.bounds
         map.hole = grip.hole
         map.cell = FloatHost.cell(in: card.bounds.size)
-        map.setNeedsDisplay()
     }
 
     /// 竖屏上下, 横屏左右 — the card is always the scene's portrait shape here, so
@@ -713,11 +712,10 @@ final class GripView: UIView {
 
 /// The band, painted. Debug only — 0.0.36.
 ///
-/// It draws exactly the rectangle `GripView` answers `true` for: yellow for the
-/// four side strips, cyan for 边中 (the middle third of the top and bottom band,
-/// the one that closes on a flick), orange for 边角 (the four corner squares
-/// that resize). The card's rect is left untouched, so the picture is still the
-/// picture and this cannot be mistaken for a UI element.
+/// Six plain views laid over the ring: four yellow strips for the side bands,
+/// two cyan patches for 边中 (the middle third of the top and bottom band, the
+/// one that closes on a flick). The card's rect is left empty, so the picture is
+/// still the picture and this cannot be mistaken for a UI element.
 ///
 /// The reason it exists: Aevon(33) and Aevon(34) both said the gesture does not
 /// fire, and both logs proved the ring was built and never touched. A band
@@ -725,41 +723,47 @@ final class GripView: UIView {
 /// — the card is 320x694 and the band is 40pt outside it. Once the gesture is
 /// confirmed, remove `map` from FloatHost and this class.
 ///
-/// No text on purpose. Three labels cost 13 KB when this was first written —
-/// `NSAttributedString`'s key dictionary and `NSString.draw` drag the whole
-/// string-drawing stack into a binary that had none of it — and colour alone
-/// answers the only question being asked: where is the line, and how wide.
-/// 黄 = 四条边带, 青 = 边中, 橙 = 四个角.
+/// Views rather than `draw(_:)`: painting the same six rectangles in a draw
+/// method cost 16 KB of binary, because overriding `draw` puts the whole layer
+/// display path back into a tweak that had none of it. Six `UIView`s are
+/// allocations at runtime, not bytes in the file.
 final class GripMap: UIView {
-    /// The card's rect, in this view's coordinates. Nothing is painted there.
-    var hole: CGRect = .zero
+    /// The card's rect, in this view's coordinates. Nothing is drawn there.
+    var hole: CGRect = .zero {
+        didSet { setNeedsLayout() }
+    }
     /// The middle third of the card's width — 边中.
-    var cell: CGRect = .zero
+    var cell: CGRect = .zero {
+        didSet { setNeedsLayout() }
+    }
+    private var strips: [UIView] = []
 
-    override func draw(_ rect: CGRect) {
+    override func layoutSubviews() {
+        if strips.isEmpty {
+            for index in 0..<6 {
+                let ink: UIColor = index < 4 ? .yellow : .cyan
+                let view = UIView()
+                view.backgroundColor = ink.withAlphaComponent(index < 4 ? 0.30 : 0.60)
+                view.layer.borderWidth = 1
+                view.layer.borderColor = ink.cgColor
+                view.isUserInteractionEnabled = false
+                addSubview(view)
+                strips.append(view)
+            }
+        }
         let w = bounds.width
         let h = bounds.height
         let bx = hole.minX
         let by = hole.minY
-
-        UIColor.yellow.withAlphaComponent(0.26).setFill()
-        UIRectFill(CGRect(x: 0, y: 0, width: w, height: by))
-        UIRectFill(CGRect(x: 0, y: hole.maxY, width: w, height: h - hole.maxY))
-        UIRectFill(CGRect(x: 0, y: hole.minY, width: bx, height: hole.height))
-        UIRectFill(CGRect(x: hole.maxX, y: hole.minY,
-                          width: w - hole.maxX, height: hole.height))
-
-        UIColor.cyan.withAlphaComponent(0.55).setFill()
-        UIRectFill(CGRect(x: hole.minX + cell.minX, y: 0, width: cell.width, height: by))
-        UIRectFill(CGRect(x: hole.minX + cell.minX, y: hole.maxY,
-                          width: cell.width, height: h - hole.maxY))
-
-        UIColor.orange.withAlphaComponent(0.70).setFill()
-        UIRectFill(CGRect(x: 0, y: 0, width: bx, height: by))
-        UIRectFill(CGRect(x: hole.maxX, y: 0, width: w - hole.maxX, height: by))
-        UIRectFill(CGRect(x: 0, y: hole.maxY, width: bx, height: h - hole.maxY))
-        UIRectFill(CGRect(x: hole.maxX, y: hole.maxY,
-                          width: w - hole.maxX, height: h - hole.maxY))
+        strips[0].frame = CGRect(x: 0, y: 0, width: w, height: by)
+        strips[1].frame = CGRect(x: 0, y: hole.maxY, width: w, height: h - hole.maxY)
+        strips[2].frame = CGRect(x: 0, y: hole.minY, width: bx, height: hole.height)
+        strips[3].frame = CGRect(x: hole.maxX, y: hole.minY,
+                                 width: w - hole.maxX, height: hole.height)
+        let mid = CGRect(x: hole.minX + cell.minX, y: 0, width: cell.width, height: by)
+        strips[4].frame = mid
+        strips[5].frame = CGRect(x: mid.minX, y: hole.maxY,
+                                 width: mid.width, height: h - hole.maxY)
     }
 }
 
