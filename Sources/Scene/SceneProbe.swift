@@ -936,6 +936,7 @@ zStackParticipantDidChange:
             Log.write("win: after demote presenter hosting=" + flag(AevonBoolOf(presenter, "isHosting"))
                       + " active=" + flag(AevonBoolOf(presenter, "isActive"))
                       + " sublayers=" + String(layers))
+            inspectDesktop()
             // The card going empty is the one answer that says the scene was
             // retired rather than that the desktop is not drawn. Put the full
             // screen back at once: a frozen card over a hidden picture is the
@@ -974,23 +975,30 @@ zStackParticipantDidChange:
 
     // MARK: - Taking the emptied full screen out of sight
 
-    /// A view that carries a scene's picture, and the ancestor SpringBoard's
-    /// window actually holds.
+    /// A view that carries a scene's picture, and the window SpringBoard keeps
+    /// it in.
     private struct Carrier {
         let view: UIView
         let top: UIView
+        let window: UIWindow
         let name: String
         let ident: String
     }
 
-    /// The one view this file changes, kept so it can be put back exactly.
-    private struct Cover {
+    /// One view that was taken out of sight, kept with everything needed to put
+    /// it back exactly as it was.
+    private struct Saved {
         let view: UIView
+        let alpha: CGFloat
+        let background: UIColor?
         let name: String
-        let previous: CGFloat
     }
 
-    private static var cover: Cover?
+    private static var saved: [Saved] = []
+    private static var savedWindow: (window: UIWindow, background: UIColor?,
+                                     opaque: Bool, alpha: CGFloat, name: String)?
+    private static var savedExtra: [(window: UIWindow, background: UIColor?,
+                                     opaque: Bool, name: String)] = []
 
     /// The classes SpringBoard puts between a window and a scene's picture.
     ///
@@ -1085,7 +1093,8 @@ zStackParticipantDidChange:
                 let name = NSStringFromClass(type(of: node))
                 if isCarrier(name), let top = container(of: node, in: window) {
                     let ident = sceneIdentifier(of: node)
-                    let carrier = Carrier(view: node, top: top, name: name, ident: ident)
+                    let carrier = Carrier(view: node, top: top, window: window,
+                                          name: name, ident: ident)
                     let hit = !wanted.isEmpty
                         && (ident.contains(wanted) || (!bundle.isEmpty && ident.contains(bundle)))
                     if hit {
@@ -1123,30 +1132,137 @@ zStackParticipantDidChange:
             Log.write("win: no carrier named the scene, using the only one found")
         }
 
-        let top = chosen.top
-        let topName = NSStringFromClass(type(of: top))
-        guard !topName.contains("HomeScreen"), !topName.contains("Icon"),
-              !topName.contains("Wallpaper") else {
-            Log.write("win: refused to hide " + topName)
+        let window = chosen.window
+        let windowName = NSStringFromClass(type(of: window))
+        guard !windowName.contains("HomeScreen"), !windowName.contains("Wallpaper") else {
+            Log.write("win: refused to hide a desktop window " + windowName)
             return
         }
 
-        let previous = top.alpha
-        cover = Cover(view: top, name: topName, previous: previous)
-        top.alpha = 0
-        Log.write("win: fullscreen demoted cls=" + topName
-                  + " alpha " + String(format: "%.1f", previous) + "->0"
+        // Take the whole chain down, not just its top. 0.0.24 set the window's
+        // direct child to alpha 0 and the outside was still black, so the black
+        // is drawn by something else on the same chain: an opaque parent, a
+        // sibling above the carrier, or the window's own background colour. All
+        // three are covered here — every view from the carrier up to (but not
+        // including) the window goes transparent, and the window's background
+        // is cleared.
+        var chain: [UIView] = []
+        var cursor: UIView? = chosen.view
+        var steps = 0
+        while let view = cursor, view !== window, steps < 64 {
+            chain.append(view)
+            cursor = view.superview
+            steps += 1
+        }
+        for view in chain.reversed() {
+            let name = NSStringFromClass(type(of: view))
+            let record = Saved(view: view, alpha: view.alpha,
+                               background: view.backgroundColor, name: name)
+            saved.append(record)
+            view.alpha = 0
+            if let background = view.backgroundColor, background != UIColor.clear {
+                view.backgroundColor = .clear
+            }
+            Log.write("win: hidden layer " + name
+                      + " alpha=" + String(format: "%.1f", record.alpha)
+                      + " size=" + String(format: "%.0fx%.0f",
+                                          view.frame.width, view.frame.height))
+        }
+
+        let background = window.backgroundColor
+        let opaqueBefore = window.isOpaque
+        savedWindow = (window, background, opaqueBefore, window.alpha, windowName)
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        Log.write("win: window background cleared " + windowName
+                  + " opaque=" + (opaqueBefore ? "yes" : "no")
+                  + " hadColor=" + (background == nil ? "no" : "yes"))
+        Log.write("win: fullscreen demoted layers=" + String(chain.count)
                   + " from=" + chosen.name)
+
+        // SpringBoard keeps a window of its own between the desktop and the app:
+        // aevon(23) logged `SBWindow level=-1 hidden=no alpha=1.0` sitting
+        // between the home screen (-2) and the app's root scene (0). An opaque
+        // window there is a black screen no matter how transparent everything
+        // above it becomes, so every window at the app's own level has its
+        // background cleared and its contents counted.
+        //
+        // Alpha is deliberately left alone here. This is the one layer that
+        // might be the desktop's own host, and a black outside is a much better
+        // outcome than a black everything.
+        for other in app.windows {
+            if other === window { continue }
+            let name = NSStringFromClass(type(of: other))
+            if name.contains("Aevon") || name.contains("HomeScreen")
+                || name.contains("Wallpaper") || name.contains("SystemAperture")
+                || name.contains("StatusBar") { continue }
+            let level = other.windowLevel.rawValue
+            guard level >= -2, level <= 1, !other.isHidden, other.alpha > 0 else { continue }
+            let root = other.rootViewController?.view
+            let rootClass = other.rootViewController.map {
+                NSStringFromClass(type(of: $0))
+            } ?? "nil"
+            Log.write("win: app window " + name
+                      + " level=" + String(format: "%.0f", level)
+                      + " root=" + rootClass
+                      + " subviews=" + String(root?.subviews.count ?? -1)
+                      + " bg=" + (other.backgroundColor == nil ? "nil" : "set")
+                      + " opaque=" + (other.isOpaque ? "yes" : "no"))
+            savedExtra.append((other, other.backgroundColor, other.isOpaque, name))
+            other.backgroundColor = .clear
+            other.isOpaque = false
+        }
     }
 
-    /// Puts the one view back. Called on teardown, before this file forgets it,
-    /// so a failed run cannot leave a hole in SpringBoard's hierarchy.
+    /// Puts everything back, newest first. Called on teardown, before this file
+    /// forgets what it changed, so a failed run cannot leave a hole in
+    /// SpringBoard's hierarchy.
     private static func restoreFullScreen() {
-        guard let saved = cover else { return }
-        saved.view.alpha = saved.previous
-        Log.write("win: fullscreen restored cls=" + saved.name
-                  + " alpha=" + String(format: "%.1f", saved.previous))
-        cover = nil
+        if let record = savedWindow {
+            record.window.alpha = record.alpha
+            record.window.backgroundColor = record.background
+            record.window.isOpaque = record.opaque
+            Log.write("win: window restored " + record.name)
+            savedWindow = nil
+        }
+        for item in saved {
+            item.view.alpha = item.alpha
+            item.view.backgroundColor = item.background
+        }
+        if !saved.isEmpty {
+            Log.write("win: fullscreen restored layers=" + String(saved.count))
+        }
+        saved.removeAll()
+        for item in savedExtra {
+            item.window.backgroundColor = item.background
+            item.window.isOpaque = item.opaque
+        }
+        if !savedExtra.isEmpty {
+            Log.write("win: app windows restored count=" + String(savedExtra.count))
+        }
+        savedExtra.removeAll()
+    }
+
+    /// What the desktop looks like right now.
+    ///
+    /// "The outside is still black" has two very different causes and they need
+    /// opposite fixes: the app's picture is still on screen, or the desktop
+    /// stopped being drawn at all. A home screen view with no sublayers is the
+    /// second one, and no amount of alpha on the app's side would ever fix it.
+    private static func inspectDesktop() {
+        guard let app = sharedApplication() else { return }
+        for window in app.windows {
+            let name = NSStringFromClass(type(of: window))
+            guard name.contains("HomeScreen") || name.contains("Wallpaper") else { continue }
+            let root = window.rootViewController?.view
+            let rootClass = window.rootViewController.map {
+                NSStringFromClass(type(of: $0))
+            } ?? "nil"
+            Log.write("win: desktop " + name + " root=" + rootClass
+                      + " alpha=" + String(format: "%.1f", root?.alpha ?? -1)
+                      + " subviews=" + String(root?.subviews.count ?? -1)
+                      + " layers=" + String(root?.layer.sublayers?.count ?? -1))
+        }
     }
 
     /// The one witness a kill leaves behind: which call the process was inside.
