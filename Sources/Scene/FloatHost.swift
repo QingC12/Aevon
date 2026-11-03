@@ -49,8 +49,20 @@ final class FloatHost {
         card.layer.borderColor = UIColor.white.cgColor
         card.clipsToBounds = true
 
-        view.frame = CGRect(origin: .zero, size: card.bounds.size)
-        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        // 0.0.22 forced this view's frame to the card's 320x480 and the card came
+        // up empty. A scene view is laid out for the scene's own size — 393x852
+        // on this phone — so it keeps that size and is scaled as a whole, the way
+        // the system scales a snapshot. Setting `frame` instead of `transform`
+        // rewrites the scene's coordinate space, which is a different thing and
+        // never a wanted one.
+        let natural = view.bounds.size
+        let source = (natural.width > 16 && natural.height > 16) ? natural : window.bounds.size
+        view.transform = .identity
+        view.autoresizingMask = []
+        view.bounds = CGRect(origin: .zero, size: source)
+        view.center = CGPoint(x: card.bounds.midX, y: card.bounds.midY)
+        let scale = min(card.bounds.width / source.width, card.bounds.height / source.height)
+        view.transform = CGAffineTransform(scaleX: scale, y: scale)
         card.addSubview(view)
         root.addSubview(card)
 
@@ -59,7 +71,10 @@ final class FloatHost {
         Log.write("win: card "
                   + String(format: "%.0fx%.0f", card.bounds.width, card.bounds.height)
                   + " at " + String(format: "%.0f,%.0f", card.frame.origin.x, card.frame.origin.y)
-                  + " hosted=" + String(format: "%.0fx%.0f", view.bounds.width, view.bounds.height))
+                  + " natural=" + String(format: "%.0fx%.0f", source.width, source.height))
+        Log.write("win: scale factor=" + String(format: "%.3f", scale)
+                  + " shown=" + String(format: "%.0fx%.0f",
+                                       source.width * scale, source.height * scale))
         return window.isHidden ? nil : host
     }
 

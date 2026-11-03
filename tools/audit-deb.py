@@ -418,14 +418,24 @@ def main():
         if token not in prefs:
             bad(f"probe: {token.decode()} missing from the bundle binary")
 
-    # 0.0.22 stops listening and starts drawing. The whole hook machinery of
-    # 0.0.21 is gone from the source, so its lines are gone from this list: an
-    # audit that asserts a string the source no longer contains fails a build
-    # that is correct, which is how two runs were already burnt in this phase.
-    # What replaces it is the mother ship's chain walked to the end — pick the
-    # scene by its own `settings.foreground`, make a presenter, take
-    # `presentationView`, put it in a window, and only then activate — plus the
-    # one witness a kill leaves behind, the step marker.
+    # 0.0.23 answers the one question 0.0.22 could not: the card was on screen
+    # and was empty. Three things changed, and each one has a marker here.
+    #
+    # The scene is chosen six seconds after the tap, when the operator has had
+    # time to switch to the app they want floated — 0.0.22 chose it while
+    # Settings was in front, which is the one moment the target app is certain
+    # to be in the background. The foreground question is now asked four ways
+    # (two FBScene accessibility readings plus two settings spellings), and each
+    # candidate is printed, because 0.0.22 asked settings alone, got -1 back
+    # from both spellings, and read that silence as "no scene is in front".
+    #
+    # The view keeps the scene's own size and is scaled as a whole. 0.0.22 set
+    # its frame to the card's 320x480, which rewrites the scene's coordinate
+    # space rather than shrinking it.
+    #
+    # And the blank card is separated into its three possible causes by two
+    # counters FBSceneLayerManager and _UISceneLayerHostContainerView already
+    # declare: layers, hostedLayers, nonHostedLayers.
     #
     # Every marker below is longer than 15 bytes on purpose: Swift compiles a
     # shorter literal into an immediate inside the instruction stream, so the
@@ -438,8 +448,11 @@ def main():
     for token in (b"scene: probe begin", b"scene: probe end",
                   b"scene: window level", b"scene: carrier view", b"scene: live scenes",
                   b"win: previous run died at ",
+                  b"win: armed, building in 6s (switch to the target app now)",
                   b"win: no app scene in the list this run",
-                  b" foreground=unknown (fallback)",
+                  b"win: scene candidate ",
+                  b"win: enumerating scenes ",
+                  b" foreground=absent (best available)",
                   b"win: no uiPresentationManager",
                   b"win: no presentationView",
                   b"win: no window - nothing activated",
@@ -447,6 +460,9 @@ def main():
                   b"win: activate ran=",
                   b"win: state hosting=",
                   b"win: view sublayers=",
+                  b"win: scene layerManager=",
+                  b"win: container cls=",
+                  b"win: scale factor=",
                   b"win: closed after 8s",
                   b"presenter %@ -> %@",
                   b"/var/mobile/Library/Logs/Aevon/win.step"):

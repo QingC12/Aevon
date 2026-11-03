@@ -777,15 +777,26 @@ zStackParticipantDidChange:
     static func runWindow() {
         reportLastStep()
 
-        guard let manager = AevonSceneManager() as? NSObject else {
-            Log.write("win: no manager")
-            return
+        // The button lives inside Settings, so at the instant it is pressed the
+        // app the operator wants to float is guaranteed to be in the background
+        // — and a scene in the background pushes no layers to anybody. 0.0.22
+        // hosted exactly that: a live presenter, `hosting=yes active=yes`, and
+        // one empty sublayer. Six seconds is the window to switch apps, and the
+        // scene is chosen when the timer fires rather than when the tap lands.
+        Log.write("win: armed, building in 6s (switch to the target app now)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
+            // Asked again on purpose: a manager captured six seconds ago is a
+            // stale reference to something the system may have rebuilt.
+            guard let manager = AevonSceneManager() as? NSObject else {
+                Log.write("win: no manager")
+                return
+            }
+            guard let scene = target(manager) else {
+                Log.write("win: no app scene in the list this run")
+                return
+            }
+            float(scene)
         }
-        guard let scene = target(manager) else {
-            Log.write("win: no app scene in the list this run")
-            return
-        }
-        float(scene)
     }
 
     /// The scene a floating window would host.
@@ -801,6 +812,7 @@ zStackParticipantDidChange:
         var spare: NSObject?
         var spareName = "?"
         var seen = 0
+        var listed = 0
         let visit: (Any?) -> Void = { scene in
             guard let scene = scene as? NSObject else { return }
             seen += 1
@@ -808,22 +820,42 @@ zStackParticipantDidChange:
             guard ident.hasPrefix("sceneID:"),
                   !ident.contains("com.apple.springboard"),
                   !ident.contains("com.apple.Preferences") else { return }
+            listed += 1
             if spare == nil { spare = scene; spareName = ident }
-            guard front == nil, let settings = value(of: scene, "settings") else { return }
-            let on = max(AevonBoolOf(settings, "isForeground"), AevonBoolOf(settings, "foreground"))
-            if on == 1 {
+
+            // Four independent answers to "is this scene in front". 0.0.22
+            // asked `settings` alone and got -1 back from both spellings —
+            // which is how a background scene came to be hosted: the question
+            // failed, not the scene. The accessibility pair is what FBScene
+            // declares for exactly this question, so it is read first; the
+            // settings readings are kept because a disagreement between the
+            // four is worth seeing in the log rather than averaging away.
+            let running = AevonBoolOf(scene, "accessibilitySceneIsRunningInForeground")
+            let visible = AevonBoolOf(scene, "accessibilitySceneIsForegroundVisible")
+            let settings = value(of: scene, "settings")
+            let foreground = settings.map { AevonBoolOf($0, "isForeground") } ?? -1
+            let plain = settings.map { AevonBoolOf($0, "foreground") } ?? -1
+            if listed <= 6 {
+                Log.write("win: scene candidate " + ident
+                          + " running=" + flag(running)
+                          + " visible=" + flag(visible)
+                          + " fg=" + flag(foreground) + "/" + flag(plain)
+                          + " settings=" + (settings.map { NSStringFromClass(type(of: $0)) } ?? "nil"))
+            }
+            guard front == nil else { return }
+            if running == 1 || visible == 1 || foreground == 1 || plain == 1 {
                 front = scene
                 frontName = ident
             }
         }
         AevonEnumerateScenes(manager, visit)
-        Log.write("win: scenes=" + String(seen))
+        Log.write("win: enumerating scenes " + String(seen) + " apps=" + String(listed))
         if let scene = front {
             Log.write("win: target " + frontName + " foreground=yes")
             return scene
         }
         if let scene = spare {
-            Log.write("win: target " + spareName + " foreground=unknown (fallback)")
+            Log.write("win: target " + spareName + " foreground=absent (best available)")
             return scene
         }
         return nil
@@ -836,6 +868,15 @@ zStackParticipantDidChange:
             Log.write("win: no uiPresentationManager")
             return
         }
+
+        // How many layers the scene is offering at all. A suspended background
+        // scene offers none; a foreground one offers at least its display
+        // layer. Read before anything is built, so the number describes the
+        // scene rather than our own work on it.
+        let layerManager = value(of: scene, "layerManager")
+        Log.write("win: scene layerManager="
+                  + (layerManager.map { NSStringFromClass(type(of: $0)) } ?? "nil")
+                  + " layers=" + String(count(of: layerManager, "layers")))
 
         guard let made = AevonCreatePresenter(manager, "com.aevon.float", 0),
               let presenter = made as? NSObject else {
@@ -852,7 +893,9 @@ zStackParticipantDidChange:
             return
         }
         Log.write("win: view cls=" + NSStringFromClass(type(of: view))
-                  + " attached=" + (view.superview == nil ? "no" : "yes"))
+                  + " attached=" + (view.superview == nil ? "no" : "yes")
+                  + " natural=" + String(format: "%.0fx%.0f",
+                                         view.bounds.width, view.bounds.height))
 
         // Window first, activate second. This is the whole difference from
         // 0.0.20, and the difference between a picture and a black phone.
@@ -869,6 +912,17 @@ zStackParticipantDidChange:
         Log.write("win: state hosting=" + flag(AevonBoolOf(presenter, "isHosting"))
                   + " active=" + flag(AevonBoolOf(presenter, "isActive")))
         Log.write("win: view sublayers=" + String(view.layer.sublayers?.count ?? 0))
+
+        // The counters that separate the three ways a card can be blank, none
+        // of which a sublayer count can tell apart:
+        //   layers=absent                 the scene has nothing to give
+        //   nonHosted>0, hosted=0         layers exist but were not attached
+        //   hosted>0 and still blank      geometry, not content
+        let container = value(of: view, "hostContainerView")
+        Log.write("win: container cls="
+                  + (container.map { NSStringFromClass(type(of: $0)) } ?? "nil")
+                  + " hosted=" + String(count(of: container, "hostedLayers"))
+                  + " nonHosted=" + String(count(of: container, "nonHostedLayers")))
 
         // It comes down by itself: a window whose only job is to prove the chain
         // has no business staying on screen, and one that stays is one that can
@@ -938,6 +992,16 @@ zStackParticipantDidChange:
         let sel = NSSelectorFromString(key)
         guard object.responds(to: sel) else { return nil }
         return object.perform(sel)?.takeUnretainedValue() as? NSObject
+    }
+
+    /// Answers -1 for "no such method" and -1 for "not a list", which keeps a
+    /// missing counter from reading as an empty one: `layers=0` is a fact about
+    /// the scene, `layers=absent` is a fact about the probe.
+    private static func count(of object: NSObject?, _ key: String) -> Int {
+        guard let object = object, let list = value(of: object, key) as? NSArray else {
+            return -1
+        }
+        return list.count
     }
 
     /// Called once at boot, before anything else touches the runtime. If the

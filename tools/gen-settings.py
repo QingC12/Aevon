@@ -297,7 +297,7 @@ def build_panel(panel_id, title, intro, items):
                       "action": "sceneSurface:", "defaults": DOMAIN})
         specs.append({"cell": "PSButtonCell", "label": "核对调用点（母本 123 条调用）",
                       "action": "sceneCalls:", "defaults": DOMAIN})
-        specs.append({"cell": "PSButtonCell", "label": "建浮窗（前台 App → 320×480 卡片，8 秒自动收）",
+        specs.append({"cell": "PSButtonCell", "label": "建浮窗（点完后 6 秒内切到目标 App）",
                       "action": "sceneWindow:", "defaults": DOMAIN})
 
     if panel_id == "Ring":
