@@ -813,6 +813,11 @@ zStackParticipantDidChange:
     /// keeps a scene awake with went uninstalled by a guess. One line per class
     /// is cheaper than the round it costs to discover the same thing twice.
     private static var censusDone = false
+    /// 0.0.33 — whether a card is on screen right now. The hook has to stay
+    /// armed for as long as one is: a disarmed hook lets the system put the
+    /// scene back to sleep underneath a card that is still showing it, which is
+    /// the black card of 0.0.28 arriving by a different road.
+    private static var cardUp = false
     private static func censusOnce() {
         guard !censusDone else { return }
         censusDone = true
@@ -899,11 +904,14 @@ zStackParticipantDidChange:
                       + " reasons=" + reasonsOf(scene))
             emitNotes(AevonHookSummary())
             float(scene)
-            // The card comes down after eight seconds, and the scene has to be
-            // allowed to sleep again afterwards: a scene nobody releases keeps a
-            // display link running for as long as this process lives, which is
-            // the one failure mode of this route that outlasts the test.
+            // 0.0.33 — this used to be the teardown, because the card came down
+            // after eight seconds. It is not one any more: the card stays, and a
+            // disarmed hook under a live card is the 0.0.28 black screen with a
+            // different cause. What is left here is the safety net for a card
+            // that never came up at all — with a card on screen, `closeCard` is
+            // the only thing that disarms.
             DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
+                if cardUp { return }
                 AevonHookDisarm()
                 unmark()
                 emitNotes(AevonHookSummary())
@@ -1055,12 +1063,58 @@ zStackParticipantDidChange:
                   + " natural=" + String(format: "%.0fx%.0f",
                                          view.bounds.width, view.bounds.height))
 
+        // 0.0.33 — the card stops being a probe and becomes furniture, so the
+        // teardown is no longer "the thing that happens after eight seconds": it
+        // is a function with three callers (the close button, the ten minute cap,
+        // and anything added later). Growing it in place was how 0.0.30 ended up
+        // with a push nobody could move.
+        //
+        // The order is the 0.0.32 fix and stays untouched —
+        //   stop the clock   (so nothing pushes forward after the hand-back)
+        //   write the scene back to the background
+        //   dismantle the presenter
+        //   hide the window, disarm, and read the settings back
+        // — with `closed` as the re-entry gate: the button and the cap can fire
+        // within a frame of each other, and a second hand-back on a presenter
+        // that is already invalid is exactly the kind of call that costs a phone.
+        var stopped = false
+        var closed = false
+        func closeCard(_ reason: String) {
+            if closed { return }
+            closed = true
+            stopped = true
+            let door = AevonPushBackground(scene)
+            _ = AevonCallVoid(presenter, "deactivate")
+            _ = AevonCallVoid(presenter, "invalidate")
+            FloatHost.hide()
+            AevonHookDisarm()
+            cardUp = false
+            emitNotes(AevonHookSummary())
+            let back = value(of: scene, "settings").map { AevonBoolOf($0, "isForeground") } ?? -1
+            Log.write("win: card closed by " + reason + ", background door=" + String(door)
+                      + " fg=" + flag(back))
+            // A hand-back that did not land is the same defect one layer down:
+            // the app would spend the rest of the session believing it is in
+            // front. One retry, half a second later, and then the log says so.
+            if back != 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    let again = AevonPushBackground(scene)
+                    let now = value(of: scene, "settings").map {
+                        AevonBoolOf($0, "isForeground")
+                    } ?? -1
+                    Log.write("win: background retry door=" + String(again)
+                              + " fg=" + flag(now))
+                }
+            }
+        }
+
         // Window first, activate second. This is the whole difference from
         // 0.0.20, and the difference between a picture and a black phone.
-        guard let host = FloatHost.show(view) else {
+        guard let host = FloatHost.show(view, onClose: { closeCard("close button") }) else {
             Log.write("win: no window - nothing activated")
             return
         }
+        cardUp = true
         Log.write("win: window up level=" + String(format: "%.0f", host.level))
 
         mark("APP-activate")
@@ -1092,12 +1146,9 @@ zStackParticipantDidChange:
         var misses = 0
         var wrote = 0
         var marked = false
-        // The clock has to be able to stop from the outside. Aevon(30) ran one
-        // beat past the close and read `fg=yes` on a card that no longer
-        // existed: the teardown had already handed the scene back, and a beat
-        // that landed a quarter-second later would have pushed it forward
-        // again. Stop is a flag, not a race.
-        var stopped = false
+        // The clock has to be able to stop from the outside, and 0.0.33 gives it
+        // a second reason to: the card no longer disappears on a timer, so the
+        // only thing that ends this loop is `closeCard` setting `stopped`.
         keep = {
             if stopped { return }
             beat += 1
@@ -1124,7 +1175,20 @@ zStackParticipantDidChange:
             // line in four is enough to see the card settle or fail. Two lets,
             // because one long concatenation is a type-checker timeout (0.0.30
             // lost a build to exactly that).
-            if beat <= 8 || beat % 4 == 0 {
+            //
+            // 0.0.33 — the card can now stay all afternoon, so the tail thins
+            // out again at ten seconds a line. A clock that writes 14,400 lines
+            // an hour is a log nobody can read and a file the operator has to
+            // clear.
+            var due = false
+            if beat <= 8 {
+                due = true
+            } else if beat <= 40 {
+                due = beat % 4 == 0
+            } else {
+                due = beat % 40 == 0
+            }
+            if due {
                 let state = " fg=" + flag(fg)
                     + " bg=" + flag(bg)
                     + " door=" + String(door)
@@ -1135,7 +1199,10 @@ zStackParticipantDidChange:
                           + " reasons=" + reasonsOf(scene)
                           + " sublayers=" + layers)
             }
-            if beat * 250 < 8000 {
+            // The clock runs for the life of the card, not for eight seconds.
+            // `stopped` is the only exit, and `closeCard` is the only thing that
+            // sets it.
+            if !stopped {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { keep() }
             } else if marked {
                 unmark()
@@ -1198,43 +1265,18 @@ zStackParticipantDidChange:
         Log.write("win: presenter objects " + AevonReadObjects(presenter, "host,active,valid"))
         Log.write("win: presenter flags " + AevonReadFlags(presenter, "host,active,valid"))
 
-        // It comes down by itself: a window whose only job is to prove the chain
-        // has no business staying on screen, and one that stays is one that can
-        // be left behind.
+        // 0.0.33 — no more eight second death. The card stays until the operator
+        // closes it, drags it or resizes it; the teardown that used to be this
+        // timer is `closeCard` above, called by the button.
         //
-        // 0.0.32 — and it hands the scene back while doing it. Aevon(30) closed
-        // the card, invalidated the presenter, disarmed the hook, and left the
-        // settings saying `foreground=yes`: Douyin went on playing to a desktop
-        // with nothing on it. The order below is the whole fix —
-        //   stop the clock   (so nothing pushes forward after the hand-back)
-        //   write the scene back to the background
-        //   dismantle the presenter
-        //   hide the window, disarm, and read the settings back
-        // — and the read-back is what turns "I called the hand-back" into "the
-        // scene really went back".
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
-            stopped = true
-            let door = AevonPushBackground(scene)
-            _ = AevonCallVoid(presenter, "deactivate")
-            _ = AevonCallVoid(presenter, "invalidate")
-            FloatHost.hide()
-            AevonHookDisarm()
-            let back = value(of: scene, "settings").map { AevonBoolOf($0, "isForeground") } ?? -1
-            Log.write("win: closed after 8s, background door=" + String(door)
-                      + " fg=" + flag(back))
-            // A hand-back that did not land is the same defect one layer down:
-            // the app would spend the rest of the session believing it is in
-            // front. One retry, half a second later, and then the log says so.
-            if back != 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                    let again = AevonPushBackground(scene)
-                    let now = value(of: scene, "settings").map {
-                        AevonBoolOf($0, "isForeground")
-                    } ?? -1
-                    Log.write("win: background retry door=" + String(again)
-                              + " fg=" + flag(now))
-                }
-            }
+        // One cap remains. A card that is never closed holds a backgrounded app
+        // in the foreground for as long as it lives: it renders, it plays audio,
+        // it drains the battery, and the only thing on screen that would say so
+        // is the card itself. Ten minutes is long enough to be a window and
+        // short enough that forgetting one costs nothing, and it names itself in
+        // the log so a card that vanished was not a crash.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 600.0) {
+            closeCard("ten minute cap")
         }
     }
 

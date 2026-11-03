@@ -9,16 +9,32 @@ import UIKit
 /// scene view goes into — 320x480, 12pt corners, 2pt white edge — because the
 /// operator has to be able to see that the view is really on screen before
 /// anything is activated.
-final class FloatHost {
+///
+/// 0.0.33 — the card became furniture. Aevon(31) closed the last open question
+/// on the chain (picture, hand-back, no respring), so the eight second probe
+/// that proved it is gone and the card now stays until it is closed, moved or
+/// resized. Nothing below touches the scene: drag and pinch move the card, the
+/// close button calls back into the teardown that already hands the scene back.
+final class FloatHost: NSObject {
     static let shared = FloatHost()
 
     private var window: FloatWindow?
     private var card: UIView?
+    private var content: UIView?
+    private var close: UIControl?
+    private var onClose: (() -> Void)?
+    /// The scene's own size. Every resize is this shape, scaled — the card never
+    /// gets an aspect the picture does not have.
+    private var natural: CGSize = .zero
+    private var pinchStart: CGSize = .zero
 
     private let cardWidth: CGFloat = 320
     private let cardHeight: CGFloat = 480
     private let corner: CGFloat = 12
     private let edge: CGFloat = 2
+    private let margin: CGFloat = 8
+    private let minWidth: CGFloat = 140
+    private let closeSize: CGFloat = 30
 
     var level: CGFloat { window?.windowLevel.rawValue ?? 0 }
 
@@ -26,9 +42,10 @@ final class FloatHost {
     /// view. A nil answer means "activate nothing": a presenter whose view is
     /// not in a window is 0.0.20's black screen, and that is not worth one more
     /// phone.
-    static func show(_ view: UIView) -> FloatHost? {
+    static func show(_ view: UIView, onClose: @escaping () -> Void) -> FloatHost? {
         let host = shared
         host.teardown()
+        host.onClose = onClose
         guard let window = host.makeWindow() else { return nil }
 
         window.backgroundColor = .clear
@@ -59,6 +76,7 @@ final class FloatHost {
         card.layer.borderWidth = host.edge
         card.layer.borderColor = UIColor.white.cgColor
         card.clipsToBounds = true
+        card.isUserInteractionEnabled = true
 
         // The scene view keeps the scene's own coordinate space and is scaled as
         // a whole — setting `frame` instead rewrites that space, which is what
@@ -73,6 +91,11 @@ final class FloatHost {
 
         host.window = window
         host.card = card
+        host.content = view
+        host.natural = source
+        host.installClose()
+        host.installGestures(on: card)
+
         Log.write("win: card "
                   + String(format: "%.0fx%.0f", card.bounds.width, card.bounds.height)
                   + " at " + String(format: "%.0f,%.0f", card.frame.origin.x, card.frame.origin.y)
@@ -93,10 +116,16 @@ final class FloatHost {
     }
 
     private func teardown() {
-        guard let window = window else { return }
+        guard let window = window else {
+            onClose = nil
+            return
+        }
         for sub in card?.subviews ?? [] { sub.removeFromSuperview() }
         card?.removeFromSuperview()
         card = nil
+        content = nil
+        close = nil
+        onClose = nil
         window.isHidden = true
         window.rootViewController = nil
         self.window = nil
@@ -134,6 +163,123 @@ final class FloatHost {
         let x = (bounds.width - w) / 2
         let y = max(60, (bounds.height - h) / 2)
         return (CGRect(x: x, y: y, width: w, height: h), h / source.height)
+    }
+
+    // MARK: - close
+
+    /// A 30pt disc in the top-right corner. It is added after the scene view, so
+    /// hit testing reaches it first: a hosted scene view is a real UIView and
+    /// would otherwise swallow the touch and forward it to the app.
+    private func installClose() {
+        guard let card = card else { return }
+        let disc = UIControl(frame: CGRect(x: card.bounds.width - margin - closeSize,
+                                           y: margin,
+                                           width: closeSize,
+                                           height: closeSize))
+        disc.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+        disc.layer.cornerRadius = closeSize / 2
+        disc.layer.borderWidth = 1
+        disc.layer.borderColor = UIColor.white.withAlphaComponent(0.75).cgColor
+        disc.autoresizingMask = [.flexibleLeftMargin]
+        disc.addTarget(self, action: #selector(tapClose), for: .touchUpInside)
+
+        let cross = UILabel(frame: disc.bounds)
+        cross.text = "✕"
+        cross.textColor = .white
+        cross.font = .systemFont(ofSize: 15, weight: .semibold)
+        cross.textAlignment = .center
+        cross.isUserInteractionEnabled = false
+        disc.addSubview(cross)
+
+        card.addSubview(disc)
+        close = disc
+    }
+
+    /// Called from inside a touch dispatch on the view being removed, so the
+    /// teardown runs on the next turn of the run loop rather than under UIKit's
+    /// own call stack. One `async`, and the card cannot be pulled out from under
+    /// the event that closed it.
+    @objc private func tapClose() {
+        let hook = onClose
+        onClose = nil
+        Log.write("win: close tapped")
+        DispatchQueue.main.async { hook?() }
+    }
+
+    // MARK: - drag and resize
+
+    private func installGestures(on card: UIView) {
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        pan.maximumNumberOfTouches = 1
+        card.addGestureRecognizer(pan)
+
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        card.addGestureRecognizer(pinch)
+    }
+
+    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        guard let card = card, let window = window else { return }
+        let step = gesture.translation(in: window)
+        var frame = card.frame
+        frame.origin.x += step.x
+        frame.origin.y += step.y
+        card.frame = clamped(frame, in: window.bounds)
+        gesture.setTranslation(.zero, in: window)
+        // Only the end of a drag is worth a line: a drag emits dozens of events
+        // and the log is the thing that has to stay readable at 250 ms a beat.
+        if gesture.state == .ended || gesture.state == .cancelled {
+            Log.write("win: card moved to " + point(card.frame.origin)
+                      + " size=" + size(card.bounds.size))
+        }
+    }
+
+    @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        guard let card = card, let window = window,
+              natural.width > 16, natural.height > 16 else { return }
+        if gesture.state == .began {
+            pinchStart = card.bounds.size
+            return
+        }
+        guard gesture.state == .changed || gesture.state == .ended else { return }
+
+        let ratio = natural.width / natural.height
+        var w = pinchStart.width * gesture.scale
+        w = min(max(w, minWidth), max(minWidth, window.bounds.width - 32))
+        var h = w / ratio
+        let tallest = max(120, window.bounds.height - 160)
+        if h > tallest {
+            h = tallest
+            w = h * ratio
+        }
+        card.bounds = CGRect(origin: .zero, size: CGSize(width: w, height: h))
+        let scale = h / natural.height
+        content?.center = CGPoint(x: w / 2, y: h / 2)
+        content?.transform = CGAffineTransform(scaleX: scale, y: scale)
+        card.frame = clamped(card.frame, in: window.bounds)
+
+        if gesture.state == .ended {
+            Log.write("win: card resized " + size(card.bounds.size)
+                      + " scale=" + String(format: "%.3f", scale))
+        }
+    }
+
+    /// A card that can be dragged off the screen can only be brought back by
+    /// closing it, so the edges are a wall, not a suggestion.
+    private func clamped(_ frame: CGRect, in bounds: CGRect) -> CGRect {
+        var result = frame
+        let maxX = max(margin, bounds.width - result.width - margin)
+        let maxY = max(margin, bounds.height - result.height - margin)
+        result.origin.x = min(max(result.origin.x, margin), maxX)
+        result.origin.y = min(max(result.origin.y, margin), maxY)
+        return result
+    }
+
+    private func point(_ p: CGPoint) -> String {
+        String(format: "%.0f,%.0f", p.x, p.y)
+    }
+
+    private func size(_ s: CGSize) -> String {
+        String(format: "%.0fx%.0f", s.width, s.height)
     }
 
     /// `UIApplication.shared` is a force-unwrapped accessor. Inside SpringBoard

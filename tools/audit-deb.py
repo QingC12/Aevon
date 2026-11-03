@@ -469,7 +469,14 @@ def main():
                   b"win: scene layerManager=",
                   b"win: container cls=",
                   b"win: scale factor=",
-                  b"win: closed after 8s",
+                  # 0.0.33 — the card stays, so the eight second line is gone.
+                  # What replaces it is the three things a card can now be told
+                  # to do: move, resize, close. All three print, because a card
+                  # that moves without logging leaves no way to tell a drag from
+                  # a card that jumped.
+                  b"win: card moved to ",
+                  b"win: card resized ",
+                  b"win: close tapped",
                   # 0.0.27 — the mother ship's route. The two selectors are the
                   # ones her binary calls and hooks; the selftest string is the
                   # only proof in the package that the write path is exercised
@@ -489,7 +496,11 @@ def main():
                   # the settings saying `foreground=yes`, so Douyin played on to
                   # an empty desktop. These two strings are the only proof in the
                   # package that the scene is written back and read back.
-                  b"win: closed after 8s, background door=",
+                  #
+                  # 0.0.33 moved the teardown out of the timer and into a
+                  # function, so the line names who closed the card instead of
+                  # how long it lived.
+                  b"win: card closed by ",
                   b"win: background retry door=",
                   b"hook: selftest got=%ld want=102",
                   b"_setDeactivationReasons:onScene:withSettings:reason:",
