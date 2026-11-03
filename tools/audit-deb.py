@@ -443,6 +443,11 @@ def main():
                   b" stopping before layer host",
                   b"win: previous run died at ",
                   b"win: runtime class ",
+                  b" presenter state hosting=",
+                  b" presentation context cls=",
+                  b"home every -> ",
+                  b"full %@ super=%@ own=%u",
+                  b"(%@: capped at %ld)",
                   b"/var/mobile/Library/Logs/Aevon/win.step",
                   b"census %@ super=%@", b"presenter %@ -> %@"):
         if token not in dylib_early:

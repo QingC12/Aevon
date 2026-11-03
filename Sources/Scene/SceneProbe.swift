@@ -783,7 +783,17 @@ zStackParticipantDidChange:
         // Device truth about the names we were about to invent. Nothing is
         // messaged here: this is a class-list walk, and every class that shows
         // up can be asked about itself in a later run.
-        for line in lines(AevonFindClasses("LayerHost,SceneLayer,Presentation,Presenter", 20)) {
+        // The mother ship's own three selectors, located by class instead of
+        // remembered from a `__cstring` table. `class_getInstanceMethod` answers
+        // "who implements this" without sending a message, so this costs one
+        // class-list walk and cannot upset anything.
+        emitNotes(AevonSelectorHome("initWithSceneLayer:,setResizesHostedContext:,setWindowLevel:", 8))
+        // And the class 0.0.16 died on: listed in full, called not at all.
+        emitNotes(AevonFullCensus("_UIContextLayerHostView", 40))
+
+        // One budget per keyword now; 0.0.17 shared one budget and `present`
+        // ate all twenty slots before `LayerHost` was reached.
+        for line in lines(AevonFindClasses("LayerHost,SceneLayer,HostContainer", 12)) {
             Log.write("win: runtime class " + line)
         }
 
@@ -886,6 +896,20 @@ zStackParticipantDidChange:
         }
         let presenterCls = NSStringFromClass(type(of: presenter))
         Log.write("win: " + tag + " presenter ready cls=" + presenterCls)
+        // Reading state is free; it is a BOOL getter on an object we own. If
+        // `hosting` already says yes, the system activated this presenter for
+        // us and the next version needs no `activate` at all. If it says no,
+        // that is the one call left between here and a visible view.
+        Log.write("win: " + tag + " presenter state hosting=" + flag(AevonBoolOf(presenter, "isHosting"))
+                  + " active=" + flag(AevonBoolOf(presenter, "isActive"))
+                  + " invalidated=" + flag(AevonBoolOf(presenter, "isInvalidated")))
+        if let context = value(of: presenter, "presentationContext") {
+            Log.write("win: " + tag + " presentation context cls="
+                      + NSStringFromClass(type(of: context)))
+            emitIvars(context, tag: tag + ".ctx")
+        } else {
+            Log.write("win: " + tag + " presentation context absent")
+        }
 
         mark(tag + "-view")
         let rawView = value(of: presenter, "presentationView")
@@ -908,6 +932,15 @@ zStackParticipantDidChange:
         emitNotes(AevonClassCensus(viewCls, "layer,host,super,window,present"))
 
         Log.write("win: " + tag + " stopping before layer host")
+    }
+
+    /// -1 is "no such method", which is a different answer from 0.
+    private static func flag(_ value: Int) -> String {
+        switch value {
+        case 1:  return "yes"
+        case 0:  return "no"
+        default: return "absent"
+        }
     }
 
     private static func value(of object: NSObject, _ key: String) -> NSObject? {

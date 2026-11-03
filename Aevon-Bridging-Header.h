@@ -60,6 +60,15 @@ BOOL AevonCan(id _Nullable object, NSString *_Nullable name);
 /// comma-separated keys. Sends no message to any class.
 NSString *_Nullable AevonFindClasses(NSString *_Nullable keys, NSInteger limit);
 
+/// 0.0.18 — the mother ship's own chain, located instead of remembered.
+/// `AevonSelectorHome` answers "which classes implement these selectors" with
+/// `class_getInstanceMethod`, which sends no message; `AevonFullCensus` lists a
+/// class's own methods with no filter; `AevonBoolOf` reads a BOOL getter with
+/// the right ABI and returns -1 for "no such method".
+NSString *_Nullable AevonSelectorHome(NSString *_Nullable selectors, NSInteger limit);
+NSString *_Nullable AevonFullCensus(NSString *_Nullable name, NSInteger limit);
+NSInteger AevonBoolOf(id _Nullable object, NSString *_Nullable name);
+
 @interface UIImage (AevonPrivateIcons)
 + (nullable UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID
                                                        format:(NSInteger)format

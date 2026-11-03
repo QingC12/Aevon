@@ -320,20 +320,139 @@ NSString *AevonFindClasses(NSString *keys, NSInteger limit) {
     if (classes == NULL) return nil;
     total = objc_getClassList(classes, total);
 
+    // One budget per key, not one budget shared by all of them.
+    //
+    // 0.0.17 asked for LayerHost, SceneLayer, Presentation and Presenter with a
+    // limit of 20, and all 20 came back from `present` matching half of UIKit —
+    // PassKitUI, PhotosUICore, JetEngine — while `LayerHost` never got a slot.
+    // A scan that reports on the loudest keyword and calls it a survey is the
+    // exact failure the operator named: the probe was looking wrong, and the
+    // conclusion drawn from it would have been "the class is not here".
     NSMutableArray<NSString *> *hits = [NSMutableArray array];
-    for (int i = 0; i < total && (NSInteger)hits.count < limit; i++) {
-        const char *raw = class_getName(classes[i]);
-        if (raw == NULL) continue;
-        NSString *name = [NSString stringWithUTF8String:raw];
-        if (name == nil) continue;
-        for (NSString *key in wanted) {
-            if (key.length == 0) continue;
-            if ([name rangeOfString:key options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                [hits addObject:name];
-                break;
-            }
+    for (NSString *key in wanted) {
+        if (key.length == 0) continue;
+        NSInteger found = 0;
+        for (int i = 0; i < total && found < limit; i++) {
+            const char *raw = class_getName(classes[i]);
+            if (raw == NULL) continue;
+            NSString *name = [NSString stringWithUTF8String:raw];
+            if (name == nil) continue;
+            if ([name rangeOfString:key options:NSCaseInsensitiveSearch].location == NSNotFound) continue;
+            [hits addObject:name];
+            found += 1;
+        }
+        if (found == 0) {
+            [hits addObject:[NSString stringWithFormat:@"(%@: none)", key]];
+        } else if (found >= limit) {
+            [hits addObject:[NSString stringWithFormat:@"(%@: capped at %ld)", key, (long)limit]];
         }
     }
     free(classes);
     return [hits componentsJoinedByString:@"\n"];
+}
+
+#pragma mark - Locate the mother ship's chain on this device (0.0.18)
+
+// 0.0.16 took `_UIContextLayerHostView` out of another binary's __cstring table,
+// trusted it, and killed SpringBoard with — most likely — the right class and
+// the wrong argument. The mother ship's own selector chain is short and known:
+//
+//     initWithSceneLayer:  setResizesHostedContext:  setWindowLevel:
+//
+// What was never known is *which class* in this process answers them. That can
+// be asked without sending a message: `class_getInstanceMethod` walks the
+// superclass chain and returns NULL for "no", and nothing in the process can
+// misbehave while it is asked. So this function answers "who implements this,
+// and does anything implement all of them" before a single call is made.
+
+/// One line of counts per selector, one line naming the classes that implement
+/// every one of them. `limit` caps how many such classes are named.
+NSString *AevonSelectorHome(NSString *selectors, NSInteger limit) {
+    if (selectors == nil || limit <= 0) return nil;
+    NSArray<NSString *> *names = [selectors componentsSeparatedByString:@","];
+    NSUInteger want = names.count;
+    if (want == 0 || want > 8) return nil;
+
+    SEL wanted[8];
+    for (NSUInteger i = 0; i < want; i++) wanted[i] = NSSelectorFromString(names[i]);
+
+    int total = objc_getClassList(NULL, 0);
+    if (total <= 0) return nil;
+    Class *classes = (Class *)malloc(sizeof(Class) * (size_t)total);
+    if (classes == NULL) return nil;
+    total = objc_getClassList(classes, total);
+
+    NSInteger counted[8] = {0};
+    NSMutableArray<NSString *> *both = [NSMutableArray array];
+
+    for (int i = 0; i < total; i++) {
+        Class cls = classes[i];
+        NSUInteger matched = 0;
+        for (NSUInteger k = 0; k < want; k++) {
+            if (class_getInstanceMethod(cls, wanted[k]) != NULL) {
+                counted[k] += 1;
+                matched += 1;
+            }
+        }
+        // A metaclass listing is what makes `+` methods show up as classes in
+        // objc_getClassList; asking for an *instance* method on one is harmless
+        // and simply never matches.
+        if (matched == want && (NSInteger)both.count < limit) {
+            [both addObject:NSStringFromClass(cls)];
+        }
+    }
+    free(classes);
+
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSUInteger k = 0; k < want; k++) {
+        [parts addObject:[NSString stringWithFormat:@"%@=%ld", names[k], (long)counted[k]]];
+    }
+    NSMutableString *out = [NSMutableString stringWithFormat:@"home %@",
+                            [parts componentsJoinedByString:@" "]];
+    [out appendString:@"\n"];
+    if (both.count == 0) {
+        [out appendString:@"home every -> none"];
+    } else {
+        [out appendString:@"home every -> "];
+        [out appendString:[both componentsJoinedByString:@" | "]];
+    }
+    return out;
+}
+
+/// Every instance method a class declares for itself — no keyword filter, no
+/// second guess. Used once on whichever class `AevonSelectorHome` named, to see
+/// the real initialiser beside the real setters. Inherited methods are not
+/// listed by `class_copyMethodList`, so the superclass name is printed first.
+NSString *AevonFullCensus(NSString *name, NSInteger limit) {
+    Class cls = NSClassFromString(name);
+    if (cls == Nil) return [NSString stringWithFormat:@"full %@ absent", name];
+    if (limit <= 0) limit = 40;
+
+    NSMutableString *out = [NSMutableString stringWithFormat:@"full %@ super=%@ own=%u",
+                            name, NSStringFromClass(class_getSuperclass(cls)),
+                            (unsigned)class_getInstanceSize(cls)];
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    if (methods != NULL) {
+        NSInteger printed = 0;
+        for (unsigned int i = 0; i < count && printed < limit; i++) {
+            [out appendFormat:@"\n  - %@", NSStringFromSelector(method_getName(methods[i]))];
+            printed += 1;
+        }
+        if ((NSInteger)count > printed) [out appendString:@"\n  …capped"];
+        free(methods);
+    }
+    return out;
+}
+
+/// A BOOL-returning no-argument method, read without guessing the ABI.
+/// `performSelector` cannot be used for this: it treats the return as an
+/// object pointer, and a BOOL of 1 is not a valid one. -1 means "no such
+/// method", which is a different answer from "no".
+NSInteger AevonBoolOf(id object, NSString *name) {
+    if (object == nil || name == nil) return -1;
+    SEL sel = NSSelectorFromString(name);
+    if (![object respondsToSelector:sel]) return -1;
+    BOOL (*call)(id, SEL) = (BOOL (*)(id, SEL))objc_msgSend;
+    return call(object, sel) ? 1 : 0;
 }
