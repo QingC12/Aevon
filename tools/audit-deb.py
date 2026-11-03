@@ -476,13 +476,15 @@ def main():
                   # before SpringBoard is touched at all.
                   b"win: now swipe up to the desktop - the card follows",
                   b"win: left the app at ",
-                  # 0.0.30 — the half that was missing. 0.0.29 installed the
-                  # interceptor and the device never called it (`intercept=0`),
-                  # so the settings are pushed instead of awaited. These two
-                  # strings are the only proof in the package that the push path
-                  # and its census reached the binary at all.
-                  b"win: force foreground door=",
+                  # 0.0.31 — the push moved off the hook and onto a main-thread
+                  # keepalive clock. `force foreground door=` is gone on purpose:
+                  # that line was printed from inside `_setDeactivationReasons:`
+                  # and the process stopped printing anything at all seven
+                  # seconds later. These two strings are the only proof in the
+                  # package that the clock and its census reached the binary.
+                  b"win: keepalive beat ",
                   b"win: scene update methods ",
+                  b"win: push banned for this run",
                   b"hook: selftest got=%ld want=102",
                   b"_setDeactivationReasons:onScene:withSettings:reason:",
                   b"_scene:interceptUpdateWithNewSettings:",

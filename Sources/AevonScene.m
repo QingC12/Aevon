@@ -469,6 +469,32 @@ static CFAbsoluteTime AevonLastPush = 0;
 /// deactivation setter this file hooks, and that hook pushes again.
 static volatile int AevonInPush = 0;
 
+/// Non-zero while one of the hooked system callbacks is on the stack.
+///
+/// This is the whole of 0.0.31. `_setDeactivationReasons:onScene:withSettings:reason:`
+/// runs on FrontBoard's scene-update path, which is holding the lock that
+/// `updateSettings…` needs. Aevon(29) wrote the settings from inside that
+/// callback, printed `push path=1 wrote=1 fg=1`, showed a picture — and then
+/// stopped printing anything at all until the watchdog replaced SpringBoard
+/// 7 s later (pid 3271 -> 3305). The same lock, taken twice, is a deadlock, and
+/// a deadlocked SpringBoard is a safe mode.
+///
+/// The mother ship never writes from a callback. She runs a keepalive clock on
+/// the main thread (rounds 12/13), writes only the values that differ (round
+/// 14), and stops after three failures in a row (round 13). That is what
+/// 0.0.31 copies, and this counter is the gate that keeps the copy honest.
+static volatile int AevonHookDepth = 0;
+
+/// Set once per process when the previous run died inside the push. Two
+/// crashes in a row — not one — is what the system calls a safe mode
+/// (MultiFloat round 3, `[CONFIRMED]`: crash, auto-retry, crash, safe mode).
+/// The second run therefore refuses to try instead of explaining it again.
+static volatile int AevonPushBanned = 0;
+
+void AevonBanPush(void) {
+    AevonPushBanned = 1;
+}
+
 /// `foreground = YES, backgrounded = NO` on whatever settings object is offered,
 /// with each setter asked for before it is used. Returns whether anything was
 /// actually written — a class without these setters is a fact worth a trace line,
@@ -516,16 +542,51 @@ static BOOL AevonCallBlockMethod(id target, NSString *name, void (^block)(id)) {
     return NO;
 }
 
+/// `- (void)updateSettings:(id)` — one object, no block. The transition-context
+/// variant is deliberately absent from this file: the mother ship's 0.3.0 passed
+/// it a nil context and SpringBoard died on the spot (round 3, `[CONFIRMED]`,
+/// twice, line for line), which is also why `_createTransitionContext` exists.
+/// A door that needs a context and does not get one is not a door.
+static BOOL AevonCallSettings(id target, id settings) {
+    if (target == nil || settings == nil) return NO;
+    SEL sel = sel_registerName("updateSettings:");
+    if (![target respondsToSelector:sel]) return NO;
+    Method method = class_getInstanceMethod(object_getClass(target), sel);
+    if (method == NULL) return NO;
+    const char *encoding = method_getTypeEncoding(method);
+    if (encoding == NULL || encoding[0] != 'v') return NO;
+    if (strstr(encoding, "@?") != NULL) return NO;
+    if (method_getNumberOfArguments(method) != 3) return NO;
+    ((void (*)(id, SEL, id))objc_msgSend)(target, sel, settings);
+    return YES;
+}
+
 /// One attempt at "you are in front". Answers the door it used so the log can
-/// say where the chain stops: 1 scene update, 2 manager amendment, 0 no door.
-/// Throttled and capped: this is called from inside a system callback that can
-/// fire dozens of times a second, and a loop here is a SpringBoard watchdog kill.
+/// say where the chain stops:
+///
+///   1  the scene's own `updateSettingsWithBlock:`
+///   2  the deactivation manager's `amendSceneSettings:forScene:`
+///   3  nothing to do — the scene already says it is in front, no write spent
+///   0  no door, wrong thread, inside a hook, throttled, banned, or out of tries
+///
+/// `updateSettingsWithBlock:` is first because it is the one door the mother
+/// ship used on this phone (`P0 已发 updateSettingsWithBlock（foreground=YES /
+/// level=1 / portrait）`, round 7) and because it is asynchronous: it returns
+/// before the update lands, which is what makes a main-thread clock the right
+/// caller and a hooked system callback the wrong one.
 NSInteger AevonPushForeground(id scene) {
     if (scene == nil || !AevonIsArmed()) return 0;
+    if (AevonPushBanned) return 0;
+    // FrontBoard objects assert on the main thread. The mother ship's first
+    // safe mode (round 3) was this exact mistake, made twice; blueprint v2 put
+    // it in one line: "SpringBoard 对这类 UIKit/FrontBoard 对象普遍有必须主线程的断言".
+    if (![NSThread isMainThread]) return 0;
+    // Never from inside a hook. See AevonHookDepth: Aevon(29) died here.
+    if (AevonHookDepth > 0) return 0;
     if (AevonInPush) return 0;
+    if (__sync_fetch_and_add(&AevonPushTried, 1) > 40) return 0;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - AevonLastPush < 0.3) return 0;
-    if (__sync_fetch_and_add(&AevonPushTried, 1) > 60) return 0;
+    if (now - AevonLastPush < 0.2) return 0;
     AevonLastPush = now;
     AevonInPush = 1;
 
@@ -535,20 +596,34 @@ NSInteger AevonPushForeground(id scene) {
     if ([scene respondsToSelector:settingsSel]) {
         current = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
     }
+
+    // Delta first. Round 14 of the mother ship settled this: a write that
+    // changes nothing still costs a re-layout, and a re-layout is a flicker.
+    // A scene already in front gets no write at all, and the caller is told so
+    // with 3 rather than 0 — "nothing to do" and "no door" are different facts.
+    if (AevonFlagOf(current, "isForeground") == 1 && AevonFlagOf(current, "isBackgrounded") == 0) {
+        if (attempt < 8) {
+            AevonRawTrace("push", "front, no write settings=%s",
+                          current != nil ? class_getName(object_getClass(current)) : "nil");
+        }
+        AevonInPush = 0;
+        return 3;
+    }
+
     // A mutable copy is tried first because a copy cannot be rejected by a class
     // that only accepts its own kind; the original is the fallback for settings
     // that are already mutable.
     id candidate = [current mutableCopy];
-    BOOL inlineWrite = AevonWriteForeground(candidate != nil ? candidate : current);
+    if (candidate == nil) candidate = current;
+    BOOL inlineWrite = AevonWriteForeground(candidate);
 
     void (^amend)(id) = [^(id settings) {
         AevonWriteForeground(settings);
     } copy];
 
     NSInteger path = 0;
-    if (AevonCallBlockMethod(scene, @"updateSettings:withTransitionContext:", amend)
-        || AevonCallBlockMethod(scene, @"updateSettings:", amend)
-        || AevonCallBlockMethod(scene, @"updateSettingsWithBlock:", amend)) {
+    if (AevonCallBlockMethod(scene, @"updateSettingsWithBlock:", amend)
+        || AevonCallSettings(scene, candidate)) {
         path = 1;
     } else if (AevonDeactManager != nil) {
         id manager = AevonDeactManager;
@@ -570,7 +645,7 @@ NSInteger AevonPushForeground(id scene) {
         __sync_fetch_and_add(&AevonPushWrote, 1);
         AevonPushPath = path;
     }
-    if (attempt < 6) {
+    if (attempt < 8) {
         AevonRawTrace("push", "path=%ld wrote=%d fg=%d settings=%s", path,
                       inlineWrite ? 1 : 0,
                       AevonFlagOf(candidate != nil ? candidate : current, "isForeground"),
@@ -754,22 +829,27 @@ NSString *AevonHookInstall(void) {
                                       reasons, AevonSceneName(scene));
                     }
                 }
-                // Keeping the scene awake is half of it. Aevon(28) had that half
-                // working — `stripped=8` — and a black card, because the app had
-                // been told it was in the background and had stopped drawing. The
-                // system keeps saying so; this says otherwise, every time it does.
+                // Keeping the scene awake is half of it, and it is the half that
+                // stays here. Aevon(28) had it working — `stripped=8` — and a
+                // black card, because the app had been told it was in the
+                // background and had stopped drawing.
                 //
-                // Only when there is something to contradict: a scene that is
-                // already in front gets no push, or the six seconds between the
-                // tap and the swipe would spend the whole budget on nothing.
-                if (mine && (reasons != 0 || AevonFlagOf(settings, "isForeground") == 0)) {
-                    AevonPushForeground(scene);
-                }
+                // The other half used to be written right here, inside this
+                // callback, and Aevon(29) is the price: `push path=1 wrote=1
+                // fg=1`, a card with a picture in it, and then silence until the
+                // watchdog replaced the process. This body runs on FrontBoard's
+                // scene-update path, which holds the lock that `updateSettings…`
+                // needs, so writing from here takes it twice. The push lives on
+                // the main-thread keepalive clock in SceneProbe now; all this
+                // hook does is announce that it is on the stack so nothing else
+                // can write through it.
+                __sync_fetch_and_add(&AevonHookDepth, 1);
                 void (*original)(id, SEL, unsigned long long, id, id, id) =
                     (void (*)(id, SEL, unsigned long long, id, id, id))slot->original;
                 if (original != NULL) {
                     original(manager, slot->sel, use, scene, settings, reason);
                 }
+                __sync_fetch_and_sub(&AevonHookDepth, 1);
             };
             AevonAttach(out, slot, deact,
                         @"_setDeactivationReasons:onScene:withSettings:reason:", block);

@@ -52,13 +52,24 @@ void AevonHookDisarm(void);
 /// this system does not answer it. Zero and "absent" are different facts.
 unsigned long long AevonReasonsOf(id _Nullable scene);
 
-/// 0.0.30 — ask the system to treat this scene as being in front, so its app
+/// 0.0.31 — ask the system to treat this scene as being in front, so its app
 /// starts committing frames again. `foreground=YES` and `backgrounded=NO` are
 /// written through whichever door the method table actually offers, and the
-/// answer is which door that was: 1 the scene's own update method, 2 the
-/// deactivation manager's amendment entry, 0 no door — in which case the next
-/// version has to hook something instead.
+/// answer is which door that was:
+///
+///   1  the scene's own `updateSettingsWithBlock:` (the mother ship's door)
+///   2  the deactivation manager's `amendSceneSettings:forScene:`
+///   3  nothing to do — the scene already says it is in front, no write spent
+///   0  no door, wrong thread, inside a hook, throttled, banned, or out of tries
+///
+/// Main thread only, and never from inside a hook: Aevon(29) called it from
+/// `_setDeactivationReasons:` and deadlocked SpringBoard into a safe mode.
 NSInteger AevonPushForeground(id _Nullable scene);
+
+/// 0.0.31 — refuse to push for the rest of this process. Called when the
+/// previous run died inside the push: one crash is a bug, two in a row is what
+/// the system calls a safe mode.
+void AevonBanPush(void);
 
 /// 0.0.28 — `- (void)name:(BOOL)`. 1 for "ran", 0 for "no such setter".
 NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL value);

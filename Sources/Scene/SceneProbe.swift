@@ -1071,30 +1071,70 @@ zStackParticipantDidChange:
                   + " active=" + flag(AevonBoolOf(presenter, "isActive")))
         Log.write("win: view sublayers=" + String(view.layer.sublayers?.count ?? 0))
 
-        // 0.0.30 — the half that was missing. Aevon(28) proved the hold works
-        // (`stripped=8`), that the layers are there (`layers=2`) and in our
-        // container (`hostedLayers=2 nonHostedLayers=0`), and that the card is
-        // still black because the app was told `isForeground=no` and stopped
-        // committing frames. 0.0.29 waited for a system callback to fix that and
-        // the callback never came: `intercept=0` after eight seconds. So the
-        // settings are pushed instead, three times — the system re-sends its own
-        // opinion constantly, and one push would be overwritten within a frame.
+        // 0.0.31 — the push moves off the hook and onto a clock.
+        //
+        // 0.0.30 wrote the settings from inside `_setDeactivationReasons:`,
+        // which is FrontBoard's own scene-update path. Aevon(29) is what that
+        // costs: `push path=1 wrote=1 fg=1`, a card with a picture in it, and
+        // then not one more line until the watchdog replaced SpringBoard seven
+        // seconds later (pid 3271 -> 3305). The same lock, taken twice.
+        //
+        // The mother ship never writes from a callback. She runs a keepalive
+        // clock on the main thread (rounds 12/13), writes only values that
+        // differ (round 14), and stops after three failures in a row (round
+        // 13) — so that is what this does. One beat per 250 ms for the life of
+        // the card, a delta check inside the push, and `WIN-PUSH` on disk only
+        // while a beat is in flight so a death inside it is named next launch.
         Log.write("win: scene update methods "
                   + AevonCensus("FBScene", "update,settings,transition,foreground"))
-        for delay in [0.3, 1.2, 2.6] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                let door = AevonPushForeground(scene)
-                let live = value(of: scene, "settings")
-                let fg: String = live.map { flag(AevonBoolOf($0, "isForeground")) } ?? "nil"
-                let bg: String = live.map { flag(AevonBoolOf($0, "isBackgrounded")) } ?? "nil"
+        var keep: (() -> Void)!
+        var beat = 0
+        var misses = 0
+        var wrote = 0
+        var marked = false
+        keep = {
+            beat += 1
+            let live = value(of: scene, "settings")
+            let fg = live.map { AevonBoolOf($0, "isForeground") } ?? -1
+            let bg = live.map { AevonBoolOf($0, "isBackgrounded") } ?? -1
+            var door = 0
+            if fg == 1 {
+                misses = 0
+            } else if misses < 3 {
+                if !marked { mark("WIN-PUSH"); marked = true }
+                door = AevonPushForeground(scene)
+                if door == 1 || door == 2 {
+                    wrote += 1
+                } else if door == 0 {
+                    misses += 1
+                }
+            }
+            if fg == 1 && marked {
+                unmark()
+                marked = false
+            }
+            // Eight beats up front say how the first push went; after that one
+            // line in four is enough to see the card settle or fail. Two lets,
+            // because one long concatenation is a type-checker timeout (0.0.30
+            // lost a build to exactly that).
+            if beat <= 8 || beat % 4 == 0 {
+                let state = " fg=" + flag(fg)
+                    + " bg=" + flag(bg)
+                    + " door=" + String(door)
+                    + " wrote=" + String(wrote)
+                    + " misses=" + String(misses)
                 let layers = String(view.layer.sublayers?.count ?? 0)
-                Log.write("win: force foreground door=" + String(door)
-                          + " fg=" + fg
-                          + " bg=" + bg
+                Log.write("win: keepalive beat " + String(beat) + state
                           + " reasons=" + reasonsOf(scene)
                           + " sublayers=" + layers)
             }
+            if beat * 250 < 8000 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { keep() }
+            } else if marked {
+                unmark()
+            }
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { keep() }
 
         // Nothing on this screen is hidden any more. 0.0.24 hid one view,
         // 0.0.25 hid the wrong window, 0.0.26 emptied every app-level window and
@@ -1189,6 +1229,14 @@ zStackParticipantDidChange:
             let step = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !step.isEmpty {
                 Log.write("win: previous run died at " + step)
+            }
+            // One crash is a bug; the second one in the same place is a safe
+            // mode. The card comes up without a picture this run, the log says
+            // why, and the operator's phone does not go down a second time to
+            // prove a point already made once.
+            if step == "WIN-PUSH" {
+                AevonBanPush()
+                Log.write("win: push banned for this run - the previous one died inside it")
             }
         }
         try? FileManager.default.removeItem(atPath: path)
