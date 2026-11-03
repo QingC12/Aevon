@@ -913,6 +913,39 @@ zStackParticipantDidChange:
                   + " active=" + flag(AevonBoolOf(presenter, "isActive")))
         Log.write("win: view sublayers=" + String(view.layer.sublayers?.count ?? 0))
 
+        // Aevon(22) settled the question the last three versions were asking.
+        // The card does hold the picture, and in the same run the rest of the
+        // screen went black — because a scene's layers are hosted by one
+        // container at a time. Taking them into the card emptied the container
+        // SpringBoard had built for the full-screen app, and an empty container
+        // draws its own black. The mother ship does not mirror (her symbol
+        // table has one `presentationView` and no mirror entry); her shape is
+        // "the app lives in the card, the desktop is outside". So the emptied
+        // container is taken out of sight — alpha only, recorded, restored on
+        // close — and what shows through is whatever SpringBoard still has
+        // underneath it.
+        demoteFullScreen(scene)
+
+        // One second later, does the scene still consider itself on screen? A
+        // hidden full-screen container can make SpringBoard retire the scene,
+        // and a retired scene would freeze the card. This is the one reading
+        // that tells "the desktop is black" apart from "the scene was put to
+        // sleep", and they need opposite fixes.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            let layers = view.layer.sublayers?.count ?? 0
+            Log.write("win: after demote presenter hosting=" + flag(AevonBoolOf(presenter, "isHosting"))
+                      + " active=" + flag(AevonBoolOf(presenter, "isActive"))
+                      + " sublayers=" + String(layers))
+            // The card going empty is the one answer that says the scene was
+            // retired rather than that the desktop is not drawn. Put the full
+            // screen back at once: a frozen card over a hidden picture is the
+            // worst of both.
+            if layers == 0 {
+                restoreFullScreen()
+                Log.write("win: card went empty, full screen put back")
+            }
+        }
+
         // The counters that separate the three ways a card can be blank, none
         // of which a sublayer count can tell apart:
         //   layers=absent                 the scene has nothing to give
@@ -931,8 +964,189 @@ zStackParticipantDidChange:
             _ = AevonCallVoid(presenter, "deactivate")
             _ = AevonCallVoid(presenter, "invalidate")
             FloatHost.hide()
+            // After the presenter is gone the layers go back to the container
+            // SpringBoard built, so it has to be visible again before anyone
+            // notices it was taken away.
+            restoreFullScreen()
             Log.write("win: closed after 8s")
         }
+    }
+
+    // MARK: - Taking the emptied full screen out of sight
+
+    /// A view that carries a scene's picture, and the ancestor SpringBoard's
+    /// window actually holds.
+    private struct Carrier {
+        let view: UIView
+        let top: UIView
+        let name: String
+        let ident: String
+    }
+
+    /// The one view this file changes, kept so it can be put back exactly.
+    private struct Cover {
+        let view: UIView
+        let name: String
+        let previous: CGFloat
+    }
+
+    private static var cover: Cover?
+
+    /// The classes SpringBoard puts between a window and a scene's picture.
+    ///
+    /// Deliberately narrow: the desktop, the icon layer and the status bar are
+    /// the three things that must survive this, so a name that mentions any of
+    /// them is never a candidate — on this phone the desktop showing through is
+    /// the entire point of the change.
+    private static func isCarrier(_ name: String) -> Bool {
+        if name.contains("HomeScreen") || name.contains("Icon")
+            || name.contains("StatusBar") || name.contains("Wallpaper")
+            || name.contains("Snapsh") || name.contains("Switcher") {
+            return false
+        }
+        return name.contains("SBDeviceApplicationSceneView")
+            || name.contains("SBAppContainerView")
+            || name.contains("SBSceneContainerView")
+            || name.contains("_UIScenePresentationView")
+    }
+
+    /// What a view says its scene is, in the spellings SpringBoard uses. An
+    /// empty answer is not a failure — `_UIScenePresentationView` keeps its
+    /// identity on the presenter, not on itself.
+    private static func sceneIdentifier(of view: UIView) -> String {
+        for key in ["sceneIdentifier", "_sceneIdentifier"] {
+            if let text = value(of: view, key) as? String, !text.isEmpty { return text }
+        }
+        if let handle = value(of: view, "sceneHandle") {
+            for key in ["sceneIdentifier", "identifier"] {
+                if let text = value(of: handle, key) as? String, !text.isEmpty { return text }
+            }
+        }
+        if let scene = value(of: view, "scene") {
+            for key in ["identifier", "sceneIdentifier"] {
+                if let text = value(of: scene, key) as? String, !text.isEmpty { return text }
+            }
+        }
+        return ""
+    }
+
+    /// The child of the window that contains `node`. Hiding this instead of the
+    /// carrier itself is the difference between "the picture is gone" and "the
+    /// picture is gone and so is the black parent behind it".
+    private static func container(of node: UIView, in window: UIWindow) -> UIView? {
+        var current = node
+        var steps = 0
+        while let parent = current.superview, parent !== window {
+            current = parent
+            steps += 1
+            if steps > 64 { return nil }
+        }
+        return current.superview === window ? current : nil
+    }
+
+    /// Finds the full-screen presentation of the scene we are drawing in the
+    /// card and sets its alpha to 0. Nothing is removed, nothing is hidden, no
+    /// selector is invented: alpha is a property every UIView has, and it is
+    /// put back to its previous value on teardown.
+    private static func demoteFullScreen(_ scene: NSObject) {
+        let identifier = value(of: scene, "identifier").map { String(describing: $0) } ?? ""
+        let wanted = identifier.hasPrefix("sceneID:") ? String(identifier.dropFirst(8)) : identifier
+        var bundle = wanted
+        if let dash = wanted.range(of: "-default") {
+            bundle = String(wanted[..<dash.lowerBound])
+        }
+
+        guard let app = sharedApplication() else {
+            Log.write("win: no application to search for the full screen")
+            return
+        }
+
+        var windows = 0
+        var matched: Carrier?
+        var spare: Carrier?
+
+        for window in app.windows {
+            if window is FloatWindow { continue }
+            windows += 1
+            let windowClass = NSStringFromClass(type(of: window))
+            Log.write("win: springboard window " + windowClass
+                      + " level=" + String(format: "%.0f", window.windowLevel.rawValue)
+                      + " hidden=" + (window.isHidden ? "yes" : "no")
+                      + " alpha=" + String(format: "%.1f", window.alpha)
+                      + " size=" + String(format: "%.0fx%.0f",
+                                          window.bounds.width, window.bounds.height))
+            if matched != nil { continue }
+
+            var queue: [UIView] = [window]
+            var head = 0
+            while head < queue.count && head < 4000 {
+                let node = queue[head]
+                head += 1
+                let name = NSStringFromClass(type(of: node))
+                if isCarrier(name), let top = container(of: node, in: window) {
+                    let ident = sceneIdentifier(of: node)
+                    let carrier = Carrier(view: node, top: top, name: name, ident: ident)
+                    let hit = !wanted.isEmpty
+                        && (ident.contains(wanted) || (!bundle.isEmpty && ident.contains(bundle)))
+                    if hit {
+                        matched = carrier
+                        Log.write("win: presentation carrier " + name
+                                  + " ident=" + ident
+                                  + " top=" + NSStringFromClass(type(of: top)))
+                        break
+                    }
+                    // A carrier that cannot name its scene is only used when it
+                    // is the full screen, because the one thing this step must
+                    // never do is take the desktop out of sight.
+                    if spare == nil, ident.isEmpty {
+                        let area = top.window?.bounds ?? .zero
+                        let covers = area.width > 64 && area.height > 64
+                            && top.frame.width >= area.width * 0.8
+                            && top.frame.height >= area.height * 0.8
+                        if covers {
+                            spare = carrier
+                            Log.write("win: presentation carrier " + name
+                                      + " ident=?"
+                                      + " top=" + NSStringFromClass(type(of: top)))
+                        }
+                    }
+                }
+                queue.append(contentsOf: node.subviews)
+            }
+        }
+
+        guard let chosen = matched ?? spare else {
+            Log.write("win: no full screen container (windows=" + String(windows) + ")")
+            return
+        }
+        if matched == nil {
+            Log.write("win: no carrier named the scene, using the only one found")
+        }
+
+        let top = chosen.top
+        let topName = NSStringFromClass(type(of: top))
+        guard !topName.contains("HomeScreen"), !topName.contains("Icon"),
+              !topName.contains("Wallpaper") else {
+            Log.write("win: refused to hide " + topName)
+            return
+        }
+
+        let previous = top.alpha
+        cover = Cover(view: top, name: topName, previous: previous)
+        top.alpha = 0
+        Log.write("win: fullscreen demoted cls=" + topName
+                  + " alpha " + String(format: "%.1f", previous) + "->0"
+                  + " from=" + chosen.name)
+    }
+
+    /// Puts the one view back. Called on teardown, before this file forgets it,
+    /// so a failed run cannot leave a hole in SpringBoard's hierarchy.
+    private static func restoreFullScreen() {
+        guard let saved = cover else { return }
+        saved.view.alpha = saved.previous
+        Log.write("win: fullscreen restored cls=" + saved.name
+                  + " alpha=" + String(format: "%.1f", saved.previous))
+        cover = nil
     }
 
     /// The one witness a kill leaves behind: which call the process was inside.
