@@ -478,7 +478,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 0.0.43 — a corner drag resizes; every other band moves. The
             // anchor is the opposite corner, read once here: a zone is which
             // cell the finger landed in, not a thing that changes mid-drag.
-            if zone == .bottomCorner, let card = card {
+            // `card` is already unwrapped by the guard above.
+            if zone == .bottomCorner {
                 resizeStart = card.frame
                 resizeFromLeft = start.x < card.bounds.width / 2
             } else {
@@ -539,7 +540,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 syncGrip()
             }
         case .ended, .cancelled:
-            if zone == .bottomCorner, resizeStart != nil, let card = card {
+            if zone == .bottomCorner, resizeStart != nil {
                 resizeStart = nil
                 Log.write("win: card resized to " + point(card.frame.origin)
                           + " size=" + size(card.bounds.size))
