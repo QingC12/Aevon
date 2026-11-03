@@ -6,56 +6,85 @@ import UIKit
 /// the main `UIWindowScene`, and a `hitTest` that answers nil for itself so a
 /// touch that misses the card falls through to whatever is underneath. This
 /// reuses exactly that shape. The only thing it adds is the card the hosted
-/// scene view goes into — 320x480, 12pt corners, 2pt white edge — because the
-/// operator has to be able to see that the view is really on screen before
-/// anything is activated.
+/// scene view goes into — 320 wide, the picture's own aspect, 12pt corners,
+/// 2pt white edge — because the operator has to be able to see that the view is
+/// really on screen before anything is activated.
 ///
-/// 0.0.34 — the gestures are the mother ship's, not ours. Aevon(32) showed the
-/// problem without saying it: fifty seconds of card, `wrote` climbing 1 -> 3 -> 5,
-/// and not one `card moved to` line, because a pinch-and-drag shell is not what
-/// a Stheno user does. Her own text is the specification, verbatim out of
-/// `zh-Hans Localizable.strings`:
+/// 0.0.35 — the grip moves outside the card, where hers is.
+///
+/// 0.0.34 put the gesture band on the inside of the card's top and bottom edge,
+/// read off her `GestureIntroduction` and nothing else. Aevon(33) answered with
+/// ninety seconds of card, `beat 1` to `beat 320`, and not one `gesture` line:
+/// the band was real, it was simply covered by the thing it was wrapped around.
+/// A hosted scene view is a real UIView that owns its touches and forwards them
+/// to the app — recognizers on the ancestor get nothing, which is exactly why
+/// the ✕ disc worked (a sibling above it) and a drag did not.
+///
+/// Her own settings say where the band goes. Two keys out of her localisation
+/// file, and the second one only makes sense if the band is outside:
+///
+///   SIFEI              = 扩展::浮窗4边交互
+///   GestureBorderWidth = 减小浮窗手势宽度
+///
+/// and her text, verbatim:
 ///
 ///   浮窗手势区域为边缘外侧, 竖屏上下, 横屏左右;
 ///   边中区域快速上滑关闭, 俩点缩小, 长按切换横竖;
 ///   边角区域滑动缩放, 长按重启;
 ///   其余部分滑动移动, 长按+滑动缩放
 ///
-/// So the card is a three-region surface, not one pan area:
+/// 边缘外侧 — outside the edge. So the gesture surface is a ring wrapped around
+/// the card, 40pt wide, with the card's own rect punched out of it:
 ///
-///   区域        快速上滑   双击      长按            长按+滑动
-///   边中        关闭       缩小      切换横竖        —
-///   边角        —          —         重启            滑动缩放
-///   其余        —          —         —               缩放
-///                                       （其余部分: 滑动 = 移动）
+///   ┌──────────── ring ────────────┐
+///   │  边角  │   边中   │  边角      │   top band: middle third is 边中,
+///   │  (角)  │  上滑关  │  (角)      │   the corner squares are 边角
+///   ├───────┴──────────┴───────────┤
+///   │ 其余                          │   left band: move
+///   │   ╔══════════════════════╗   │
+///   │   ║   the card — the app  ║   │   nothing here belongs to us any more
+///   │   ╚══════════════════════╝   │
+///   │ 其余                          │
+///   ├───────┬──────────┬───────────┤
+///   │  边角  │   边中   │  边角      │
+///   └───────┴──────────┴───────────┘
 ///
-/// Two deviations, both named here rather than discovered later:
+/// Three things fall out of that, and all three are improvements rather than
+/// compromises:
 ///
-///   1. The band is on the *inside* of the card's top and bottom edge. Her text
-///      says 边缘外侧 — outside — because her window sits against the screen
-///      edge, so outside it there is nothing to steal. Our card floats in the
-///      middle of the desktop: a band outside it would have to claim touches on
-///      the desktop itself, and the desktop is where the icons are.
-///   2. 长按切换横竖 and 长按重启 are wired to what this chain can actually do.
-///      There is no orientation write anywhere in 0.0.33's scene path, so a
-///      rotation gesture would move the card and not the picture; and 重启 by
-///      rebuilding the window is the 0.0.20 presenter-remount that cost a phone.
-///      The long press prints what it was asked to do and resets the geometry,
-///      which is the half of 重启 that a window can do by itself.
+///   1. The band cannot be swallowed. Nothing is hosted in the ring, so no
+///      remote scene view sits between the finger and the recognizer.
+///   2. The picture is the app's again. Her model has no interior zone, so
+///      tapping, scrolling and liking inside the card work as they do in a real
+///      window — 0.0.34 ate those touches with a pan recognizer.
+///   3. Moving the card is a band gesture, not a card gesture, which is why a
+///      card that fills most of the screen is still draggable from its edge.
+///
+/// Two deviations, both printed in the log rather than discovered later:
+///
+///   - 长按切换横竖 and 长按重启 are wired to what this chain can do. There is no
+///     orientation write in the scene path, so a rotation would move the card and
+///     not the picture; and 重启 by rebuilding the window is the 0.0.20 presenter
+///     remount that cost a phone. The long press says what it was asked for and
+///     resets geometry — the half of 重启 a window can do by itself.
+///   - 边角 is the four corner squares exactly, because her two trim settings are
+///     named 左角 / 右角. The rest of the band moves, so a hand sliding along an
+///     edge never resizes by accident.
 final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     static let shared = FloatHost()
 
-    /// Which part of the card a touch landed on. The mother ship's names.
+    /// Which part of the ring a touch landed on. The mother ship's names.
     private enum Zone {
         case edgeMiddle
         case edgeCorner
-        case interior
+        case rest
     }
 
     private var window: FloatWindow?
     private var card: UIView?
     private var content: UIView?
     private var close: UIControl?
+    private var grip: GripView?
     private var onClose: ((String) -> Void)?
     /// The scene's own size. Every resize is this shape, scaled — the card never
     /// gets an aspect the picture does not have.
@@ -65,13 +94,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var press: UILongPressGestureRecognizer?
     private var tap: UITapGestureRecognizer?
 
-    private var zone: Zone = .interior
-    private var pressZone: Zone = .interior
+    private var zone: Zone = .rest
+    private var pressZone: Zone = .rest
     private var panStep: CGPoint = .zero
-    /// Which band the drag started in. 边角 on the top edge has to follow the
-    /// finger: pulling that edge down shrinks the card, and the bottom edge is
-    /// the other way round. Without this, one of the two corners fights the hand.
-    private var bandTop = true
+    /// Which end of the ring the drag started on. A corner above the card grows
+    /// when the finger goes up; a corner below it grows the other way round.
+    /// Without this, half the corners fight the hand.
+    private var cornerTop = true
     private var pressStep: CGPoint = .zero
     private var miniFrame: CGRect?
 
@@ -84,10 +113,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private let closeSize: CGFloat = 30
     /// `GestureBorderWidth` in her settings, described there as 减小浮窗手势宽度 —
     /// i.e. the shipped default is a band you might want to shrink, so it is not
-    /// a hairline. 44pt on a 320pt card is the same proportion as a 12% band on a
-    /// 375pt phone, which is what an edge gesture has to be to be findable by a
-    /// thumb without looking.
-    private let band: CGFloat = 44
+    /// a hairline. 40pt of ring outside a 320pt card is wide enough to find with
+    /// a thumb without looking, and it costs the desktop 40pt of icon margin
+    /// around the card, which is the price of the ring being outside at all.
+    private let band: CGFloat = 40
     /// 快速上滑: a flick, not a drag. 900 pt/s is above a deliberate slow drag and
     /// below the speed a thumb reaches when it is actually swiping away.
     private let flick: CGFloat = 900
@@ -120,9 +149,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // operator saw what that means: a 430x932 picture in a 2:3 box is 221
         // wide, so ~50pt of black sat on each side. A card that shows a phone is
         // a card shaped like a phone. The card now takes the picture's aspect
-        // and the width is the only thing chosen — 0.0.24 logged
-        // `scale factor=0.515 shown=221x480`, and the sum of those two numbers
-        // is the two black bars.
+        // and the width is the only thing chosen.
         let natural = view.bounds.size
         let source = (natural.width > 16 && natural.height > 16) ? natural : window.bounds.size
         let plan = host.plan(in: window.bounds, source: source)
@@ -151,7 +178,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         host.content = view
         host.natural = source
         host.installClose()
-        host.installGestures(on: card)
+        // The ring goes in last, so it is above the card in the window. Its own
+        // hitTest hands back nothing inside the card's rect, so a touch on the
+        // picture still reaches the app — the ring is above, not in the way.
+        host.installGrip(on: root)
+        host.installGestures()
 
         Log.write("win: card "
                   + String(format: "%.0fx%.0f", card.bounds.width, card.bounds.height)
@@ -162,14 +193,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                                        source.width * plan.scale, source.height * plan.scale)
                   + " fill=" + String(format: "%.0fx%.0f",
                                       card.bounds.width, card.bounds.height))
-        // One line that says which regions exist, so the next log can be read
-        // against the matrix instead of against the code. Split into `let`s
-        // because one long concatenation of format calls is a type-checker
-        // timeout, and 0.0.30 lost a whole build to exactly that.
-        let head = "win: gesture zones band=" + String(format: "%.0f", host.band)
-        let middle = " middle=" + String(format: "%.0f", FloatHost.cell(in: card.bounds.size).width)
-        Log.write(head + middle
-                  + " (边中 上滑关/双击缩/长按横竖, 边角 滑缩放/长按复位, 其余 滑移动/长按滑缩放)")
+        // Where the ring is, so the next log can be read against her matrix
+        // instead of against the code. Two `let`s: one long concatenation of
+        // format calls is a type-checker timeout, and 0.0.30 lost a build to it.
+        let ring = "win: grip ring band=" + String(format: "%.0f", host.band)
+        let cell = " cell=" + String(format: "%.0f", FloatHost.cell(in: card.bounds.size).width)
+        Log.write(ring + cell
+                  + " 外侧 (边中 上滑关/双击缩, 边角 滑缩放/长按复位, 其余 滑移动/长按滑缩放)")
         return window.isHidden ? nil : host
     }
 
@@ -186,7 +216,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return
         }
         for sub in card?.subviews ?? [] { sub.removeFromSuperview() }
+        grip?.removeFromSuperview()
         card?.removeFromSuperview()
+        grip = nil
         card = nil
         content = nil
         close = nil
@@ -279,19 +311,45 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         DispatchQueue.main.async { hook?(reason) }
     }
 
-    // MARK: - zones
+    // MARK: - ring
+
+    /// The ring is the card's frame grown by `band` on all four sides, with the
+    /// card's own rect declared as a hole. Nothing else about it is special:
+    /// it has no background, it draws nothing, it exists to be touched.
+    private func installGrip(on root: UIView) {
+        guard let card = card else { return }
+        let grip = GripView(frame: card.frame.insetBy(dx: -band, dy: -band))
+        grip.backgroundColor = .clear
+        grip.isUserInteractionEnabled = true
+        grip.hole = CGRect(x: band, y: band, width: card.bounds.width, height: card.bounds.height)
+        root.addSubview(grip)
+        self.grip = grip
+    }
+
+    /// Every frame change goes through here. A ring that lags its card by one
+    /// event is a ring the finger misses by one band.
+    private func syncGrip() {
+        guard let card = card, let grip = grip else { return }
+        grip.frame = card.frame.insetBy(dx: -band, dy: -band)
+        grip.hole = CGRect(x: band, y: band,
+                           width: card.bounds.width, height: card.bounds.height)
+    }
 
     /// 竖屏上下, 横屏左右 — the card is always the scene's portrait shape here, so
-    /// the band lives on the top and bottom edge. 边中 is the middle third of the
-    /// band; the outer thirds are 边角, where her resize corners are.
+    /// the bands that count are the top and bottom ones. The middle third of a
+    /// band is 边中; the four squares where two bands meet are 边角; everything
+    /// else in the ring moves the card.
     private func zoneFor(_ point: CGPoint) -> Zone {
-        guard let card = card else { return .interior }
+        guard let card = card else { return .rest }
         let size = card.bounds.size
-        let reach = min(band, size.height / 4)
-        guard point.y <= reach || point.y >= size.height - reach else { return .interior }
-        let middle = FloatHost.cell(in: size)
-        if point.x >= middle.minX && point.x <= middle.maxX { return .edgeMiddle }
-        return .edgeCorner
+        let outsideX = point.x < 0 || point.x > size.width
+        let outsideY = point.y < 0 || point.y > size.height
+        if outsideX && outsideY { return .edgeCorner }
+        if outsideY {
+            let cell = FloatHost.cell(in: size)
+            if point.x >= cell.minX && point.x <= cell.maxX { return .edgeMiddle }
+        }
+        return .rest
     }
 
     private static func cell(in size: CGSize) -> CGRect {
@@ -299,13 +357,29 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return CGRect(x: third, y: 0, width: third, height: size.height)
     }
 
+    private func name(_ zone: Zone) -> String {
+        switch zone {
+        case .edgeMiddle: return "edge-middle"
+        case .edgeCorner: return "edge-corner"
+        case .rest: return "rest"
+        }
+    }
+
+    /// Ring coordinates back to the card's own, which is the space the zones and
+    /// the geometry are written in. A point outside the card comes back negative
+    /// or past the size, and that is precisely how a band is recognised.
+    private func cardPoint(_ point: CGPoint) -> CGPoint {
+        CGPoint(x: point.x - band, y: point.y - band)
+    }
+
     // MARK: - gestures
 
-    private func installGestures(on card: UIView) {
+    private func installGestures() {
+        guard let grip = grip else { return }
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         pan.maximumNumberOfTouches = 1
         pan.delegate = self
-        card.addGestureRecognizer(pan)
+        grip.addGestureRecognizer(pan)
         self.pan = pan
 
         // 长按 is half of two of her four cells, so it is not an accessory here:
@@ -315,59 +389,57 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         press.minimumPressDuration = pressDelay
         press.allowableMovement = 12
         press.delegate = self
-        card.addGestureRecognizer(press)
+        grip.addGestureRecognizer(press)
         self.press = press
 
-        // 俩点缩小 — two taps in 边中. It begins only there, so a double tap in
-        // the middle of the picture still belongs to the app.
+        // 俩点缩小 — two taps in 边中, and only there: a double tap on the rest of
+        // the ring belongs to nothing, and a double tap inside the card belongs
+        // to the app.
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
         tap.numberOfTapsRequired = 2
         tap.delegate = self
-        card.addGestureRecognizer(tap)
+        grip.addGestureRecognizer(tap)
         self.tap = tap
     }
 
-    /// The close disc is a control, not a gesture surface. Without this a swipe
-    /// that starts on the ✕ becomes a 边角 resize and the tap that follows is
-    /// cancelled — the one button on the card would be the one thing that does
-    /// not work.
-    func gestureRecognizer(_ gesture: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        guard let disc = close else { return true }
-        return !disc.bounds.contains(touch.location(in: disc))
-    }
-
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
-        guard let card = card, gesture === tap else { return true }
-        return zoneFor(gesture.location(in: card)) == .edgeMiddle
+        guard let grip = grip, gesture === tap else { return true }
+        return zoneFor(cardPoint(gesture.location(in: grip))) == .edgeMiddle
     }
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
-        guard let card = card, let window = window else { return }
+        guard let card = card, let window = window, let grip = grip else { return }
         switch gesture.state {
         case .began:
-            zone = zoneFor(gesture.location(in: card))
-            bandTop = gesture.location(in: card).y <= card.bounds.height / 2
+            let start = cardPoint(gesture.location(in: grip))
+            zone = zoneFor(start)
+            cornerTop = start.y < 0
             panStep = .zero
+            // Which band the finger found. If the operator reports "it does not
+            // work" again, this line says whether the touch arrived and which
+            // zone it was counted as — two very different defects.
+            Log.write("win: gesture grab zone=" + name(zone)
+                      + " at " + point(start))
         case .changed:
-            // Every delta is measured in the window, never in the card. The card
-            // is being resized while the finger moves, so its own coordinate
-            // space is a ruler that stretches: 0.0.24 read a 40pt drag as 55 and
-            // the corner ran away from the finger.
+            // Every delta is measured in the window, never in the card or the
+            // ring. Both are being resized and moved by this very gesture, so
+            // their coordinate spaces are rulers that stretch.
             let total = gesture.translation(in: window)
             let dx = total.x - panStep.x
             let dy = total.y - panStep.y
             panStep = total
             switch zone {
-            case .interior:
+            case .rest:
                 var frame = card.frame
                 frame.origin.x += dx
                 frame.origin.y += dy
                 card.frame = clamped(frame, in: window.bounds)
+                syncGrip()
             case .edgeCorner:
                 // 边角区域滑动缩放 — direct, no long press. Vertical drag changes
                 // the height and the width follows the scene's own ratio, with the
                 // band's own sign so the edge stays under the finger.
-                resize(height: card.bounds.height + (bandTop ? -dy : dy))
+                resize(height: card.bounds.height + (cornerTop ? -dy : dy))
             case .edgeMiddle:
                 // 边中 only answers a flick; dragging there is not a move, and
                 // moving the card from its own edge is how a window gets dragged
@@ -388,7 +460,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // has to clear the threshold and has to be the larger one, or a
             // diagonal drag along the band would close a window nobody meant to
             // close.
-            let speed = gesture.velocity(in: card)
+            let speed = gesture.velocity(in: window)
             let up = -speed.y
             if up > flick && up > abs(speed.x) {
                 Log.write("win: gesture edge-middle flick up=" + String(Int(up))
@@ -400,20 +472,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             }
         case .edgeCorner:
             let scale = card.bounds.height / max(natural.height, 1)
-            let band = bandTop ? " top band" : " bottom band"
+            let end = cornerTop ? " top band" : " bottom band"
             Log.write("win: card resized " + size(card.bounds.size)
-                      + " by corner, scale=" + String(format: "%.3f", scale) + band)
-        case .interior:
+                      + " by corner, scale=" + String(format: "%.3f", scale) + end)
+        case .rest:
             Log.write("win: card moved to " + point(card.frame.origin)
                       + " size=" + size(card.bounds.size))
         }
     }
 
     @objc private func handlePress(_ gesture: UILongPressGestureRecognizer) {
-        guard let card = card, let window = window else { return }
+        guard let card = card, let window = window, let grip = grip else { return }
         switch gesture.state {
         case .began:
-            pressZone = zoneFor(gesture.location(in: card))
+            pressZone = zoneFor(cardPoint(gesture.location(in: grip)))
             pressStep = gesture.location(in: window)
             // A press that becomes a drag must not also drag the card: 长按+滑动
             // is a resize, and two recognizers fighting over one finger is how a
@@ -426,17 +498,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             case .edgeCorner:
                 Log.write("win: gesture long press edge-corner, 重启 as geometry reset")
                 resetToPlan(in: window.bounds)
-            case .interior:
-                Log.write("win: gesture long press interior, drag to resize")
+            case .rest:
+                Log.write("win: gesture long press rest, drag to resize")
             }
         case .changed:
-            guard pressZone == .interior else { break }
+            guard pressZone == .rest else { break }
             let total = gesture.location(in: window)
             let dy = total.y - pressStep.y
             pressStep = total
             resize(height: card.bounds.height + dy)
         case .ended, .cancelled, .failed:
-            if pressZone == .interior {
+            if pressZone == .rest {
                 Log.write("win: card resized " + size(card.bounds.size)
                           + " by long press, scale=" + String(format: "%.3f",
                                                               card.bounds.height / max(natural.height, 1)))
@@ -457,6 +529,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             card.frame = clamped(saved, in: window.bounds)
             miniFrame = nil
             followContent()
+            syncGrip()
             Log.write("win: gesture double tap restored " + size(card.bounds.size)
                       + " at " + point(card.frame.origin))
             return
@@ -469,6 +542,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let y = min(max(card.frame.origin.y, margin), window.bounds.height - height - margin)
         card.frame = CGRect(x: x, y: y, width: minWidth, height: height)
         followContent()
+        syncGrip()
         Log.write("win: gesture double tap minimised " + size(card.bounds.size)
                   + (dockLeft ? " docked left" : " docked right"))
     }
@@ -500,6 +574,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         card.bounds = CGRect(origin: .zero, size: CGSize(width: w, height: h))
         followContent()
         card.frame = clamped(card.frame, in: window.bounds)
+        syncGrip()
     }
 
     /// The content keeps the card's size for one reason only: it is the scene's
@@ -522,6 +597,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         card.frame = plan.frame
         miniFrame = nil
         followContent()
+        syncGrip()
         Log.write("win: card reset to " + size(card.bounds.size)
                   + " at " + point(card.frame.origin))
     }
@@ -557,6 +633,41 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return nil
         }
         return application.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    }
+}
+
+/// The gesture ring: the card's frame grown by the band, with the card's own
+/// rect punched out.
+///
+/// It exists because a hosted scene view owns its touches. Aevon(33) put the
+/// recognizers on the card and got ninety seconds of silence — the presentation
+/// view forwarded every touch in the picture to the app, and the ✕ disc worked
+/// only because it is a sibling drawn above it. Outside the card there is no
+/// scene, no remote window and nothing to forward to: a touch on the ring is a
+/// touch on a plain view in our own window.
+///
+/// `hole` is what keeps the picture honest. Touching inside the card returns nil
+/// from hitTest, so the touch goes to the card, to the presentation view, and to
+/// the app — tapping, scrolling and liking inside the floating window behave
+/// like a real window, which 0.0.34's pan recognizer had taken away.
+final class GripView: UIView {
+    /// The card's rect in this view's own coordinates.
+    var hole: CGRect = .zero
+    /// The first few touches are written down. If a report ever says "the edge
+    /// still does nothing", this line separates "the touch never arrived" from
+    /// "it arrived in a zone that does not do that" without another build.
+    private var proven = 0
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        super.point(inside: point, with: event) && !hole.contains(point)
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard proven < 4, let touch = touches.first else { return }
+        proven += 1
+        Log.write("win: grip touch at " + String(format: "%.0f,%.0f", touch.location(in: self).x,
+                                                 touch.location(in: self).y)
+                  + " #" + String(proven))
     }
 }
 

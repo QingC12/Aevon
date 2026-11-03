@@ -476,12 +476,18 @@ def main():
                   # a card that jumped.
                   b"win: card moved to ",
                   b"win: card resized ",
+                  # 0.0.35 — the band moved outside the card, so these two strings
+                  # are the proof that a gesture surface exists at all and that it
+                  # is a ring rather than a band on the inside of the picture:
+                  # Aevon(33) showed ninety seconds of card with the recognizers
+                  # attached to a view that owns its touches.
+                  b"win: grip ring band=",
+                  b"win: grip touch at ",
                   # 0.0.34 — the mother ship's 区域 × 动作 matrix replaced our
                   # pinch-and-drag shell. These four strings are the only proof
-                  # in the package that the zones exist, that a band flick can
-                  # close, that two taps minimise, and that 长按 mapped onto this
-                  # chain's geometry reset.
-                  b"win: gesture zones band=",
+                  # in the package that a band flick can close, that two taps
+                  # minimise, and that 长按 mapped onto this chain's reset.
+                  b"win: gesture grab zone=",
                   b"win: gesture edge-middle flick up=",
                   b"win: gesture double tap minimised ",
                   b"win: card reset to ",
