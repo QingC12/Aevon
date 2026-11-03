@@ -784,7 +784,7 @@ zStackParticipantDidChange:
         // messaged here: this is a class-list walk, and every class that shows
         // up can be asked about itself in a later run.
         for line in lines(AevonFindClasses("LayerHost,SceneLayer,Presentation,Presenter", 20)) {
-            Log.write("win: class " + line)
+            Log.write("win: runtime class " + line)
         }
 
         var springboard: NSObject?
@@ -885,7 +885,7 @@ zStackParticipantDidChange:
             return
         }
         let presenterCls = NSStringFromClass(type(of: presenter))
-        Log.write("win: " + tag + " presenter cls=" + presenterCls)
+        Log.write("win: " + tag + " presenter ready cls=" + presenterCls)
 
         mark(tag + "-view")
         let rawView = value(of: presenter, "presentationView")

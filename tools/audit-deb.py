@@ -438,11 +438,11 @@ def main():
                   b"scene: window level", b"scene: carrier view", b"scene: live scenes",
                   b"win: begin manager",
                   b" uiPresentationManager absent", b" uiPresentationManager cls=",
-                  b" presenter cls=",
+                  b" presenter ready cls=",
                   b" presentationView absent", b" presentationView cls=",
                   b" stopping before layer host",
                   b"win: previous run died at ",
-                  b"win: class ",
+                  b"win: runtime class ",
                   b"/var/mobile/Library/Logs/Aevon/win.step",
                   b"census %@ super=%@", b"presenter %@ -> %@"):
         if token not in dylib_early:

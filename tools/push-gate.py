@@ -463,10 +463,23 @@ def check_audit_tokens():
     # Swift 把 ≤15 字节的字符串字面量编成立即数塞进指令，字节流里根本没有。
     # 所以「ring: trash 」这种短标记在 dylib 里 grep 不到，审计必挂 —— 而且
     # 本地看不出、只在 CI 里挂。这条把它挡在推送之前：标记必须够长。
+    # 0.0.17 又踩了一次同一个坑，只是换了个入口：` presenter cls=` 和
+    # `win: class ` 都正好 15 字节，一样被编成立即数。所以判据不是前缀表，
+    # 而是「这段文字是否出现在 Swift 源码里」+ 「是否 ≤15 字节」。
+    swift_blob = "\n".join(
+        read(os.path.join(d, n))
+        for d, _s, ns in os.walk("Sources")
+        for n in ns if n.endswith(".swift"))
+    # 只查「日志标记形状」的断言：以日志通道前缀开头，或以空格开头的拼接段。
+    # 类名（PanelController）、域名（com.aevon.prefs）这类本来就在二进制里，
+    # 长度再短也不算问题，查它们只会制造假警报。
+    LOG_HEADS = ("ring: ", "prefs: ", "scene: ", "scene2: ", "calls: ", "win: ")
     for token in sorted(tokens):
-        if token.startswith(("ring: ", "prefs: ", "scene: ", "scene2: ", "calls: ")) and len(token.encode()) < 16:
-            bad(f"audit: 标记「{token}」只有 {len(token.encode())} 字节，"
-                f"Swift 会把它编成立即数，二进制里搜不到 —— 至少再加几个字")
+        short = len(token.encode()) < 16
+        looks_like_log = token.startswith(LOG_HEADS) or token.startswith(" ")
+        if short and looks_like_log and token in swift_blob:
+            bad(f"audit: 断言「{token}」只有 {len(token.encode())} 字节且出自 Swift，"
+                f"会被编成立即数，二进制里搜不到 —— 换成更长的那半句")
 
 
 # ---------------------------------------------------------------------------
