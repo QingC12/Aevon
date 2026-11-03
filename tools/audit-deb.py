@@ -408,13 +408,16 @@ def main():
     # in CI while looking fine locally. tools/push-gate.py enforces the length.
     dylib_early = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
     for token in (b"RingHost", b"ring: hosted on desktop", b"LSApplicationWorkspace",
-                  b"(operator list)", b"ring: grip moved to",
-                  # 0.0.42 — the ported disc must be in the dylib: its three
-                  # marker tags are the version tags the old plugin used, and
-                  # the unfolded-ring log line is the one the operator greps.
+                  b"ring: grip moved to", b"ring: expanded (",
+                  b"(first run, editable in Settings)",
+                  # 0.0.42 — the ported disc must be in the dylib. These tags are
+                  # string literals inside the disc's own log lines / source, so
+                  # FINALPACKAGE cannot strip them the way it strips type names.
                   b"AevonKeyframeHoverV320", b"AevonGifHoverV322", b"AevonRingIcon40V323",
                   b"AevonRingUnfoldV323", b"AevonQuickScreenshotV262",
-                  b"AevonQuickRecordingV262", b"RingSpringDamping"):
+                  b"AevonQuickRecordingV262", b"RingSpringDamping",
+                  b"AevonRingMultiRing", b"AevonRingHoldRotateV28",
+                  b"AevonRingPointerHandoffV216"):
         if token not in dylib_early:
             bad(f"host: {token.decode(errors='replace')} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")
