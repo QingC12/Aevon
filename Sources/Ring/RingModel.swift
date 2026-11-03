@@ -289,11 +289,23 @@ struct RingConfig {
     /// counted seven. Nothing had failed — `capacity` is a fact about a circle
     /// (R64 with 44 pt icons holds exactly seven), and the eighth icon was never
     /// built. Silently truncating the operator's own list is the wrong answer to
-    /// a geometry question, so the geometry gives way instead: the icons shrink
-    /// first (44 → 26 pt, the floor the settings slider already uses), and only
-    /// when that is exhausted does the ring grow (64 → 120 pt, the slider's own
-    /// ceiling). A list that does not fit even at R120 / 26 pt is still cut, and
-    /// the caller logs that instead of pretending.
+    /// a geometry question, so the geometry gives way instead.
+    ///
+    /// 0.0.39 — the order matters, and 0.0.38 had it backwards.
+    ///
+    /// 0.0.38 shrank the icons first (44 → 26 pt) and only grew the circle
+    /// afterwards. Aevon(37) shows what that looks like: twelve icons on a
+    /// 64 pt circle at 26 pt each — small stamps crowded inside a shape the
+    /// master never draws that way. The master is explicit about which number
+    /// belongs to whom: `_iconWidth` is a setting the operator chose and the
+    /// sliders still show, while `_radius` is the scale of the shape. Shrinking
+    /// the setting to fit the shape is exactly the trade that made the ring
+    /// stop looking like the master's.
+    ///
+    /// So the circle grows first (64 → 120 pt, the slider's own ceiling) and the
+    /// icons keep the width they were given. Only when the circle is at its
+    /// ceiling do the icons give way, and only then. A list that fits at neither
+    /// is still cut, and the caller logs that instead of pretending.
     ///
     /// The operator's own numbers are never written back: this is a rendering
     /// decision, and the sliders stay the master control.
@@ -303,10 +315,10 @@ struct RingConfig {
         var steps = 0
         while capacity(radius: r, iconWidth: w) < count, steps < 64 {
             steps += 1
-            if w > 26 {
-                w = Swift.max(26, w - 2)
-            } else if r < 120 {
+            if r < 120 {
                 r = Swift.min(120, r + 4)
+            } else if w > 26 {
+                w = Swift.max(26, w - 2)
             } else {
                 break
             }

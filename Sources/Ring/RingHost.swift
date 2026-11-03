@@ -230,6 +230,10 @@ final class RingHost: NSObject {
         // dot's centre here would move it in the pad's coordinate space.
         gripPad?.center = point
         window.rootViewController?.view.frame = bounds
+        // A rotation can switch the appearance under a live dot; repainting on
+        // every layout pass is one property write and keeps it visible through
+        // that switch.
+        paintGrip()
 
         if let ring = ring {
             ring.frame = bounds
@@ -288,16 +292,47 @@ final class RingHost: NSObject {
                                         width: side, height: side))
         grip.layer.cornerRadius = side / 2
         grip.layer.cornerCurve = .continuous
-        grip.backgroundColor = UIColor.white.withAlphaComponent(0.22)
-        grip.layer.borderWidth = 1
-        grip.layer.borderColor = UIColor.white.withAlphaComponent(0.55).cgColor
-        grip.layer.shadowColor = UIColor.black.cgColor
-        grip.layer.shadowOpacity = 0.35
-        grip.layer.shadowRadius = 4
-        grip.layer.shadowOffset = CGSize(width: 0, height: 1)
         grip.isUserInteractionEnabled = false
         pad.addSubview(grip)
         self.grip = grip
+        paintGrip()
+    }
+
+    /// 0.0.39 — the dot has to be visible on whatever is behind it.
+    ///
+    /// 0.0.38 painted it white at 22% with a 1 pt white border. On a white
+    /// page — which is what a full-screen light-mode app is — that is not a
+    /// faint dot, it is no dot: white on white with a white edge. Aevon(37)
+    /// is the first log where the operator opened a light app and could not
+    /// find it at all.
+    ///
+    /// The master has no desktop dot to copy the shape from: its handle is the
+    /// edge bar (`EgdeGestureView`, `AppearEdge`, `_edgeWidth`) and it is
+    /// summoned from the screen edge, not tapped. What the master does have,
+    /// and what is copied here, is `_colorScheme` on `RingView` and on every
+    /// capsule control: the chrome is repainted for the current appearance
+    /// instead of assuming a dark one.
+    ///
+    /// So the dot is no longer one colour with one edge. It is a white core
+    /// with a black outline, which is the only pair that reads on both a white
+    /// page and a black one — the light core carries a dark screen, the dark
+    /// outline carries a light one — and the outline thickens in light mode,
+    /// where a hairline white-on-white would still be invisible at arm's
+    /// length.
+    private func paintGrip() {
+        guard let grip = grip else { return }
+        let dark = window?.traitCollection.userInterfaceStyle == .dark
+        // Not `?? .dark`: an unanswered trait collection in SpringBoard is the
+        // light case more often than not, and guessing wrong is what made the
+        // dot vanish. 0.86/0.62 both read; only the outline changes.
+        grip.backgroundColor = UIColor.white.withAlphaComponent(dark ? 0.62 : 0.86)
+        grip.layer.borderWidth = dark ? 1 : 2
+        grip.layer.borderColor = UIColor.black.withAlphaComponent(dark ? 0.45 : 0.55).cgColor
+        grip.layer.shadowColor = UIColor.black.cgColor
+        grip.layer.shadowOpacity = dark ? 0.45 : 0.35
+        grip.layer.shadowRadius = 3
+        grip.layer.shadowOffset = CGSize(width: 0, height: 1)
+        grip.alpha = 1
     }
 
     @objc private func toggle() {
@@ -341,8 +376,11 @@ final class RingHost: NSObject {
     }
 
     private func animateGrip(expanded: Bool) {
+        // 0.0.39 — 0.45 while expanded was another way of losing the dot: the
+        // ring is drawn around it, and the only way to put the ring away is to
+        // tap this. It now dims without becoming hard to find.
         UIView.animate(withDuration: 0.18, delay: 0, options: [.beginFromCurrentState]) {
-            self.grip?.alpha = expanded ? 0.45 : 1
+            self.grip?.alpha = expanded ? 0.72 : 1
         }
     }
 

@@ -88,6 +88,32 @@ final class RingView: UIView {
     private var trashView: UIView?
     private var isDragging = false
 
+    // MARK: 0.0.39 — 手指滑过图标 (母本 `_selected` + `fingerLocation`)
+
+    /// `RingEnv._selected`. The icon under the finger, or -1. The master keeps
+    /// exactly this one index; the highlight is not a per-view state, because
+    /// two highlighted icons would be two answers to "which one will open".
+    private var hoverIndex = -1
+    /// `RingEnv._translationPadding`. Below this the finger is *pointing*, above
+    /// it the finger is *dragging*. The master keeps the same field on `RingEnv`
+    /// and on `RingView` — it is the one number that separates "slide across the
+    /// icons to pick one" from "turn the whole shape", and both gestures start
+    /// with the same touch.
+    private let dragThreshold: CGFloat = 10
+    /// The touch is still in the pick phase (no drag has started yet).
+    private var hovering = false
+    private var hoverStart: CGPoint = .zero
+    /// A tap that arrives right after a hover picked an icon must not open a
+    /// second app. The two recognisers see the same touch and neither is
+    /// cancelled by the other, so the pick owns the next third of a second.
+    private var suppressTapUntil: CFTimeInterval = 0
+
+    /// How much the icon under the finger grows. The master's own recording
+    /// (`证据/stheno图标动画.GIF`) shows the picked icon clearly larger than its
+    /// neighbours with a light rim around it; 1.2× is what that reads as at
+    /// 44 pt, and it is small enough that the neighbours keep their slots.
+    private let hoverScale: CGFloat = 1.2
+
     // MARK: Init
 
     init(frame: CGRect, config: RingConfig, apps: [RingApp], pivot: CGPoint) {
@@ -132,6 +158,10 @@ final class RingView: UIView {
         iconViews.removeAll()
         slots.removeAll()
         bornAt.removeAll()
+        // A highlight index that outlives its icons points at whatever is
+        // rebuilt into that slot next — one icon permanently lit for no reason.
+        hoverIndex = -1
+        hovering = false
 
         guard !apps.isEmpty else {
             iconCount = 0
@@ -228,6 +258,8 @@ final class RingView: UIView {
             completion?()
             return
         }
+        hoverIndex = -1
+        hovering = false
         expanding = false
         collapseCompletion = completion
         duration = 0.34 / speedFactor()
@@ -327,7 +359,11 @@ final class RingView: UIView {
             let age = now - bornAt[index]
             let k = CGFloat(Swift.min(1, Swift.max(0, age / 0.16)))
             let pop = 0.34 + 0.66 * easeOut(k)
-            view.transform = CGAffineTransform(scaleX: pop, y: pop)
+            // 手指滑过的那一个再放大一点 (母本 `_selected`). Kept inside the
+            // same assignment as `pop` on purpose: two writes to `transform` in
+            // one frame means one of them wins at random.
+            let scale = index == hoverIndex ? pop * hoverScale : pop
+            view.transform = CGAffineTransform(scaleX: scale, y: scale)
             view.alpha = Swift.min(1, k * 1.6)
         }
     }
@@ -394,6 +430,10 @@ final class RingView: UIView {
         applyFit(newApps.count)
         let count = Swift.min(newApps.count, geo.capacity)
         let keepsViews = count == iconCount && count > 0
+        // The selection does not survive a shorter list: index 5 of eight is a
+        // different app than index 5 of six, and a highlight that lands on the
+        // wrong icon after a 收藏 is worse than no highlight.
+        if !keepsViews || hoverIndex >= count { hoverIndex = -1 }
 
         if keepsViews {
             // Same number of icons: swap the artwork and let them glide, which
@@ -473,24 +513,45 @@ final class RingView: UIView {
 
     @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
         guard !iconViews.isEmpty, !apps.isEmpty else { return }
+        // A hover that just opened something consumed this same touch. Without
+        // this the pick fires twice: once from the pan's `.ended`, once from the
+        // tap that the pan never cancels.
+        guard CACurrentMediaTime() >= suppressTapUntil else { return }
         let point = gesture.location(in: self)
 
         for (index, view) in iconViews.enumerated() {
             guard view.alpha > 0.3, view.frame.insetBy(dx: -4, dy: -4).contains(point) else { continue }
-            let app = apps[index % apps.count]
-            UIView.animate(withDuration: 0.12, animations: {
-                view.transform = CGAffineTransform(scaleX: 1.14, y: 1.14)
-            }, completion: { _ in
-                UIView.animate(withDuration: 0.2) { view.transform = .identity }
-            })
-            haptic(intensity: config.intensity)
-            onPick?(app)
+            pick(index: index)
             return
         }
 
         // Not an icon: the host may close the ring. Doing it here would leave
         // the host's `expanded` flag lying.
         onBackgroundTap?()
+    }
+
+    /// One place that opens an icon, so a tap and a slide-to-pick can never
+    /// disagree about the haptic or the pop — and cannot open two apps.
+    ///
+    /// The gate lives *here* rather than in the pan's `.ended`: for a touch that
+    /// never travelled, the tap recogniser and the pan recogniser both fire, and
+    /// UIKit does not promise which one runs first. Guarding at the entry point
+    /// makes the order irrelevant; guarding at either caller only protects
+    /// against the order that was tested.
+    private func pick(index: Int) {
+        guard index >= 0, index < iconViews.count, !apps.isEmpty else { return }
+        let now = CACurrentMediaTime()
+        guard now >= suppressTapUntil else { return }
+        suppressTapUntil = now + 0.35
+        let view = iconViews[index]
+        UIView.animate(withDuration: 0.12, animations: {
+            let base = index == self.hoverIndex ? self.hoverScale : 1
+            view.transform = CGAffineTransform(scaleX: base * 1.14, y: base * 1.14)
+        }, completion: { _ in
+            UIView.animate(withDuration: 0.2) { view.transform = .identity }
+        })
+        haptic(intensity: config.intensity)
+        onPick?(apps[index % apps.count])
     }
 
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
@@ -511,14 +572,111 @@ final class RingView: UIView {
 
         switch gesture.state {
         case .began:
-            beginPan(at: point)
+            // 0.0.39 — every touch starts as a pick, and only becomes a drag
+            // once it has travelled `dragThreshold`. The master orders it the
+            // same way: `PanGestureSubType` has both `icon` and `window`, and
+            // the same touch reaches both — a touch that stays put is picking,
+            // a touch that travels is turning.
+            hoverStart = point
+            hovering = true
+            panMode = .none
+            updateHover(at: point)
         case .changed:
+            if hovering {
+                let dx = point.x - hoverStart.x
+                let dy = point.y - hoverStart.y
+                if dx * dx + dy * dy <= dragThreshold * dragThreshold {
+                    updateHover(at: point)
+                    return
+                }
+                // The finger meant to drag, not to pick. Drop the highlight and
+                // hand this touch to the old path with the anchor taken from
+                // here: an anchor from `.began` would be a dozen points stale
+                // and the shape would jump on the first frame of the drag.
+                hovering = false
+                clearHover()
+                beginPan(at: point)
+                return
+            }
             continuePan(to: point)
         case .ended, .cancelled, .failed:
+            if hovering {
+                hovering = false
+                let picked = hoverIndex
+                let committed = gesture.state == .ended
+                clearHover()
+                // `.cancelled` and `.failed` are the system taking the touch
+                // away (a call, a gesture losing to another). Opening an app on
+                // those is opening an app nobody asked for.
+                if committed, picked >= 0, picked < apps.count {
+                    pick(index: picked)
+                }
+                return
+            }
             endPan()
         default:
             break
         }
+    }
+
+    /// `_selected` — the nearest icon the finger is *on*, or -1.
+    ///
+    /// Distance to the icon's centre, not a frame hit test: the icons sit on an
+    /// arc, so a rectangle test picks a neighbour whenever the finger passes
+    /// between two of them. The radius is a little wider than half an icon so
+    /// sliding along the arc never falls into a dead gap and blanks the
+    /// highlight between every pair.
+    private func updateHover(at point: CGPoint) {
+        guard progress >= 0.999 else { return }
+        var best = -1
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for (index, view) in iconViews.enumerated() where view.alpha > 0.3 {
+            let dx = view.center.x - point.x
+            let dy = view.center.y - point.y
+            let distance = sqrt(dx * dx + dy * dy)
+            if distance < bestDistance {
+                bestDistance = distance
+                best = index
+            }
+        }
+        let reach = geo.iconWidth * 0.85
+        let target = bestDistance <= reach ? best : -1
+        guard target != hoverIndex else { return }
+        hoverIndex = target
+        applyHover()
+        // One line per icon crossed. This is the only evidence in the log that
+        // a slide across the shape is being read at all — without it "the
+        // highlight does not follow my finger" is indistinguishable from "the
+        // ring never saw the touch".
+        if target >= 0 {
+            Log.write("ring: hover icon " + String(target) + " of "
+                      + String(iconViews.count))
+            // One soft click per icon crossed, not per frame: `updateHover`
+            // already returned early when the index did not change.
+            haptic(intensity: Swift.max(0.3, config.intensity * 0.6))
+        }
+    }
+
+    private func clearHover() {
+        guard hoverIndex != -1 else { return }
+        hoverIndex = -1
+        applyHover()
+    }
+
+    /// Puts the current `hoverIndex` onto the icons. Called from here and from
+    /// `placeIcons`, which owns `transform` during the sweep — two writers of
+    /// one property is how a highlight ends up one icon behind the finger.
+    ///
+    /// The rim is a layer border rather than a shadow: the icons clip to their
+    /// squircle (`masksToBounds`), so a shadow would be clipped away entirely
+    /// and the operator would see the icon grow with no rim at all.
+    private func applyHover() {
+        for (index, view) in iconViews.enumerated() {
+            let on = index == hoverIndex
+            view.layer.borderWidth = on ? 2 : 0
+            view.layer.borderColor = on ? UIColor.white.cgColor : UIColor.clear.cgColor
+        }
+        placeIcons(progress: progress)
     }
 
     private func beginPan(at point: CGPoint) {

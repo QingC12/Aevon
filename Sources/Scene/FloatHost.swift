@@ -217,6 +217,66 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return window.isHidden ? nil : host
     }
 
+    /// Records what the operator just did with the card.
+    ///
+    /// Called at the end of a move or a resize and nowhere else: an in-flight
+    /// drag would be a disk write forty times a second on SpringBoard's main
+    /// thread, for a value nobody can read until the finger lifts.
+    ///
+    /// The edge is decided here and only here, from the distance between the
+    /// card's own side and the screen's side (`_edgeWidth`, 30 pt). Inside that
+    /// band the card is pulled hard against the edge — that pull *is* 吸附 —
+    /// and the result is what gets stored. Outside it the card keeps whichever
+    /// side it already had, because a card nudged just past the centre line
+    /// must not silently change which stored placement it is overwriting.
+    ///
+    /// Both numbers are stored as fractions of the host, so the same placement
+    /// means the same thing in portrait and in landscape.
+    private func remember(in bounds: CGRect) {
+        guard let card = card, bounds.width > 0, bounds.height > 0 else { return }
+        var placement = CardLayout.loadRuntime()
+        var origin = card.frame.origin
+        var docked: CardLayout.Edge?
+
+        if let edge = CardLayout.dockEdge(card.frame, in: bounds) {
+            let target = CardLayout.dockOrigin(edge, width: card.bounds.width,
+                                               in: bounds, margin: margin)
+            origin = CGPoint(x: target.x, y: card.frame.minY)
+            placement.edge = edge
+            docked = edge
+        }
+
+        let normalized = CGPoint(x: origin.x / bounds.width, y: origin.y / bounds.height)
+        if placement.edge == .left {
+            placement.left = normalized
+        } else {
+            placement.right = normalized
+        }
+        placement.heightFraction = card.bounds.height / bounds.height
+
+        // The frame moves before the file is written, not after: if the write
+        // fails the card is still where the finger left it, and the operator
+        // sees a card that did not stick rather than one that did not move.
+        if origin != card.frame.origin {
+            UIView.animate(withDuration: 0.22, delay: 0,
+                           usingSpringWithDamping: 0.86, initialSpringVelocity: 0.3,
+                           options: [.beginFromCurrentState]) {
+                card.frame.origin = origin
+            } completion: { _ in
+                self.syncGrip()
+            }
+        }
+
+        let ok = CardLayout.save(placement)
+        let side = placement.edge == .left ? "left" : "right"
+        let at = String(Int((normalized.x * 100).rounded())) + "% / "
+            + String(Int((normalized.y * 100).rounded())) + "%"
+        let tall = " h=" + String(Int((placement.heightFraction * 100).rounded())) + "%"
+        let snap = docked == nil ? "" : " docked"
+        Log.write("win: card remembered " + side + snap + " at " + at + tall
+                  + (ok ? "" : " (write failed)"))
+    }
+
     /// The hosted view belongs to the system. It leaves with the card and never
     /// with the window: holding a presentation view after the presenter is gone
     /// keeps a scene alive that should have been reclaimed.
@@ -264,20 +324,50 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// thing as asking for two black bars: 932/430 of a 320-wide card is 694
     /// tall, and 320 wide of a 430-wide picture is 319 — the numbers only agree
     /// when the card has the picture's aspect.
+    /// 0.0.39 — the card comes back where it was left.
+    ///
+    /// Until now this function was pure: the same host bounds always produced
+    /// the same 320x694 in the middle, which is why Aevon(37) shows
+    /// `card 320x694 at 55,119` three times in a row after three different
+    /// drags and two resizes. The operator's own geometry now wins:
+    ///
+    ///   height  ← `HeightFraction`, the master's own size value
+    ///   width   ← height × the scene's aspect, so the picture is never
+    ///             letterboxed (0.0.24's black bars)
+    ///   origin  ← the stored corner for the current edge, clamped on screen
+    ///
+    /// A card wider than the screen is narrowed rather than allowed to hang
+    /// off it: a width that does not fit is a card whose close button may be
+    /// in a place no thumb reaches.
     private func plan(in bounds: CGRect, source: CGSize) -> (frame: CGRect, scale: CGFloat) {
         guard bounds.width > 64, bounds.height > 200, source.height > 16 else {
             return (CGRect(x: 0, y: 0, width: cardWidth, height: cardHeight), 1)
         }
+        let placement = CardLayout.loadRuntime()
         let ratio = source.width / source.height
-        var w = min(cardWidth, bounds.width - 32)
-        var h = w / ratio
+
+        var h = bounds.height * placement.heightFraction
+        var w = h * ratio
+        let widest = bounds.width - margin * 2
+        if w > widest {
+            w = widest
+            h = w / ratio
+        }
+        // The tall guard from 0.0.24 stays: a short screen with a tall scene
+        // still has to leave room to see what is behind the card.
         let tallest = bounds.height - 160
         if h > tallest {
             h = tallest
             w = h * ratio
         }
-        let x = (bounds.width - w) / 2
-        let y = max(60, (bounds.height - h) / 2)
+
+        let saved = placement.origin(for: placement.edge)
+        var x = saved.x * bounds.width
+        var y = saved.y * bounds.height
+        // Clamp as a rectangle, not as two numbers: a width change from a
+        // rotation must not leave the right edge 40 pt outside the screen.
+        x = Swift.min(Swift.max(margin, x), Swift.max(margin, bounds.width - w - margin))
+        y = Swift.min(Swift.max(0, y), Swift.max(0, bounds.height - h))
         return (CGRect(x: x, y: y, width: w, height: h), h / source.height)
     }
 
@@ -544,9 +634,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             let end = cornerTop ? " top band" : " bottom band"
             Log.write("win: card resized " + size(card.bounds.size)
                       + " by corner, scale=" + String(format: "%.3f", scale) + end)
+            remember(in: window.bounds)
         case .rest:
             Log.write("win: card moved to " + point(card.frame.origin)
                       + " size=" + size(card.bounds.size))
+            remember(in: window.bounds)
         }
     }
 
@@ -583,6 +675,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 Log.write("win: card resized " + size(card.bounds.size)
                           + " by long press, scale=" + String(format: "%.3f",
                                                               card.bounds.height / max(natural.height, 1)))
+                remember(in: window.bounds)
             }
             pan?.isEnabled = true
         default:
@@ -664,6 +757,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// would re-run the presenter mount that 0.0.20 already paid for.
     private func resetToPlan(in bounds: CGRect) {
         guard let card = card, natural.height > 16, bounds.width > 64 else { return }
+        // 边角长按 = 重启 (母本文案「边角区域滑动缩放, 长按重启」). Since 0.0.39 the
+        // plan reads the remembered placement, so resetting the frame alone
+        // would restore the very numbers the operator wanted gone — the
+        // remembered placement has to go first, or "restart" is a no-op.
+        CardLayout.reset()
         let plan = self.plan(in: bounds, source: natural)
         card.frame = plan.frame
         miniFrame = nil

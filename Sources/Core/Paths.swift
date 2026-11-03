@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.0.38"
+    public static let version = "0.0.39"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -49,6 +49,17 @@ public enum Aevon {
     /// place the drag happens), Settings reads it to show the position and
     /// deletes it to send the grip back to its corner.
     public static let layoutPath = "/var/mobile/Library/Logs/Aevon/layout.plist"
+
+    /// 0.0.39 — where the floating card sits, and how big it is.
+    ///
+    /// The master keeps this as five values inside `EgdeGestureView` /
+    /// `SettingEnv`, not as one frame: `_leftPecent` `_rightPecent`
+    /// `_leftHeightPecent` `_rightHeightPecent` and `_edgeWidth`. Two sets, one
+    /// per edge, because a card docked on the left and the same card docked on
+    /// the right are two different placements and the operator expects each to
+    /// come back the way it was left. A stored CGRect cannot express that: it
+    /// holds one position for a screen that has two.
+    public static let cardPath = "/var/mobile/Library/Logs/Aevon/card.plist"
 
     /// A request, not a setting: Settings drops this file and posts the prefs
     /// note; SpringBoard deletes it and writes the scene dump to the log. A

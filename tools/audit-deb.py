@@ -511,6 +511,10 @@ def main():
                   # 0.0.38 — 图标 → 悬浮窗。三条：挂起启动的门口、场景等到的时刻、
                   # 承载形状装不下时几何让步的那一行。少了第一条，「点图标没反应」
                   # 就又是一次无法分辨的报告。
+                  # 0.0.39 — 位置/大小记忆与吸附、手指滑过高亮。两条各自
+                  # 是「记不住」和「高亮不跟随」的唯一证据。
+                  b"win: card remembered ",
+                  b"ring: hover icon ",
                   b"win: icon launch ",
                   b"win: icon scene up after ",
                   b"ring: capacity fit ",

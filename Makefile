@@ -19,7 +19,7 @@ include $(THEOS)/makefiles/common.mk
 # Shared, platform-free core. The same three files are compiled into both
 # binaries, so SpringBoard and Settings can never disagree about paths/gates.
 AE_CORE := Sources/Core/Paths.swift Sources/Core/Log.swift Sources/Core/Gate.swift \
-           Sources/Core/GripLayout.swift
+           Sources/Core/GripLayout.swift Sources/Core/CardLayout.swift
 
 # The ring's model + icons + view are compiled into BOTH binaries on purpose:
 # the settings preview and the home-screen host must render the same shape from

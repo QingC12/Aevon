@@ -227,12 +227,15 @@ def push_api(message):
     if not files:
         sys.exit("没有跟踪的文件")
 
+    clock = {}
+    started = time.time()
     ref = api("/repos/%s/git/ref/heads/%s" % (REPO, BRANCH))
     parent_sha = ref["object"]["sha"]
     try:
         known = remote_tree_shas(parent_sha)
     except SystemExit:
         known = {}
+    clock["已知树"] = time.time() - started
 
     entries = []
     uploads = []
@@ -260,25 +263,36 @@ def push_api(message):
         return slot, blob["sha"]
 
     if uploads:
+        mark = time.time()
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             for slot, sha in pool.map(send, uploads):
                 entries[slot]["sha"] = sha
+        clock["上传 %d 个 blob" % len(uploads)] = time.time() - mark
 
     print("%d 个文件，复用 %d 个未变 blob，上传 %d 个"
           % (len(entries), len(entries) - len(uploads), len(uploads)))
 
+    mark = time.time()
     new_tree = api("/repos/%s/git/trees" % REPO, {"tree": entries})
+    clock["写树"] = time.time() - mark
+    mark = time.time()
     commit = api(
         "/repos/%s/git/commits" % REPO,
         {"message": message, "tree": new_tree["sha"], "parents": [parent_sha]},
     )
+    clock["提交"] = time.time() - mark
+    mark = time.time()
     api(
         "/repos/%s/git/refs/heads/%s" % (REPO, BRANCH),
         {"sha": commit["sha"]},
         method="PATCH",
     )
+    clock["移动分支"] = time.time() - mark
+    # 每一段都打出来：下次再觉得慢，先看是哪一段，而不是猜网络。
+    detail = "，".join("%s %.1fs" % (k, v) for k, v in clock.items())
     print("api push OK %s (parent %s, tree %s)"
           % (commit["sha"][:7], parent_sha[:7], new_tree["sha"][:7]))
+    print("用时 " + detail)
     return True
 
 
