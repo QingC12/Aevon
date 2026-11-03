@@ -1110,7 +1110,7 @@ zStackParticipantDidChange:
 
         // Window first, activate second. This is the whole difference from
         // 0.0.20, and the difference between a picture and a black phone.
-        guard let host = FloatHost.show(view, onClose: { closeCard("close button") }) else {
+        guard let host = FloatHost.show(view, onClose: { reason in closeCard(reason) }) else {
             Log.write("win: no window - nothing activated")
             return
         }

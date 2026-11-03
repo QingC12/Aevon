@@ -476,7 +476,16 @@ def main():
                   # a card that jumped.
                   b"win: card moved to ",
                   b"win: card resized ",
-                  b"win: close tapped",
+                  # 0.0.34 — the mother ship's 区域 × 动作 matrix replaced our
+                  # pinch-and-drag shell. These four strings are the only proof
+                  # in the package that the zones exist, that a band flick can
+                  # close, that two taps minimise, and that 长按 mapped onto this
+                  # chain's geometry reset.
+                  b"win: gesture zones band=",
+                  b"win: gesture edge-middle flick up=",
+                  b"win: gesture double tap minimised ",
+                  b"win: card reset to ",
+                  b"win: close requested by ",
                   # 0.0.27 — the mother ship's route. The two selectors are the
                   # ones her binary calls and hooks; the selftest string is the
                   # only proof in the package that the write path is exercised
