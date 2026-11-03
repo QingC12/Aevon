@@ -15,9 +15,8 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <mach/mach.h>
-#import <mach/mach_host.h>
-#import <mach/mach_vm.h>
-#import <mach/vm_prot.h>
+#import <mach/vm_map.h>
+#import <unistd.h>
 
 /// Returns the created FBScene, or nil when the manager does not answer.
 /// The completion block is the caller's; this function never retains it.
@@ -749,12 +748,15 @@ static void AevonInvalidateReplacement(id self, SEL _cmd) {
 ///
 /// Answers NO when the page will not open. The caller then refuses to install
 /// rather than hoping for the best.
+///
+/// `sysconf(_SC_PAGESIZE)` rather than `host_page_size`: the iOS SDK's
+/// `mach/mach_host.h` pulls in headers that are stubs on this platform, and
+/// `mach/mach_vm.h` is one of them — it answers `error: mach_vm.h unsupported`
+/// before anything compiles. Both were tried in the first build of this file.
 static BOOL AevonOpenPageForWrite(const void *address) {
     if (address == NULL) return NO;
-    vm_size_t pageSize = 0;
-    if (host_page_size(mach_host_self(), &pageSize) != KERN_SUCCESS || pageSize == 0) {
-        pageSize = 16384;
-    }
+    long raw = sysconf(_SC_PAGESIZE);
+    vm_size_t pageSize = (raw > 0) ? (vm_size_t)raw : 16384;
     vm_address_t start = (vm_address_t)address & ~(vm_address_t)(pageSize - 1);
     vm_prot_t target = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY;
     if (vm_protect(mach_task_self(), start, pageSize, FALSE, target) == KERN_SUCCESS) return YES;
