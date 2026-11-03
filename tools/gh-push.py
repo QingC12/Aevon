@@ -53,8 +53,12 @@ MODE = os.environ.get("AEVON_PUSH_MODE", "auto").lower()
 if not TOKEN:
     sys.exit("GH_TOKEN 未设置")
 
-for _k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-    os.environ.pop(_k, None)
+# 0.0.46 — 代理不是「一律有害」，是「以前那台机器上没有代理」。
+# 这台机器出网必须走代理：上面那一行 pop 掉之后，api.github.com 直接
+# RemoteDisconnected，git 也连不上。保留一个开关，默认行为不变。
+if os.environ.get("AEVON_KEEP_PROXY") != "1":
+    for _k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+        os.environ.pop(_k, None)
 
 HEAD = {
     "Authorization": "Bearer " + TOKEN,

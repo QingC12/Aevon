@@ -84,6 +84,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var resizeFromLeft = false
     /// The frame to come back to. Non-nil is the only definition of "docked".
     private var miniFrame: CGRect?
+    /// 0.0.46 — how many outer touches `ringHitTest` has routed. Bounded, like
+    /// every other probe here: SpringBoard's log is not the place for a stream.
+    private var ringProbe = 0
 
     private let cardWidth: CGFloat = 320
     private let cardHeight: CGFloat = 480
@@ -213,7 +216,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // is a type-checker timeout, and 0.0.30 lost a build to it.
         let ring = "win: grip ring band=" + String(format: "%.0f", host.band)
         let cell = " cell=" + String(format: "%.0f", FloatHost.cell(in: card.bounds.size).width)
-        Log.write(ring + cell
+        // 0.0.46 — the room left on each side, printed with the ring. A band
+        // narrower than `reach` is a band the thumb cannot find, and that is
+        // exactly what 0.0.45 could not show: `room=l57 r8 t56 b84` would have
+        // ended the round in one line.
+        let room = " room=" + String(format: "%.0f/%.0f/%.0f/%.0f",
+                                     card.frame.minX,
+                                     window.bounds.width - card.frame.maxX,
+                                     card.frame.minY,
+                                     window.bounds.height - card.frame.maxY)
+        Log.write(ring + cell + room
                   + " 外侧 (左右 拖动/点吸附, 底中 拖动/上滑关, 底角 缩放/长按复位, 顶部不接)")
         return window.isHidden ? nil : host
     }
@@ -282,7 +294,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         press = nil
         tap = nil
         miniFrame = nil
+        ringProbe = 0
         onClose = nil
+        window.ringHit = nil
         window.isHidden = true
         window.rootViewController = nil
         self.window = nil
@@ -331,10 +345,28 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let saved = placement.origin(for: placement.edge)
         var x = saved.x * bounds.width
         var y = saved.y * bounds.height
+        // 0.0.46 — the card may not use the last `reach` of the screen.
+        //
+        // The band lives *outside* the card, so the two are in direct
+        // competition for the same pixels: 0.0.45's card was 365 pt wide on a
+        // 430 pt screen and sat 8 pt from the right edge, which means the right
+        // band was 8 pt wide. Aevon(44) read that as 「四周的手势依旧是失效」
+        // and it is neither a hit-test bug nor an app-bridge bug — the band was
+        // simply not there. Whatever the card's size, it now leaves `reach` on
+        // every side the screen has room for, and is centred when it does not.
+        let room = reach
+        if w + room * 2 <= bounds.width {
+            x = Swift.min(Swift.max(room, x), bounds.width - w - room)
+        } else {
+            x = (bounds.width - w) / 2
+        }
         // Clamp as a rectangle, not as two numbers: a width change from a
         // rotation must not leave the right edge 40 pt outside the screen.
-        x = Swift.min(Swift.max(margin, x), Swift.max(margin, bounds.width - w - margin))
-        y = Swift.min(Swift.max(0, y), Swift.max(0, bounds.height - h))
+        if h + room * 2 <= bounds.height {
+            y = Swift.min(Swift.max(0, y), bounds.height - h - room)
+        } else {
+            y = (bounds.height - h) / 2
+        }
         return (CGRect(x: x, y: y, width: w, height: h), h / source.height)
     }
 
@@ -397,7 +429,38 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                            width: card.bounds.width, height: card.bounds.height)
         root.addSubview(grip)
         self.grip = grip
+        // 0.0.46 — the window decides ring membership itself, in window
+        // coordinates, before UIKit walks the view tree. Two rounds in a row
+        // have ended with 「外侧手势失效」 while the ring existed, was above the
+        // card and answered `point(inside:)` correctly; making the window route
+        // the touch removes the whole class of "a sibling in between" answers.
+        window?.ringHit = { [weak self] point in self?.ringHitTest(point) }
         syncGrip()
+    }
+
+    /// The probe for the next round. Three lines can differ and each has one
+    /// meaning:
+    ///
+    ///   · `event hit #n … -> GripView`  the window got the touch and routed it
+    ///   · `ring hit zone=right …`       the ring got it and the zone decides
+    ///   · neither, again                the touch never reached this window
+    private func ringHitTest(_ point: CGPoint) -> UIView? {
+        guard let grip = grip else { return nil }
+        let local = grip.convert(point, from: window)
+        guard grip.bounds.contains(local) else { return nil }
+        // The picture keeps its own touches: tapping, scrolling and liking
+        // inside the card belong to the hosted app.
+        guard !grip.hole.contains(local) else { return nil }
+        // No gesture lives on the top strip, and a band that answers nothing but
+        // still eats the touch is worse than no band at all.
+        guard local.y >= grip.hole.minY else { return nil }
+        if ringProbe < 20 {
+            ringProbe += 1
+            Log.write("win: ring hit zone=" + name(zoneFor(cardPoint(local)))
+                      + " at " + String(format: "%.0f,%.0f", local.x, local.y)
+                      + " #" + String(ringProbe))
+        }
+        return grip
     }
 
     /// Every frame change goes through here. A ring that lags its card by one
@@ -721,12 +784,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     /// A card that can be dragged off the screen can only be brought back by
     /// closing it, so the edges are a wall, not a suggestion.
+    ///
+    /// 0.0.46 — the wall is `reach` thick, not `margin`. `margin` is 8 pt and a
+    /// drag that parked the card 8 pt from the left edge left an 8 pt band
+    /// there — the operator's own next drag then "did nothing". The top keeps
+    /// none of it: the top strip answers no gesture at all, so reserving room
+    /// above the card would only be a gap nobody can use.
     private func clamped(_ frame: CGRect, in bounds: CGRect) -> CGRect {
         var result = frame
-        let maxX = max(margin, bounds.width - result.width - margin)
-        let maxY = max(margin, bounds.height - result.height - margin)
-        result.origin.x = min(max(result.origin.x, margin), maxX)
-        result.origin.y = min(max(result.origin.y, margin), maxY)
+        let side = frame.width + reach * 2 <= bounds.width ? reach : 0
+        let under = frame.height + reach * 2 <= bounds.height ? reach : 0
+        let maxX = max(side, bounds.width - result.width - side)
+        let maxY = max(0, bounds.height - result.height - under)
+        result.origin.x = min(max(result.origin.x, side), maxX)
+        result.origin.y = min(max(result.origin.y, 0), maxY)
         return result
     }
 
@@ -816,6 +887,11 @@ final class GripView: UIView {
 /// through to the app underneath, which is what makes a floating card usable
 /// while a full-screen app is running.
 final class FloatWindow: UIWindow {
+    /// 0.0.46 — asked before UIKit's own search. Returns the ring view when the
+    /// point is outside the picture and inside the band, nil otherwise. Set by
+    /// `FloatHost.installGrip` and cleared on teardown.
+    var ringHit: ((CGPoint) -> UIView?)?
+
     /// The first few touches, printed as they enter the window and before any hit
     /// testing of our own. Two reports in a row have ended with "the gesture does
     /// not fire" and an empty probe, and an empty probe means either the touch
@@ -824,6 +900,7 @@ final class FloatWindow: UIWindow {
     private var seen = 0   // 0.0.45 — 8 → 20, same reason as `GripView.proven`
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        if let ring = ringHit, let view = ring(point) { return view }
         let hit = super.hitTest(point, with: event)
         // The bare root view is not a thing to answer with: letting it take the
         // touch costs the desktop its icons and gains nothing, because it has no

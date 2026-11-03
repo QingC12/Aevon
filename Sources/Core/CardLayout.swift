@@ -38,7 +38,11 @@ public enum CardLayout {
     public struct Placement {
         /// Bumped whenever the built-in size changes meaning. A file stamped
         /// with an older number is read as "default + drag", not as a choice.
-        public static let currentVersion = 2
+        ///
+        /// 0.0.46 — version 3. Aevon(44) reports the default as 「几乎占满整个
+        /// 屏幕」, and a saved 85 % card would keep that true on the one phone
+        /// that reported it, so the stamp moves with the number.
+        public static let currentVersion = 3
 
         /// `_effectEdge` — which edge the card is docked to right now.
         public var edge: Edge
@@ -50,42 +54,68 @@ public enum CardLayout {
         /// The width follows the scene's own aspect, so one number is enough.
         public var heightFraction: CGFloat
 
-        /// 0.0.45 — the master's own 高度系数, not 0.0.38's leftover.
+        /// 0.0.46 — 62 %, and the number comes from a measurement rather than
+        /// from that annotation. It is also the value 设置里 `高度系数` ships
+        /// with, so the panel and the first frame agree instead of disagreeing
+        /// by thirty points of screen.
         ///
-        /// Aevon(43) said the card reads as 「特别的细长条」. It was: 694/932 =
-        /// 74.5 % of the screen height, and with the picture's own aspect
-        /// (430:932) the width lands at 320 pt — a strip, not a window.
+        /// 0.0.45 read `"0.2 0.3 0.9 0.85 30.0"` as "the window is 85 % tall"
+        /// and shipped it. Aevon(44) is unambiguous: 「默认的尺寸太大了。几乎占满
+        /// 整个屏幕」. 85 % is 792 pt of a 932 pt screen with 365 pt of width —
+        /// a card that leaves 8 pt on the right, which is also the width of the
+        /// gesture band on that side, so the same round reports the outer
+        /// gestures dead (see `FloatHost.band`). The two reports are one defect.
         ///
-        /// The master keeps this number in `SettingEnv._windowHeight` (labelled
-        /// `HeightFraction` = 高度系数 in its own strings) and its default is
-        /// legible in the only numeric annotation the binary still carries:
-        /// `"0.2 0.3 0.9 0.85 30.0"`, sitting directly after `EgdeGestureView`'s
-        /// five geometry fields — `_leftPecent`, `_rightPecent`,
-        /// `_leftHeightPecent`, `_rightHeightPecent`, `_edgeWidth`. So the two
-        /// heights are 90 % and 85 %, and 30 pt is the master's edge band width
-        /// (already used above as `edgeWidth`).
+        /// The 0.9/0.85 pair cannot be proven to mean window height: those two
+        /// fields sit beside `_leftPecent`/`_rightPecent` in `EgdeGestureView`,
+        /// whose job is the *edge band* — 90 % and 85 % of the height is where a
+        /// handle spans. A window is not a band.
         ///
-        /// 0.85 it is — the docked-right default, the conservative of the two.
-        /// Width follows the picture, so the card becomes 366x792 on this
-        /// 430x932 phone: full-height, centred, and nothing like a strip.
+        /// 62 % is 578 pt tall and 267 wide here: a window, not a second screen,
+        /// with 81 pt of screen on each side and 177 pt above and below for the
+        /// band to live in.
         public static var initial: Placement {
-            // 366 wide in a 430 screen → 32 pt either side, held as a fraction so
-            // a rotation keeps the card centred instead of pinned left.
-            let x = (1 - ratio(for: 0.85)) / 2
+            let height = preferredHeight
+            let x = (1 - widthFraction(for: height)) / 2
+            // Vertically centred, so the band has the same room above and below
+            // and neither corner resize starts against a screen edge.
+            let y = (1 - height) / 2
             return Placement(edge: .right,
-                             left: CGPoint(x: x, y: 0.06),
-                             right: CGPoint(x: x, y: 0.06),
-                             heightFraction: 0.85)
+                             left: CGPoint(x: x, y: y),
+                             right: CGPoint(x: x, y: y),
+                             heightFraction: height)
         }
 
-        /// Width as a fraction of the host width, given a height fraction. The
-        /// picture is 430:932, so the card is that shape scaled — one number
-        /// (height) decides both, and the operator only ever chooses the height.
-        public static func ratio(for heightFraction: CGFloat) -> CGFloat {
-            // 0.4614 = 430/932, the picture's own aspect on this phone. Written
-            // as a constant so the initial placement does not depend on a live
-            // screen being available when the setting page asks for a preview.
-            return 0.4614 * heightFraction
+        /// The built-in height, before anything is remembered.
+        public static let defaultHeight: CGFloat = 0.62
+        /// 0.0.46 — 设置 → 窗口与场景 → 高度系数. That row shipped in 0.0.42
+        /// with a note promising it decides the floating window's height, and
+        /// nothing read it: the card took the height from its own saved file and
+        /// the slider moved a key nobody opened. Wiring it here is the shortest
+        /// honest way to answer 「尺寸太大」 twice in a row — the operator can
+        /// now set the first frame's height without waiting for a build.
+        ///
+        /// Read once per open (an IPC round trip, never per frame). The saved
+        /// placement still wins after a drag or a resize — that is the more
+        /// specific choice — and 长按底角 clears it, which re-reads this.
+        public static var preferredHeight: CGFloat {
+            let stored = CGFloat(AevonPrefs.double("HeightFraction",
+                                                  default: Double(defaultHeight)))
+            return Swift.min(0.80, Swift.max(0.30, stored))
+        }
+
+        /// Width as a fraction of the host width, given a height fraction.
+        ///
+        /// 0.0.46 — this used to be `0.4614 * heightFraction`, which is the
+        /// *point* ratio (430 : 932) multiplied by a fraction: a unit error.
+        /// At 85 % it asked for x = 30 % of the width, `plan` clamped that to
+        /// "8 pt from the right edge", and the card ended up pinned off-centre.
+        /// The scene is full-bleed inside the card and carries the phone's own
+        /// aspect, so on the phone that shows it the width fraction *is* the
+        /// height fraction. Other aspects are handled at plan time, where the
+        /// real scene size is known.
+        public static func widthFraction(for heightFraction: CGFloat) -> CGFloat {
+            return Swift.min(0.92, heightFraction)
         }
 
         public func origin(for edge: Edge) -> CGPoint {

@@ -599,6 +599,12 @@ def main():
                   # attached to a view that owns its touches.
                   b"win: grip ring band=",
                   b"win: grip touch at ",
+                  # 0.0.46 — 窗口自己判定环带归属（窗口坐标系，先于 UIKit 的
+                  # 视图树搜索）。上一轮的失败是几何：卡片 365 pt 宽放在 430 pt
+                  # 屏上，右边只剩 8 pt，也就是右边带只有 8 pt。这一行是该判定
+                  # 生效的唯一证据：有它而 zone 不对，是分格问题；没它，是触摸
+                  # 根本没到窗口。
+                  b"win: ring hit zone=",
                   # 0.0.36 — Aevon(33) and Aevon(34) both reported "the gesture
                   # does not fire" while the log proved the ring existed and was
                   # never touched once. `event hit #n` is how the next run

@@ -80,8 +80,9 @@ PANELS = [
              note="浮窗首帧不套用系统比例，直接使用下面的宽度/高度系数。"),
         dict(k="Width", cn="宽度", cell="slider", d=0.55, rng=(0.30, 1.00),
              note="浮窗宽度占屏幕宽度的比例。"),
-        dict(k="HeightFraction", cn="高度系数", cell="slider", d=0.62, rng=(0.20, 1.00),
-             note="在宽度基础上再乘的系数，决定最终高度。"),
+        dict(k="HeightFraction", cn="高度系数", cell="slider", d=0.62, rng=(0.30, 0.80),
+             note="浮窗第一次打开时的高度（占屏幕高度的比例），宽度按画面比例跟随。"
+                  "拖动或缩放过的浮窗以它自己的记忆为准；长按底角可复位到这个值。"),
         dict(k="Size", cn="尺寸", cell="slider", d=0.60, rng=(0.40, 1.00),
              note="基准尺寸，圆盘展开时按此推导各图标位置。"),
         dict(k="BallparkFigure", cn="近似取值", cell="switch", d=False,
