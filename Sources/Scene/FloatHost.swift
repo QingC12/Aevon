@@ -353,7 +353,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let map = GripMap(frame: grip.bounds)
         map.isUserInteractionEnabled = false
         map.backgroundColor = .clear
-        map.contentMode = .redraw
         grip.addSubview(map)
 
         root.addSubview(grip)
@@ -725,6 +724,12 @@ final class GripView: UIView {
 /// nobody can see is a band a thumb can miss by exactly the amount that matters
 /// — the card is 320x694 and the band is 40pt outside it. Once the gesture is
 /// confirmed, remove `map` from FloatHost and this class.
+///
+/// No text on purpose. Three labels cost 13 KB when this was first written —
+/// `NSAttributedString`'s key dictionary and `NSString.draw` drag the whole
+/// string-drawing stack into a binary that had none of it — and colour alone
+/// answers the only question being asked: where is the line, and how wide.
+/// 黄 = 四条边带, 青 = 边中, 橙 = 四个角.
 final class GripMap: UIView {
     /// The card's rect, in this view's coordinates. Nothing is painted there.
     var hole: CGRect = .zero
@@ -736,38 +741,25 @@ final class GripMap: UIView {
         let h = bounds.height
         let bx = hole.minX
         let by = hole.minY
-        let top = CGRect(x: 0, y: 0, width: w, height: by)
-        let bottom = CGRect(x: 0, y: hole.maxY, width: w, height: h - hole.maxY)
-        let left = CGRect(x: 0, y: hole.minY, width: bx, height: hole.height)
-        let right = CGRect(x: hole.maxX, y: hole.minY,
-                           width: w - hole.maxX, height: hole.height)
 
-        UIColor.systemYellow.withAlphaComponent(0.22).setFill()
-        UIRectFill(top)
-        UIRectFill(bottom)
-        UIRectFill(left)
-        UIRectFill(right)
+        UIColor.yellow.withAlphaComponent(0.26).setFill()
+        UIRectFill(CGRect(x: 0, y: 0, width: w, height: by))
+        UIRectFill(CGRect(x: 0, y: hole.maxY, width: w, height: h - hole.maxY))
+        UIRectFill(CGRect(x: 0, y: hole.minY, width: bx, height: hole.height))
+        UIRectFill(CGRect(x: hole.maxX, y: hole.minY,
+                          width: w - hole.maxX, height: hole.height))
 
-        UIColor.systemCyan.withAlphaComponent(0.55).setFill()
+        UIColor.cyan.withAlphaComponent(0.55).setFill()
         UIRectFill(CGRect(x: hole.minX + cell.minX, y: 0, width: cell.width, height: by))
         UIRectFill(CGRect(x: hole.minX + cell.minX, y: hole.maxY,
                           width: cell.width, height: h - hole.maxY))
 
-        UIColor.systemOrange.withAlphaComponent(0.65).setFill()
+        UIColor.orange.withAlphaComponent(0.70).setFill()
         UIRectFill(CGRect(x: 0, y: 0, width: bx, height: by))
         UIRectFill(CGRect(x: hole.maxX, y: 0, width: w - hole.maxX, height: by))
         UIRectFill(CGRect(x: 0, y: hole.maxY, width: bx, height: h - hole.maxY))
-        UIRectFill(CGRect(x: hole.maxX, y: hole.maxY, width: w - hole.maxX, height: h - hole.maxY))
-
-        let font = UIFont.systemFont(ofSize: 9, weight: .semibold)
-        let ink: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.white]
-        ("边中" as NSString).draw(in: CGRect(x: hole.minX + cell.minX, y: 0,
-                                            width: cell.width, height: by),
-                                 withAttributes: ink)
-        ("角" as NSString).draw(in: CGRect(x: 0, y: 0, width: bx, height: by),
-                               withAttributes: ink)
-        ("移动" as NSString).draw(in: CGRect(x: 0, y: hole.minY, width: bx, height: hole.height),
-                                withAttributes: ink)
+        UIRectFill(CGRect(x: hole.maxX, y: hole.maxY,
+                          width: w - hole.maxX, height: h - hole.maxY))
     }
 }
 
@@ -799,7 +791,9 @@ final class FloatWindow: UIWindow {
             seen += 1
             let point = touch.location(in: self)
             let target = hitTest(point, with: event)
-            let who = target.map { NSStringFromClass(type(of: $0)) } ?? "nil"
+            // `object_getClassName` rather than `type(of:)`: the generic route
+            // pulls reflection metadata into the binary for one diagnostic line.
+            let who = target.map { String(cString: object_getClassName($0)) } ?? "nil"
             Log.write("win: event hit #" + String(seen)
                       + " at " + String(format: "%.0f,%.0f", point.x, point.y)
                       + " -> " + who)
