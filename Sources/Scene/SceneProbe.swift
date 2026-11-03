@@ -991,30 +991,15 @@ zStackParticipantDidChange:
             return
         }
 
-        // How many layers the scene is offering at all. A suspended background
-        // scene offers none; a foreground one offers at least its display
-        // layer. Read before anything is built, so the number describes the
-        // scene rather than our own work on it.
+        // How many layers the scene is offering at all: a suspended background
+        // scene offers none, a foreground one at least its display layer. One
+        // number, read before anything is built, so it describes the scene and
+        // not our own work on it. 0.0.27-0.0.29 needed five method-table dumps
+        // around this line to learn the getter names; the names are known now,
+        // and `hosted=2` at the container is the reading that decides anything.
         let layerManager = value(of: scene, "layerManager")
-        Log.write("win: scene layerManager="
-                  + (layerManager.map { NSStringFromClass(type(of: $0)) } ?? "nil")
-                  + " layers=" + String(count(of: layerManager, "layers")))
-        // 0.0.27 printed `layers=-1` here and `hosted=-1` two steps later, which
-        // is three dashes where the whole decision was supposed to be. Those
-        // numbers were about the names in this file, not about the scene. The
-        // real names are read off the method table now, and every getter that
-        // mentions layers, activity or content is reported next to its value.
-        Log.write("win: scene objects "
-                  + AevonReadObjects(scene, "layer,content,state,manager"))
-        Log.write("win: scene flags " + AevonReadFlags(scene,
-                                                       "active,foreground,valid,visib,deact"))
-        // 0.0.28 read this with the object-returning probe and printed
-        // `no getter matched`: `foreground` is a BOOL, so the object walk was
-        // answering a question nobody asked. Flags here, objects (content state,
-        // display configuration) beside them.
-        let settings = value(of: scene, "settings")
-        Log.write("win: scene settings flags "
-                  + AevonReadFlags(settings, "foreground,background,active,level,visible"))
+        Log.write("win: scene layerManager layers="
+                  + String(count(of: layerManager, "layers")))
 
         guard let made = AevonCreatePresenter(manager, "com.aevon.float", 0),
               let presenter = made as? NSObject else {
@@ -1031,10 +1016,7 @@ zStackParticipantDidChange:
         // scene's own size. Without it a card that is a fifth of the screen is
         // asking a full-screen surface to shrink itself, and an unshrunk surface
         // in a cropped view is not necessarily a picture.
-        let resized = AevonCallSetBool(presenter, "setResizesHostedContext:", true)
-        Log.write("win: hosted context resizes="
-                  + (resized == 1 ? "set" : "no such setter")
-                  + " reads=" + flag(AevonBoolOf(presenter, "resizesHostedContext")))
+        _ = AevonCallSetBool(presenter, "setResizesHostedContext:", true)
 
         guard let raw = value(of: presenter, "presentationView"),
               let view = raw as? UIView else {
@@ -1201,35 +1183,19 @@ zStackParticipantDidChange:
         // never being in that position — the app is in the background and the
         // desktop is the backdrop — so what is left here is one reading, one
         // second later, of whether a kept-alive scene really is still drawing.
+        // One reading, one second in, of whether a kept-alive scene is really
+        // still drawing — the difference between a card that works and 0.0.28's
+        // black one. The container's hosted count is on the same line, because
+        // `hosted=0` and `hosted=2` are the two answers this line exists for.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            Log.write("win: after 1s presenter hosting=" + flag(AevonBoolOf(presenter, "isHosting"))
-                      + " active=" + flag(AevonBoolOf(presenter, "isActive"))
-                      + " sublayers=" + String(view.layer.sublayers?.count ?? 0)
-                      + " reasons=" + reasonsOf(scene))
-        }
-
-        // The counters that separate the three ways a card can be blank, none
-        // of which a sublayer count can tell apart:
-        //   layers=absent                 the scene has nothing to give
-        //   nonHosted>0, hosted=0         layers exist but were not attached
-        //   hosted>0 and still blank      geometry, not content
-        //
-        // `hostContainerView` did not answer in 0.0.27, so the container is also
-        // looked for by class among the view's own children: the one sublayer a
-        // presentation view carries is that container, and it can say what it is
-        // hosting even when the property name is wrong.
-        var container = value(of: view, "hostContainerView")
-        if container == nil {
-            container = view.subviews.first {
+            let container = value(of: view, "hostContainerView") ?? view.subviews.first {
                 NSStringFromClass(type(of: $0)).contains("HostContainer")
             }
-        }
-        Log.write("win: container cls="
-                  + (container.map { NSStringFromClass(type(of: $0)) } ?? "nil")
-                  + " hosted=" + String(count(of: container, "hostedLayers"))
-                  + " nonHosted=" + String(count(of: container, "nonHostedLayers")))
-        if let container = container {
-            Log.write("win: container flags " + AevonReadFlags(container, "host,hidden"))
+            Log.write("win: after 1s hosted=" + String(count(of: container, "hostedLayers"))
+                      + " nonHosted=" + String(count(of: container, "nonHostedLayers"))
+                      + " sublayers=" + String(view.layer.sublayers?.count ?? 0)
+                      + " reasons=" + reasonsOf(scene)
+                      + " hosting=" + flag(AevonBoolOf(presenter, "isHosting")))
         }
 
         // 0.0.33 — no more eight second death. The card stays until the operator

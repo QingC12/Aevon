@@ -466,8 +466,8 @@ def main():
                   b"win: activate ran=",
                   b"win: state hosting=",
                   b"win: view sublayers=",
-                  b"win: scene layerManager=",
-                  b"win: container cls=",
+                  b"win: scene layerManager layers=",
+                  b"win: after 1s hosted=",
                   b"win: scale factor=",
                   # 0.0.33 — the card stays, so the eight second line is gone.
                   # What replaces it is the three things a card can now be told
