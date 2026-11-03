@@ -153,37 +153,6 @@ NSInteger AevonCallSetBool(id object, NSString *name, BOOL value) {
 // beside the value. A name that answers is a name that exists; a keyword with no
 // hits says the word is not in this class instead of leaving a dash in the log.
 
-/// Names a class actually declares, for the keywords given. Nothing is called.
-/// `keywords` is a comma-separated list. Answers "none" for a class that is not
-/// on this system, which is a fact worth logging on its own.
-NSString *AevonCensus(NSString *className, NSString *keywords) {
-    Class cls = className ? NSClassFromString(className) : Nil;
-    if (cls == Nil) return @"class absent";
-    NSArray<NSString *> *words = [[keywords lowercaseString]
-                                  componentsSeparatedByString:@","];
-    NSMutableArray<NSString *> *hits = [NSMutableArray array];
-    for (Class c = cls; c != Nil && c != [NSObject class]; c = class_getSuperclass(c)) {
-        unsigned int count = 0;
-        Method *list = class_copyMethodList(c, &count);
-        if (list == NULL) continue;
-        for (unsigned int i = 0; i < count && hits.count < 60; i++) {
-            NSString *name = NSStringFromSelector(method_getName(list[i]));
-            NSString *lower = [name lowercaseString];
-            for (NSString *word in words) {
-                if (word.length < 3) continue;
-                if (![lower containsString:word]) continue;
-                NSString *entry = (c == cls) ? name
-                    : [NSString stringWithFormat:@"%@/%@", NSStringFromClass(c), name];
-                if (![hits containsObject:entry]) [hits addObject:entry];
-                break;
-            }
-        }
-        free(list);
-    }
-    if (hits.count == 0) return @"no name matched";
-    return [hits componentsJoinedByString:@" "];
-}
-
 static BOOL AevonNameIsSafe(NSString *name) {
     for (NSString *bad in @[@"init", @"new", @"copy", @"alloc", @"dealloc",
                             @"retain", @"release", @"autorelease", @"invalidate",

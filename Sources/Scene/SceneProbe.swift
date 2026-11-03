@@ -789,7 +789,6 @@ zStackParticipantDidChange:
         mark("hook-install")
         emitNotes(AevonHookInstall())
         unmark()
-        censusOnce()
         Log.write("win: armed, building in 6s (switch to the target app now)")
         DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
             // Asked again on purpose: a manager captured six seconds ago is a
@@ -818,18 +817,6 @@ zStackParticipantDidChange:
     /// scene back to sleep underneath a card that is still showing it, which is
     /// the black card of 0.0.28 arriving by a different road.
     private static var cardUp = false
-    private static func censusOnce() {
-        guard !censusDone else { return }
-        censusDone = true
-        Log.write("win: runtime census SBDeviceApplicationSceneViewController "
-                  + AevonCensus("SBDeviceApplicationSceneViewController",
-                                "scene,host,activ,render,foreground,offscreen"))
-        Log.write("win: runtime census SBSceneManager "
-                  + AevonCensus("SBSceneManager", "intercept,settings,scene,fore,activ"))
-        Log.write("win: runtime census deactivation "
-                  + AevonCensus("UIApplicationSceneDeactivationManager",
-                                "deact,reason,scene,assert"))
-    }
 
     /// Holds the scene open and builds the card the moment the operator leaves
     /// it.
@@ -1028,9 +1015,6 @@ zStackParticipantDidChange:
         let settings = value(of: scene, "settings")
         Log.write("win: scene settings flags "
                   + AevonReadFlags(settings, "foreground,background,active,level,visible"))
-        Log.write("win: scene settings objects "
-                  + AevonReadObjects(settings, "state,display,orient,role"))
-        Log.write("win: layer manager objects " + AevonReadObjects(layerManager, "layer"))
 
         guard let made = AevonCreatePresenter(manager, "com.aevon.float", 0),
               let presenter = made as? NSObject else {
@@ -1139,8 +1123,6 @@ zStackParticipantDidChange:
         // 13) — so that is what this does. One beat per 250 ms for the life of
         // the card, a delta check inside the push, and `WIN-PUSH` on disk only
         // while a beat is in flight so a death inside it is named next launch.
-        Log.write("win: scene update methods "
-                  + AevonCensus("FBScene", "update,settings,transition,foreground"))
         var keep: (() -> Void)!
         var beat = 0
         var misses = 0
@@ -1247,23 +1229,8 @@ zStackParticipantDidChange:
                   + " hosted=" + String(count(of: container, "hostedLayers"))
                   + " nonHosted=" + String(count(of: container, "nonHostedLayers")))
         if let container = container {
-            Log.write("win: container objects " + AevonReadObjects(container, "host,layer"))
             Log.write("win: container flags " + AevonReadFlags(container, "host,hidden"))
-            // Aevon(27) said two layers are hosted and two host views exist, and
-            // the card was still black. Two hosted layers and a black card are
-            // either "the app is not committing" or "the host view has no size",
-            // and a frame separates them for free.
-            if let hosts = value(of: container, "_hostViews") as? NSArray,
-               let first = hosts.firstObject as? UIView {
-                Log.write("win: host view count=" + String(hosts.count)
-                          + " cls=" + NSStringFromClass(type(of: first))
-                          + " frame=" + String(format: "%.0fx%.0f",
-                                               first.frame.width, first.frame.height)
-                          + " hidden=" + (first.isHidden ? "yes" : "no"))
-            }
         }
-        Log.write("win: presenter objects " + AevonReadObjects(presenter, "host,active,valid"))
-        Log.write("win: presenter flags " + AevonReadFlags(presenter, "host,active,valid"))
 
         // 0.0.33 — no more eight second death. The card stays until the operator
         // closes it, drags it or resizes it; the teardown that used to be this

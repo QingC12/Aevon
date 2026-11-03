@@ -499,7 +499,6 @@ def main():
                   # seconds later. These two strings are the only proof in the
                   # package that the clock and its census reached the binary.
                   b"win: keepalive beat ",
-                  b"win: scene update methods ",
                   b"win: push banned for this run",
                   # 0.0.32 — the hand-back. Aevon(30) closed the card and left
                   # the settings saying `foreground=yes`, so Douyin played on to
