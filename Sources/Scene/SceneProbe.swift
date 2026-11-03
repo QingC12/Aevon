@@ -949,8 +949,12 @@ zStackParticipantDidChange:
             level += 1
         }
         if let window = ui.window {
+            // `windowLevel.rawValue`: UIWindow.Level is a RawRepresentable
+            // struct, and `String(format:)` wants a CVarArg. The first build of
+            // this line did not compile — one run, one line, which is the price
+            // of having no swiftc on this machine.
             Log.write("win: live view window=" + NSStringFromClass(type(of: window))
-                      + " level=" + String(format: "%.1f", window.windowLevel)
+                      + " level=" + String(format: "%.1f", window.windowLevel.rawValue)
                       + " hidden=" + (window.isHidden ? "yes" : "no"))
         } else {
             Log.write("win: live view is not in any window")
