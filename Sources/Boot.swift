@@ -13,6 +13,11 @@
 import Foundation
 import CoreFoundation
 
+/// `AevonScene.m` 里的 C 函数，只此一处声明。写成 `@_silgen_name` 而不是桥接头
+/// 文件：这个工程没有 Umbrella header，而两个名字是全部要交换的东西。
+@_silgen_name("AevonInstallTouchTap")
+private func AevonInstallTouchTap()
+
 // Two notifications, two callbacks. Deciding "which notification is this" by
 // comparing the name needs a CFString -> String bridge that this toolchain
 // refuses (CFNotificationName is not class-constrained here), so the name is
@@ -72,6 +77,11 @@ public func AevonStart() {
     guard case .pass = Gate.evaluate() else { return }
 
     Log.write("boot ok: version \(Aevon.version), pid \(getpid())")
+
+    // 0.0.48 — 浮窗的手指入口。装在 `-[UIApplication sendEvent:]` 上，理由写在
+    // AevonScene.m 那一段的注释里：四份日志证明「窗口会不会被问到」不可靠，而
+    // 这个方法是每一个触摸都必经的地方。装不上就只是退回旧行为，不会弄坏触摸。
+    AevonInstallTouchTap()
 
     // Before anything else touches the runtime: if a probe left a death marker
     // behind, name the class that stopped it and blacklist it. This is the only

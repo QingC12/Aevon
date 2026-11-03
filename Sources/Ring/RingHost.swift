@@ -303,6 +303,10 @@ final class RingHost: NSObject {
                                width: padWidth, height: padHeight)
         bar?.frame = CGRect(x: padWidth - barWidth, y: (padHeight - barHeight) / 2,
                             width: barWidth, height: barHeight)
+        // 0.0.48 — 竖条的触摸垫位置交给浮窗那一侧。浮窗的手指入口在应用层就
+        // 把环上的触摸吃掉了，环的右半边正好压在这里；没有这条线，卡片开着时
+        // 点竖条会被当成拖浮窗（见 AevonRingGrip.summonRect）。
+        AevonRingGrip.summonRect = barPad?.frame ?? .zero
         window.rootViewController?.view.frame = bounds
         paintBar()
 

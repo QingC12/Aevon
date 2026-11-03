@@ -607,6 +607,15 @@ def main():
                   # 是触摸连这一层都没到 —— 这正是 0.0.44-0.0.46 分不开的两件事。
                   b"win: band window up level=",
                   b"win: band probe ",
+                  # 0.0.48 — 手指入口搬到 `-[UIApplication sendEvent:]`。四份日志
+                  # 证明「窗口会不会被问到」不可靠（`event hit` / `band probe` 整场
+                  # 只有 ✕ 那一条），所以这一轮不再依赖窗口命中。`raw touch grab
+                  # zone=` 是这条路真的收到手指的唯一证据，`raw long press corner`
+                  # 是长按复位，`raw touch cancelled` 是系统把手势收走。
+                  b"win: touch seen at ",
+                  b"win: raw touch grab zone=",
+                  b"win: raw long press corner",
+                  b"win: raw touch cancelled by the system",
                   # 0.0.36 — Aevon(33) and Aevon(34) both reported "the gesture
                   # does not fire" while the log proved the ring existed and was
                   # never touched once. `event hit #n` is how the next run

@@ -90,9 +90,26 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// not the place for a stream.
     private var ringProbe = 0
 
+    // 0.0.48 — 应用层原始触摸的状态（见 `rawTouch`）。识别器那条路有自己的
+    // 状态机（UIKit 的），这条路必须有自己的一份：谁在跑由「事件有没有被吞掉」
+    // 决定，而一次触摸只可能走其中一条。
+    private var rawActive = false
+    private var rawStart = CGPoint.zero
+    private var rawLast = CGPoint.zero
+    private var rawMoved = false
+    private var rawStamp: TimeInterval = 0
+    private var rawVelocity = CGPoint.zero
+    private var rawProbe = 0
+    /// 卡片开着时，前 12 个到达应用层的触摸都写一行（不管落在哪里）。它回答的
+    /// 是「卡片外面到底有没有触摸进到 SpringBoard」—— 0.0.44-0.0.47 四轮里唯一
+    /// 始终分不开的问题。
+    private var rawSeen = 0
+    private var rawPress: DispatchWorkItem?
+
     private let cardWidth: CGFloat = 320
     private let cardHeight: CGFloat = 480
-    private let edge: CGFloat = 2
+    /// 0.0.48 — 原来这里是 `edge = 2`，卡片那圈白描边。描边撤了（见 `show`），
+    /// 常量一起撤，免得留一个没人读的 2。
     private let margin: CGFloat = 8
     /// 0.0.45 — 吸附 (docked) size, from the master's 「贴边缩小」.
     ///
@@ -175,8 +192,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
         let card = UIView(frame: plan.frame)
         card.backgroundColor = .clear
-        card.layer.borderWidth = host.edge
-        card.layer.borderColor = UIColor.white.cgColor
+        // 0.0.48 — 白色描边撤掉（Aevon(46) #2「边缘的白色线条太明显」）。
+        //
+        // 那 2 pt 是 0.0.24 留下的：当时卡片里可能是空的，需要一个框说明「这是一
+        // 个窗口」。现在卡片里永远是真实画面，画面自己就是边界；再画一条白线，
+        // 等于给一张有内容的图套个相框。圆角保留（它是有用的，见 `applyCorner`），
+        // 边框不保留。
         card.clipsToBounds = true
         card.isUserInteractionEnabled = true
         host.card = card
@@ -301,6 +322,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         tap = nil
         miniFrame = nil
         ringProbe = 0
+        rawProbe = 0
+        rawSeen = 0
+        rawActive = false
+        rawPress?.cancel()
+        rawPress = nil
         bandInset = .zero
         onClose = nil
         // The band's window goes with it. It is full-screen and one level below
@@ -629,100 +655,99 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return true
     }
 
-    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
-        guard let card = card, let window = window, let grip = grip else { return }
-        switch gesture.state {
-        case .began:
-            let start = cardPoint(gesture.location(in: grip))
-            zone = zoneFor(start)
-            panStep = .zero
-            // Which band the finger found. If the operator reports "it does not
-            // work" again, this line says whether the touch arrived and which
-            // zone it was counted as — two very different defects.
-            Log.write("win: gesture grab zone=" + name(zone)
-                      + " at " + point(start))
-            // 0.0.43 — a corner drag resizes; every other band moves. The
-            // anchor is the opposite corner, read once here: a zone is which
-            // cell the finger landed in, not a thing that changes mid-drag.
-            // `card` is already unwrapped by the guard above.
-            if zone == .bottomCorner {
-                resizeStart = card.frame
-                resizeFromLeft = start.x < card.bounds.width / 2
-            } else {
-                resizeStart = nil
-            }
-        case .changed:
-            // Every delta is measured in the window, never in the card or the
-            // ring. Both are being resized and moved by this very gesture, so
-            // their coordinate spaces are rulers that stretch.
-            // `nil` = 本手势所在窗口的坐标系（也就是 band 那一层）。手势面
-            // 0.0.47 起和卡片不在同一个窗口，跨窗口换算没有必要：两层都是全屏、
-            // 原点重合，而 band 窗口在整个拖动过程中不动，是唯一稳定的尺子。
-            let total = gesture.translation(in: nil)
-            let dx = total.x - panStep.x
-            let dy = total.y - panStep.y
-            panStep = total
-            if zone == .bottomCorner, let start = resizeStart {
-                // 边角拖动 = 缩放（0.0.43）。The finger's vertical travel is the
-                // height; the width follows the picture's own aspect. Down
-                // grows, up shrinks, and the opposite corner stays put.
-                let ratio = natural.width / Swift.max(natural.height, 1)
-                var h = start.height + total.y
-                var w = h * ratio
-                let widest = window.bounds.width - margin * 2
-                if w > widest {
-                    w = widest
-                    h = w / ratio
-                }
-                // The docked mini is the smallest shape the card ever takes;
-                // a resize cannot go under it.
-                let shortest = miniHeight(in: window.bounds)
-                if h < shortest {
-                    h = shortest
-                    w = h * ratio
-                }
-                let tallest = window.bounds.height - margin * 2
-                if h > tallest {
-                    h = tallest
-                    w = h * ratio
-                }
-                var frame: CGRect
-                if resizeFromLeft {
-                    frame = CGRect(x: start.maxX - w, y: start.minY,
-                                   width: w, height: h)
-                } else {
-                    frame = CGRect(x: start.minX, y: start.minY,
-                                   width: w, height: h)
-                }
-                card.frame = clamped(frame, in: window.bounds)
-                followContent()
-                syncGrip()
-            } else {
-                // All four cells move. 0.0.40 removed the two that resized, so a
-                // drag on the band is a drag on the band, wherever it started;
-                // 0.0.43 gave the corners their own meaning back, so a drag on
-                // a corner is a resize and this branch is the other three.
-                var frame = card.frame
-                frame.origin.x += dx
-                frame.origin.y += dy
-                card.frame = clamped(frame, in: window.bounds)
-                syncGrip()
-            }
-        case .ended, .cancelled:
-            if zone == .bottomCorner, resizeStart != nil {
-                resizeStart = nil
-                Log.write("win: card resized to " + point(card.frame.origin)
-                          + " size=" + size(card.bounds.size))
-                remember(in: window.bounds)
-            } else {
-                finishPan(gesture, card: card, window: window)
-            }
-        default:
-            break
+    /// 0.0.48 — 手势逻辑从识别器里拆了出来：同一段代码现在有两个入口。
+    ///
+    ///   1. `GripView` 上的 UIPanGestureRecognizer（原来的路，留着当兜底）
+    ///   2. `-[UIApplication sendEvent:]` 送来的原始触摸（见 `rawTouch`）
+    ///
+    /// 两条路互斥：原始触摸在应用层被吞掉时，UIKit 根本不会把它分发给任何视图，
+    /// 识别器也就不会响。所以两个入口共用 `zone` / `resizeStart` 这一份状态没有
+    /// 二义 —— 同一次触摸只可能由其中一条跑完。
+    private func dragBegin(at start: CGPoint) {
+        guard let card = card else { return }
+        zone = zoneFor(start)
+        panStep = .zero
+        // Which band the finger found. If the operator reports "it does not
+        // work" again, this line says whether the touch arrived and which
+        // zone it was counted as — two very different defects.
+        Log.write("win: gesture grab zone=" + name(zone)
+                  + " at " + point(start))
+        // 0.0.43 — a corner drag resizes; every other band moves. The anchor is
+        // the opposite corner, read once here: a zone is which cell the finger
+        // landed in, not a thing that changes mid-drag.
+        if zone == .bottomCorner {
+            resizeStart = card.frame
+            resizeFromLeft = start.x < card.bounds.width / 2
+        } else {
+            resizeStart = nil
         }
     }
 
-    private func finishPan(_ gesture: UIPanGestureRecognizer, card: UIView, window: UIWindow) {
+    /// `total` is the finger's travel since it landed, in the window's space —
+    /// never in the card's or the ring's, because both are being moved and
+    /// resized by this very gesture and their rulers stretch.
+    private func dragMove(total: CGPoint, velocity: CGPoint) {
+        guard let card = card, let window = window else { return }
+        let dx = total.x - panStep.x
+        let dy = total.y - panStep.y
+        panStep = total
+        if zone == .bottomCorner, let start = resizeStart {
+            // 边角拖动 = 缩放（0.0.43）。The finger's vertical travel is the
+            // height; the width follows the picture's own aspect. Down grows,
+            // up shrinks, and the opposite corner stays put.
+            let ratio = natural.width / Swift.max(natural.height, 1)
+            var h = start.height + total.y
+            var w = h * ratio
+            let widest = window.bounds.width - margin * 2
+            if w > widest {
+                w = widest
+                h = w / ratio
+            }
+            // The docked mini is the smallest shape the card ever takes;
+            // a resize cannot go under it.
+            let shortest = miniHeight(in: window.bounds)
+            if h < shortest {
+                h = shortest
+                w = h * ratio
+            }
+            let tallest = window.bounds.height - margin * 2
+            if h > tallest {
+                h = tallest
+                w = h * ratio
+            }
+            var frame: CGRect
+            if resizeFromLeft {
+                frame = CGRect(x: start.maxX - w, y: start.minY,
+                               width: w, height: h)
+            } else {
+                frame = CGRect(x: start.minX, y: start.minY,
+                               width: w, height: h)
+            }
+            card.frame = clamped(frame, in: window.bounds)
+            followContent()
+            syncGrip()
+        } else {
+            // All four cells move. 0.0.40 removed the two that resized, so a
+            // drag on the band is a drag on the band, wherever it started;
+            // 0.0.43 gave the corners their own meaning back, so a drag on
+            // a corner is a resize and this branch is the other three.
+            var frame = card.frame
+            frame.origin.x += dx
+            frame.origin.y += dy
+            card.frame = clamped(frame, in: window.bounds)
+            syncGrip()
+        }
+    }
+
+    private func dragEnd(total: CGPoint, velocity: CGPoint) {
+        guard let card = card, let window = window else { return }
+        if zone == .bottomCorner, resizeStart != nil {
+            resizeStart = nil
+            Log.write("win: card resized to " + point(card.frame.origin)
+                      + " size=" + size(card.bounds.size))
+            remember(in: window.bounds)
+            return
+        }
         if zone == .bottomMiddle {
             // 边中区域快速上滑关闭. Two readings, either one closes.
             //
@@ -734,12 +759,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // Travel is the whole path and cannot flip. Speed stays as the second
             // reading, because a short hard flick barely travels and is still a
             // flick.
-            let total = gesture.translation(in: nil)
-            let speed = gesture.velocity(in: nil)
             let lift = -total.y
-            let up = -speed.y
+            let up = -velocity.y
             let byTravel = lift > 50 && abs(total.y) > abs(total.x)
-            let bySpeed = up > flick && up > abs(speed.x)
+            let bySpeed = up > flick && up > abs(velocity.x)
             if byTravel || bySpeed {
                 Log.write("win: gesture edge-middle flick up=" + String(Int(up))
                           + " dy=" + String(Int(total.y)) + " -> close")
@@ -747,13 +770,30 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 return
             }
             Log.write("win: gesture edge-middle not a flick up=" + String(Int(up))
-                      + " vx=" + String(Int(speed.x))
+                      + " vx=" + String(Int(velocity.x))
                       + " dy=" + String(Int(total.y)))
         }
         Log.write("win: card moved to " + point(card.frame.origin)
                   + " size=" + size(card.bounds.size))
         remember(in: window.bounds)
     }
+
+    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        guard let grip = grip else { return }
+        switch gesture.state {
+        case .began:
+            dragBegin(at: cardPoint(gesture.location(in: grip)))
+        case .changed:
+            // `nil` = 本手势所在窗口的坐标系。两层都是全屏、原点重合，而 band
+            // 那一层在整个拖动过程中不动，是唯一稳定的尺子。
+            dragMove(total: gesture.translation(in: nil), velocity: gesture.velocity(in: nil))
+        case .ended, .cancelled:
+            dragEnd(total: gesture.translation(in: nil), velocity: gesture.velocity(in: nil))
+        default:
+            break
+        }
+    }
+
 
     /// 边角长按 = 重启 (母本文案「边角区域滑动缩放, 长按重启」). Since 0.0.39 the
     /// plan reads the remembered placement, so resetting the frame alone would
@@ -777,9 +817,15 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 吸附 — one tap on a side band. Docked is `miniFrame != nil`, and that is
     /// the only thing that says so: a second flag would be a second answer.
     @objc private func handleDockTap(_ gesture: UITapGestureRecognizer) {
-        guard let grip = grip, let card = card, let window = window else { return }
-        let zone = zoneFor(cardPoint(gesture.location(in: grip)))
-        guard zone == .left || zone == .right else { return }
+        guard let grip = grip else { return }
+        dock(zone: zoneFor(cardPoint(gesture.location(in: grip))))
+    }
+
+    /// 0.0.48 — the body of the tap, callable without a recognizer: the raw
+    /// touch path lands here too, because a tap is a touch that never moved.
+    private func dock(zone landed: Zone) {
+        guard landed == .left || landed == .right else { return }
+        guard let card = card, let window = window else { return }
         if miniFrame != nil {
             undock()
             return
@@ -793,16 +839,130 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let ratio = natural.width / Swift.max(natural.height, 1)
         let height = miniHeight(in: window.bounds)
         let width = height * ratio
-        let edge: CardLayout.Edge = zone == .left ? .left : .right
-        let x = edge == .left ? 0 : window.bounds.width - width
+        let side: CardLayout.Edge = landed == .left ? .left : .right
+        let x = side == .left ? 0 : window.bounds.width - width
         let y = Swift.min(Swift.max(card.frame.minY, margin),
                           Swift.max(margin, window.bounds.height - height - margin))
         card.frame = CGRect(x: x, y: y, width: width, height: height)
         followContent()
         installShield()
         syncGrip()
-        Log.write("win: card docked " + (edge == .left ? "left " : "right ")
+        Log.write("win: card docked " + (side == .left ? "left " : "right ")
                   + size(card.bounds.size) + " at " + point(card.frame.origin))
+    }
+
+    // MARK: - 应用层触摸（0.0.48）
+
+    /// 环上的原始触摸。`phase` 用 UITouchPhase 的数值：0 began / 1 moved /
+    /// 3 ended / 4 cancelled。返回 true 表示这条事件被浮窗吃掉。
+    ///
+    /// 为什么要绕到这一层：Aevon(44)/(45)/(46) 三份日志里，卡片外面**一个触摸
+    /// 都没有进过我们的任何窗口** —— `win: event hit` 整场只有 ✕ 那一条，
+    /// 0.0.47 独立窗口那版的 `win: band probe` 也只有 ✕ 那一条；而卡片里的 ✕
+    /// 一直好用。也就是说「窗口收不收得到触摸」这件事本身不可靠，环的几何从来
+    /// 不是瓶颈（0.0.44-0.0.47 都在改几何）。
+    ///
+    /// `-[UIApplication sendEvent:]` 是唯一一个「不管命中哪个窗口都会经过」的
+    /// 入口，所以浮窗的四个边从这里拿手指，不再指望某个窗口被问到。
+    func rawTouch(phase: Int, at screen: CGPoint, stamp: TimeInterval) -> Bool {
+        guard let card = card, let window = window else {
+            // 卡片在手势中途被关掉：这一路已经把 began 吞了，收尾也必须吞，否则
+            // UIKit 会收到一根它从没见过的手指的结束事件。
+            let was = rawActive
+            rawActive = false
+            rawPress?.cancel()
+            rawPress = nil
+            return was
+        }
+        let frame = card.frame
+        let local = CGPoint(x: screen.x - frame.minX, y: screen.y - frame.minY)
+        switch phase {
+        case 0:
+            if rawSeen < 12 {
+                rawSeen += 1
+                Log.write("win: touch seen at " + point(screen)
+                          + " card=" + point(frame.origin))
+            }
+            // 系统手势的地盘不抢：屏幕最下面 12 pt 是 home 条，最上面 10 pt 是
+            // 状态栏下拉。环是圆的，少这一条边不影响任何人伸手。
+            guard screen.y < window.bounds.maxY - 12,
+                  screen.y > 10 else { return false }
+            // 竖条的地盘也不抢：卡片开着的时候换 App 的路不能被我自己的环堵死。
+            guard !AevonRingGrip.summonRect.contains(screen) else { return false }
+            guard ringHolds(local, size: card.bounds.size) else { return false }
+            rawActive = true
+            rawStart = screen
+            rawLast = screen
+            rawMoved = false
+            rawStamp = stamp
+            rawVelocity = .zero
+            dragBegin(at: local)
+            if rawProbe < 20 {
+                rawProbe += 1
+                Log.write("win: raw touch grab zone=" + name(zone)
+                          + " at " + point(local))
+            }
+            // 边角长按 = 复位。这条路没有 UILongPressGestureRecognizer 可用
+            // （事件根本没进 UIKit），所以按住不动这件事自己计时。
+            if zone == .bottomCorner {
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    self.rawPressFired()
+                }
+                rawPress = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + pressDelay, execute: work)
+            }
+            return true
+        case 1:
+            guard rawActive else { return false }
+            let total = CGPoint(x: screen.x - rawStart.x, y: screen.y - rawStart.y)
+            if !rawMoved, abs(total.x) + abs(total.y) > 6 {
+                rawMoved = true
+                rawPress?.cancel()
+                rawPress = nil
+            }
+            let dt = Swift.max(stamp - rawStamp, 0.008)
+            rawVelocity = CGPoint(x: (screen.x - rawLast.x) / CGFloat(dt),
+                                  y: (screen.y - rawLast.y) / CGFloat(dt))
+            rawLast = screen
+            rawStamp = stamp
+            if rawMoved { dragMove(total: total, velocity: rawVelocity) }
+            return true
+        case 3, 4:
+            guard rawActive else { return false }
+            rawActive = false
+            rawPress?.cancel()
+            rawPress = nil
+            if phase == 4 {
+                Log.write("win: raw touch cancelled by the system")
+                return true
+            }
+            let total = CGPoint(x: screen.x - rawStart.x, y: screen.y - rawStart.y)
+            if rawMoved {
+                dragEnd(total: total, velocity: rawVelocity)
+            } else if zone == .left || zone == .right {
+                dock(zone: zone)
+            }
+            return true
+        default:
+            return rawActive
+        }
+    }
+
+    private func rawPressFired() {
+        guard rawActive, !rawMoved, zone == .bottomCorner, let window = window else { return }
+        Log.write("win: raw long press corner, 重启 as geometry reset")
+        resetToPlan(in: window.bounds)
+    }
+
+    /// 手指是否落在环上：卡片之外，且离卡片边缘不超过 `reach`。卡片坐标系，
+    /// 和 `zoneFor` / `cardPoint` 用的是同一个。
+    private func ringHolds(_ local: CGPoint, size: CGSize) -> Bool {
+        let outside = local.x < 0 || local.y < 0
+            || local.x > size.width || local.y > size.height
+        guard outside else { return false }
+        return local.x >= -reach && local.x <= size.width + reach
+            && local.y >= -reach && local.y <= size.height + reach
     }
 
     /// The way out of 停靠小窗: a tap anywhere on its picture. The scene view
@@ -1026,4 +1186,18 @@ final class BandRoot: UIView {
         let hit = super.hitTest(point, with: event)
         return hit === self ? nil : hit
     }
+}
+
+/// 0.0.48 — `-[UIApplication sendEvent:]` 的落点（钩子在 Sources/AevonScene.m）。
+///
+/// `@_cdecl` 只有一个理由：这个函数必须能被 C 直接调用。钩子跑在每一个事件上，
+/// 它不该为了调一行 Swift 去建桥、查类、拼 block —— 三个 double 和一个小整数就
+/// 是全部。
+///
+/// 返回 1 = 这条事件已被浮窗吃掉，不要把原事件再交下去。
+@_cdecl("AevonFloatTouch")
+public func AevonFloatTouch(_ phase: Int32, _ x: Double, _ y: Double, _ stamp: Double) -> Int32 {
+    return FloatHost.shared.rawTouch(phase: Int(phase),
+                                     at: CGPoint(x: CGFloat(x), y: CGFloat(y)),
+                                     stamp: TimeInterval(stamp)) ? 1 : 0
 }

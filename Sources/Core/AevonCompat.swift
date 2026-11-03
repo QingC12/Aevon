@@ -261,6 +261,13 @@ enum AevonRingGrip {
     /// bug Aevon(41) #2 reported.
     static var activeTouchHandler: (() -> Bool)?
     static var hasActiveGripTouch: Bool { return activeTouchHandler?() ?? false }
+
+    /// 0.0.48 — 竖条触摸垫在屏幕上的位置，由 RingHost 在每次布局后写进来。
+    ///
+    /// 浮窗的手指入口（`-[UIApplication sendEvent:]`）会把落在浮窗环上的触摸
+    /// 全部吃掉，而环的右半边正好压在竖条原来的位置上。没有这个矩形，卡片开着
+    /// 的时候点竖条会被当成「拖浮窗」—— 换 App 的路就被自己的浮窗堵死了。
+    static var summonRect: CGRect = .zero
 }
 
 /// The old window manager, reduced to the two things the menu calls:

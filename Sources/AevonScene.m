@@ -11,6 +11,7 @@
 //
 
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <stdio.h>
@@ -865,3 +866,53 @@ unsigned long long AevonReasonsOf(id scene) {
     return call(manager, getter, scene, settings);
 }
 
+
+// MARK: - 浮窗的手指入口（0.0.48）
+
+//
+//  四份日志（Aevon(43)-(46)）说的是同一件事：卡片外面没有一个触摸进过我们的
+//  任何窗口。`win: event hit` 整场只有 ✕ 那一条（0.0.44-0.0.46），独立的 band
+//  窗口那版 `win: band probe` 也只有 ✕ 那一条（0.0.47）—— 而卡片里的 ✕ 一直
+//  好用。所以「窗口会不会被问到」这件事本身不可靠，环的宽度、位置、层级都不是
+//  瓶颈；0.0.44 到 0.0.47 四轮改的都是那一层。
+//
+//  `-[UIApplication sendEvent:]` 是唯一一个不管命中哪个窗口都会经过的地方。浮窗
+//  的四个边（移动 / 缩放 / 上滑关闭 / 点吸附）从这里拿手指，判断和动作全在 Swift
+//  （FloatHost.rawTouch），这里只做三件事：取唯一那根手指、报位置和相位、被吃掉
+//  就不往下传。
+//
+extern int AevonFloatTouch(int phase, double x, double y, double stamp);
+
+static IMP AevonSendEventOriginal = NULL;
+
+static void AevonSendEventReplacement(id self, SEL _cmd, UIEvent *event) {
+    if (AevonSendEventOriginal == NULL) return;
+
+    BOOL eaten = NO;
+    NSSet *touches = [event allTouches];
+    // 多指一律不接：浮窗的五个手势都是单指，而两根手指同时按下的那一瞬吞掉
+    // 事件表，就是在替系统决定缩放手势的生死。
+    if ([touches count] == 1) {
+        UITouch *touch = [touches anyObject];
+        // 相位原样交过去，包括 Stationary：那一条也得跟着吞，否则 UIKit 会收到
+        // 一根它从没见过的「静止的」手指。
+        CGPoint point = [touch locationInView:nil];
+        eaten = AevonFloatTouch((int)[touch phase], point.x, point.y,
+                                [touch timestamp]) != 0;
+    }
+    if (!eaten) {
+        ((void (*)(id, SEL, UIEvent *))AevonSendEventOriginal)(self, _cmd, event);
+    }
+}
+
+/// 由 Swift 的 AevonStart 调一次。装不上就什么都不做：没有这个入口，浮窗只是
+/// 退回「四周手势不灵」，而不是把 SpringBoard 的触摸弄坏。
+void AevonInstallTouchTap(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Method method = class_getInstanceMethod([UIApplication class], @selector(sendEvent:));
+        if (method == NULL) return;
+        AevonSendEventOriginal = method_getImplementation(method);
+        method_setImplementation(method, (IMP)AevonSendEventReplacement);
+    });
+}
