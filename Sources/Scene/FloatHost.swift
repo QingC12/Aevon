@@ -385,7 +385,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return point.x < 0 ? .left : .right
     }
 
-    private static func cell(in size: CGSize) -> CGRect {
+    // Not private: GripView (same file, different type) paints the heat map
+    // with the very same cell arithmetic, and one number must not fork in two.
+    static func cell(in size: CGSize) -> CGRect {
         let third = size.width / 3
         return CGRect(x: third, y: 0, width: third, height: size.height)
     }

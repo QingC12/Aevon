@@ -201,19 +201,19 @@ enum AevonHostWindow {
 /// old call sites cannot come across (Swift does not catch ObjC exceptions);
 /// the respondsToSelector gate stays, which is the check that decides the
 /// branch on every iOS this targets.
-func AevonTrySystemRecordingStart(_ recorder: AnyObject?, handler: (@convention(block) (NSError?) -> Void)?) -> Bool {
+func AevonTrySystemRecordingStart(_ recorder: NSObject?, handler: (@convention(block) (NSError?) -> Void)?) -> Bool {
     guard let recorder = recorder else { return false }
     let sel = NSSelectorFromString("startSystemRecordingWithMicrophoneEnabled:handler:")
-    guard (recorder as NSObject).responds(to: sel) else { return false }
-    (recorder as NSObject).perform(sel, with: true, with: handler as AnyObject?)
+    guard recorder.responds(to: sel) else { return false }
+    recorder.perform(sel, with: true, with: handler as AnyObject?)
     return true
 }
 
-func AevonTrySystemRecordingStop(_ recorder: AnyObject?) -> Bool {
+func AevonTrySystemRecordingStop(_ recorder: NSObject?) -> Bool {
     guard let recorder = recorder else { return false }
     let sel = NSSelectorFromString("stopSystemRecording:")
-    guard (recorder as NSObject).responds(to: sel) else { return false }
-    (recorder as NSObject).perform(sel, with: nil)
+    guard recorder.responds(to: sel) else { return false }
+    recorder.perform(sel, with: nil)
     return true
 }
 
