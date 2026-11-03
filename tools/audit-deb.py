@@ -29,8 +29,19 @@ MH_MAGIC_64 = 0xFEEDFACF
 FAT_MAGIC = 0xCAFEBABE
 
 # 体积预算（字节）。不是目标值，是闸门：超过就说明有东西偷偷长大了。
+#
+# 2026-11-03 重划 BUDGET_TWEAK 320 KB → 344 KB：
+#   0.0.14 起 dylib 里多了一整块场景取证（AevonScene.m 的 C 垫片 + SceneProbe 的
+#   census / attempt 两条路），实测 312,496 → 330,064 B，真实代码增长 17.5 KB。
+#   期间试过三次压体积，都只省下百字节量级，已证明无杠杆：
+#     1. 删两个已无人调用的 C 函数（AevonAnswers / AevonCreatePresenter）—— 减 112 B，
+#        因为 dead_strip 早就把它们摘掉了，占体积的是符号表不是代码；
+#     2. Makefile 加 -Wl,-x 剥离局部符号 —— 零收益，打包时本来就 strip；
+#     3. -Osize 是唯一有效的杠杆（0.0.14 已用，省 16 KB），但不能再收。
+#   所以这里放宽到 344 KB（352,256 B），给后续取证留 ~22 KB 余量；
+#   一旦再超，说明是新增长而不是历史欠账，仍然要查。
 BUDGET_DEB = 520 * 1024
-BUDGET_TWEAK = 320 * 1024
+BUDGET_TWEAK = 344 * 1024
 BUDGET_PREFS = 400 * 1024
 
 PREFIXES = (
