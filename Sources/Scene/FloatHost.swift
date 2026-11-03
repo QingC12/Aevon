@@ -771,6 +771,15 @@ final class GripMap: UIView {
 /// through to the app underneath, which is what makes a floating card usable
 /// while a full-screen app is running.
 final class FloatWindow: UIWindow {
+    /// 0.0.36 — the first few touches, printed where they enter the window and
+    /// before any hit testing of our own. Two reports in a row have ended with
+    /// "the gesture does not fire" and an empty `grip touch` probe, and an empty
+    /// probe means either the touch never reached this window or it reached it
+    /// and missed the ring. `sendEvent` is the one place that can tell those
+    /// apart: it runs for every touch that arrives, whatever the answer to
+    /// hitTest turns out to be, and it can print that answer next to it.
+    private var seen = 0
+
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let hit = super.hitTest(point, with: event)
         // The card is answerable only where something is drawn in it. The bare
@@ -779,5 +788,18 @@ final class FloatWindow: UIWindow {
         // recognizers and no controls on it.
         if hit === self || hit === rootViewController?.view { return nil }
         return hit
+    }
+
+    override func sendEvent(_ event: UIEvent) {
+        if seen < 6, let touch = event.allTouches?.first, touch.phase == .began {
+            seen += 1
+            let point = touch.location(in: self)
+            let who = hitTest(point, with: event)
+                .map { String(cString: object_getClassName($0)) } ?? "nil"
+            Log.write("win: event hit #" + String(seen)
+                      + " at " + String(format: "%.0f,%.0f", point.x, point.y)
+                      + " -> " + who)
+        }
+        super.sendEvent(event)
     }
 }
