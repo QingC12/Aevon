@@ -69,6 +69,16 @@ NSString *_Nullable AevonSelectorHome(NSString *_Nullable selectors, NSInteger l
 NSString *_Nullable AevonFullCensus(NSString *_Nullable name, NSInteger limit);
 NSInteger AevonBoolOf(id _Nullable object, NSString *_Nullable name);
 
+/// 0.0.19 — the mother ship was written for iOS 16 and this phone runs 17, so
+/// every name she uses is a question rather than an assumption.
+/// `AevonLayerNameScan` lists every method in the process whose selector
+/// mentions a scene layer, a layer host or a context layer, with its real type
+/// encoding; `AevonSelectorInfo` reports one selector on one class, the
+/// encoding, and the class in the chain that actually defines it.
+NSString *_Nullable AevonLayerNameScan(NSInteger limit);
+NSString *_Nullable AevonSelectorInfo(NSString *_Nullable className,
+                                      NSString *_Nullable selectors);
+
 @interface UIImage (AevonPrivateIcons)
 + (nullable UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID
                                                        format:(NSInteger)format

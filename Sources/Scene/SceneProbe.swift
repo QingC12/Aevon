@@ -778,38 +778,67 @@ zStackParticipantDidChange:
         }
         Log.write("win: begin manager cls=" + NSStringFromClass(type(of: manager)))
 
-        census()
+        // The mother ship was written for iOS 16 and this phone runs 17. Every
+        // name below is therefore a question, not an assumption: iOS 17 is
+        // asked what it calls these things now, and the type encodings say what
+        // the arguments really are. 0.0.16 died on a name taken from her
+        // `__cstring` table with no encoding ever checked.
+        Log.write("win: scanning selectors on this system")
 
-        // Device truth about the names we were about to invent. Nothing is
-        // messaged here: this is a class-list walk, and every class that shows
-        // up can be asked about itself in a later run.
-        // The mother ship's own three selectors, located by class instead of
-        // remembered from a `__cstring` table. `class_getInstanceMethod` answers
-        // "who implements this" without sending a message, so this costs one
-        // class-list walk and cannot upset anything.
-        emitNotes(AevonSelectorHome("initWithSceneLayer:,setResizesHostedContext:,setWindowLevel:", 8))
-        // And the class 0.0.16 died on: listed in full, called not at all.
-        emitNotes(AevonFullCensus("_UIContextLayerHostView", 40))
+        // Who in this process implements her three selectors — names now, not a
+        // count. 0.0.18 printed only "=11" and the intersection was noise.
+        emitNotes(AevonSelectorHome("initWithSceneLayer:,setResizesHostedContext:", 14), cap: 34)
 
-        // One budget per keyword now; 0.0.17 shared one budget and `present`
-        // ate all twenty slots before `LayerHost` was reached.
-        for line in lines(AevonFindClasses("LayerHost,SceneLayer,HostContainer", 12)) {
-            Log.write("win: runtime class " + line)
+        // Her layer-host initialiser, on her class, with the real encoding.
+        emitNotes(AevonSelectorInfo("_UIContextLayerHostView",
+                                    "initWithSceneLayer:,setResizesHostedContext:,layer"))
+        emitNotes(AevonSelectorInfo("_UISceneLayerHostView", "initWithSceneLayer:,layer"))
+        emitNotes(AevonSelectorInfo("_UIExternalSceneLayerHostView", "initWithSceneLayer:,layer"))
+        emitNotes(AevonSelectorInfo("_UISceneLayerHostContainerView", "initWithSceneLayer:,hostContainerView"))
+
+        // Everything the whole process calls a scene layer or a layer host,
+        // with encodings. This is the iOS 17 answer to "what do they call it
+        // now", and it is the list the next version may choose from.
+        emitNotes(AevonLayerNameScan(60), cap: 66)
+
+        // The classes around the layer model, unfiltered: what makes a layer,
+        // who owns them, and what a target looks like.
+        for name in ["_UISceneLayerHostView", "_UISceneLayerHostContainerView",
+                     "FBSceneLayerManager", "FBSSceneLayer", "FBSceneLayer",
+                     "_UISceneLayerTargetWithContext", "UISceneLayerTargetFactory"] {
+            emitNotes(AevonFullCensus(name, 26), cap: 30)
         }
 
         var springboard: NSObject?
         var keyboard: NSObject?
+        var foregroundApp: NSObject?
         var seen = 0
         let visit: (Any?) -> Void = { scene in
             guard let scene = scene as? NSObject else { return }
             seen += 1
             let ident = value(of: scene, "identifier").map { String(describing: $0) } ?? "?"
-            if seen <= 8 { Log.write("win: s" + String(seen) + " id=" + ident) }
+            if seen <= 10 { Log.write("win: s" + String(seen) + " id=" + ident) }
             if ident == "com.apple.springboard" { springboard = scene }
             if ident.contains("remote-keyboard") { keyboard = scene }
+            // App scenes arrive as `sceneID:<bundle id>-default`. The first one
+            // that is neither SpringBoard nor Settings is the app the operator
+            // opened, and it is the one a floating window would have to host.
+            if ident.hasPrefix("sceneID:") && !ident.contains("com.apple.springboard")
+                && !ident.contains("com.apple.Preferences") {
+                if foregroundApp == nil { foregroundApp = scene }
+            }
         }
         AevonEnumerateScenes(manager, visit)
         Log.write("win: scenes=" + String(seen))
+
+        // What an app scene is actually made of. This is the object a floating
+        // window would host, so its shape decides whether a layer can be taken
+        // from it at all.
+        if let app = foregroundApp {
+            dumpScene(app, tag: "APP")
+        } else {
+            Log.write("win: no app scene in the list this run")
+        }
 
         // 0.0.16 got exactly this far on both templates: the manager, the
         // presenter and the presentation view all came back, and the process
@@ -842,28 +871,13 @@ zStackParticipantDidChange:
         try? FileManager.default.removeItem(atPath: Aevon.winStepPath)
     }
 
-    private static func lines(_ text: String?) -> [String] {
-        guard let text = text else { return [] }
-        return text.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
-    }
-
-    /// Asks the classes that have to be built how they are built. Filtered to
-    /// the fields that matter: identity, specification, copying, init.
-    private static func census() {
-        for name in ["FBSSceneIdentity", "FBSSceneClientIdentity",
-                     "FBSSceneDefinition", "FBSMutableSceneDefinition"] {
-            let text = AevonClassCensus(name, "identity,identifier,workspace,spec,definition,init")
-            emitNotes(text)
-        }
-    }
-
     /// Drains the C-side note buffer into the log, one line each. Called before
     /// every call that could end the process: an undrained note is lost work.
-    private static func emitNotes(_ text: String?) {
+    private static func emitNotes(_ text: String?, cap: Int = 40) {
         guard let text = text, !text.isEmpty else { return }
         var printed = 0
         for raw in text.split(separator: "\n") {
-            if printed >= 40 { Log.write("win: …notes truncated"); return }
+            if printed >= cap { Log.write("win: …notes truncated at " + String(cap)); return }
             Log.write("win: " + raw.trimmingCharacters(in: .whitespaces))
             printed += 1
         }

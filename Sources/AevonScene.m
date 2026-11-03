@@ -365,16 +365,35 @@ NSString *AevonFindClasses(NSString *keys, NSInteger limit) {
 // misbehave while it is asked. So this function answers "who implements this,
 // and does anything implement all of them" before a single call is made.
 
-/// One line of counts per selector, one line naming the classes that implement
-/// every one of them. `limit` caps how many such classes are named.
-NSString *AevonSelectorHome(NSString *selectors, NSInteger limit) {
-    if (selectors == nil || limit <= 0) return nil;
-    NSArray<NSString *> *names = [selectors componentsSeparatedByString:@","];
-    NSUInteger want = names.count;
-    if (want == 0 || want > 8) return nil;
+/// Is this class a UIView, or a subclass of one? Walks the superclass chain by
+/// pointer comparison, which needs no message and no name lookup, so it costs
+/// nothing per class during a full class-list sweep.
+static BOOL AevonIsView(Class cls) {
+    if (cls == Nil) return NO;
+    Class view = NSClassFromString(@"UIView");
+    if (view == Nil) return NO;
+    for (Class walk = cls; walk != Nil; walk = class_getSuperclass(walk)) {
+        if (walk == view) return YES;
+    }
+    return NO;
+}
 
-    SEL wanted[8];
-    for (NSUInteger i = 0; i < want; i++) wanted[i] = NSSelectorFromString(names[i]);
+/// For each selector: how many classes in this process implement it, and the
+/// names of the first `limit` of them, tagged `[view]` when the class is a
+/// UIView subclass.
+///
+/// 0.0.18 printed only the classes implementing *all* the selectors, and the
+/// answer was seven Swift value types — `UIKeyboardCandidateViewStyle`,
+/// `NTKInterpolatedColorPalette`, `REMAuxiliaryChangeInfoType` — which cannot
+/// possibly implement `initWithSceneLayer:`. `class_getInstanceMethod` reports
+/// a method for those class objects anyway. The intersection was noise and the
+/// useful half — the eleven classes that really do implement it — was reduced
+/// to a number. Names now, not a count.
+NSString *AevonSelectorHome(NSString *selectors, NSInteger limit) {
+    if (selectors == nil) return nil;
+    NSArray<NSString *> *names = [selectors componentsSeparatedByString:@","];
+    if (names.count == 0 || names.count > 8) return nil;
+    if (limit <= 0) limit = 12;
 
     int total = objc_getClassList(NULL, 0);
     if (total <= 0) return nil;
@@ -382,47 +401,119 @@ NSString *AevonSelectorHome(NSString *selectors, NSInteger limit) {
     if (classes == NULL) return nil;
     total = objc_getClassList(classes, total);
 
-    NSInteger counted[8] = {0};
-    NSMutableArray<NSString *> *both = [NSMutableArray array];
-
-    for (int i = 0; i < total; i++) {
-        Class cls = classes[i];
-        NSUInteger matched = 0;
-        for (NSUInteger k = 0; k < want; k++) {
-            if (class_getInstanceMethod(cls, wanted[k]) != NULL) {
-                counted[k] += 1;
-                matched += 1;
-            }
+    NSMutableString *out = [NSMutableString string];
+    for (NSString *name in names) {
+        if (name.length == 0) continue;
+        SEL sel = NSSelectorFromString(name);
+        NSMutableArray<NSString *> *hits = [NSMutableArray array];
+        NSInteger count = 0;
+        for (int i = 0; i < total; i++) {
+            if (class_getInstanceMethod(classes[i], sel) == NULL) continue;
+            count += 1;
+            if ((NSInteger)hits.count >= limit) continue;
+            [hits addObject:[NSString stringWithFormat:@"%@%@",
+                             AevonIsView(classes[i]) ? @"[view] " : @"",
+                             NSStringFromClass(classes[i])]];
         }
-        // A metaclass listing is what makes `+` methods show up as classes in
-        // objc_getClassList; asking for an *instance* method on one is harmless
-        // and simply never matches.
-        if (matched == want && (NSInteger)both.count < limit) {
-            [both addObject:NSStringFromClass(cls)];
+        [out appendFormat:@"home %@ %ld", name, (long)count];
+        if (count == 0) {
+            [out appendString:@"\n  (none on this system)"];
+            continue;
+        }
+        if (count > (NSInteger)hits.count) {
+            [out appendFormat:@" (+%ld not shown)", (long)(count - (NSInteger)hits.count)];
+        }
+        for (NSString *hit in hits) {
+            [out appendFormat:@"\n  %@", hit];
         }
     }
     free(classes);
+    return out;
+}
 
-    NSMutableArray<NSString *> *parts = [NSMutableArray array];
-    for (NSUInteger k = 0; k < want; k++) {
-        [parts addObject:[NSString stringWithFormat:@"%@=%ld", names[k], (long)counted[k]]];
+/// Every method anywhere in the process whose selector mentions a scene layer,
+/// a layer host or a context layer, with its real type encoding.
+///
+/// This is the answer to "Stheno was written for iOS 16 and we are on 17".
+/// Copying her `__cstring` table assumes the names survived; this asks iOS 17
+/// what it calls things now, and the encodings say what the arguments are
+/// (`@"CALayer"` vs a raw struct pointer is the difference between 0.0.16
+/// crashing and working).
+NSString *AevonLayerNameScan(NSInteger limit) {
+    if (limit <= 0) limit = 60;
+    int total = objc_getClassList(NULL, 0);
+    if (total <= 0) return nil;
+    Class *classes = (Class *)malloc(sizeof(Class) * (size_t)total);
+    if (classes == NULL) return nil;
+    total = objc_getClassList(classes, total);
+
+    NSMutableString *out = [NSMutableString string];
+    NSInteger printed = 0;
+    for (int i = 0; i < total; i++) {
+        Class cls = classes[i];
+        unsigned int count = 0;
+        Method *methods = class_copyMethodList(cls, &count);
+        if (methods == NULL) continue;
+        for (unsigned int k = 0; k < count; k++) {
+            NSString *sel = NSStringFromSelector(method_getName(methods[k]));
+            if ([sel rangeOfString:@"SceneLayer"].location == NSNotFound &&
+                [sel rangeOfString:@"LayerHost"].location == NSNotFound &&
+                [sel rangeOfString:@"ContextLayer"].location == NSNotFound) {
+                continue;
+            }
+            if (printed >= limit) { free(methods); break; }
+            const char *enc = method_getTypeEncoding(methods[k]);
+            [out appendFormat:@"\n%@%@ -%@ :: %s",
+             AevonIsView(cls) ? @"[view] " : @"",
+             NSStringFromClass(cls), sel,
+             enc ? enc : "?"];
+            printed += 1;
+        }
+        free(methods);
+        if (printed >= limit) {
+            [out appendFormat:@"\n scan capped at %ld", (long)limit];
+            break;
+        }
     }
-    NSMutableString *out = [NSMutableString stringWithFormat:@"home %@",
-                            [parts componentsJoinedByString:@" "]];
-    [out appendString:@"\n"];
-    if (both.count == 0) {
-        [out appendString:@"home every -> none"];
-    } else {
-        [out appendString:@"home every -> "];
-        [out appendString:[both componentsJoinedByString:@" | "]];
+    free(classes);
+    return out;
+}
+
+/// One selector, one class: does it answer, with what encoding, and which class
+/// in the chain actually defines it. Used to settle `initWithSceneLayer:`'s
+/// argument type without calling it.
+NSString *AevonSelectorInfo(NSString *className, NSString *selectors) {
+    Class cls = NSClassFromString(className);
+    if (cls == Nil) return [NSString stringWithFormat:@"info %@ absent", className];
+    NSMutableString *out = [NSMutableString string];
+    for (NSString *name in [selectors componentsSeparatedByString:@","]) {
+        if (name.length == 0) continue;
+        SEL sel = NSSelectorFromString(name);
+        Method method = class_getInstanceMethod(cls, sel);
+        if (method == NULL) {
+            [out appendFormat:@"info %@ -%@ :: absent\n", className, name];
+            continue;
+        }
+        const char *enc = method_getTypeEncoding(method);
+        Class owner = Nil;
+        for (Class walk = cls; walk != Nil; walk = class_getSuperclass(walk)) {
+            unsigned int n = 0;
+            Method *ms = class_copyMethodList(walk, &n);
+            BOOL found = NO;
+            for (unsigned int i = 0; i < n; i++) {
+                if (method_getName(ms[i]) == sel) { found = YES; break; }
+            }
+            if (ms != NULL) free(ms);
+            if (found) { owner = walk; break; }
+        }
+        [out appendFormat:@"info %@ -%@ :: %s from %@\n", className, name,
+         enc ? enc : "?",
+         owner ? NSStringFromClass(owner) : @"?"];
     }
     return out;
 }
 
-/// Every instance method a class declares for itself — no keyword filter, no
-/// second guess. Used once on whichever class `AevonSelectorHome` named, to see
-/// the real initialiser beside the real setters. Inherited methods are not
-/// listed by `class_copyMethodList`, so the superclass name is printed first.
+
 NSString *AevonFullCensus(NSString *name, NSInteger limit) {
     Class cls = NSClassFromString(name);
     if (cls == Nil) return [NSString stringWithFormat:@"full %@ absent", name];
