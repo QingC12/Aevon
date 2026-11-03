@@ -549,6 +549,28 @@ final class AevonRingMenu: UIView {
         menu.startFrameWatch()
     }
 
+    /// 0.0.45 — **按住呼出**（召唤条那条路唯一的正确形态）。
+    ///
+    /// 操作者对旧版行为的原话：「滑动时出现圆盘，手指没有离开屏幕时圆盘不会
+    /// 自动收起关闭圆盘，手指离开屏幕时会自动关闭圆盘」。这正是
+    /// `beginRemoteTracking / remoteMoved / remoteLift` 这三条通道原本的语义
+    /// （V0.3.16 的权威抬手、V0.2.18 的「只有抬手才收」），本文件本来就写好
+    /// 了 —— 缺的只是一个「呼盘时就带上手指」的入口。
+    ///
+    /// 与 `present(in:)` 的差别只有一处：挂上之后立刻把这根手指登记成当前
+    /// 指针，并把它落下的位置记成展开原点（`unfoldOrigin`），于是圆盘从手指
+    /// 按下的那一点长出来，跟着手指走，抬手才结束。点一下（不带手指）的路径
+    /// 仍然走 `present(in:)`。
+    @discardableResult
+    static func presentTracking(in host: UIView, at point: CGPoint,
+                                source: String) -> AevonRingMenu? {
+        if current != nil { return nil }
+        present(in: host)
+        guard let menu = current else { return nil }
+        menu.beginRemoteTracking(at: point, source: source)
+        return menu
+    }
+
     // MARK: - V0.2.66（AevonRingIdleV266）：指针静默自动收起
     //
     // 用户 Aevon(39) #5：滑动呼出圆盘后手指离开屏幕，圆盘留在屏上必须再点一下。
@@ -618,6 +640,19 @@ final class AevonRingMenu: UIView {
             // 活跃触摸：圆盘视图与把手上都查不到活跃 touch，才算「ended 真漏发」。
             // 圆心按住与旋转模式照旧豁免（它们的 touch 一定在）。
             guard !self.rotating, self.centerHoldTimer == nil else { return }
+            /* 0.0.45：**没喂过任何指针，就不存在「ended 漏发」。**
+             *
+             * `pointerIdleSeconds` 在 `pointerLastEventAt == 0` 时返回极大值，本意是
+             * 「从没来过 = 静默无限久」。但这只对「曾有一根手指、ended 丢了」成立。
+             * 召唤条点一下就开的那条路上，手指是**按下之前就抬起了**，圆盘从来没有
+             * 指针 —— 于是它必然在 1 秒宽限后自己收起。Aevon(43) 的日志逐字印证：
+             *
+             *   19:10:36 [圆盘] 已展开（20 个 App …）
+             *   19:10:37 [圆盘] 指针已静默 1797...e308s → 自动收起（ended 漏发实锤）
+             *
+             * 一秒不是「漏发实锤」，是「根本没人来过」。这种局面的收尾由用户自己的
+             * 下一次触摸（touchesBegan 接管）或抬手判定负责，看门狗在这里没有职责。 */
+            guard self.pointerLastEventAt > 0 else { return }
             guard self.pointerIdleSeconds >= AevonRingMenu.pointerIdleDismissInterval else { return }
             guard !self.hasLiveTouch else { return }
             AevonLog.info("[圆盘] 指针已静默 \(String(format: "%.1f", self.pointerIdleSeconds))s"

@@ -250,10 +250,17 @@ enum AevonRingGrip {
     static func setVisible(_ visible: Bool) { setVisibleHandler?(visible) }
 
     /// The watchdog treats "grip touch alive" as a reason not to auto-dismiss.
-    /// The dot is a tap target — no gesture tracks a finger across it — so
-    /// there is never a live touch to report. UIKit's own touch count on the
-    /// menu view (checked first by the watchdog) covers the real cases.
-    static var hasActiveGripTouch: Bool { return false }
+    ///
+    /// 0.0.45 — this stops being a constant. The summon bar now *holds* the
+    /// disc: a finger pressed on the bar drags the ring open, moves it, and
+    /// only lifting ends the session (the operator's own words for the old
+    /// behaviour: 「手指在没有离开屏幕时圆盘不会自动收起」). While that pan is
+    /// live the finger is on the bar, not on the disc, so UIKit's touch count
+    /// on the menu view is zero — without this hook the 1.5 s watchdog would
+    /// dismiss a disc whose finger never left the screen, which is exactly the
+    /// bug Aevon(41) #2 reported.
+    static var activeTouchHandler: (() -> Bool)?
+    static var hasActiveGripTouch: Bool { return activeTouchHandler?() ?? false }
 }
 
 /// The old window manager, reduced to the two things the menu calls:

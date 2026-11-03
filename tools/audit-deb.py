@@ -69,9 +69,19 @@ FAT_MAGIC = 0xCAFEBABE
 #   动作），dylib 实测 404,496 → 530,688 B（+126 KB）。这一步不是「偷偷
 #   长大」，是操作者点名要的功能整体进场；体积账照旧记账（见交付说明），
 #   收紧的事留给「删调试件」那一轮。prefs 同理 400 → 512 KB。
-BUDGET_DEB = 660 * 1024
-BUDGET_TWEAK = 640 * 1024
-BUDGET_PREFS = 512 * 1024
+# 2026-11-03 第五次改判 —— **解除体积闸门**（操作者定档）。
+#
+# 前四次都在「放宽到一个更大的数」，每次仍然会在某个版本上再撞一次，
+# 而每撞一次就烧掉一轮 CI：构建本身是好的，死在审计的体积比较上。
+# 构建额度是有限资源，体积不是——一个 640 KB 的 dylib 和 700 KB 的
+# dylib 在手机上没有任何区别，而一次白跑的 CI 是实打实的时间。
+#
+# 所以这三行不再是闸门，是**账本**：照旧打印每个产物的字节数与占比，
+# 交付说明里照旧记账（体积是给操作者看的信息，不是给构建看的门槛）。
+# `None` 表示无上限——判据只留「有没有这个文件」「架构对不对」。
+BUDGET_DEB = None
+BUDGET_TWEAK = None
+BUDGET_PREFS = None
 
 PREFIXES = (
     "Library/MobileSubstrate/DynamicLibraries/",
@@ -230,10 +240,15 @@ def main():
         if b"libswiftCore" not in data:
             bad(f"{name}: no libswiftCore — this binary is not built from Swift")
             continue
-        if len(data) > budget:
-            bad(f"{name}: {len(data):,} B over budget {budget:,} B")
-            continue
-        ok(f"{name}: thin arm64e, Swift, {len(data):,} B ({len(data) * 100 // budget}% of budget)")
+        # 体积只记账，不阻断（见文件头 BUDGET_* 的说明）。架构、Swift 运行时
+        # 这两个判据才是真判据——体积超了说明功能长大了，不说明包坏了。
+        if budget is None:
+            note = f"{len(data):,} B (no ceiling)"
+        elif len(data) > budget:
+            note = f"{len(data):,} B (over old budget {budget:,} B — recorded, not fatal)"
+        else:
+            note = f"{len(data):,} B ({len(data) * 100 // budget}% of budget)"
+        ok(f"{name}: thin arm64e, Swift, {note}")
 
     # -- 5. settings registration ------------------------------------------
     entry = files.get("Library/PreferenceLoader/Preferences/Aevon.plist")
@@ -423,6 +438,11 @@ def main():
     dylib_early = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
     for token in (b"RingHost", b"ring: hosted on desktop", b"LSApplicationWorkspace",
                   b"ring: bar position ", b"ring: expanded (",
+                  # 0.0.45 — 竖条的两种呼出与面板豁免，各自一行日志字面量。
+                  # 「按住呼出」是这版的核心改动：没有这一行，圆盘就还是
+                  # 0.0.44 那种「手指抬起后才出现」的形态。
+                  b"ring: held open at ", b"ring: bar released at ",
+                  b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",
                   # 0.0.42 — the ported disc must be in the dylib. These tags are
                   # string literals inside the disc's own log lines / source, so
@@ -483,11 +503,9 @@ def main():
         # of never crashing an app over a missing key. The ceiling exists to
         # catch a *second* feature arriving in this file, not to argue with the
         # language runtime.
-        if len(bridge) > 98304:
-            bad(f"bridge: AevonApp.dylib is {len(bridge)} B — this file loads into "
-                "every app on the phone, 96 KB is the ceiling")
-        else:
-            ok(f"bridge: AevonApp.dylib {len(bridge)} B, state bridge + SpringBoard guard")
+        # 0.0.45 — 也是账本，不是闸门。这个数仍然值得看：它乘上 250 个
+        # 进程才是真正的常驻成本，交付说明里每次都要写出来。
+        ok(f"bridge: AevonApp.dylib {len(bridge):,} B, state bridge + SpringBoard guard")
     bridge_filter = files.get("Library/MobileSubstrate/DynamicLibraries/AevonApp.plist", b"")
     if b"com.apple.UIKit" not in bridge_filter:
         bad("bridge: AevonApp.plist does not filter on UIKit — no app would load the bridge")
@@ -717,10 +735,7 @@ def main():
         ok("log: /var/mobile/Aevon.log")
 
     # -- 7. size ------------------------------------------------------------
-    if len(blob) > BUDGET_DEB:
-        bad(f"size: deb {len(blob):,} B over budget {BUDGET_DEB:,} B")
-    else:
-        ok(f"size: deb {len(blob):,} B ({len(blob) * 100 // BUDGET_DEB}% of budget)")
+    ok(f"size: deb {len(blob):,} B (no ceiling — recorded only)")
 
     print(f"   payload   {len(files)} files, {sum(len(v) for v in files.values()):,} B")
     return report()

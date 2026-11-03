@@ -90,17 +90,41 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private let corner: CGFloat = 12
     private let edge: CGFloat = 2
     private let margin: CGFloat = 8
-    private let minWidth: CGFloat = 140
+    /// 0.0.45 — 吸附 (docked) size, from the master's 「贴边缩小」.
+    ///
+    /// The master docks flush against the edge and keeps the picture's aspect;
+    /// how small it goes is its 高度系数 taken down to a handle. Three tenths
+    /// of the screen height is 280 pt tall and 129 wide here — big enough to
+    /// read the app, small enough to be out of the way, and the same shape as
+    /// the card it came from.
+    private let miniHeightFraction: CGFloat = 0.30
+    /// The height the docked card has on this screen, and the floor a corner
+    /// resize may not go under — one function so "smallest" means one thing.
+    private func miniHeight(in bounds: CGRect) -> CGFloat {
+        return bounds.height * miniHeightFraction
+    }
     private let closeSize: CGFloat = 30
     /// `GestureBorderWidth` in her settings, described there as 减小浮窗手势宽度.
+    /// The master's own edge band is 30 pt (`_edgeWidth`, legible in the same
+    /// constant annotation that gave the height fractions); the *floating
+    /// window* band is the one its caption calls 边缘外侧 and it is wider.
     ///
-    /// 0.0.35 shipped 40 pt. 0.0.40 answered "the band is in the way" with 32,
-    /// and Aevon(39) answered that with 「移除热区可见性后，四周的手势失效」:
-    /// the painted band was the only thing saying where the 32 pt edge was, and
-    /// once it was gone a thumb landing 34 pt out was touching the desktop.
-    /// 40 is the master's own default and it is back; the visible band stays
-    /// gone, because the problem was never that it was visible.
-    private let band: CGFloat = 40
+    /// 0.0.35 shipped 40. 0.0.40 cut it to 32, and Aevon(39) answered with
+    /// 「移除热区可见性后，四周的手势失效」. 0.0.42 painted the band, gestures
+    /// came back, 0.0.44 unpainted it and they died again — and Aevon(43)'s
+    /// log finally says why, which is neither visibility nor the app bridge:
+    ///
+    ///   0.0.43 (working):  card 320x694 at 52,106  → band reached (418, 846)
+    ///   0.0.44 (broken):   card 265x575 at 76,207   → band reached (387, 828)
+    ///
+    /// The band is measured from the card's edge, so a card that shrinks takes
+    /// its own hit area with it: the same thumb, the same place on the screen,
+    /// now lands 30 pt past the ring and touches the desktop. The painted map
+    /// only ever *reported* where the ring was; the defect was the ring's size.
+    ///
+    /// 60 pt + 6 of slack it is. That is a band a thumb finds without being
+    /// told, and it survives the card being resized smaller by the operator.
+    private let band: CGFloat = 60
     /// 0.0.41 — 6 pt of tolerance on the *outside*. 0.0.37's Aevon(35) shows a
     /// thumb landing at x=390 on a card whose right edge was 375: 15 pt outside,
     /// comfortably inside a 40 pt band. The same thumb on 0.0.40's 32 pt band
@@ -296,7 +320,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
         // The tall guard from 0.0.24 stays: a short screen with a tall scene
         // still has to leave room to see what is behind the card.
-        let tallest = bounds.height - 160
+        // 0.0.45 — 96, not 160: at 160 the master's own 85 % height was being
+        // clipped to 772 pt on a 932 screen, which reintroduced the strip.
+        let tallest = bounds.height - 96
         if h > tallest {
             h = tallest
             w = h * ratio
@@ -505,7 +531,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 }
                 // The docked mini is the smallest shape the card ever takes;
                 // a resize cannot go under it.
-                let shortest = minWidth / Swift.max(ratio, 0.0001)
+                let shortest = miniHeight(in: window.bounds)
                 if h < shortest {
                     h = shortest
                     w = h * ratio
@@ -615,12 +641,18 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
         guard natural.height > 16 else { return }
         miniFrame = card.frame
-        let height = minWidth / (natural.width / natural.height)
+        // 0.0.45 — 贴边缩小, the master's own words for this state. The height
+        // is the only free number (the picture decides the width), and the card
+        // goes flush against the edge it was docked from — an inset mini is a
+        // mini whose whole point (being out of the way) it fails at.
+        let ratio = natural.width / Swift.max(natural.height, 1)
+        let height = miniHeight(in: window.bounds)
+        let width = height * ratio
         let edge: CardLayout.Edge = zone == .left ? .left : .right
-        let x = edge == .left ? margin : window.bounds.width - minWidth - margin
+        let x = edge == .left ? 0 : window.bounds.width - width
         let y = Swift.min(Swift.max(card.frame.minY, margin),
                           Swift.max(margin, window.bounds.height - height - margin))
-        card.frame = CGRect(x: x, y: y, width: minWidth, height: height)
+        card.frame = CGRect(x: x, y: y, width: width, height: height)
         followContent()
         installShield()
         syncGrip()
@@ -745,7 +777,8 @@ final class GripView: UIView {
     /// card (the ✕), because the operator's four attempts at the band came
     /// after it and the counter had already stopped. Eight now, and the window
     /// below matches.
-    private var proven = 0
+    private var proven = 0   // 0.0.45 — 8 → 20; Aevon(43) spent all four band
+                             // attempts inside the first eight touched slots
 
     // 0.0.44 — the heat map is invisible again, and this time the geometry
     // stays exactly where it is.
@@ -771,7 +804,7 @@ final class GripView: UIView {
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard proven < 8, let touch = touches.first else { return }
+        guard proven < 20, let touch = touches.first else { return }
         proven += 1
         Log.write("win: grip touch at " + String(format: "%.0f,%.0f", touch.location(in: self).x,
                                                  touch.location(in: self).y)
@@ -788,7 +821,7 @@ final class FloatWindow: UIWindow {
     /// not fire" and an empty probe, and an empty probe means either the touch
     /// never reached this window or it reached it and missed the ring.
     /// `sendEvent` is the one place that can tell those apart.
-    private var seen = 0   // 0.0.41 — 6 → 8, same reason as `GripView.proven`
+    private var seen = 0   // 0.0.45 — 8 → 20, same reason as `GripView.proven`
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let hit = super.hitTest(point, with: event)
@@ -800,7 +833,7 @@ final class FloatWindow: UIWindow {
     }
 
     override func sendEvent(_ event: UIEvent) {
-        if seen < 8, let touch = event.allTouches?.first, touch.phase == .began {
+        if seen < 20, let touch = event.allTouches?.first, touch.phase == .began {
             seen += 1
             let point = touch.location(in: self)
             let who = hitTest(point, with: event)

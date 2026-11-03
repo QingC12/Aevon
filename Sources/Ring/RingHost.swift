@@ -14,6 +14,10 @@
 //  What stays here is everything that is genuinely host-side:
 //
 //    · the window (level normal+1) and the passthrough hit testing,
+//    · the summon bar's window level and its system-overlay exemption (0.0.45):
+//      the bar lives above every app so it can be reached from anywhere, and
+//      goes away for the three places it must not appear — 锁屏 / 控制中心 /
+//      通知中心. Aevon(43) #3 asked for exactly that map.
 //    · the summon bar — 0.0.44's entry: a short vertical strip flush with the
 //      right edge. 0.0.14-0.0.43 used a 14 pt dot in the corner, and Aevon(42)
 //      said what a dot in a corner is worth: 「有点不容易触发」. A strip along the
@@ -66,6 +70,15 @@ final class RingHost: NSObject {
     /// real change instead of one per refresh.
     private var laidOutPercent: Int = -1
 
+    /// 0.0.45 — 竖条上那根手指还在屏上。`AevonRingGrip.hasActiveGripTouch`
+    /// 从这里取值，圆盘的静默看门狗据此放过「按住不动」的局。
+    private var barHeld = false
+
+    /// 0.0.45 — 系统面板（锁屏 / 控制中心 / 通知中心）豁免的定时器与缓存。
+    private var overlayTimer: Timer?
+    private var overlayCheckedAt: CFTimeInterval = 0
+    private var overlayUp = false
+
     private var config = RingConfig()
     private var expanded = false
 
@@ -97,7 +110,20 @@ final class RingHost: NSObject {
         let window = makeWindow()
         window.backgroundColor = .clear
         window.isOpaque = false
-        window.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.normal.rawValue + 1)
+        // 0.0.45 — **任何一个页面**都能呼出圆盘（Aevon(43) #3）。
+        //
+        // `normal + 1` was enough while the bar only had to sit on the home
+        // screen: SpringBoard's own windows and the icon layer share that
+        // level. A full-screen app brings its own window at `normal`, and the
+        // app's scene is composited above the home screen — a bar at +1 ends up
+        // underneath it and is simply not there.
+        //
+        // `statusBar + 1` (1001) is above every app window and still below
+        // `alert` (2000), which is where the control centre, the notification
+        // centre and the lock screen cover sheet live — so even if the timer
+        // below is late, the system's own panels win. The level is not the
+        // exemption, it is the layer; the exemption is `systemOverlayUp`.
+        window.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 1)
         window.rootViewController = UIViewController()
         window.rootViewController?.view = PassthroughView(frame: window.bounds)
         window.rootViewController?.view.backgroundColor = .clear
@@ -115,9 +141,15 @@ final class RingHost: NSObject {
         AevonRingGrip.setVisibleHandler = { [weak self] visible in
             self?.setGripVisible(visible)
         }
+        // 0.0.45 — 竖条按住期间，圆盘不许因为"静默"自收（手指根本没离开屏幕）。
+        AevonRingGrip.activeTouchHandler = { [weak self] in
+            self?.barHeld ?? false
+        }
 
         addBar()
         layout()
+        startOverlayWatch()
+        syncOverlayVisibility()
         seedStore()
 
         observe()
@@ -139,6 +171,11 @@ final class RingHost: NSObject {
             NotificationCenter.default.removeObserver(observer)
         }
         observers.removeAll()
+
+        overlayTimer?.invalidate()
+        overlayTimer = nil
+        AevonRingGrip.activeTouchHandler = nil
+        barHeld = false
 
         bar?.removeFromSuperview()
         barPad?.removeFromSuperview()
@@ -251,6 +288,10 @@ final class RingHost: NSObject {
         window.rootViewController?.view.frame = bounds
         paintBar()
 
+        // 面板正在上面的时候换了页面（比如通知中心拉下来又弹回去），
+        // layout 是唯一会被叫到的地方，顺手把可见性对齐一次。
+        syncOverlayVisibility()
+
         let percent = Int((config.barY).rounded())
         if percent != laidOutPercent {
             laidOutPercent = percent
@@ -282,13 +323,20 @@ final class RingHost: NSObject {
         pad.isUserInteractionEnabled = true
         pad.addGestureRecognizer(UITapGestureRecognizer(target: self,
                                                         action: #selector(toggle)))
-        // 0.0.44 — 「点击或者向左滑动时触发」. A swipe recogniser, not a pan: this
-        // one only has to fire, and a pan would need its own failure rules
-        // against the tap.
-        let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swipeOpen))
-        swipe.direction = .left
-        swipe.numberOfTouchesRequired = 1
-        pad.addGestureRecognizer(swipe)
+        // 0.0.45 — 滑动呼出改成**按住拖动**，这是 Aevon(43) #5 的原话：
+        // 「旧版圆盘的逻辑是滑动时出现圆盘，手指没有离开屏幕时圆盘不会自动收起，
+        //   手指离开屏幕时会自动关闭圆盘」。
+        //
+        // 0.0.44 用的是 `UISwipeGestureRecognizer`，它只在**手指抬起时**才识别
+        // 成功 —— 也就是说圆盘是在手指离开之后才出现的，此后没有任何东西在喂它，
+        // 于是「按住不放也不收」从物理上就不可能。`UIPanGestureRecognizer` 从
+        // 落指那一刻就开始报，正好把整根手指交给圆盘（presentTracking 一族）。
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleBarPan(_:)))
+        pan.maximumNumberOfTouches = 1
+        // 不做方向过滤。竖条只有 40x112，落在这块面积上的触摸本来就是给它的；
+        // 反过来，「先往下再往左」的斜滑很常见，方向闸门只会把这类真实的拖动
+        // 判成失败（而失败后这根手指就再也不会被重新考虑）。
+        pad.addGestureRecognizer(pan)
         host.addSubview(pad)
         barPad = pad
 
@@ -357,13 +405,117 @@ final class RingHost: NSObject {
         if expanded { collapse() } else { expand() }
     }
 
-    /// 向左滑动 → 呼出. The bar sits on the right edge, so the natural gesture is
-    /// the thumb travelling away from the edge. It only ever opens: a swipe that
-    /// closes would fight the disc's own lift-to-dismiss, which already ends in
-    /// the same place.
-    @objc private func swipeOpen(_ gesture: UISwipeGestureRecognizer) {
-        if expanded { return }
-        expand()
+    /// 按住拖动（0.0.45）。
+    ///
+    /// 这条路从头到尾只有一根手指：落指 → 圆盘从这一点长出来 → 报告每一次移动
+    /// → 抬手定生死。**没有任何一步替用户做决定**：
+    ///
+    ///   · 停在竖条上不动 → 圆盘开着（看门狗被 `barHeld` 挡住）；
+    ///   · 向左划到某个图标 → 那个图标高亮（跳起回落的关键帧是圆盘自己的）；
+    ///   · 抬手在图标上 → 打开浮窗；抬手在盘外 / 间隙 → 收起。
+    ///
+    /// 这三条不是这里写的规则，是 `AevonRingMenu.handlePointerEnded` 原本的语义
+    /// （V0.2.18 AevonRingCloseOnLiftV218），这里只是把手指接上去。
+    @objc private func handleBarPan(_ gesture: UIPanGestureRecognizer) {
+        guard let window = window, let host = window.rootViewController?.view else { return }
+        let point = gesture.location(in: window)
+
+        switch gesture.state {
+        case .began:
+            barHeld = true
+            if let menu = AevonRingMenu.presented {
+                // 圆盘已经开着（点一下开的那种），这根手指直接接管它。
+                menu.beginRemoteTracking(at: point, source: "bar")
+            } else {
+                expanded = true
+                AevonRingMenu.presentTracking(in: host, at: point, source: "bar")
+                Log.write("ring: held open at "
+                          + String(format: "%.0f,%.0f", point.x, point.y)
+                          + " (\(AevonRingStore.bundleIDs().count) apps)")
+            }
+
+        case .changed:
+            AevonRingMenu.presented?.remoteMoved(to: point, source: "bar")
+
+        case .ended, .cancelled, .failed:
+            barHeld = false
+            expanded = false
+            guard let menu = AevonRingMenu.presented else { return }
+            if gesture.state == .ended {
+                // 权威抬手：不受 0.12 秒通道交换闸影响（V0.3.16）。
+                menu.remoteLift(at: point, source: "bar")
+            } else {
+                // 手势被系统抢断 = 这根手指的去向不由我们决定了，收起最安全。
+                menu.remoteCancelled(source: "bar")
+            }
+            Log.write("ring: bar released at "
+                      + String(format: "%.0f,%.0f", point.x, point.y))
+
+        default:
+            break
+        }
+    }
+
+    // MARK: - 0.0.45 系统面板豁免
+
+    /// 锁屏 / 控制中心 / 通知中心 —— 竖条在这三处不出现（Aevon(43) #3）。
+    ///
+    /// 窗口层级（statusBar + 1）已经把这三种面板留在上面，但「没被盖住」不等于
+    /// 「不该显示」：控制中心是半屏、锁屏是另一套 UI，竖条浮在上面既难看也没有
+    /// 意义。所以再加一道主动隐藏，判据全部走运行时，不编译期依赖 SpringBoard。
+    ///
+    /// 0.35 秒缓存：这个查询每次要过 3 个单例 + 最多 6 次 KVC，而调用点是 0.4
+    /// 秒一次的定时器 —— 缓存把「面板刚好在这个 tick 里打开」的延迟压到看不出来。
+    private var systemOverlayUp: Bool {
+        let now = CACurrentMediaTime()
+        if now - overlayCheckedAt < 0.35 { return overlayUp }
+        overlayCheckedAt = now
+        overlayUp = computeSystemOverlay()
+        return overlayUp
+    }
+
+    private func computeSystemOverlay() -> Bool {
+        if boolValue(sharedInstance("SBLockScreenManager"), "isUILocked") { return true }
+        let cover = sharedInstance("SBCoverSheetPresentationManager")
+        if boolValue(cover, "isPresented") || boolValue(cover, "isVisible") { return true }
+        let center = sharedInstance("SBControlCenterController")
+        if boolValue(center, "isVisible") || boolValue(center, "isPresented") { return true }
+        return false
+    }
+
+    private func sharedInstance(_ className: String) -> NSObject? {
+        guard let meta = NSClassFromString(className) as? NSObject.Type else { return nil }
+        let selector = NSSelectorFromString("sharedInstanceIfExists")
+        guard meta.responds(to: selector),
+              let unmanaged = meta.perform(selector) else { return nil }
+        return unmanaged.takeUnretainedValue() as? NSObject
+    }
+
+    /// `responds(to:)` first, then KVC: `value(forKey:)` on a key the object does
+    /// not have raises, and this runs in SpringBoard on a timer.
+    private func boolValue(_ object: NSObject?, _ key: String) -> Bool {
+        guard let object = object,
+              object.responds(to: NSSelectorFromString(key)),
+              let value = object.value(forKey: key) as? NSNumber else { return false }
+        return value.boolValue
+    }
+
+    private func startOverlayWatch() {
+        overlayTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
+            self?.syncOverlayVisibility()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        overlayTimer = timer
+    }
+
+    private func syncOverlayVisibility() {
+        guard let pad = barPad else { return }
+        let hidden = systemOverlayUp
+        guard pad.isHidden != hidden else { return }
+        pad.isHidden = hidden
+        Log.write("ring: summon bar " + (hidden ? "hidden (system overlay up)"
+                                                 : "shown (system overlay gone)"))
     }
 
     // MARK: - Disc (AevonRingMenu, 1:1)

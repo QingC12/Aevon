@@ -36,6 +36,10 @@ public enum CardLayout {
     /// The master's `_leftPecent` family, plus the one size value it keeps
     /// separately as `HeightFraction`.
     public struct Placement {
+        /// Bumped whenever the built-in size changes meaning. A file stamped
+        /// with an older number is read as "default + drag", not as a choice.
+        public static let currentVersion = 2
+
         /// `_effectEdge` — which edge the card is docked to right now.
         public var edge: Edge
         /// Normalised top-left corner while docked left.
@@ -46,16 +50,42 @@ public enum CardLayout {
         /// The width follows the scene's own aspect, so one number is enough.
         public var heightFraction: CGFloat
 
-        /// What 0.0.38 did, expressed in these terms: 320x694 centred in a
-        /// 430x932 host. Starting from the old numbers rather than from a
-        /// nicer-looking guess means the first open after the upgrade looks
-        /// exactly like the last one, and only the operator's own drag changes
-        /// it from there.
+        /// 0.0.45 — the master's own 高度系数, not 0.0.38's leftover.
+        ///
+        /// Aevon(43) said the card reads as 「特别的细长条」. It was: 694/932 =
+        /// 74.5 % of the screen height, and with the picture's own aspect
+        /// (430:932) the width lands at 320 pt — a strip, not a window.
+        ///
+        /// The master keeps this number in `SettingEnv._windowHeight` (labelled
+        /// `HeightFraction` = 高度系数 in its own strings) and its default is
+        /// legible in the only numeric annotation the binary still carries:
+        /// `"0.2 0.3 0.9 0.85 30.0"`, sitting directly after `EgdeGestureView`'s
+        /// five geometry fields — `_leftPecent`, `_rightPecent`,
+        /// `_leftHeightPecent`, `_rightHeightPecent`, `_edgeWidth`. So the two
+        /// heights are 90 % and 85 %, and 30 pt is the master's edge band width
+        /// (already used above as `edgeWidth`).
+        ///
+        /// 0.85 it is — the docked-right default, the conservative of the two.
+        /// Width follows the picture, so the card becomes 366x792 on this
+        /// 430x932 phone: full-height, centred, and nothing like a strip.
         public static var initial: Placement {
+            // 366 wide in a 430 screen → 32 pt either side, held as a fraction so
+            // a rotation keeps the card centred instead of pinned left.
+            let x = (1 - ratio(for: 0.85)) / 2
             return Placement(edge: .right,
-                             left: CGPoint(x: 55.0 / 430.0, y: 119.0 / 932.0),
-                             right: CGPoint(x: 55.0 / 430.0, y: 119.0 / 932.0),
-                             heightFraction: 694.0 / 932.0)
+                             left: CGPoint(x: x, y: 0.06),
+                             right: CGPoint(x: x, y: 0.06),
+                             heightFraction: 0.85)
+        }
+
+        /// Width as a fraction of the host width, given a height fraction. The
+        /// picture is 430:932, so the card is that shape scaled — one number
+        /// (height) decides both, and the operator only ever chooses the height.
+        public static func ratio(for heightFraction: CGFloat) -> CGFloat {
+            // 0.4614 = 430/932, the picture's own aspect on this phone. Written
+            // as a constant so the initial placement does not depend on a live
+            // screen being available when the setting page asks for a preview.
+            return 0.4614 * heightFraction
         }
 
         public func origin(for edge: Edge) -> CGPoint {
@@ -88,6 +118,17 @@ public enum CardLayout {
         // the wrong side of the screen.
         guard let raw = dict["edge"] as? String,
               let edge = Edge(rawValue: raw) else { return nil }
+        // 0.0.45 — a placement saved before the default size changed is not a
+        // placement the operator chose *against* the new default; it is the old
+        // default plus whatever drag happened under it. Keeping it would make
+        // 「改默认尺寸」 invisible on exactly the phone that reported the problem,
+        // so anything without the current stamp falls back to `initial`. The
+        // edge is kept: which side the card lives on is a real choice.
+        guard (dict["layoutVersion"] as? NSNumber)?.intValue == Placement.currentVersion else {
+            var fresh = Placement.initial
+            fresh.edge = edge
+            return fresh
+        }
 
         func number(_ key: String, _ fallback: CGFloat) -> CGFloat {
             return (dict[key] as? NSNumber).map { clampFraction(CGFloat($0.doubleValue)) }
@@ -127,6 +168,7 @@ public enum CardLayout {
             "rightPecent": Double(clampFraction(placement.right.x)),
             "rightHeightPecent": Double(clampFraction(placement.right.y)),
             "HeightFraction": Double(placement.heightFraction),
+            "layoutVersion": Placement.currentVersion,
             "edgeWidth": Double(edgeWidth),
             "savedAt": Date().timeIntervalSince1970,
         ]
