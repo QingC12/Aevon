@@ -82,8 +82,6 @@ NSInteger AevonPushBackground(id _Nullable scene);
 NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL value);
 
 /// 0.0.28 — the accessor names come from the runtime instead of this source
-NSString *AevonReadObjects(id _Nullable object, NSString *_Nullable keywords);
-NSString *AevonReadFlags(id _Nullable object, NSString *_Nullable keywords);
 
 @interface UIImage (AevonPrivateIcons)
 + (nullable UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID
