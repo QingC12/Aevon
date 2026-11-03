@@ -1084,12 +1084,15 @@ zStackParticipantDidChange:
         for delay in [0.3, 1.2, 2.6] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 let door = AevonForceForeground(scene)
-                let now = value(of: scene, "settings")
+                let live = value(of: scene, "settings")
+                let fg: String = live.map { flag(AevonBoolOf($0, "isForeground")) } ?? "nil"
+                let bg: String = live.map { flag(AevonBoolOf($0, "isBackgrounded")) } ?? "nil"
+                let layers = String(view.layer.sublayers?.count ?? 0)
                 Log.write("win: force foreground door=" + String(door)
-                          + " fg=" + (now.map { flag(AevonBoolOf($0, "isForeground")) } ?? "nil")
-                          + " bg=" + (now.map { flag(AevonBoolOf($0, "isBackgrounded")) } ?? "nil")
+                          + " fg=" + fg
+                          + " bg=" + bg
                           + " reasons=" + reasonsOf(scene)
-                          + " sublayers=" + String(view.layer.sublayers?.count ?? 0))
+                          + " sublayers=" + layers)
             }
         }
 
