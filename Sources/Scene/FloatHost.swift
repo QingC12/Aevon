@@ -20,8 +20,17 @@ import UIKit
 ///   点吸附 │   ╚═══════════════════════════════╝         │   点吸附
 ///          │                                             │
 ///          ├──────────┬─────────────────┬───────────────┤
-///          │ 长按复位  │ 拖动移动/上滑关  │   长按复位     │
+///          │ 缩放/复位 │ 拖动移动/上滑关   │   缩放/复位    │
 ///          └──────────┴─────────────────┴───────────────┘
+///
+/// 0.0.43 — the corners resize again. 0.0.40 removed the two resize cells on
+/// the honest grounds that a resize reachable only through the dead top strip
+/// was no resize at all; Aevon(41) answered with the operator's own map: the
+/// bottom corners are where resize belongs. A drag on a corner now scales the
+/// card around its opposite corner — the shape the master's own caption
+/// promises (「边角区域滑动缩放，长按重启」) — and the long press keeps its
+/// geometry reset. The card's aspect never changes: the picture is one shape
+/// scaled, so a resize is a height choice and the width follows.
 ///
 /// Why the top strip is empty. 0.0.35-0.0.39 had four cells up there — 边中's
 /// flick-to-close and the two top corners' resize — copied from the master's
@@ -69,6 +78,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     private var zone: Zone = .left
     private var panStep: CGPoint = .zero
+    /// 0.0.43 — the frame a corner resize started from, and which corner the
+    /// finger is on. The opposite corner is the anchor that never moves.
+    private var resizeStart: CGRect?
+    private var resizeFromLeft = false
     /// The frame to come back to. Non-nil is the only definition of "docked".
     private var miniFrame: CGRect?
 
@@ -177,7 +190,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let ring = "win: grip ring band=" + String(format: "%.0f", host.band)
         let cell = " cell=" + String(format: "%.0f", FloatHost.cell(in: card.bounds.size).width)
         Log.write(ring + cell
-                  + " 外侧 (左右 拖动/点吸附, 底中 拖动/上滑关, 底角 长按复位, 顶部不接)")
+                  + " 外侧 (左右 拖动/点吸附, 底中 拖动/上滑关, 底角 缩放/长按复位, 顶部不接)")
         return window.isHidden ? nil : host
     }
 
@@ -462,6 +475,15 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // zone it was counted as — two very different defects.
             Log.write("win: gesture grab zone=" + name(zone)
                       + " at " + point(start))
+            // 0.0.43 — a corner drag resizes; every other band moves. The
+            // anchor is the opposite corner, read once here: a zone is which
+            // cell the finger landed in, not a thing that changes mid-drag.
+            if zone == .bottomCorner, let card = card {
+                resizeStart = card.frame
+                resizeFromLeft = start.x < card.bounds.width / 2
+            } else {
+                resizeStart = nil
+            }
         case .changed:
             // Every delta is measured in the window, never in the card or the
             // ring. Both are being resized and moved by this very gesture, so
@@ -470,15 +492,61 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             let dx = total.x - panStep.x
             let dy = total.y - panStep.y
             panStep = total
-            // All four cells move. 0.0.40 removed the two that resized, so a
-            // drag on the band is a drag on the band, wherever it started.
-            var frame = card.frame
-            frame.origin.x += dx
-            frame.origin.y += dy
-            card.frame = clamped(frame, in: window.bounds)
-            syncGrip()
+            if zone == .bottomCorner, let start = resizeStart {
+                // 边角拖动 = 缩放（0.0.43）。The finger's vertical travel is the
+                // height; the width follows the picture's own aspect. Down
+                // grows, up shrinks, and the opposite corner stays put.
+                let ratio = natural.width / Swift.max(natural.height, 1)
+                var h = start.height + total.y
+                var w = h * ratio
+                let widest = window.bounds.width - margin * 2
+                if w > widest {
+                    w = widest
+                    h = w / ratio
+                }
+                // The docked mini is the smallest shape the card ever takes;
+                // a resize cannot go under it.
+                let shortest = minWidth / Swift.max(ratio, 0.0001)
+                if h < shortest {
+                    h = shortest
+                    w = h * ratio
+                }
+                let tallest = window.bounds.height - margin * 2
+                if h > tallest {
+                    h = tallest
+                    w = h * ratio
+                }
+                var frame: CGRect
+                if resizeFromLeft {
+                    frame = CGRect(x: start.maxX - w, y: start.minY,
+                                   width: w, height: h)
+                } else {
+                    frame = CGRect(x: start.minX, y: start.minY,
+                                   width: w, height: h)
+                }
+                card.frame = clamped(frame, in: window.bounds)
+                followContent()
+                syncGrip()
+            } else {
+                // All four cells move. 0.0.40 removed the two that resized, so a
+                // drag on the band is a drag on the band, wherever it started;
+                // 0.0.43 gave the corners their own meaning back, so a drag on
+                // a corner is a resize and this branch is the other three.
+                var frame = card.frame
+                frame.origin.x += dx
+                frame.origin.y += dy
+                card.frame = clamped(frame, in: window.bounds)
+                syncGrip()
+            }
         case .ended, .cancelled:
-            finishPan(gesture, card: card, window: window)
+            if zone == .bottomCorner, resizeStart != nil, let card = card {
+                resizeStart = nil
+                Log.write("win: card resized to " + point(card.frame.origin)
+                          + " size=" + size(card.bounds.size))
+                remember(in: window.bounds)
+            } else {
+                finishPan(gesture, card: card, window: window)
+            }
         default:
             break
         }

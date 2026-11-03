@@ -1232,7 +1232,11 @@ zStackParticipantDidChange:
             } else if misses < 3 {
                 if !marked { mark("WIN-PUSH"); marked = true }
                 door = AevonPushForeground(scene)
-                if door == 1 || door == 2 {
+                // 0.0.43 — door 3 is the transition-context write, the one that
+                // crosses the scene bridge; it counts as a write like 1 and 2.
+                // Door 4 means "already front, nothing spent": neither a write
+                // nor a miss, which is exactly what the old 3 was to this clock.
+                if door == 1 || door == 2 || door == 3 {
                     wrote += 1
                 } else if door == 0 {
                     misses += 1

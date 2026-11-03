@@ -406,11 +406,9 @@ static BOOL AevonCallBlockMethod(id target, NSString *name, void (^block)(id)) {
     return NO;
 }
 
-/// `- (void)updateSettings:(id)` — one object, no block. The transition-context
-/// variant is deliberately absent from this file: the mother ship's 0.3.0 passed
-/// it a nil context and SpringBoard died on the spot (round 3, `[CONFIRMED]`,
-/// twice, line for line), which is also why `_createTransitionContext` exists.
-/// A door that needs a context and does not get one is not a door.
+/// `- (void)updateSettings:(id)` — one object, no block. Kept as the fallback
+/// door for the day the transition overload disappears; see the note there for
+/// why it stopped being the first choice.
 static BOOL AevonCallSettings(id target, id settings) {
     if (target == nil || settings == nil) return NO;
     SEL sel = sel_registerName("updateSettings:");
@@ -425,13 +423,65 @@ static BOOL AevonCallSettings(id target, id settings) {
     return YES;
 }
 
+/// The transition-context doors, 0.4.2's own order — `updateSettings:
+/// withTransitionContext:completion:` first, the two-argument overload second,
+/// both with a nil context. This file used to refuse the whole family because
+/// Stheno 0.3.0 died passing nil into it (round 3, twice); Aevon 0.4.2 has run
+/// this exact call — nil context included — on this phone for two hundred
+/// builds, so the death was the caller's, not the door's.
+///
+/// The door matters for one reason the beat log finally named: a settings
+/// write through the plain `updateSettings:` changes the dictionary the
+/// keepalive reads back (`beat fg=yes`) but never crosses the scene bridge as
+/// a scene update, so the app process keeps the activation state it was born
+/// with — a suspended launch stays suspended, and every touch the bridge
+/// forwards into the picture dies in a background scene. The transition
+/// pipeline is what turns a dictionary edit into a lifecycle the app acts on.
+///
+/// Answers 3 when a transition door opened, 0 when neither exists.
+static NSInteger AevonCallSettingsTransition(id target, id settings) {
+    if (target == nil || settings == nil) return 0;
+    SEL three = sel_registerName("updateSettings:withTransitionContext:completion:");
+    if ([target respondsToSelector:three]) {
+        Method method = class_getInstanceMethod(object_getClass(target), three);
+        const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
+        // v@:0 1@"FBSceneTransitionContext" 2@"?" — the completion must be
+        // an object-nullable block slot, the context an object slot.
+        if (encoding != NULL && encoding[0] == 'v' && method_getNumberOfArguments(method) == 5) {
+            ((void (*)(id, SEL, id, id, id))objc_msgSend)(target, three, settings, nil, nil);
+            return 3;
+        }
+    }
+    SEL two = sel_registerName("updateSettings:withTransitionContext:");
+    if ([target respondsToSelector:two]) {
+        Method method = class_getInstanceMethod(object_getClass(target), two);
+        const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
+        if (encoding != NULL && encoding[0] == 'v' && method_getNumberOfArguments(method) == 4) {
+            ((void (*)(id, SEL, id, id))objc_msgSend)(target, two, settings, nil);
+            return 3;
+        }
+    }
+    return 0;
+}
+
 /// One attempt at "you are in front". Answers the door it used so the log can
 /// say where the chain stops:
 ///
-///   1  the scene's own `updateSettingsWithBlock:`
+///   3  a transition-context door — the one that crosses the scene bridge and
+///      gives the app a lifecycle to act on (0.0.43, 0.4.2's own order)
+///   1  the scene's own `updateSettingsWithBlock:` / `updateSettings:`
 ///   2  the deactivation manager's `amendSceneSettings:forScene:`
-///   3  nothing to do — the scene already says it is in front, no write spent
+///   4  nothing to do — the scene already says it is in front, no write spent
 ///   0  no door, wrong thread, inside a hook, throttled, banned, or out of tries
+///
+/// `4` used to be `3`; the transition door took that number, and "already in
+/// front" had to move out of its way rather than share it.
+///
+/// The transition door is first because 0.0.42 settled where content touch
+/// dies: not in the hit test (`event hit -> _UISceneLayerHostContainerView`
+/// in Aevon(41)), not in the band — in the app's belief about its own state.
+/// The plain doors kept SpringBoard's copy of the settings foreground while
+/// the app process, launched suspended, never heard about it.
 ///
 /// `updateSettingsWithBlock:` is first because it is the one door the mother
 /// ship used on this phone (`P0 已发 updateSettingsWithBlock（foreground=YES /
@@ -471,7 +521,7 @@ NSInteger AevonPushForeground(id scene) {
                           current != nil ? class_getName(object_getClass(current)) : "nil");
         }
         AevonInPush = 0;
-        return 3;
+        return 4;
     }
 
     // A mutable copy is tried first because a copy cannot be rejected by a class
@@ -485,22 +535,24 @@ NSInteger AevonPushForeground(id scene) {
         AevonWriteFront(settings, YES);
     } copy];
 
-    NSInteger path = 0;
-    if (AevonCallBlockMethod(scene, @"updateSettingsWithBlock:", amend)
-        || AevonCallSettings(scene, candidate)) {
-        path = 1;
-    } else if (AevonDeactManager != nil) {
-        id manager = AevonDeactManager;
-        SEL amendSel = NSSelectorFromString(@"amendSceneSettings:forScene:");
-        if ([manager respondsToSelector:amendSel]) {
-            Method method = class_getInstanceMethod(object_getClass(manager), amendSel);
-            const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
-            unsigned int arguments = method != NULL ? method_getNumberOfArguments(method) : 0;
-            if (encoding != NULL && encoding[0] == 'v' && arguments == 4) {
-                ((void (*)(id, SEL, id, id))objc_msgSend)(manager, amendSel,
-                                                          candidate != nil ? candidate : current,
-                                                          scene);
-                path = 2;
+    NSInteger path = AevonCallSettingsTransition(scene, candidate);
+    if (path == 0) {
+        if (AevonCallBlockMethod(scene, @"updateSettingsWithBlock:", amend)
+            || AevonCallSettings(scene, candidate)) {
+            path = 1;
+        } else if (AevonDeactManager != nil) {
+            id manager = AevonDeactManager;
+            SEL amendSel = NSSelectorFromString(@"amendSceneSettings:forScene:");
+            if ([manager respondsToSelector:amendSel]) {
+                Method method = class_getInstanceMethod(object_getClass(manager), amendSel);
+                const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
+                unsigned int arguments = method != NULL ? method_getNumberOfArguments(method) : 0;
+                if (encoding != NULL && encoding[0] == 'v' && arguments == 4) {
+                    ((void (*)(id, SEL, id, id))objc_msgSend)(manager, amendSel,
+                                                              candidate != nil ? candidate : current,
+                                                              scene);
+                    path = 2;
+                }
             }
         }
     }
@@ -549,6 +601,11 @@ NSInteger AevonPushBackground(id scene) {
     void (^amend)(id) = [^(id settings) {
         AevonWriteFront(settings, NO);
     } copy];
+    // The hand-back goes through the same transition door the push came in
+    // through: a background write that stops at the dictionary leaves the app
+    // process believing it is in front, which is Aevon(30)'s Douyin playing to
+    // an empty desktop, one bridge crossing later.
+    if (AevonCallSettingsTransition(scene, candidate) == 3) return 1;
     if (AevonCallBlockMethod(scene, @"updateSettingsWithBlock:", amend)) return 1;
     if (AevonCallSettings(scene, candidate)) return 1;
     return 0;
