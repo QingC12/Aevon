@@ -424,11 +424,16 @@ def main():
     # arrived", which is the one wrong answer that costs a full round trip.
     # 0.0.15 adds the census and the identity path. Every planned exit has its own
     # line, because the failing run is exactly the one whose log is all there is.
-    # 0.0.16 replaced the build with the mother ship's presenting chain; 0.0.17
-    # stops one call earlier, at the layer host, because that is exactly where
-    # SpringBoard died. What must stay is one line per step the probe still
-    # takes, plus the two witnesses that make the next death readable instead of
-    # inferable: the step marker path, and the line that reports it at boot.
+    # 0.0.20 is the first version that calls something new since the layer-host
+    # death: `-activate` on a presenter we own. What must stay is one line per
+    # step, the wording that says whether that call ran at all, and the two
+    # witnesses that make a death readable instead of inferable: the step marker
+    # path and the line that reports it at boot.
+    #
+    # Deliberately NOT asserted any more: `home %@ %ld`, ` scan capped at %ld`,
+    # `(%@: capped at %ld)` and `census %@ super=%@`. Those belong to helpers
+    # nothing calls since this round, so whether their constants survive
+    # dead_strip is not something the audit should have an opinion about.
     # Two shorter fragments are deliberately NOT asserted: ` no presenter` and
     # ` no layer host` share the prefix ` no `, and LLVM merged the two constants
     # into one blob at link time, so neither survives as its own byte string.
@@ -440,19 +445,20 @@ def main():
                   b" uiPresentationManager absent", b" uiPresentationManager cls=",
                   b" presenter ready cls=",
                   b" presentationView absent", b" presentationView cls=",
-                  b" stopping before layer host",
+                  b" stopping before window",
                   b"win: previous run died at ",
-                  b"win: scanning selectors on this system",
+                  b"win: reading full method tables",
                   b"win: no app scene in the list this run",
-                  b" presenter state hosting=",
-                  b" presentation context cls=",
-                  b"home %@ %ld",
+                  b" presenter state ",
+                  b" presenter identifier=",
+                  b" activate call ran=",
+                  b" host container view=",
+                  b" presentation context=",
                   b"info %@ -%@ :: %s from %@",
-                  b" scan capped at %ld",
                   b"full %@ super=%@ own=%u",
-                  b"(%@: capped at %ld)",
+                  b"meta %@ absent",
                   b"/var/mobile/Library/Logs/Aevon/win.step",
-                  b"census %@ super=%@", b"presenter %@ -> %@"):
+                  b"presenter %@ -> %@"):
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the probe would never reach SpringBoard")

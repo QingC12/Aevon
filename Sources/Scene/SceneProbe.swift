@@ -752,23 +752,22 @@ zStackParticipantDidChange:
         return Set(lines)
     }
 
-    // MARK: - Window build (0.0.17): the device answers, we do not guess
+    // MARK: - Window build (0.0.20): read everything, then the one call left
 
-    /// Two SpringBoard deaths in a row, both on a name we took from another
-    /// binary's string table and trusted:
-    ///   0.0.15  `_createSceneWithDefinition:`  — four nils, one of them a block
-    ///   0.0.16  right after `presentationView`, i.e. inside the layer host's
-    ///           initialiser — `_UIContextLayerHostView initWithSceneLayer:`
-    /// The mother ship runs on this exact system, so both names must exist here
-    /// somehow. If our call kills the process, the call is wrong, not the name.
+    /// Three SpringBoard deaths taught the same lesson three times:
+    ///   0.0.15  `_createSceneWithDefinition:` — four nils, one of them a block
+    ///   0.0.16  `_UIContextLayerHostView initWithSceneLayer:` — the class name
+    ///           was right (0.0.19 checked: it is there, encoding `@24@0:8@16`)
+    ///           but the argument was a CALayer where an FBSceneLayer is read.
+    /// 0.0.16's `@24@0:8@16` also settles the typing question: the parameter is
+    /// an object, so nothing about the ABI was wrong.
     ///
-    /// So this version calls nothing that has not already returned on the
-    /// device, and it asks the runtime instead of assuming:
-    ///   - which classes exist whose name mentions a layer host / scene layer;
-    ///   - what the real presenter class answers to;
-    ///   - and, for every remaining call, it leaves a step marker on disk
-    ///     first, so a death is reported by name at the next boot instead of
-    ///     being inferred from where the log stopped.
+    /// 0.0.19 answered "what does iOS 17 call these things". This run answers
+    /// the rest by reading — full method tables, instance and class side, plus
+    /// the encodings that were still unknown — and then makes exactly one call
+    /// that has never run on this phone: `-activate` on a presenter we own.
+    ///
+    /// Nothing is put in a window this round, so the screen does not change.
     static func runWindow() {
         reportLastStep()
 
@@ -778,35 +777,54 @@ zStackParticipantDidChange:
         }
         Log.write("win: begin manager cls=" + NSStringFromClass(type(of: manager)))
 
-        // The mother ship was written for iOS 16 and this phone runs 17. Every
-        // name below is therefore a question, not an assumption: iOS 17 is
-        // asked what it calls these things now, and the type encodings say what
-        // the arguments really are. 0.0.16 died on a name taken from her
-        // `__cstring` table with no encoding ever checked.
-        Log.write("win: scanning selectors on this system")
+        // 0.0.19 answered "what does iOS 17 call these things". This version
+        // asks the other half of the question: every method the objects we are
+        // about to touch declare for *themselves*, unfiltered, plus the class
+        // side — `class_copyMethodList` silently omits `+` methods when you hand
+        // it a class, which is why UISceneLayerTargetFactory came back empty.
+        Log.write("win: reading full method tables")
 
-        // Who in this process implements her three selectors — names now, not a
-        // count. 0.0.18 printed only "=11" and the intersection was noise.
-        emitNotes(AevonSelectorHome("initWithSceneLayer:,setResizesHostedContext:", 14), cap: 34)
+        // The three objects a float window is built out of.
+        for (name, cap) in [("_UIScenePresenter", 24),
+                            ("_UIScenePresenterOwner", 26),
+                            ("_UIScenePresentationView", 24),
+                            ("_UIContextLayerHostView", 26)] {
+            emitNotes(AevonFullCensus(name, cap), cap: cap + 4)
+        }
 
-        // Her layer-host initialiser, on her class, with the real encoding.
-        emitNotes(AevonSelectorInfo("_UIContextLayerHostView",
-                                    "initWithSceneLayer:,setResizesHostedContext:,layer"))
-        emitNotes(AevonSelectorInfo("_UISceneLayerHostView", "initWithSceneLayer:,layer"))
-        emitNotes(AevonSelectorInfo("_UIExternalSceneLayerHostView", "initWithSceneLayer:,layer"))
-        emitNotes(AevonSelectorInfo("_UISceneLayerHostContainerView", "initWithSceneLayer:,hostContainerView"))
+        // FBScene is the object a floating window would host. If it exposes a
+        // layer manager, the mother ship's `initWithSceneLayer:` becomes
+        // reachable without inventing a layer; if it does not, that route is
+        // closed on this system and the presenter route is the only one.
+        for (name, cap) in [("FBScene", 56), ("FBSceneManager", 40),
+                            ("FBSceneLayerManager", 26),
+                            ("_UISceneLayerHostContainerView", 50)] {
+            emitNotes(AevonFullCensus(name, cap), cap: cap + 4)
+        }
 
-        // Everything the whole process calls a scene layer or a layer host,
-        // with encodings. This is the iOS 17 answer to "what do they call it
-        // now", and it is the list the next version may choose from.
-        emitNotes(AevonLayerNameScan(60), cap: 66)
+        // The class side. A factory that answers only `+` looks like an empty
+        // class to every listing above.
+        for (name, cap) in [("UISceneLayerTargetFactory", 20),
+                            ("FBSceneLayer", 18),
+                            ("FBSceneManager", 18),
+                            ("_UIScenePresenter", 12)] {
+            emitNotes(AevonClassMethods(name, cap), cap: cap + 4)
+        }
 
-        // The classes around the layer model, unfiltered: what makes a layer,
-        // who owns them, and what a target looks like.
-        for name in ["_UISceneLayerHostView", "_UISceneLayerHostContainerView",
-                     "FBSceneLayerManager", "FBSSceneLayer", "FBSceneLayer",
-                     "_UISceneLayerTargetWithContext", "UISceneLayerTargetFactory"] {
-            emitNotes(AevonFullCensus(name, 26), cap: 30)
+        // And the encodings of the handful of selectors that still have an
+        // unknown argument shape. `@` is an object, `q` is a long, `B` is a
+        // BOOL, `^{…}` is a bare struct pointer — the difference matters.
+        for (cls, sels) in [("_UISceneLayerHostContainerView",
+                             "initWithScene:debugDescription:,dataSource,setDataSource:,hostedLayers"),
+                            ("_UIScenePresenter",
+                             "activate,deactivate,presentationView,invalidate,identifier,priority"),
+                            ("_UIScenePresentationView",
+                             "initWithPresenter:,hostContainerView,setHostContainerView:"),
+                            ("_UIExternalSceneLayerHostView", "initWithSceneLayer:parentScene:"),
+                            ("_UIKeyboardLayerHostView", "initWithSceneLayer:"),
+                            ("UIScene", "_fbsSceneLayerForWindow:"),
+                            ("FBScene", "layerManager,layers,settings")] {
+            emitNotes(AevonSelectorInfo(cls, sels), cap: 26)
         }
 
         var springboard: NSObject?
@@ -840,11 +858,11 @@ zStackParticipantDidChange:
             Log.write("win: no app scene in the list this run")
         }
 
-        // 0.0.16 got exactly this far on both templates: the manager, the
-        // presenter and the presentation view all came back, and the process
-        // died after the view's class was printed. Everything up to here has
-        // therefore returned on this phone, which is the only reason it is
-        // still called.
+        // The app scene first: it is the one a floating window would actually
+        // host, and it is the only template whose presenter has never been
+        // built before. SpringBoard and the keyboard follow, because their
+        // chains are already proven and a failure there isolates the cause.
+        if let app = foregroundApp { present(app, tag: "APP") }
         if let scene = springboard { present(scene, tag: "SB") }
         if let scene = keyboard { present(scene, tag: "KB") }
     }
@@ -883,12 +901,14 @@ zStackParticipantDidChange:
         }
     }
 
-    /// The three calls that have already returned on this device, and then a
-    /// full stop. Every one of them is marked first.
+    /// manager → presenter → view → activate, and then a full stop.
     ///
-    /// The stop is the whole point: the next call in the chain is the one that
-    /// killed 0.0.16, so it waits until the device has named the class and its
-    /// initialiser in the census below — not one run earlier.
+    /// Every object here has already been returned on this phone (0.0.19 did
+    /// exactly this much), so the chain up to `activate` is proven. `activate`
+    /// is not: it is marked before it runs, which is what makes a watchdog kill
+    /// name the call instead of leaving it to be inferred from where the log
+    /// stops. The stop after it is deliberate — the window is next round, and
+    /// only once this answer is on disk.
     private static func present(_ scene: NSObject, tag: String) {
         mark(tag + "-manager")
         let rawManager = value(of: scene, "uiPresentationManager")
@@ -908,23 +928,16 @@ zStackParticipantDidChange:
             emitNotes(AevonTakeNotes())
             return
         }
-        let presenterCls = NSStringFromClass(type(of: presenter))
-        Log.write("win: " + tag + " presenter ready cls=" + presenterCls)
-        // Reading state is free; it is a BOOL getter on an object we own. If
-        // `hosting` already says yes, the system activated this presenter for
-        // us and the next version needs no `activate` at all. If it says no,
-        // that is the one call left between here and a visible view.
-        Log.write("win: " + tag + " presenter state hosting=" + flag(AevonBoolOf(presenter, "isHosting"))
-                  + " active=" + flag(AevonBoolOf(presenter, "isActive"))
-                  + " invalidated=" + flag(AevonBoolOf(presenter, "isInvalidated")))
-        if let context = value(of: presenter, "presentationContext") {
-            Log.write("win: " + tag + " presentation context cls="
-                      + NSStringFromClass(type(of: context)))
-            emitIvars(context, tag: tag + ".ctx")
-        } else {
-            Log.write("win: " + tag + " presentation context absent")
-        }
+        Log.write("win: " + tag + " presenter ready cls="
+                  + NSStringFromClass(type(of: presenter)))
+        Log.write("win: " + tag + " presenter identifier="
+                  + (value(of: presenter, "identifier").map { String(describing: $0) } ?? "?"))
 
+        state(presenter, tag: tag, when: "before")
+
+        // The view exists before activate: 0.0.19 got one back without ever
+        // activating anything. So the view is made on demand, and hosting is
+        // what activate changes — which is why both readings are logged.
         mark(tag + "-view")
         let rawView = value(of: presenter, "presentationView")
         unmark()
@@ -933,19 +946,60 @@ zStackParticipantDidChange:
             emitNotes(AevonTakeNotes())
             return
         }
-        let viewCls = NSStringFromClass(type(of: view))
-        Log.write("win: " + tag + " presentationView cls=" + viewCls)
+        Log.write("win: " + tag + " presentationView cls=" + NSStringFromClass(type(of: view)))
+        describe(view, tag: tag + ".view")
 
-        // What the device says these three classes can actually do. This list is
-        // the whole menu the next version may choose from — no name outside it
-        // gets called, however plausible it looks in a string table.
-        emitNotes(AevonClassCensus(presenterCls,
-                                   "activate,invalidate,present,view,layer,window,super,host,scene"))
-        emitNotes(AevonClassCensus(NSStringFromClass(type(of: manager)),
-                                   "present,view,layer,window,super,host,scene,create"))
-        emitNotes(AevonClassCensus(viewCls, "layer,host,super,window,present"))
+        // The one call in this whole chain that has never run on this phone.
+        // Marked before it, so a watchdog kill names the call instead of
+        // leaving us to infer it from where the log stops.
+        mark(tag + "-activate")
+        let didActivate = AevonCallVoid(presenter, "activate")
+        unmark()
+        Log.write("win: " + tag + " activate call ran="
+                  + (didActivate == 1 ? "yes" : "no such method"))
 
-        Log.write("win: " + tag + " stopping before layer host")
+        state(presenter, tag: tag, when: "after")
+        describe(view, tag: tag + ".view")
+
+        Log.write("win: " + tag + " stopping before window")
+    }
+
+    /// The presenter's own account of itself, in the words its getters use.
+    /// Both readings are kept: `activate` can change `active` and leave
+    /// `hosting` alone, and a view that is not in a window is not hosting no
+    /// matter what was called on it.
+    private static func state(_ presenter: NSObject, tag: String, when moment: String) {
+        Log.write("win: " + tag + " presenter state " + moment
+                  + " hosting=" + flag(AevonBoolOf(presenter, "isHosting"))
+                  + " active=" + flag(AevonBoolOf(presenter, "isActive"))
+                  + " invalidated=" + flag(AevonBoolOf(presenter, "isInvalidated"))
+                  + " deactivatable=" + (AevonCan(presenter, "deactivate") ? "yes" : "no"))
+    }
+
+    /// Frame, layer tree and host container of a presentation view. A view that
+    /// is not in a window has no superview and its own coordinate space — that
+    /// is the difference between "the presenter made a view" and "the presenter
+    /// is hosting", and this line is where the difference shows.
+    private static func describe(_ view: NSObject, tag: String) {
+        guard let ui = view as? UIView else {
+            Log.write("win: " + tag + " not a UIView, cls=" + NSStringFromClass(type(of: view)))
+            return
+        }
+        let f = ui.frame
+        Log.write("win: " + tag + " frame="
+                  + String(format: "%.0fx%.0f at %.0f,%.0f", f.size.width, f.size.height,
+                           f.origin.x, f.origin.y)
+                  + " hidden=" + (ui.isHidden ? "yes" : "no")
+                  + " superview=" + (ui.superview.map { NSStringFromClass(type(of: $0)) } ?? "nil")
+                  + " sublayers=" + String(ui.layer.sublayers?.count ?? 0))
+        if let host = value(of: view, "hostContainerView") {
+            Log.write("win: " + tag + " host container view=" + NSStringFromClass(type(of: host)))
+        } else {
+            Log.write("win: " + tag + " host container view absent")
+        }
+        if let context = value(of: view, "currentPresentationContext") {
+            Log.write("win: " + tag + " presentation context=" + NSStringFromClass(type(of: context)))
+        }
     }
 
     /// -1 is "no such method", which is a different answer from 0.

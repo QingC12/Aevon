@@ -79,6 +79,15 @@ NSString *_Nullable AevonLayerNameScan(NSInteger limit);
 NSString *_Nullable AevonSelectorInfo(NSString *_Nullable className,
                                       NSString *_Nullable selectors);
 
+/// 0.0.20 — the two questions that cannot be answered by reading.
+/// `AevonClassMethods` lists the `+` side (class_copyMethodList on a class
+/// returns instance methods only, which is why UISceneLayerTargetFactory looked
+/// empty). `AevonCallVoid` runs a no-argument void method and answers 1 for
+/// "ran", 0 for "no such method" — a call that never happened and a call that
+/// returned nil are otherwise indistinguishable from Swift.
+NSString *_Nullable AevonClassMethods(NSString *_Nullable name, NSInteger limit);
+NSInteger AevonCallVoid(id _Nullable object, NSString *_Nullable name);
+
 @interface UIImage (AevonPrivateIcons)
 + (nullable UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID
                                                        format:(NSInteger)format

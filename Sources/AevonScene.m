@@ -547,3 +547,50 @@ NSInteger AevonBoolOf(id object, NSString *name) {
     BOOL (*call)(id, SEL) = (BOOL (*)(id, SEL))objc_msgSend;
     return call(object, sel) ? 1 : 0;
 }
+
+#pragma mark - What only a call can answer (0.0.20)
+
+// Everything up to here was reading. Two things cannot be read:
+//
+//   1. the class-side `+` methods — `class_copyMethodList` on a class returns
+//      instance methods only, so `UISceneLayerTargetFactory` looked empty when
+//      the factory is obviously a `+` API;
+//   2. whether `-activate` on a presenter actually flips it on.
+//
+// The first is a listing and costs nothing. The second is a call, so the caller
+// writes a step marker before it and deletes it after — the same discipline that
+// turned 0.0.16's "died somewhere after presentationView" into a fact.
+
+/// Every `+` method a class declares. Instance methods are `AevonFullCensus`.
+NSString *AevonClassMethods(NSString *name, NSInteger limit) {
+    Class cls = NSClassFromString(name);
+    if (cls == Nil) return [NSString stringWithFormat:@"meta %@ absent", name];
+    if (limit <= 0) limit = 30;
+
+    NSMutableString *out = [NSMutableString stringWithFormat:@"meta %@", name];
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(object_getClass(cls), &count);
+    if (methods != NULL) {
+        NSInteger printed = 0;
+        for (unsigned int i = 0; i < count && printed < limit; i++) {
+            [out appendFormat:@"\n  + %@", NSStringFromSelector(method_getName(methods[i]))];
+            printed += 1;
+        }
+        if ((NSInteger)count > printed) [out appendString:@"\n  …capped"];
+        free(methods);
+    }
+    return out;
+}
+
+/// `- (void)name`. 1 when it ran, 0 when the object does not answer it. Void,
+/// no arguments — the only shape `activate` and `deactivate` have. Returning the
+/// "did it run" answer here rather than a value matters: a call that never
+/// happened and a call that returned nil look identical from Swift.
+NSInteger AevonCallVoid(id object, NSString *name) {
+    if (object == nil || name == nil) return 0;
+    SEL sel = NSSelectorFromString(name);
+    if (![object respondsToSelector:sel]) return 0;
+    void (*call)(id, SEL) = (void (*)(id, SEL))objc_msgSend;
+    call(object, sel);
+    return 1;
+}
