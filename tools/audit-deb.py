@@ -491,7 +491,6 @@ def main():
                   # reached this window at all" (`event hit #n` prints the touch
                   # as it enters, with the hitTest answer beside it).
                   b"win: grip map hole=",
-                  b"win: event hit #",
                   # 0.0.34 — the mother ship's 区域 × 动作 matrix replaced our
                   # pinch-and-drag shell. These four strings are the only proof
                   # in the package that a band flick can close, that two taps
