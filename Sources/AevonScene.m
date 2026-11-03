@@ -495,11 +495,18 @@ void AevonBanPush(void) {
     AevonPushBanned = 1;
 }
 
-/// `foreground = YES, backgrounded = NO` on whatever settings object is offered,
-/// with each setter asked for before it is used. Returns whether anything was
-/// actually written — a class without these setters is a fact worth a trace line,
-/// not a crash.
-static BOOL AevonWriteForeground(id settings) {
+/// `foreground = front, backgrounded = !front` on whatever settings object is
+/// offered, with each setter asked for before it is used. Returns whether
+/// anything was actually written — a class without these setters is a fact worth
+/// a trace line, not a crash.
+///
+/// 0.0.32 made this a two-way switch. Aevon(30) proved the push works and the
+/// same readout proved what it leaves behind: `win: closed after 8s` and then
+/// `beat 32 fg=yes` — the card was gone, the presenter invalidated, and the
+/// scene still said "I am in front", so Douyin kept playing to an empty desktop.
+/// A settings value written by us does not expire with the card; it has to be
+/// put back.
+static BOOL AevonWriteFront(id settings, BOOL front) {
     if (settings == nil) return NO;
     BOOL wrote = NO;
     const char *ons[2] = {"setForeground:", "_setForeground:"};
@@ -507,13 +514,14 @@ static BOOL AevonWriteForeground(id settings) {
     for (int i = 0; i < 2; i++) {
         SEL sel = sel_registerName(ons[i]);
         if (![settings respondsToSelector:sel]) continue;
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(settings, sel, YES);
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(settings, sel, front);
         wrote = YES;
     }
     for (int i = 0; i < 2; i++) {
         SEL sel = sel_registerName(offs[i]);
         if (![settings respondsToSelector:sel]) continue;
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(settings, sel, NO);
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(settings, sel, !front);
+        wrote = YES;
     }
     return wrote;
 }
@@ -615,10 +623,10 @@ NSInteger AevonPushForeground(id scene) {
     // that are already mutable.
     id candidate = [current mutableCopy];
     if (candidate == nil) candidate = current;
-    BOOL inlineWrite = AevonWriteForeground(candidate);
+    BOOL inlineWrite = AevonWriteFront(candidate, YES);
 
     void (^amend)(id) = [^(id settings) {
-        AevonWriteForeground(settings);
+        AevonWriteFront(settings, YES);
     } copy];
 
     NSInteger path = 0;
@@ -653,6 +661,41 @@ NSInteger AevonPushForeground(id scene) {
     }
     AevonInPush = 0;
     return path;
+}
+
+/// Put the scene back where the card found it: `foreground=NO, backgrounded=YES`.
+///
+/// Aevon(30) is the reason this exists. The card came down, the presenter was
+/// invalidated, the hook was disarmed — and the next beat still read `fg=yes`,
+/// so Douyin kept playing to a desktop with nothing on it. Disarming a hook
+/// stops us contradicting the system; it does not undo a value already written.
+/// The settings have to be handed back.
+///
+/// Answers 1 when a door opened, 3 when the scene was already in the background,
+/// 0 when there was nothing to write through.
+NSInteger AevonPushBackground(id scene) {
+    if (scene == nil) return 0;
+    if (![NSThread isMainThread]) return 0;
+    if (AevonHookDepth > 0) return 0;
+
+    SEL settingsSel = sel_registerName("settings");
+    id current = nil;
+    if ([scene respondsToSelector:settingsSel]) {
+        current = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
+    }
+    if (AevonFlagOf(current, "isForeground") == 0
+        && AevonFlagOf(current, "isBackgrounded") == 1) {
+        return 3;
+    }
+    id candidate = [current mutableCopy];
+    if (candidate == nil) candidate = current;
+    AevonWriteFront(candidate, NO);
+    void (^amend)(id) = [^(id settings) {
+        AevonWriteFront(settings, NO);
+    } copy];
+    if (AevonCallBlockMethod(scene, @"updateSettingsWithBlock:", amend)) return 1;
+    if (AevonCallSettings(scene, candidate)) return 1;
+    return 0;
 }
 
 /// The first class whose *own* method list contains this selector. Own list, not

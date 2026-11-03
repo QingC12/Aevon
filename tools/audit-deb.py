@@ -485,6 +485,12 @@ def main():
                   b"win: keepalive beat ",
                   b"win: scene update methods ",
                   b"win: push banned for this run",
+                  # 0.0.32 — the hand-back. Aevon(30) closed the card and left
+                  # the settings saying `foreground=yes`, so Douyin played on to
+                  # an empty desktop. These two strings are the only proof in the
+                  # package that the scene is written back and read back.
+                  b"win: closed after 8s, background door=",
+                  b"win: background retry door=",
                   b"hook: selftest got=%ld want=102",
                   b"_setDeactivationReasons:onScene:withSettings:reason:",
                   b"_scene:interceptUpdateWithNewSettings:",

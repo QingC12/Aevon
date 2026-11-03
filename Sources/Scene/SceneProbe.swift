@@ -1092,7 +1092,14 @@ zStackParticipantDidChange:
         var misses = 0
         var wrote = 0
         var marked = false
+        // The clock has to be able to stop from the outside. Aevon(30) ran one
+        // beat past the close and read `fg=yes` on a card that no longer
+        // existed: the teardown had already handed the scene back, and a beat
+        // that landed a quarter-second later would have pushed it forward
+        // again. Stop is a flag, not a race.
+        var stopped = false
         keep = {
+            if stopped { return }
             beat += 1
             let live = value(of: scene, "settings")
             let fg = live.map { AevonBoolOf($0, "isForeground") } ?? -1
@@ -1194,11 +1201,40 @@ zStackParticipantDidChange:
         // It comes down by itself: a window whose only job is to prove the chain
         // has no business staying on screen, and one that stays is one that can
         // be left behind.
+        //
+        // 0.0.32 — and it hands the scene back while doing it. Aevon(30) closed
+        // the card, invalidated the presenter, disarmed the hook, and left the
+        // settings saying `foreground=yes`: Douyin went on playing to a desktop
+        // with nothing on it. The order below is the whole fix —
+        //   stop the clock   (so nothing pushes forward after the hand-back)
+        //   write the scene back to the background
+        //   dismantle the presenter
+        //   hide the window, disarm, and read the settings back
+        // — and the read-back is what turns "I called the hand-back" into "the
+        // scene really went back".
         DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
+            stopped = true
+            let door = AevonPushBackground(scene)
             _ = AevonCallVoid(presenter, "deactivate")
             _ = AevonCallVoid(presenter, "invalidate")
             FloatHost.hide()
-            Log.write("win: closed after 8s")
+            AevonHookDisarm()
+            let back = value(of: scene, "settings").map { AevonBoolOf($0, "isForeground") } ?? -1
+            Log.write("win: closed after 8s, background door=" + String(door)
+                      + " fg=" + flag(back))
+            // A hand-back that did not land is the same defect one layer down:
+            // the app would spend the rest of the session believing it is in
+            // front. One retry, half a second later, and then the log says so.
+            if back != 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    let again = AevonPushBackground(scene)
+                    let now = value(of: scene, "settings").map {
+                        AevonBoolOf($0, "isForeground")
+                    } ?? -1
+                    Log.write("win: background retry door=" + String(again)
+                              + " fg=" + flag(now))
+                }
+            }
         }
     }
 

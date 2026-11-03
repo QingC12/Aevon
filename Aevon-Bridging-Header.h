@@ -71,6 +71,13 @@ NSInteger AevonPushForeground(id _Nullable scene);
 /// the system calls a safe mode.
 void AevonBanPush(void);
 
+/// 0.0.32 — hand the settings back: `foreground=NO, backgrounded=YES`.
+/// A value written by this tweak does not expire when the card comes down, and
+/// Aevon(30) is the proof: the card was gone and Douyin was still playing to an
+/// empty desktop. Same doors as the push, same main-thread rule.
+/// 1 a door opened, 3 already in the background, 0 nothing to write through.
+NSInteger AevonPushBackground(id _Nullable scene);
+
 /// 0.0.28 — `- (void)name:(BOOL)`. 1 for "ran", 0 for "no such setter".
 NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL value);
 
