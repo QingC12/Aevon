@@ -353,7 +353,12 @@ def main():
         ring_items = plistlib.loads(ring_plist).get("items", [])
         actions = [item.get("action") for item in ring_items]
         keys = [item.get("key") for item in ring_items]
-        shapes = [k for k in keys if k in ("RTSIF", "RTSIH", "RTSIQ", "RTSIZ")]
+        # 0.0.41 — 圆盘 only. The four shape switches and 尾角 are gone from the
+        # panel on purpose (the operator asked for one shape, and a control that
+        # writes a key nothing reads is a lie), so the assertion is now that
+        # they are *absent*: a re-added RTSIH row would be a regression.
+        shapes = [k for k in keys if k in ("RTSIF", "RTSIH", "RTSIQ", "RTSIZ",
+                                           "LastIconAngle")]
         if "@ring.star" not in keys:
             bad("ring: no 收藏 row — 长按收藏 exists in the view but nothing "
                 "in Settings can show what is pinned")
@@ -361,8 +366,8 @@ def main():
             bad("ring: no previewRing: row — the carrier shape is unreachable")
         elif "@ring.summary" not in keys:
             bad("ring: no @ring.summary row — nothing reports the live geometry")
-        elif len(shapes) != 4:
-            bad(f"ring: {len(shapes)} of 4 shape switches present")
+        elif shapes:
+            bad(f"ring: {', '.join(shapes)} back in the panel — 0.0.41 is 圆盘 only")
         elif "!ring.desktop" not in keys:
             bad("ring: no !ring.desktop switch — the desktop host cannot be turned off")
         elif "editApps:" not in actions:
@@ -372,13 +377,13 @@ def main():
         elif "@ring.apps" not in keys or "@ring.grip" not in keys:
             bad("ring: the app list / grip position has no live row")
         else:
-            ok("ring: 4 shapes, live summary, preview, apps, grip reset, desktop switch")
+            ok("ring: 圆盘 only, live summary, preview, apps, grip reset, desktop switch")
 
     for token in (b"RingView", b"RingPreviewController", b"openPanel:",
                   b"PanelController", b"previewRing:", b"editApps:", b"resetGrip:",
                   b"AppListController", b"AppPickerController",
                   b"prefs: open app list", b"prefs: grip reset",
-                  b"prefs: preview trash", b"prefs: preview pin",
+                  b"prefs: preview pin",
                   b"_applicationIconImageForBundleIdentifier:"):
         if token not in prefs:
             bad(f"ring: {token.decode()} missing from the bundle binary")
@@ -395,7 +400,7 @@ def main():
     dylib_early = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
     for token in (b"RingHost", b"ring: hosted on desktop", b"LSApplicationWorkspace",
                   b"(operator list)", b"ring: grip moved to",
-                  b"ring: trash remove ", b"ring: pin toggle ", b"ring: rotate -> "):
+                  b"ring: pin toggle ", b"ring: rotate -> "):
         if token not in dylib_early:
             bad(f"host: {token.decode()} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")
@@ -515,7 +520,11 @@ def main():
                   b"ring: hover icon ",
                   b"win: icon launch ",
                   b"win: icon scene up after ",
-                  b"ring: capacity fit ",
+                  # 0.0.41 — 多圈。0.0.38-0.0.40 断言的是「几何让步」那一行：
+                  # 圆盘只有一圈，塞不下就只能扩半径或缩图标。现在没有让步可做，
+                  # 这一行报的是圈数与每圈几个 —— 「9 个图标怎么就显示了 9 个」
+                  # 从这行读，不用截图。
+                  b"ring: ring layout ",
                   # 0.0.34 — the mother ship's 区域 × 动作 matrix replaced our
                   # pinch-and-drag shell. Aevon(38) cut it down to five cells:
                   # both sides move and dock on a tap, the bottom band moves and

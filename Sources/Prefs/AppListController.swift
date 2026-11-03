@@ -157,9 +157,10 @@ extension AppListController: UITableViewDataSource, UITableViewDelegate {
     }
 
     func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-        let capacity = RingConfig.load().capacity
-        return "顺序即托盘顺序：第一个 App 落在起始角上，其余顺时针排。"
-             + "当前形状最多显示 \(capacity) 个，列表最多可存 \(RingApps.maxCount) 个。"
+        let config = RingConfig.load()
+        let inner = config.perRing(0)
+        return "顺序即托盘顺序：第一个 App 落在内圈的起始角上，其余顺时针排满内圈后向外扩一圈。"
+             + "当前内圈 \(inner) 个，外圈按半径自动增加容量；列表最多可存 \(RingApps.maxCount) 个。"
              + "改动立即作用到桌面，不需要重载。"
     }
 

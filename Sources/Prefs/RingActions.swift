@@ -22,9 +22,10 @@ enum RingActions {
     static func preview(from controller: UIViewController) {
         let started = Date()
         let config = RingConfig.load()
-        let loaded = RingApps.resolved(limit: 12)
+        let loaded = RingApps.resolved(limit: RingApps.maxCount)
         let milliseconds = Int(Date().timeIntervalSince(started) * 1000)
-        Log.write("prefs: ring preview shape=\(config.shape.title) icons=\(loaded.apps.count) "
+        Log.write("prefs: ring preview icons=\(loaded.apps.count) "
+                  + "rings=\(config.ringCount(for: loaded.apps.count)) "
                   + "source=\(loaded.source.rawValue) in \(milliseconds)ms")
 
         let preview = RingPreviewController(config: config,

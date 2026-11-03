@@ -89,7 +89,7 @@ final class RingHost: NSObject {
 
         observe()
         Log.write("ring: hosted on desktop (radius=\(Int(config.radius)) "
-                  + "icon=\(Int(config.iconWidth)) shape=\(config.shape.title))")
+                  + "icon=\(Int(config.iconWidth)) shape=圆盘)")
 
         // Warm the icon cache off the critical path. The first tap must not
         // pay for a LaunchServices enumeration; one second after mount is a
@@ -127,9 +127,7 @@ final class RingHost: NSObject {
         let updated = RingConfig.loadRuntime()
         let changed = updated.radius != config.radius
             || updated.iconWidth != config.iconWidth
-            || updated.shape != config.shape
             || updated.rotation != config.rotation
-            || updated.tail != config.tail
             || updated.speed != config.speed
             || updated.damping != config.damping
             || updated.customSpring != config.customSpring
@@ -146,7 +144,7 @@ final class RingHost: NSObject {
         var appsChanged = false
         if signature != appsSignature {
             appsSignature = signature
-            let loaded = RingApps.resolved(limit: 12)
+            let loaded = RingApps.resolved(limit: RingApps.maxCount)
             apps = loaded.apps
             appsChanged = true
             Log.write("ring: apps -> \(apps.count) (\(loaded.source.rawValue)), "
@@ -397,12 +395,13 @@ final class RingHost: NSObject {
         ring.onPick = { [weak self] app in
             self?.open(app)
         }
-        // 回收站 / 收藏 / 拖拽旋转 all end up in one file (apps.plist) or in the
-        // runtime snapshot. The view never writes anything itself, so the two
-        // hosts cannot disagree about who owns the data.
-        ring.onRemove = { [weak self] app in
-            self?.trash(app)
-        }
+        // 收藏 / 拖拽旋转 all end up in one file (apps.plist) or in the runtime
+        // snapshot. The view never writes anything itself, so the two hosts
+        // cannot disagree about who owns the data.
+        //
+        // 0.0.41 — 回收站 is gone. Deleting an app belonged to a drag that only
+        // ever happened by accident (the same drag rotates the disc), and it
+        // wrote to a file the operator could not see while doing it.
         ring.onPin = { [weak self] app in
             self?.pin(app)
         }
@@ -449,7 +448,7 @@ final class RingHost: NSObject {
         // draws placeholder tiles, and neither is documented as thread-safe.
         // Mount + 1 s is a quiet moment, so the cost is invisible.
         let started = Date()
-        let loaded = RingApps.resolved(limit: 12)
+        let loaded = RingApps.resolved(limit: RingApps.maxCount)
         apps = loaded.apps
         appsSignature = RingApps.signature()
 
@@ -464,19 +463,6 @@ final class RingHost: NSObject {
 
     // MARK: - 托盘编辑（桌面侧）
 
-    /// 回收站: the operator dragged the icon into the middle of the ring.
-    private func trash(_ app: RingApp) {
-        let ok = RingApps.remove(app.bundleID)
-        let result = ok ? "ok" : "write failed"
-        Log.write("ring: trash remove " + app.bundleID + " -> " + result)
-        reloadApps()
-        // Nothing left to show. Keeping an empty ring on screen would look like
-        // the delete broke the shape instead of emptying it.
-        if apps.isEmpty {
-            collapse(animated: true)
-        }
-    }
-
     /// 收藏 (`Star`). A pinned app moves to the head of the ring, which is the
     /// only ordering the master's ring has.
     private func pin(_ app: RingApp) {
@@ -487,16 +473,13 @@ final class RingHost: NSObject {
         reloadApps()
     }
 
-    /// Geometry set by dragging (旋转角, or 尾角 in the 任意 shape). Written to
-    /// the runtime snapshot so the ring comes back the way it was left; the
-    /// settings sliders stay the master control, so the next write from
-    /// Settings wins.
+    /// 旋转角 set by dragging the empty arc. Written to the runtime snapshot so
+    /// the ring comes back the way it was left; the settings slider stays the
+    /// master control, so the next write from Settings wins.
     private func persistGeometry(_ edited: RingConfig) {
         var snapshot = RingConfig.loadRuntime()
         snapshot.rotation = edited.rotation
-        snapshot.tail = edited.tail
         config.rotation = edited.rotation
-        config.tail = edited.tail
         if snapshot.writeSnapshot() {
             Log.write("ring: rotate -> " + config.summary)
         }
@@ -506,7 +489,7 @@ final class RingHost: NSObject {
     /// are cached by bundle id, so this is an array sort, not a redraw of the
     /// whole catalogue.
     private func reloadApps() {
-        let loaded = RingApps.resolved(limit: 12)
+        let loaded = RingApps.resolved(limit: RingApps.maxCount)
         apps = loaded.apps
         appsSignature = RingApps.signature()
         Log.write("ring: apps -> " + String(apps.count) + " (" + loaded.source.rawValue + ")")

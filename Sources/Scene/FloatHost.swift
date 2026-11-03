@@ -80,10 +80,23 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private let minWidth: CGFloat = 140
     private let closeSize: CGFloat = 30
     /// `GestureBorderWidth` in her settings, described there as 减小浮窗手势宽度.
-    /// 0.0.35 shipped 40 pt; the operator asked for 32. Every point here is a
-    /// point of desktop the ring takes away from the card's surroundings, so a
-    /// narrower band is also a card that sits closer to the icons behind it.
-    private let band: CGFloat = 32
+    ///
+    /// 0.0.35 shipped 40 pt. 0.0.40 answered "the band is in the way" with 32,
+    /// and Aevon(39) answered that with 「移除热区可见性后，四周的手势失效」:
+    /// the painted band was the only thing saying where the 32 pt edge was, and
+    /// once it was gone a thumb landing 34 pt out was touching the desktop.
+    /// 40 is the master's own default and it is back; the visible band stays
+    /// gone, because the problem was never that it was visible.
+    private let band: CGFloat = 40
+    /// 0.0.41 — 6 pt of tolerance on the *outside*. 0.0.37's Aevon(35) shows a
+    /// thumb landing at x=390 on a card whose right edge was 375: 15 pt outside,
+    /// comfortably inside a 40 pt band. The same thumb on 0.0.40's 32 pt band
+    /// touched nothing. `band` is what the zone map is written in; `slack` is
+    /// how far past it a touch still counts, and the two are added once, here,
+    /// so the hit area and the zone arithmetic can never drift apart.
+    private let slack: CGFloat = 6
+    /// The ring's real half-width: the band plus its tolerance.
+    private var reach: CGFloat { band + slack }
     /// 快速上滑: a flick, not a drag. 900 pt/s is above a deliberate slow drag and
     /// below the speed a thumb reaches when it is actually swiping away.
     private let flick: CGFloat = 900
@@ -338,10 +351,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// exists to be touched.
     private func installGrip(on root: UIView) {
         guard let card = card else { return }
-        let grip = GripView(frame: card.frame.insetBy(dx: -band, dy: -band))
+        let grip = GripView(frame: card.frame.insetBy(dx: -reach, dy: -reach))
         grip.backgroundColor = .clear
         grip.isUserInteractionEnabled = true
-        grip.hole = CGRect(x: band, y: band, width: card.bounds.width, height: card.bounds.height)
+        grip.hole = CGRect(x: reach, y: reach,
+                           width: card.bounds.width, height: card.bounds.height)
         root.addSubview(grip)
         self.grip = grip
         syncGrip()
@@ -351,8 +365,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// event is a ring the finger misses by one band.
     private func syncGrip() {
         guard let card = card, let grip = grip else { return }
-        grip.frame = card.frame.insetBy(dx: -band, dy: -band)
-        grip.hole = CGRect(x: band, y: band,
+        grip.frame = card.frame.insetBy(dx: -reach, dy: -reach)
+        grip.hole = CGRect(x: reach, y: reach,
                            width: card.bounds.width, height: card.bounds.height)
     }
 
@@ -387,7 +401,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// the geometry are written in. A point outside the card comes back negative
     /// or past the size, and that is precisely how a band is recognised.
     private func cardPoint(_ point: CGPoint) -> CGPoint {
-        CGPoint(x: point.x - band, y: point.y - band)
+        CGPoint(x: point.x - reach, y: point.y - reach)
     }
 
     // MARK: - gestures

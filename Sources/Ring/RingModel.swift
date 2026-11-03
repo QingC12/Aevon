@@ -1,9 +1,9 @@
 //
 //  RingModel.swift — Aevon, carrier shape ("承载形状").
 //
-//  Pure numbers: reading the 12 Ring keys, and turning them into icon
-//  positions. No UIKit, no side effects, so this file can be reasoned about
-//  (and unit-checked) without a device.
+//  Pure numbers: reading the ring keys and turning them into icon positions.
+//  No UIKit, no side effects, so this file can be reasoned about (and
+//  unit-checked) without a device.
 //
 //  Angle convention, fixed here once:
 //      0°   = straight up (12 o'clock)
@@ -19,50 +19,33 @@
 //      radius ≈ 54 pt, icon ≈ 46 pt → consistent with Radius=64, IconWidth=44
 //      at the master's own scale factor.
 //
+//  0.0.41 — 圆盘 only, and more than one of them.
+//
+//  The master ships four shapes and the operator asked for one: 圆盘. The other
+//  three are gone from the model *and* from Settings, not hidden behind a
+//  default, because a control that writes a key nothing reads is a lie told in
+//  a list. RTSIH / RTSIQ / RTSIZ / LastIconAngle are recorded as dropped in
+//  tools/gen-settings.py so the 81-key reconciliation still closes.
+//
+//  What replaces them is the one thing a single circle could not do: grow
+//  outwards. A circle holds a fixed number of icons at a given radius, and
+//  0.0.38-0.0.40 answered "more icons than fit" by silently growing the radius
+//  or shrinking the icons — both of which are the geometry arguing with the
+//  operator. Now the ring keeps its radius and adds a ring: index order fills
+//  the inner circle first, then the next one out, and only the count decides
+//  how many.
+//
 
 import Foundation
 import CoreGraphics
-
-// MARK: - Shape
-
-enum RingShape: Int {
-    case full = 0       // RTSIF 圆盘
-    case half           // RTSIH 半圆盘
-    case quarter        // RTSIQ 直角盘
-    case free           // RTSIZ 任意角度
-
-    var title: String {
-        switch self {
-        case .full:    return "圆盘"
-        case .half:    return "半圆盘"
-        case .quarter: return "直角盘"
-        case .free:    return "任意角度"
-        }
-    }
-
-    /// Degrees actually covered. `free` is derived from 旋转角/尾角 instead.
-    var sweep: CGFloat {
-        switch self {
-        case .full:    return 360
-        case .half:    return 180
-        case .quarter: return 90
-        case .free:    return 0
-        }
-    }
-
-    /// A full circle closes on itself, so its icon count is not "sweep/step+1".
-    var isClosed: Bool { self == .full }
-}
 
 // MARK: - Configuration
 
 struct RingConfig {
 
-    var shape: RingShape = .full
-    var radius: CGFloat = 64
+    var radius: CGFloat = 64         // 内圈半径
     var iconWidth: CGFloat = 44
-    var rotation: CGFloat = 0        // 旋转角
-    var tail: CGFloat = 0            // 尾角
+    var rotation: CGFloat = 0        // 起点角
     var damping: CGFloat = 0.82      // 阻尼系数
     var customSpring: Bool = true    // 动画弹性
     var star: Bool = true            // 收藏（长按图标）
@@ -71,8 +54,8 @@ struct RingConfig {
     var speed: CGFloat = 1           // 速度
 
     /// RingEnv._pinSpeed. How fast a 收藏 lands in its new place. Not one of
-    /// the 81 keys — the master keeps it as a derived value, so it is derived
-    /// here too instead of being invented as a control.
+    /// the master's 81 keys — the master keeps it as a derived value, so it is
+    /// derived here too instead of being invented as a control.
     var pinSpeed: CGFloat = 1.6
 
     /// "Put the grip on the home screen." Not one of the master's 81 keys, so
@@ -83,14 +66,15 @@ struct RingConfig {
     /// Every key whose change has to be mirrored to ring.plist. One list, so a
     /// new ring control cannot be added to the UI and forgotten here.
     static let mirroredKeys: Set<String> = [
-        "RTSIF", "RTSIH", "RTSIQ", "RTSIZ",
-        "Radius", "IconWidth", "RotationAngle", "LastIconAngle", "Star",
+        "Radius", "IconWidth", "RotationAngle", "Star",
         "DampingFraction", "CustomSpringAnimation", "VIBRATE", "INTENSITY",
         "Speed", "!ring.desktop",
     ]
 
     /// Gap kept between two neighbouring icons, in points. The master's own
     /// screenshots never show icons touching, so this is a floor, not a taste.
+    /// It is also the gap between two rings: 44 + 6 = 50 pt of radial distance
+    /// is what keeps an icon on ring 2 from overlapping one on ring 1.
     static let iconGap: CGFloat = 6
 
     // MARK: Reading
@@ -116,24 +100,9 @@ struct RingConfig {
         }
 
         var config = RingConfig()
-
-        // Mutually exclusive in the master's UI. Order matters: if more than
-        // one is on, the most specific wins, so a stray write can never leave
-        // the ring in a shape nothing can describe.
-        if flag("RTSIZ", false) {
-            config.shape = .free
-        } else if flag("RTSIQ", false) {
-            config.shape = .quarter
-        } else if flag("RTSIH", false) {
-            config.shape = .half
-        } else {
-            config.shape = .full
-        }
-
         config.radius = clamp(number("Radius", 64), 40, 120)
         config.iconWidth = clamp(number("IconWidth", 44), 28, 64)
         config.rotation = clamp(number("RotationAngle", 0), -180, 180)
-        config.tail = clamp(number("LastIconAngle", 0), -180, 180)
         config.damping = clamp(number("DampingFraction", 0.82), 0.10, 1.0)
         config.customSpring = flag("CustomSpringAnimation", true)
         config.star = flag("Star", true)
@@ -156,23 +125,16 @@ struct RingConfig {
     /// and a file is the one thing both processes see the same way.
     var snapshot: [String: Any] {
         return [
-            "shape": shape.title,
-            "shapeIndex": shape.rawValue,
-            "RTSIF": shape == .full,
-            "RTSIH": shape == .half,
-            "RTSIQ": shape == .quarter,
-            "RTSIZ": shape == .free,
             "Radius": Double(radius),
             "IconWidth": Double(iconWidth),
             "RotationAngle": Double(rotation),
-            "LastIconAngle": Double(tail),
             "DampingFraction": Double(damping),
             "CustomSpringAnimation": customSpring,
             "Star": star,
             "VIBRATE": haptic,
             "INTENSITY": Double(intensity),
             "Speed": Double(speed),
-            "capacity": capacity,
+            "capacity": perRing(0),
             "summary": summary,
             "desktop": desktop,
             "writtenAt": Date().timeIntervalSince1970,
@@ -190,10 +152,6 @@ struct RingConfig {
         guard let dict = NSDictionary(contentsOfFile: Aevon.ringPath) as? [String: Any] else {
             return nil
         }
-        // A snapshot without a readable shape was not written by this version;
-        // ignore it instead of inventing a geometry from half a file.
-        guard let raw = (dict["shapeIndex"] as? NSNumber)?.intValue,
-              let shape = RingShape(rawValue: raw) else { return nil }
 
         func number(_ key: String, _ fallback: CGFloat) -> CGFloat {
             return (dict[key] as? NSNumber).map { CGFloat($0.doubleValue) } ?? fallback
@@ -203,11 +161,9 @@ struct RingConfig {
         }
 
         var config = RingConfig()
-        config.shape = shape
         config.radius = clamp(number("Radius", 64), 40, 120)
         config.iconWidth = clamp(number("IconWidth", 44), 28, 64)
         config.rotation = clamp(number("RotationAngle", 0), -180, 180)
-        config.tail = clamp(number("LastIconAngle", 0), -180, 180)
         config.damping = clamp(number("DampingFraction", 0.82), 0.10, 1.0)
         config.customSpring = flag("CustomSpringAnimation", true)
         config.star = flag("Star", true)
@@ -224,106 +180,65 @@ struct RingConfig {
         return loadSnapshot() ?? load()
     }
 
-    // MARK: Derived
+    // MARK: Rings — 0.0.41 的内圈 / 外圈几何
 
-    /// Degrees between neighbours, or 0 when the shape cannot hold two icons.
-    var sweep: CGFloat {
-        if shape.isClosed { return 360 }
-        if shape == .free {
-            let span = tail - rotation
-            return abs(span) < 5 ? 360 : span
-        }
-        return shape.sweep
+    /// Radius of ring `ring`. Ring 0 is the operator's own 半径 slider; every
+    /// ring further out clears the previous one by icon + gap, which is the
+    /// same number that keeps two neighbours on one ring apart.
+    func radius(of ring: Int) -> CGFloat {
+        if ring <= 0 { return Swift.max(8, radius) }
+        return Swift.max(8, radius) + CGFloat(ring) * (iconWidth + RingConfig.iconGap)
     }
 
-    /// A ring that covers a full turn — either because the shape is closed or
-    /// because "任意" was dragged until the tail met the head.
-    var closedRing: Bool {
-        return shape.isClosed || abs(sweep) >= 359.5
-    }
-
-    /// Where the arc begins.
-    ///
-    /// A closed ring starts at 旋转角 and wraps. The half and quarter shapes are
-    /// centred on 旋转角 (so 0° means "straight up"), which is how the master's
-    /// own screenshots read. 任意 starts at 旋转角 and ends at 尾角 — that is
-    /// exactly the pair the two sliders name.
-    var arcStart: CGFloat {
-        if closedRing { return rotation }
-        if shape == .free { return rotation }
-        return rotation - sweep / 2
-    }
-
-    /// The arc at a given expansion progress. RingEnv calls that progress
-    /// `_angleScale`; it is 0 → 1, not a scale factor.
-    func arc(progress: CGFloat) -> RingArc {
-        return RingArc(start: arcStart, sweep: sweep,
-                       progress: Swift.min(1, Swift.max(0, progress)))
-    }
-
-    /// How many icons fit without touching. A closed ring must also close the
-    /// gap back to the first icon, which is why it uses a plain division.
-    var capacity: Int {
-        let step = 2 * asin(Swift.min(1, (iconWidth + RingConfig.iconGap) / (2 * radius)))
+    /// How many icons fit on one ring without touching. This is the same chord
+    /// arithmetic 0.0.38 used for the whole circle, applied per ring: a chord
+    /// of icon + gap subtends 2·asin(c / 2r) at the centre.
+    func perRing(_ ring: Int) -> Int {
+        let r = radius(of: ring)
+        let chord = iconWidth + RingConfig.iconGap
+        guard r > chord / 2 else { return 3 }
+        let step = 2 * asin(Swift.min(1, chord / (2 * r)))
         guard step > 0.01 else { return 3 }
-        let span = abs(sweep) * .pi / 180
-        if closedRing {
-            return Swift.max(3, Swift.min(12, Int(span / step)))
+        return Swift.max(3, Int((2 * Double.pi) / Double(step)))
+    }
+
+    /// How many rings `count` icons need. Summed capacity, not a division by
+    /// the inner ring: the second ring holds more than the first, so eight
+    /// icons fit one ring while nine need two only because ring 0 is full.
+    func ringCount(for count: Int) -> Int {
+        guard count > 0 else { return 0 }
+        var total = 0
+        var ring = 0
+        while total < count, ring < 8 {
+            total += perRing(ring)
+            ring += 1
         }
-        return Swift.max(2, Swift.min(12, Int(span / step) + 1))
+        return Swift.max(1, ring)
     }
 
-    /// `capacity` for a geometry this config does not have yet. Written as a
-    /// copy rather than as a second formula: two spellings of one rule is how
-    /// "the ring holds 7" and "the ring holds 8" both end up true.
-    private func capacity(radius r: CGFloat, iconWidth w: CGFloat) -> Int {
-        var probe = self
-        probe.radius = r
-        probe.iconWidth = w
-        return probe.capacity
-    }
-
-    /// 0.0.38 — 图标数量不该被几何偷偷截掉一半。
+    /// How many icons land on each ring.
     ///
-    /// Aevon(36): the operator put nine apps in the ring, tapped the dot, and
-    /// counted seven. Nothing had failed — `capacity` is a fact about a circle
-    /// (R64 with 44 pt icons holds exactly seven), and the eighth icon was never
-    /// built. Silently truncating the operator's own list is the wrong answer to
-    /// a geometry question, so the geometry gives way instead.
-    ///
-    /// 0.0.39 — the order matters, and 0.0.38 had it backwards.
-    ///
-    /// 0.0.38 shrank the icons first (44 → 26 pt) and only grew the circle
-    /// afterwards. Aevon(37) shows what that looks like: twelve icons on a
-    /// 64 pt circle at 26 pt each — small stamps crowded inside a shape the
-    /// master never draws that way. The master is explicit about which number
-    /// belongs to whom: `_iconWidth` is a setting the operator chose and the
-    /// sliders still show, while `_radius` is the scale of the shape. Shrinking
-    /// the setting to fit the shape is exactly the trade that made the ring
-    /// stop looking like the master's.
-    ///
-    /// So the circle grows first (64 → 120 pt, the slider's own ceiling) and the
-    /// icons keep the width they were given. Only when the circle is at its
-    /// ceiling do the icons give way, and only then. A list that fits at neither
-    /// is still cut, and the caller logs that instead of pretending.
-    ///
-    /// The operator's own numbers are never written back: this is a rendering
-    /// decision, and the sliders stay the master control.
-    func fitted(to count: Int) -> (radius: CGFloat, iconWidth: CGFloat) {
-        var r = radius
-        var w = iconWidth
-        var steps = 0
-        while capacity(radius: r, iconWidth: w) < count, steps < 64 {
-            steps += 1
-            if r < 120 {
-                r = Swift.min(120, r + 4)
-            } else if w > 26 {
-                w = Swift.max(26, w - 2)
-            } else {
-                break
+    /// Filling the inner ring to the brim and dropping the remainder outside
+    /// would put a single lonely icon on ring 2 for nine apps. Spreading them
+    /// evenly looks like one shape growing rather than one shape with a stray,
+    /// and the two bounds keep it honest: `floorHere` is the number the outer
+    /// rings cannot absorb (so nothing overflows), `even` is the fair share.
+    func distribution(for count: Int) -> [Int] {
+        let rings = ringCount(for: count)
+        guard rings > 0 else { return [] }
+        var counts = [Int](repeating: 0, count: rings)
+        var remaining = count
+        for ring in 0..<rings {
+            var later = 0
+            if ring + 1 < rings {
+                for outer in (ring + 1)..<rings { later += perRing(outer) }
             }
+            let floorHere = Swift.max(0, remaining - later)
+            let even = Int((Double(remaining) / Double(rings - ring)).rounded(.up))
+            counts[ring] = Swift.min(perRing(ring), Swift.max(floorHere, even))
+            remaining -= counts[ring]
         }
-        return (r, w)
+        return counts
     }
 
     /// One line for the settings row: what the ring is right now.
@@ -331,93 +246,49 @@ struct RingConfig {
     /// `%d` fed with a Swift Int is a 32/64-bit mismatch waiting to print
     /// garbage on the one row whose job is to tell the truth.
     var summary: String {
-        let angle: String
-        if shape == .free {
-            angle = "\(Int(rotation))°→\(Int(tail))°"
-        } else if rotation == 0 {
-            angle = "起点 0°"
-        } else {
-            angle = "起点 \(Int(rotation))°"
-        }
-        return "\(shape.title) · R\(Int(radius)) · \(Int(iconWidth))pt · \(capacity) 个 · \(angle)"
+        let angle = rotation == 0 ? "起点 0°" : "起点 \(Int(rotation))°"
+        return "圆盘 · R\(Int(radius)) · \(Int(iconWidth))pt · 内圈 \(perRing(0)) · \(angle)"
     }
 }
 
 // MARK: - Geometry
 
-/// The sweep, as a value the animation can carry around.
-///
-/// 母本 P4 的四条（逆向 A 级）:
-///   1  `_angleScale` 是展开进度 0→1，不是缩放；
-///   2  可见弧段 = `_rotationAngle` → `_tailDegree` 按 `_angleScale` 扫过；
-///   3  每个图标按自身角度决定出场时刻 → 依次弹出（stagger）；
-///   4  radius / iconWidth / offset 随进度同步插值 → 从边缘长出来。
-///
-/// All four are expressed by this one struct plus `slotFraction`: nothing else
-/// in the animation needs to know what a shape is.
-struct RingArc {
-    let start: CGFloat      // degrees
-    let sweep: CGFloat      // signed degrees
-    var progress: CGFloat   // 0...1
-
-    /// Where the tail currently is. Icons beyond this have not appeared yet.
-    var visibleEnd: CGFloat { return start + sweep * progress }
-
-    /// How far along the sweep a given angle sits: 0 at the head, 1 at the
-    /// tail. This is the icon's own cue — 母本第 3 条.
-    func fraction(of angle: CGFloat) -> CGFloat {
-        guard abs(sweep) > 0.01 else { return 1 }
-        return (angle - start) / sweep
-    }
-
-    /// True once the sweep has passed that angle.
-    func reached(_ angle: CGFloat) -> Bool {
-        return fraction(of: angle) <= progress + 0.0001
-    }
-}
-
 struct RingSlot {
     let angle: CGFloat      // degrees, 0 = up, clockwise
     let center: CGPoint     // in the host view's coordinate space
-    let fraction: CGFloat   // 0 = head of the arc, 1 = tail
+    let radius: CGFloat     // this slot's own ring radius
+    let ring: Int           // 0 = 内圈
+    let fraction: CGFloat   // 0 = first icon to appear, 1 = last
 }
 
-/// Places `count` icons on the configured shape around `pivot`.
+/// Places `count` icons on concentric rings around `pivot`.
 ///
-/// Open shapes (half / quarter / free) spread their icons *inclusive* of both
-/// ends, so the first and last icon sit exactly on the boundary. A closed ring
-/// divides evenly instead, so there is no double-occupied angle at 0°/360°.
-func ringSlots(pivot: CGPoint, count: Int, config: RingConfig,
-               radius: CGFloat? = nil, rotation: CGFloat? = nil) -> [RingSlot] {
+/// The array is in the operator's own order and the view draws it by index, so
+/// "sorting" and "which ring" are the same fact read once: index 0 is the head
+/// of the inner ring, and the list wraps outwards. Ring 2 onwards is rotated by
+/// half a step so two rings with the same count do not line up into spokes.
+func ringSlots(pivot: CGPoint, count: Int, config: RingConfig) -> [RingSlot] {
     guard count > 0 else { return [] }
 
-    let useRadius = radius ?? config.radius
-    let useRotation = rotation ?? config.rotation
-    var tuned = config
-    tuned.rotation = useRotation
-    let start = tuned.arcStart
-    let span = tuned.sweep
+    let counts = config.distribution(for: count)
+    var slots: [RingSlot] = []
+    slots.reserveCapacity(count)
+    var placed = 0
 
-    var angles: [CGFloat] = []
-    angles.reserveCapacity(count)
-
-    if config.closedRing {
-        let step = 360 / CGFloat(count)
-        for index in 0..<count {
-            angles.append(start + CGFloat(index) * step)
-        }
-    } else {
-        let step = count > 1 ? span / CGFloat(count - 1) : 0
-        for index in 0..<count {
-            angles.append(start + CGFloat(index) * step)
+    for (ring, n) in counts.enumerated() where n > 0 {
+        let r = config.radius(of: ring)
+        let step = 360 / CGFloat(n)
+        let phase: CGFloat = ring % 2 == 0 ? 0 : step / 2
+        for index in 0..<n {
+            let angle = config.rotation + phase + CGFloat(index) * step
+            let radians = angle * .pi / 180
+            let point = CGPoint(x: pivot.x + r * sin(radians),
+                                y: pivot.y - r * cos(radians))
+            let fraction = count > 1 ? CGFloat(placed) / CGFloat(count - 1) : 0
+            slots.append(RingSlot(angle: angle, center: point, radius: r,
+                                  ring: ring, fraction: fraction))
+            placed += 1
         }
     }
-
-    let arc = RingArc(start: start, sweep: span, progress: 1)
-    return angles.map { angle in
-        let radians = angle * .pi / 180
-        let point = CGPoint(x: pivot.x + useRadius * sin(radians),
-                            y: pivot.y - useRadius * cos(radians))
-        return RingSlot(angle: angle, center: point, fraction: arc.fraction(of: angle))
-    }
+    return slots
 }

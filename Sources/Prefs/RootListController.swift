@@ -125,22 +125,6 @@ final class RootListController: PSListController {
                 Log.write("settings: G1 pause injection -> \(on ? "on" : "off")")
                 refreshLiveRows()
                 return
-            case "RTSIF", "RTSIH", "RTSIQ", "RTSIZ":
-                // The master's four shapes are a radio group, not four switches.
-                // Turning one on has to switch the other three off in the same
-                // breath, otherwise the ring would be asked to be a circle and
-                // a quarter-circle at once and the answer would depend on the
-                // order the reader happened to check them in.
-                if on {
-                    let store = UserDefaults(suiteName: Aevon.domain)
-                    for other in ["RTSIF", "RTSIH", "RTSIQ", "RTSIZ"] where other != key {
-                        store?.set(false, forKey: other)
-                    }
-                    store?.synchronize()
-                }
-                super.setPreferenceValue(value, specifier: specifier)
-                refreshLiveRows()
-                return
             default:
                 break
             }

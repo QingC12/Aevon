@@ -1,7 +1,7 @@
 //
 //  RingView.swift — Aevon, the carrier shape itself.
 //
-//  What it draws: N app icons sitting on the arc described by RingModel.
+//  What it draws: N app icons sitting on the rings described by RingModel.
 //  Nothing else. No window, no gesture hijack of its own, no app launching
 //  policy — this view is deliberately a leaf, so the settings preview and the
 //  home-screen host can both run it unchanged.
@@ -17,15 +17,22 @@
 //  icons exist yet, how far out they sit, how big they are — is a function of
 //  it. That is why this file has a display link instead of a dozen nested
 //  UIView animations: the master interpolates per frame (its 16 `xxxLast`
-//  shadow fields exist for exactly that), and a per-icon stagger driven by
-//  angle cannot be expressed as one UIView animation anyway.
+//  shadow fields exist for exactly that), and a per-icon stagger cannot be
+//  expressed as one UIView animation anyway.
+//
+//  0.0.41 — 圆盘 only, many rings, and two gestures fewer.
+//
+//  The 回收站 (drag an icon to the middle to delete) is gone: it was reachable
+//  only by dragging an icon *off* the shape, which is also how the shape is
+//  rotated, and the operator never used it. Deleting an app belongs to
+//  应用 → 编辑应用, where the list is visible while it happens. 尾角定形 went
+//  with 任意角度, so the pan has exactly one meaning now: turn the disc.
 //
 //  Gestures (all local to the ring, all reversible):
 //    · tap icon         launch / pick
-//    · drag icon        move it; drop near the pivot to删除 (回收站)
+//    · slide across     highlight follows the finger, release opens it
 //    · long-press icon  收藏 / 取消收藏 (`Star`)
 //    · drag empty arc   rotate the whole shape
-//    · drag last icon   任意 shape only: set the tail (`RTSIZ` 拖拽定形)
 //
 
 import Foundation
@@ -36,14 +43,9 @@ final class RingView: UIView {
     // MARK: Callbacks — the host decides what a gesture *means*
 
     var onPick: ((RingApp) -> Void)?
-    /// 回收站: the operator dragged an icon into the middle.
-    var onRemove: ((RingApp) -> Void)?
     /// 收藏: long-press toggled `Star` for this app.
     var onPin: ((RingApp) -> Void)?
-    /// 拖拽改变了几何（旋转角，或「任意」形状的尾角）。The host persists it.
-    /// Whole config rather than just the angle: dragging the last icon in the
-    /// 任意 shape changes the tail, and a callback that only carries rotation
-    /// would silently drop that.
+    /// 拖拽改变了旋转角。The host persists it.
     var onConfigChange: ((RingConfig) -> Void)?
     /// A tap that hit the ring but not an icon. The host collapses.
     var onBackgroundTap: (() -> Void)?
@@ -53,15 +55,6 @@ final class RingView: UIView {
     private(set) var config: RingConfig
     private var apps: [RingApp]
     private var pivot: CGPoint
-
-    /// 0.0.38 — the operator's geometry, adjusted only when their own list does
-    /// not fit in it. `nil` means the sliders' numbers are already the truth,
-    /// which is the normal case and the one that must cost nothing.
-    private var fitted: RingConfig?
-    /// Every geometric read goes through here, never through `config`: a ring
-    /// that lays its icons out with one radius and hit-tests them with another
-    /// is a ring whose icons are not where they are drawn.
-    private var geo: RingConfig { fitted ?? config }
 
     private var iconViews: [UIView] = []
     private var slots: [RingSlot] = []
@@ -77,16 +70,9 @@ final class RingView: UIView {
     private var collapseCompletion: (() -> Void)?
 
     // Gesture bookkeeping
-    private enum PanMode { case none, rotate, tail, icon }
-    private var panMode: PanMode = .none
-    private var panIcon = -1
+    private var panning = false
     private var panAnchorAngle: CGFloat = 0
     private var panStartRotation: CGFloat = 0
-    private var panStartTail: CGFloat = 0
-    private var panStartCenter: CGPoint = .zero
-    private var trashActive = false
-    private var trashView: UIView?
-    private var isDragging = false
 
     // MARK: 0.0.39 — 手指滑过图标 (母本 `_selected` + `fingerLocation`)
 
@@ -104,9 +90,9 @@ final class RingView: UIView {
     /// lived for one frame and the shape started turning under it.
     ///
     /// A slide across the icons is a *tangential* move: the distance to the pivot
-    /// barely changes. Leaving the band — toward the centre for 回收站, or out
-    /// past the icons — is a *radial* move. One number separates the two, and it
-    /// is the number the master keeps (`_translationPadding`).
+    /// barely changes. Leaving the band — toward the centre, or out past the
+    /// icons — is a *radial* move. One number separates the two, and it is the
+    /// number the master keeps (`_translationPadding`).
     private let dragThreshold: CGFloat = 10
     /// The touch is still in the pick phase (no drag has started yet).
     private var hovering = false
@@ -177,10 +163,10 @@ final class RingView: UIView {
             return
         }
 
-        applyFit(apps.count)
-        iconCount = Swift.min(apps.count, geo.capacity)
-        slots = ringSlots(pivot: pivot, count: iconCount, config: geo)
+        iconCount = apps.count
+        slots = ringSlots(pivot: pivot, count: iconCount, config: config)
         bornAt = Array(repeating: 0, count: iconCount)
+        logLayout()
 
         for (index, _) in slots.enumerated() {
             let icon = makeIconView(apps[index % apps.count])
@@ -193,31 +179,23 @@ final class RingView: UIView {
         }
     }
 
-    /// 0.0.38 — resolve "does the operator's list fit the operator's geometry"
-    /// once, before any view exists, and say so in the log when it does not.
-    private func applyFit(_ count: Int) {
-        let target = config.fitted(to: count)
-        guard target.iconWidth != config.iconWidth || target.radius != config.radius else {
-            fitted = nil
-            return
+    /// The one line that makes "it shows eight of my nine icons" answerable
+    /// from the log instead of from a screenshot: how many rings the list
+    /// needed and what each of them holds. 0.0.38-0.0.40 logged a 让步
+    /// (`capacity fit`) because the shape was arguing with the list; there is
+    /// nothing to concede now, only a shape to describe.
+    private func logLayout() {
+        let counts = config.distribution(for: iconCount)
+        var body = ""
+        for (ring, n) in counts.enumerated() {
+            body += (ring == 0 ? "" : "/") + String(n)
         }
-        var adjusted = config
-        adjusted.iconWidth = target.iconWidth
-        adjusted.radius = target.radius
-        let changed = fitted.map {
-            $0.iconWidth != adjusted.iconWidth || $0.radius != adjusted.radius
-        } ?? true
-        fitted = adjusted
-        guard changed else { return }
-        // Two lets: one long concatenation of String(Int()) is a type-checker
-        // timeout, and 0.0.30 already lost a build to exactly that.
-        let head = "ring: capacity fit " + String(count) + " icons into R"
-        let tail = " <- " + String(Int(target.radius)) + "/" + String(Int(target.iconWidth))
-        Log.write(head + String(Int(config.radius)) + "/" + String(Int(config.iconWidth)) + tail)
+        Log.write("ring: ring layout " + String(iconCount) + " icons -> "
+                  + String(counts.count) + " ring(s) " + body)
     }
 
     private func makeIconView(_ app: RingApp) -> UIView {
-        let side = geo.iconWidth
+        let side = config.iconWidth
         let container = UIView(frame: CGRect(x: 0, y: 0, width: side, height: side))
         container.layer.cornerRadius = side * 0.2237     // iOS squircle ratio
         container.layer.cornerCurve = .continuous
@@ -328,30 +306,26 @@ final class RingView: UIView {
 
         // 母本第 4 条: radius / iconWidth 随进度插值. 0.58 is the starting
         // fraction: the arc is already visible, it just grows out of the pivot.
-        let radius = geo.radius * (0.58 + 0.42 * p)
-        let side = Swift.max(10, geo.iconWidth * (0.55 + 0.45 * p))
-        let arc = config.arc(progress: p)
+        // Each ring grows from its own radius, so ring 2 sweeps out further
+        // rather than starting where ring 1 ended.
+        let side = Swift.max(10, config.iconWidth * (0.55 + 0.45 * p))
         let now = CACurrentMediaTime()
 
         for (index, view) in iconViews.enumerated() {
             let slot = slots[index]
+            let radius = slot.radius * (0.58 + 0.42 * p)
             let angle = slot.angle * .pi / 180
             let center = CGPoint(x: pivot.x + radius * sin(angle),
                                  y: pivot.y - radius * cos(angle))
 
-            // 母本第 2、3 条: an icon exists once the sweep has passed it.
-            let shown = p >= 0.999 || arc.reached(slot.angle)
+            // 母本第 2、3 条: an icon exists once the sweep has passed it. The
+            // cue is the icon's own place in the list, which is also its ring —
+            // the inner circle fills first and the next one follows it out.
+            let shown = p >= 0.999 || p >= slot.fraction * 0.92
             if shown {
                 if bornAt[index] == 0 { bornAt[index] = now }
             } else {
                 bornAt[index] = 0
-            }
-
-            if panMode == .icon && panIcon == index && isDragging {
-                // A dragged icon is not on its slot; do not fight the finger.
-                view.bounds = CGRect(x: 0, y: 0, width: side, height: side)
-                view.layer.cornerRadius = side * 0.2237
-                continue
             }
 
             view.bounds = CGRect(x: 0, y: 0, width: side, height: side)
@@ -364,7 +338,7 @@ final class RingView: UIView {
                 continue
             }
 
-            // Per-icon pop: 0.16 s from the moment its angle is reached.
+            // Per-icon pop: 0.16 s from the moment it is reached.
             let age = now - bornAt[index]
             let k = CGFloat(Swift.min(1, Swift.max(0, age / 0.16)))
             let pop = 0.34 + 0.66 * easeOut(k)
@@ -392,28 +366,25 @@ final class RingView: UIView {
     /// Re-applies a configuration in place. The icons are never rebuilt, so a
     /// drag or a slider stays at 60 fps.
     func update(config newConfig: RingConfig) {
-        // Capacity is a function of the config: change the radius and the ring
-        // holds a different number of icons. Updating in place would leave
-        // `slots` and `iconViews` with different counts, and the guard in
-        // placeIcons would then freeze every icon where it stands.
+        // Both the ring radii and the icons per ring are functions of the
+        // config, so a change can leave `slots` and `iconViews` with different
+        // counts — and the guard in placeIcons would then freeze every icon
+        // where it stands.
         config = newConfig
-        applyFit(apps.count)
-        let count = Swift.min(apps.count, geo.capacity)
-        if count != iconCount {
+        if slots.count != iconViews.count || apps.count != iconViews.count {
             rebuild(config: newConfig)
             return
         }
-        slots = ringSlots(pivot: pivot, count: iconCount, config: geo)
+        slots = ringSlots(pivot: pivot, count: iconCount, config: config)
         if bornAt.count != iconCount {
             bornAt = Array(repeating: 0, count: iconCount)
         }
         placeIcons(progress: progress)
     }
 
-    /// Re-applies a configuration that changes the icon *count* (radius, icon
-    /// width and shape all do). Rebuilding is correct here: sliding eight icons
-    /// into six slots looks like a glitch, while a fresh sweep looks like the
-    /// shape changed — which it did.
+    /// Re-applies a configuration that changes the layout. Rebuilding is
+    /// correct here: sliding icons from one ring to another looks like a
+    /// glitch, while a fresh sweep looks like the shape changed — which it did.
     func rebuild(config newConfig: RingConfig, apps newApps: [RingApp]? = nil) {
         link?.invalidate()
         link = nil
@@ -424,8 +395,8 @@ final class RingView: UIView {
         appear()
     }
 
-    /// 收藏 / 回收站 之后换一批图标，但不重播扫掠。母本的 `_pinSpeed` 说的就是
-    /// 这段重排的时长：图标就地滑到新位置，而不是整个圆盘重新长一遍。
+    /// 收藏 之后换一批图标，但不重播扫掠。母本的 `_pinSpeed` 说的就是这段
+    /// 重排的时长：图标就地滑到新位置，而不是整个圆盘重新长一遍。
     ///
     /// The icons are explicitly marked as *already born* before the last
     /// `placeIcons` call. Without that they are still at scale 0.2 / alpha 0
@@ -436,8 +407,7 @@ final class RingView: UIView {
         link = nil
 
         apps = newApps
-        applyFit(newApps.count)
-        let count = Swift.min(newApps.count, geo.capacity)
+        let count = newApps.count
         let keepsViews = count == iconCount && count > 0
         // The selection does not survive a shorter list: index 5 of eight is a
         // different app than index 5 of six, and a highlight that lands on the
@@ -450,7 +420,7 @@ final class RingView: UIView {
             for (index, view) in iconViews.enumerated() {
                 (view.subviews.first as? UIImageView)?.image = apps[index % apps.count].icon
             }
-            slots = ringSlots(pivot: pivot, count: iconCount, config: geo)
+            slots = ringSlots(pivot: pivot, count: iconCount, config: config)
         } else {
             progress = 0
             build()
@@ -469,30 +439,13 @@ final class RingView: UIView {
     /// changes size. Re-seating is instant: nothing is animating at that point.
     func movePivot(_ point: CGPoint) {
         pivot = point
-        slots = ringSlots(pivot: pivot, count: iconCount, config: geo)
+        slots = ringSlots(pivot: pivot, count: iconCount, config: config)
         placeIcons(progress: progress)
-    }
-
-    /// 回收站/收藏 之后，图标要消失得有个交代。
-    func detach(appAt index: Int, completion: (() -> Void)? = nil) {
-        guard index >= 0, index < iconViews.count else {
-            completion?()
-            return
-        }
-        let view = iconViews[index]
-        UIView.animate(withDuration: 0.18, animations: {
-            view.alpha = 0
-            view.transform = CGAffineTransform(scaleX: 0.1, y: 0.1)
-            view.center = self.pivot
-        }, completion: { _ in
-            view.removeFromSuperview()
-            completion?()
-        })
     }
 
     // MARK: Hit testing
 
-    /// Claim the icons and the arc band, nothing else. In the floating window
+    /// Claim the icons and the ring bands, nothing else. In the floating window
     /// empty space must fall through to the home screen — a full-screen view
     /// that swallows every tap is worse than no ring at all.
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
@@ -500,22 +453,22 @@ final class RingView: UIView {
         for view in iconViews where view.frame.insetBy(dx: -6, dy: -6).contains(point) {
             return self
         }
-        guard iconCount > 0, isVisible(point) else { return nil }
+        guard iconCount > 0, onRing(point) else { return nil }
         return self
     }
 
-    /// True when the point sits in the annulus the icons live on, within the
-    /// part of the sweep that has already appeared.
-    private func isVisible(_ point: CGPoint) -> Bool {
+    /// True when the point sits on one of the bands the icons live on. Every
+    /// ring counts, not just the inner one: a touch on ring 2 is a touch on the
+    /// shape, and 0.0.41 is the first version where ring 2 exists.
+    private func onRing(_ point: CGPoint) -> Bool {
         let dx = point.x - pivot.x
         let dy = point.y - pivot.y
         let distance = sqrt(dx * dx + dy * dy)
-        let band = Swift.max(geo.iconWidth, 22)
-        guard distance > geo.radius - band, distance < geo.radius + band else {
-            return false
+        let band = Swift.max(config.iconWidth, 22)
+        for slot in slots where abs(distance - slot.radius) < band {
+            return true
         }
-        let angle = atan2(dx, -dy) * 180 / .pi
-        return progress >= 0.999 || config.arc(progress: progress).reached(angle)
+        return false
     }
 
     // MARK: Input
@@ -590,10 +543,10 @@ final class RingView: UIView {
 
         switch gesture.state {
         case .began:
-            // 0.0.40 — a touch that lands on an icon is picking; one that lands
-            // on the empty arc is turning the shape. Only the first can become a
+            // A touch that lands on an icon is picking; one that lands on the
+            // empty arc is turning the shape. Only the first can become a
             // hover, because only the first has anything to hover.
-            panMode = .none
+            panning = false
             hoverRadius = radial(point)
             hovering = iconIndex(at: point) >= 0
             if hovering {
@@ -615,7 +568,7 @@ final class RingView: UIView {
                 beginPan(at: point)
                 return
             }
-            continuePan(to: point)
+            if panning { turnPan(to: point) }
         case .ended, .cancelled, .failed:
             if hovering {
                 hovering = false
@@ -637,12 +590,6 @@ final class RingView: UIView {
     }
 
     /// `_selected` — the nearest icon the finger is *on*, or -1.
-    ///
-    /// Distance to the icon's centre, not a frame hit test: the icons sit on an
-    /// arc, so a rectangle test picks a neighbour whenever the finger passes
-    /// between two of them. The radius is a little wider than half an icon so
-    /// sliding along the arc never falls into a dead gap and blanks the
-    /// highlight between every pair.
     private func updateHover(at point: CGPoint) {
         guard progress >= 0.999 else { return }
         let target = iconIndex(at: point)
@@ -663,10 +610,10 @@ final class RingView: UIView {
     }
 
     /// Which icon the finger is on, or -1. Distance to the centre rather than a
-    /// frame test: the icons sit on an arc, so a rectangle test picks a neighbour
-    /// whenever the finger passes between two of them. The reach is a little wider
-    /// than half an icon so sliding along the arc never falls into a dead gap and
-    /// blanks the highlight between every pair.
+    /// frame test: the icons sit on arcs, so a rectangle test picks a neighbour
+    /// whenever the finger passes between two of them. The reach is a little
+    /// wider than half an icon so sliding along an arc never falls into a dead
+    /// gap and blanks the highlight between every pair.
     private func iconIndex(at point: CGPoint) -> Int {
         var best = -1
         var bestDistance = CGFloat.greatestFiniteMagnitude
@@ -679,10 +626,10 @@ final class RingView: UIView {
                 best = index
             }
         }
-        return bestDistance <= geo.iconWidth * 0.85 ? best : -1
+        return bestDistance <= config.iconWidth * 0.85 ? best : -1
     }
 
-    /// Distance from the pivot — the one coordinate a slide along the arc leaves
+    /// Distance from the pivot — the one coordinate a slide along an arc leaves
     /// alone.
     private func radial(_ point: CGPoint) -> CGFloat {
         let dx = point.x - pivot.x
@@ -713,153 +660,26 @@ final class RingView: UIView {
     }
 
     private func beginPan(at point: CGPoint) {
-        let angle = angleOf(point)
+        panAnchorAngle = angleOf(point)
         panStartRotation = config.rotation
-        panStartTail = config.tail
-        panAnchorAngle = angle
-        panMode = .rotate
-        panIcon = -1
-
-        // An icon under the finger wins over "rotate the shape".
-        for (index, view) in iconViews.enumerated()
-        where view.alpha > 0.4 && view.frame.insetBy(dx: -8, dy: -8).contains(point) {
-            panMode = .icon
-            panIcon = index
-            panStartCenter = view.center
-            isDragging = true
-            // 任意形状: 拖最后一个图标 = 定形（母本 RTSIZ 的原文）
-            if config.shape == .free && index == iconViews.count - 1 {
-                panMode = .tail
-                isDragging = false
-            }
-            return
-        }
+        panning = true
     }
 
-    private func continuePan(to point: CGPoint) {
-        switch panMode {
-        case .icon:
-            guard panIcon >= 0, panIcon < iconViews.count else { return }
-            iconViews[panIcon].center = point
-            updateTrash(at: point)
-
-        case .tail:
-            var updated = config
-            var value = updated.tail + (angleOf(point) - panAnchorAngle)
-            value = Swift.max(updated.rotation + 12, Swift.min(updated.rotation + 360, value))
-            panAnchorAngle = angleOf(point)
-            updated.tail = value
-            config = updated
-            slots = ringSlots(pivot: pivot, count: iconCount, config: geo)
-            placeIcons(progress: progress)
-
-        case .rotate:
-            var updated = config
-            updated.rotation = normalised(panStartRotation + (angleOf(point) - panAnchorAngle))
-            config = updated
-            slots = ringSlots(pivot: pivot, count: iconCount, config: geo)
-            placeIcons(progress: progress)
-
-        case .none:
-            break
-        }
+    /// One meaning: turn the disc. 0.0.41 removed the two that used to share
+    /// this path — dragging an icon (it only ever ended in the 回收站) and
+    /// dragging the last icon to set 尾角 (that shape is gone).
+    private func turnPan(to point: CGPoint) {
+        var updated = config
+        updated.rotation = normalised(panStartRotation + (angleOf(point) - panAnchorAngle))
+        config = updated
+        slots = ringSlots(pivot: pivot, count: iconCount, config: config)
+        placeIcons(progress: progress)
     }
 
     private func endPan() {
-        let mode = panMode
-        panMode = .none
-        isDragging = false
-
-        if mode == .icon, panIcon >= 0, panIcon < iconViews.count {
-            let view = iconViews[panIcon]
-            if trashActive {
-                let app = apps[panIcon % apps.count]
-                hideTrash()
-                detach(appAt: panIcon)
-                haptic(intensity: 1.0)
-                onRemove?(app)
-                panIcon = -1
-                return
-            }
-            // Snap back onto its own slot.
-            if panIcon < slots.count {
-                let slot = slots[panIcon]
-                let angle = slot.angle * .pi / 180
-                let target = CGPoint(x: pivot.x + geo.radius * sin(angle),
-                                     y: pivot.y - geo.radius * cos(angle))
-                UIView.animate(withDuration: 0.22, delay: 0,
-                               usingSpringWithDamping: 0.8, initialSpringVelocity: 0.4,
-                               options: [.beginFromCurrentState], animations: {
-                    view.center = target
-                }, completion: nil)
-            }
-        }
-
-        if mode == .rotate || mode == .tail {
-            onConfigChange?(config)
-        }
-
-        hideTrash()
-        panIcon = -1
-    }
-
-    // MARK: 回收站
-
-    /// Dragging an icon to the middle deletes it, which is the only way to
-    /// remove an app without opening Settings. The target is deliberate: it is
-    /// where the ring came from, so the icon goes back to the pivot it grew out
-    /// of.
-    private func updateTrash(at point: CGPoint) {
-        let dx = point.x - pivot.x
-        let dy = point.y - pivot.y
-        let distance = sqrt(dx * dx + dy * dy)
-        let inside = distance < Swift.max(44, geo.radius * 0.45)
-        if inside == trashActive { return }
-        trashActive = inside
-        if inside {
-            showTrash()
-            haptic(intensity: 0.5)
-        } else {
-            hideTrash()
-        }
-    }
-
-    private func showTrash() {
-        if trashView == nil {
-            let side: CGFloat = 52
-            let view = UIView(frame: CGRect(x: 0, y: 0, width: side, height: side))
-            view.center = pivot
-            view.backgroundColor = UIColor.systemRed.withAlphaComponent(0.92)
-            view.layer.cornerRadius = side / 2
-            view.layer.cornerCurve = .continuous
-            view.isUserInteractionEnabled = false
-
-            let glyph = UIImageView(frame: view.bounds.insetBy(dx: 14, dy: 14))
-            glyph.contentMode = .scaleAspectFit
-            glyph.tintColor = .white
-            glyph.image = UIImage(systemName: "trash")
-            glyph.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            view.addSubview(glyph)
-
-            addSubview(view)
-            trashView = view
-        }
-        trashView?.alpha = 1
-        trashView?.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
-        UIView.animate(withDuration: 0.16) {
-            self.trashView?.transform = .identity
-        }
-    }
-
-    private func hideTrash() {
-        guard let view = trashView else { return }
-        trashView = nil
-        UIView.animate(withDuration: 0.14, animations: {
-            view.alpha = 0
-            view.transform = CGAffineTransform(scaleX: 0.7, y: 0.7)
-        }, completion: { _ in
-            view.removeFromSuperview()
-        })
+        guard panning else { return }
+        panning = false
+        onConfigChange?(config)
     }
 
     // MARK: Helpers

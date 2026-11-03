@@ -57,12 +57,15 @@ final class RingPreviewController: UIViewController {
             let guide = RingGuideView(frame: view.bounds)
             guide.config = config
             guide.pivot = pivot
+            guide.rings = config.ringCount(for: apps.count)
             guide.backgroundColor = .clear
             guide.isUserInteractionEnabled = false
             view.insertSubview(guide, at: 0)
             self.guide = guide
         }
         guide?.frame = view.bounds
+        guide?.rings = config.ringCount(for: apps.count)
+        guide?.setNeedsDisplay()
 
         if ring == nil {
             let ring = RingView(frame: view.bounds, config: config, apps: apps, pivot: pivot)
@@ -70,10 +73,9 @@ final class RingPreviewController: UIViewController {
             // The preview is the only place these can be tried without a
             // respring, so it has to exercise the same callbacks the desktop
             // host does — otherwise it is a picture, not a test.
-            ring.onRemove = { [weak self] app in self?.remove(app) }
             ring.onPin = { [weak self] app in self?.pin(app) }
             ring.onConfigChange = { [weak self] edited in self?.persist(edited) }
-            ring.onBackgroundTap = { [weak self] in self?.showToast("点图标启动 · 拖动旋转 · 长按收藏") }
+            ring.onBackgroundTap = { [weak self] in self?.showToast("点图标启动 · 空档拖动旋转 · 长按收藏") }
             view.addSubview(ring)
             bringChromeToFront()
             self.ring = ring
@@ -95,7 +97,7 @@ final class RingPreviewController: UIViewController {
 
     private func buildChrome() {
         let title = UILabel()
-        title.text = "承载形状 · \(config.shape.title)"
+        title.text = "承载形状 · 圆盘"
         title.font = .systemFont(ofSize: 22, weight: .semibold)
         title.textColor = .white
 
@@ -146,9 +148,7 @@ final class RingPreviewController: UIViewController {
         chrome.append(replay)
 
         let hint = UILabel()
-        hint.text = config.shape == .free
-            ? "按住拖动可以旋转托盘（仅「任意角度」支持）"
-            : "点图标看它属于哪个 App。改「任意角度」后可拖动旋转。"
+        hint.text = "点图标看它属于哪个 App。在图标之间的空档拖动可整体旋转。"
         hint.font = .systemFont(ofSize: 12)
         hint.textColor = UIColor.white.withAlphaComponent(0.38)
         hint.textAlignment = .center
@@ -200,16 +200,9 @@ final class RingPreviewController: UIViewController {
     // MARK: Live editing (same file the desktop reads)
 
     private func reloadApps() {
-        let loaded = RingApps.resolved(limit: 12)
+        let loaded = RingApps.resolved(limit: RingApps.maxCount)
         apps = loaded.apps
         ring?.reload(apps: apps)
-    }
-
-    private func remove(_ app: RingApp) {
-        RingApps.remove(app.bundleID)
-        Log.write("prefs: preview trash " + app.bundleID)
-        showToast("已从托盘移除 " + app.name)
-        reloadApps()
     }
 
     private func pin(_ app: RingApp) {
@@ -222,10 +215,8 @@ final class RingPreviewController: UIViewController {
 
     private func persist(_ edited: RingConfig) {
         config.rotation = edited.rotation
-        config.tail = edited.tail
         var snapshot = RingConfig.loadRuntime()
         snapshot.rotation = edited.rotation
-        snapshot.tail = edited.tail
         snapshot.writeSnapshot()
         Log.write("prefs: preview geometry -> " + config.summary)
     }
@@ -254,41 +245,44 @@ final class RingPreviewController: UIViewController {
 
 // MARK: - Guide
 
-/// Faint proof of the geometry: the carrier circle, the pivot, and the arc
-/// actually covered by the shape. Without it, "半径 64" is a number; with it,
-/// the number is visible next to the icons that use it.
+/// Faint proof of the geometry: every ring the current list actually uses, the
+/// starting angle, and the pivot. Without it, "半径 64" is a number; with it,
+/// the number is visible next to the icons that use it — and so is the ring the
+/// ninth icon went to, which is the one thing 0.0.41 added.
 final class RingGuideView: UIView {
 
     var config = RingConfig()
     var pivot: CGPoint = .zero
+    /// How many rings this list needs. Set by the controller from the live
+    /// count, so the guide draws the shape the icons are on.
+    var rings = 1
 
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
 
-        UIColor.white.withAlphaComponent(0.10).setStroke()
-        let circle = UIBezierPath(ovalIn: CGRect(x: pivot.x - config.radius,
-                                                 y: pivot.y - config.radius,
-                                                 width: config.radius * 2,
-                                                 height: config.radius * 2))
-        circle.lineWidth = 1
         let dash: [CGFloat] = [2, 5]
-        circle.setLineDash(dash, count: dash.count, phase: 0)
-        circle.stroke()
-
-        // The arc the shape actually uses, drawn brighter than the full circle.
-        let sweep = config.sweep
-        let start = config.shape.isClosed ? config.rotation : config.rotation - sweep / 2
-        let arc = UIBezierPath()
-        let steps = 64
-        for step in 0...steps {
-            let angle = (start + sweep * CGFloat(step) / CGFloat(steps)) * .pi / 180
-            let point = CGPoint(x: pivot.x + config.radius * sin(angle),
-                                y: pivot.y - config.radius * cos(angle))
-            if step == 0 { arc.move(to: point) } else { arc.addLine(to: point) }
+        for ring in 0..<Swift.max(1, rings) {
+            let radius = config.radius(of: ring)
+            let circle = UIBezierPath(ovalIn: CGRect(x: pivot.x - radius,
+                                                     y: pivot.y - radius,
+                                                     width: radius * 2,
+                                                     height: radius * 2))
+            circle.lineWidth = 1
+            circle.setLineDash(dash, count: dash.count, phase: 0)
+            UIColor.white.withAlphaComponent(ring == 0 ? 0.20 : 0.11).setStroke()
+            circle.stroke()
         }
-        UIColor.white.withAlphaComponent(0.20).setStroke()
-        arc.lineWidth = 1.5
-        arc.stroke()
+
+        // 起点: the spoke the first icon sits on. 旋转角 is otherwise a number.
+        let radians = config.rotation * .pi / 180
+        let head = CGPoint(x: pivot.x + config.radius * sin(radians),
+                           y: pivot.y - config.radius * cos(radians))
+        let spoke = UIBezierPath()
+        spoke.move(to: pivot)
+        spoke.addLine(to: head)
+        spoke.lineWidth = 1
+        UIColor.white.withAlphaComponent(0.26).setStroke()
+        spoke.stroke()
 
         context.setFillColor(UIColor.white.withAlphaComponent(0.22).cgColor)
         context.fillEllipse(in: CGRect(x: pivot.x - 3, y: pivot.y - 3, width: 6, height: 6))
