@@ -111,6 +111,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 0.0.48 — 原来这里是 `edge = 2`，卡片那圈白描边。描边撤了（见 `show`），
     /// 常量一起撤，免得留一个没人读的 2。
     private let margin: CGFloat = 8
+    /// 0.0.49 — 卡片下面那层柔光。跟着 card 的 frame 与圆角走。
+    private var glow: UIView?
     /// 0.0.45 — 吸附 (docked) size, from the master's 「贴边缩小」.
     ///
     /// The master docks flush against the edge and keeps the picture's aspect;
@@ -214,6 +216,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         view.center = CGPoint(x: card.bounds.midX, y: card.bounds.midY)
         view.transform = CGAffineTransform(scaleX: plan.scale, y: plan.scale)
         card.addSubview(view)
+        // 0.0.49 — 光晕在卡片**下面**。描边撤掉之后，深色壁纸上的卡片边界看不出来
+        // （Aevon(47) #2）；母本的做法不是画线，而是给卡片加一层柔光 —— 二进制里
+        // 有 SwiftUI 的 `_ShadowEffect` 与 `_BlurEffect`，没有 border 相关的具体值。
+        // 所以这里是 `layer.shadow`，不是 border：模糊半径大、透明度低，只负责把
+        // 卡片从同样深的背景里托起来，不构成一条可见的边。
+        //
+        // 单独一层而非直接给 card 加阴影：card 自己 `masksToBounds = true`（画面要
+        // 被圆角裁掉），阴影会被一起裁掉。放在下面当兄弟，才画得出来。
+        let glow = UIView(frame: plan.frame)
+        glow.backgroundColor = .clear
+        glow.isUserInteractionEnabled = false
+        glow.layer.shadowOffset = .zero
+        glow.layer.shadowOpacity = 1
+        root.addSubview(glow)
+        host.glow = glow
         root.addSubview(card)
 
         host.window = window
@@ -311,6 +328,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
         for sub in card?.subviews ?? [] { sub.removeFromSuperview() }
         grip?.removeFromSuperview()
+        glow?.removeFromSuperview()
+        glow = nil
         card?.removeFromSuperview()
         grip = nil
         close = nil
@@ -570,6 +589,28 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         grip.frame = shape.frame
         grip.hole = shape.hole
         bandInset = shape.inset
+        // 光晕、圆角、环三者必须同一次事件里一起走。慢一帧就是「卡片动了、光圈
+        // 还留在原地」。
+        applyGlow()
+    }
+
+    /// 0.0.49 — 卡片边缘的柔光。
+    ///
+    /// 深色模式给白、浅色模式给黑，两者都只在很低的透明度上：目的是让卡片从
+    /// 和它一样深的背景里分出来，而不是给卡片画一圈灯。半径取圆角的六成左右，
+    /// 这样光从圆角里透出来的形状和卡片本身的连续曲率一致。
+    private func applyGlow() {
+        guard let card = card, let glow = glow else { return }
+        glow.frame = card.frame
+        let radius = card.layer.cornerRadius
+        let dark = card.traitCollection.userInterfaceStyle == .dark
+        // 0.22 / 0.16 — 两次真机反馈之间的取值：0.35 已经能看出「发光」，0.10 在
+        // 深色壁纸上又看不出来。深色的白稍强，因为白色比黑色更需要靠亮度争边界。
+        glow.layer.shadowColor = (dark ? UIColor.white : UIColor.black).cgColor
+        glow.layer.shadowOpacity = dark ? 0.22 : 0.16
+        glow.layer.shadowRadius = Swift.max(10, Swift.min(radius * 0.7, 22))
+        glow.layer.shadowPath = UIBezierPath(roundedRect: glow.bounds,
+                                            cornerRadius: radius).cgPath
     }
 
     /// The bottom band's middle third — the cell that closes on a flick and
@@ -865,6 +906,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// `-[UIApplication sendEvent:]` 是唯一一个「不管命中哪个窗口都会经过」的
     /// 入口，所以浮窗的四个边从这里拿手指，不再指望某个窗口被问到。
     func rawTouch(phase: Int, at screen: CGPoint, stamp: TimeInterval) -> Bool {
+        // 竖条先问一次（0.0.49）。它自己知道自己的地盘，不在地盘里就回 false，
+        // 不影响下面任何一行；卡片开着时先问它，正是为了「换 App 的路不被浮窗
+        // 的环堵死」。
+        if AevonRingGrip.barTouch(phase: phase, at: screen, stamp: stamp) { return true }
         guard let card = card, let window = window else {
             // 卡片在手势中途被关掉：这一路已经把 began 吞了，收尾也必须吞，否则
             // UIKit 会收到一根它从没见过的手指的结束事件。

@@ -140,8 +140,12 @@ final class PanelController: PSListController {
         if key == "@ring.grip" {
             // 0.0.44 — the bar's place on the screen, straight out of the
             // snapshot the host reads, so this row and the strip cannot disagree.
-            let percent = Int(RingConfig.loadRuntime().barY.rounded())
-            return "屏幕高度的 \(percent)%（右侧贴边竖条）"
+            let config = RingConfig.loadRuntime()
+            let percent = Int(config.barY.rounded())
+            // 0.0.49 — 这一行同时报长与宽，滑块拖完不用去桌面数像素。
+            let length = Int(config.barLength.rounded())
+            let width = Int((40 * config.barWidth / 100).rounded())
+            return "屏幕高度的 \(percent)%（右侧贴边竖条 · 长 \(length)% / \(width)pt）"
         }
         return super.readPreferenceValue(specifier)
     }
@@ -202,6 +206,9 @@ final class PanelController: PSListController {
     private static let sliderKeys: Set<String> = [
         "Radius", "IconWidth", "RotationAngle", "LastIconAngle",
         "DampingFraction", "INTENSITY", "Speed", "!ring.barY",
+        // 0.0.49 — 竖条的长与宽。加在这里才会走「合并写入 + 一次 Darwin 通知」
+        // 的那条路：漏一个，拖动滑块就会每帧写一次 ring.plist。
+        "!ring.barLength", "!ring.barWidth",
     ]
 
     private var lastWrite = Date.distantPast

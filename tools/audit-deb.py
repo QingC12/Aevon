@@ -414,8 +414,25 @@ def main():
             elif not bar[0].get("showValue"):
                 bad("ring: !ring.barY does not show its value — 实时百分比 is the point")
             else:
-                ok("ring: 旧版圆盘, live summary, preview, apps, grip reset, "
-                   "bar position slider, desktop switch, app-side bridge switch")
+                # 0.0.49 — 竖条的长与宽各一条滑块（Aevon(47) #3 直接要求的）。
+                length = [i for i in ring_items if i.get("key") == "!ring.barLength"]
+                width = [i for i in ring_items if i.get("key") == "!ring.barWidth"]
+                if not length or length[0].get("cell") != "PSSliderCell":
+                    bad("ring: no !ring.barLength slider — the bar length cannot be set")
+                elif not (length[0].get("min") == 4.0 and length[0].get("max") == 20.0):
+                    bad("ring: !ring.barLength range is not 4…20 % — the row says percent")
+                elif not length[0].get("showValue"):
+                    bad("ring: !ring.barLength does not show its value")
+                elif not width or width[0].get("cell") != "PSSliderCell":
+                    bad("ring: no !ring.barWidth slider — the bar width cannot be set")
+                elif not (width[0].get("min") == 10.0 and width[0].get("max") == 100.0):
+                    bad("ring: !ring.barWidth range is not 10…100 % of 40 pt")
+                elif not width[0].get("showValue"):
+                    bad("ring: !ring.barWidth does not show its value")
+                else:
+                    ok("ring: 旧版圆盘, live summary, preview, apps, grip reset, "
+                       "bar position / length / width sliders, desktop switch, "
+                       "app-side bridge switch")
 
     for token in (b"RingPreviewController", b"openPanel:",
                   b"PanelController", b"previewRing:", b"editApps:", b"resetGrip:",
@@ -443,6 +460,11 @@ def main():
                   # 0.0.44 那种「手指抬起后才出现」的形态。
                   b"ring: held open at ", b"ring: bar released at ",
                   b"ring: bar touch at ",
+                  # 0.0.49 — 竖条的第二个入口（应用层触摸）与解锁后的窗口置顶。
+                  # 前者没有这一行，就分不清「没摸到」和「摸到了但窗口被压住」；
+                  # 后者是 Aevon(47) 「锁屏一次后不灵敏」的直接对策。
+                  b"ring: bar raw down at ",
+                  b"ring: bar layer put back on top (level=",
                   b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",
                   # 0.0.42 — the ported disc must be in the dylib. These tags are

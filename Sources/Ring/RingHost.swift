@@ -67,10 +67,28 @@ final class RingHost: NSObject {
     /// the two things that produces that sentence (the other one is the overlay
     /// timer hiding the pad, fixed below). The strip itself does not change:
     /// what grew is the part nobody sees.
-    private let barWidth: CGFloat = 8
-    private let barHeight: CGFloat = 56
-    private let padWidth: CGFloat = 46
-    private let padHeight: CGFloat = 150
+    /// 0.0.49 — 竖条的尺寸不再是常量，而是由两个百分比算出来（设置面板里
+    /// 「竖条长度」「竖条宽度」两行）。四条边都是纯函数的结果，所以 `layout()`
+    /// 和 `barCentreY()` 永远看到同一组数。
+    private struct BarMetrics {
+        let barWidth: CGFloat    // 可见宽度，硬上限 40 pt
+        let barHeight: CGFloat   // 可见长度
+        let padWidth: CGFloat    // 触摸垫宽度（≥ 可见宽度 + 余量）
+        let padHeight: CGFloat   // 触摸垫长度
+    }
+
+    private func metrics(in bounds: CGRect) -> BarMetrics {
+        // 宽度：40 pt 的百分比。上限写死 40 —— 竖条贴屏幕右缘，那里有页面自己
+        // 的点击目标（返回、列表行、滑条），再宽就开始抢它们。
+        let width = Swift.min(40, Swift.max(4, 40 * config.barWidth / 100))
+        // 长度：屏幕高度的百分比。4–20 % 在本机是 37–186 pt。
+        let height = Swift.min(240, Swift.max(24, bounds.height * config.barLength / 100))
+        // 垫子比条子大一圈：手指落在半英寸外也算命中，这是「不灵敏」的第一道防线。
+        let padW = Swift.min(76, Swift.max(40, width + 32))
+        let padH = Swift.min(320, Swift.max(96, height * 2 + 38))
+        return BarMetrics(barWidth: width, barHeight: height,
+                          padWidth: padW, padHeight: padH)
+    }
 
     /// The last percentage that was laid out, so a slider drag logs one line per
     /// real change instead of one per refresh.
@@ -89,6 +107,14 @@ final class RingHost: NSObject {
     /// 0.0.47 — 垫子上落过几次手指。前 20 次写进日志，用来分开「没落上」与
     /// 「落上了没被当手势」。
     private var padProbe = 0
+    /// 0.0.49 — 上一次写进日志的尺寸（宽×10、长×10 拼成的整数），只用来去重。
+    private var laidOutMetrics = 0
+
+    /// 0.0.49 — 走应用层那条路时这根手指的状态。
+    private var rawDownAt: CGPoint = .zero
+    private var rawMovedFar = false
+    private var rawOpenedHere = false
+    private var barProbe = 0
 
     private var config = RingConfig()
     private var expanded = false
@@ -161,6 +187,12 @@ final class RingHost: NSObject {
         AevonRingGrip.activeTouchHandler = { [weak self] in
             self?.barHeld ?? false
         }
+        // 0.0.49 — 竖条的手指入口。和浮窗环一样走 `-[UIApplication sendEvent:]`：
+        // 锁屏一次之后窗口栈会被重排，我们这一层可能被一个透明窗压住，条子还
+        // 看得见、按下去却不算我们的。这条路过的是事件，不是窗口，压不住。
+        AevonRingGrip.barTouchHandler = { [weak self] phase, point, stamp in
+            self?.rawBar(phase: phase, at: point, stamp: stamp) ?? false
+        }
 
         addBar()
         layout()
@@ -191,6 +223,7 @@ final class RingHost: NSObject {
         overlayTimer?.invalidate()
         overlayTimer = nil
         AevonRingGrip.activeTouchHandler = nil
+        AevonRingGrip.barTouchHandler = nil
         barHeld = false
         overlayStrikes = 0
         padProbe = 0
@@ -271,7 +304,13 @@ final class RingHost: NSObject {
         for name in names {
             observers.append(center.addObserver(forName: name, object: nil,
                                                queue: .main) { [weak self] _ in
-                self?.layout()
+                guard let self = self else { return }
+                // 0.0.49 — 解锁 / 回前台是窗口栈被重排的时刻，先把自己放回顶上，
+                // 再按新尺寸重新布局（旋转和分屏也走这里）。
+                if name == UIApplication.didBecomeActiveNotification {
+                    self.raiseWindow()
+                }
+                self.layout()
             })
         }
         // The screen's bounds change on rotation and on split-screen size
@@ -297,12 +336,17 @@ final class RingHost: NSObject {
         // and the strip sits in the pad's last `barWidth` points, so the strip
         // and the screen edge are the same line. Nothing floats in from the
         // edge — a strip inset by a margin is a strip a thumb can miss.
+        let m = metrics(in: bounds)
         let centre = barCentreY(in: bounds)
-        barPad?.frame = CGRect(x: bounds.maxX - padWidth,
-                               y: centre - padHeight / 2,
-                               width: padWidth, height: padHeight)
-        bar?.frame = CGRect(x: padWidth - barWidth, y: (padHeight - barHeight) / 2,
-                            width: barWidth, height: barHeight)
+        barPad?.frame = CGRect(x: bounds.maxX - m.padWidth,
+                               y: centre - m.padHeight / 2,
+                               width: m.padWidth, height: m.padHeight)
+        bar?.frame = CGRect(x: m.padWidth - m.barWidth,
+                            y: (m.padHeight - m.barHeight) / 2,
+                            width: m.barWidth, height: m.barHeight)
+        // 尺寸变了，圆角也要跟着：8 pt 宽的条子是 4 pt 圆角，40 pt 宽还是 4 pt
+        // 就成了方凳；跟着宽度取一半，两端永远是圆的。
+        bar?.layer.cornerRadius = m.barWidth / 2
         // 0.0.48 — 竖条的触摸垫位置交给浮窗那一侧。浮窗的手指入口在应用层就
         // 把环上的触摸吃掉了，环的右半边正好压在这里；没有这条线，卡片开着时
         // 点竖条会被当成拖浮窗（见 AevonRingGrip.summonRect）。
@@ -314,11 +358,20 @@ final class RingHost: NSObject {
         // layout 是唯一会被叫到的地方，顺手把可见性对齐一次。
         syncOverlayVisibility()
 
+        // 位置和尺寸一起报。0.0.49 起竖条的长宽是两个滑块，日志里必须能看见
+        // 改完之后实际生效的点数 —— 否则「还是不灵敏」时没法区分「滑块没生效」
+        // 和「生效了但位置不对」。
         let percent = Int((config.barY).rounded())
-        if percent != laidOutPercent {
+        let sizeKey = Int(m.barWidth * 10) * 100_000 + Int(m.barHeight * 10)
+        if percent != laidOutPercent || sizeKey != laidOutMetrics {
             laidOutPercent = percent
+            laidOutMetrics = sizeKey
             Log.write("ring: bar position " + String(percent)
-                      + "% of the screen height (right edge)")
+                      + "% of the screen height (right edge) size="
+                      + String(Int(m.barWidth.rounded())) + "x"
+                      + String(Int(m.barHeight.rounded())) + "pt pad="
+                      + String(Int(m.padWidth.rounded())) + "x"
+                      + String(Int(m.padHeight.rounded())))
         }
     }
 
@@ -327,7 +380,7 @@ final class RingHost: NSObject {
     /// bar at 0 % must still be reachable, and the thing the finger lands on is
     /// the pad.
     private func barCentreY(in bounds: CGRect) -> CGFloat {
-        let half = padHeight / 2
+        let half = metrics(in: bounds).padHeight / 2
         let y = bounds.height * config.barY / 100
         return Swift.min(bounds.maxY - half, Swift.max(half, y))
     }
@@ -370,7 +423,7 @@ final class RingHost: NSObject {
 
         let bar = UIView(frame: .zero)
         bar.isUserInteractionEnabled = false
-        bar.layer.cornerRadius = barWidth / 2
+        bar.layer.cornerRadius = metrics(in: window?.bounds ?? UIScreen.main.bounds).barWidth / 2
         bar.layer.cornerCurve = .continuous
         bar.clipsToBounds = true
         pad.addSubview(bar)
@@ -484,6 +537,115 @@ final class RingHost: NSObject {
         }
     }
 
+    // MARK: - 0.0.49 竖条的应用层触摸
+
+    /// 竖条的手指，来源是 `-[UIApplication sendEvent:]`（见 `AevonRingGrip.barTouch`）。
+    ///
+    /// `phase` 用 UITouchPhase 的数值：0 began / 1 moved / 3 ended / 4 cancelled。
+    /// 返回 true = 这条事件被竖条吃掉，不再往下传（也不再有 UIKit 识别器参与）。
+    ///
+    /// 语义与 `handleBarPan` 完全一致，一个字都没改：
+    ///   · 落指 → 圆盘从这一点长出来；
+    ///   · 手指在屏幕上 → 圆盘跟着走，`barHeld` 挡住看门狗；
+    ///   · 抬手在图标上 → 打开浮窗；抬手在盘外 → 收起。
+    ///
+    /// 唯一的补充是「短按」：这条路吃掉了事件，识别器不会响，所以原来由
+    /// UITapGestureRecognizer 负责的「点一下开 / 再点一下关」在这里补：
+    /// 手指没怎么动就抬手，按 `toggle()` 的语义处理。
+    func rawBar(phase: Int, at point: CGPoint, stamp: TimeInterval) -> Bool {
+        guard let window = window, let host = window.rootViewController?.view else { return false }
+        // 只在两种情况下接管：手指落在垫子上，或者这根手指已经在驱动圆盘了。
+        // 圆盘是「点一下」开着的时候，盘面上的触摸交给圆盘自己的窗口。
+        let onPad = AevonRingGrip.summonRect.contains(point)
+        guard barHeld || (onPad && AevonRingMenu.presented == nil) else { return false }
+
+        switch phase {
+        case 0:
+            rawDownAt = point
+            rawMovedFar = false
+            rawOpenedHere = (AevonRingMenu.presented == nil)
+            barHeld = true
+            if let menu = AevonRingMenu.presented {
+                menu.beginRemoteTracking(at: point, source: "bar")
+            } else {
+                expanded = true
+                AevonRingMenu.presentTracking(in: host, at: point, source: "bar")
+            }
+            if barProbe < 20 {
+                barProbe += 1
+                Log.write("ring: bar raw down at "
+                          + String(format: "%.0f,%.0f", point.x, point.y)
+                          + " pad=" + String(format: "%.0f,%.0f",
+                                             AevonRingGrip.summonRect.minX,
+                                             AevonRingGrip.summonRect.minY)
+                          + " #" + String(barProbe))
+            }
+            return true
+
+        case 1:
+            guard barHeld else { return false }
+            if abs(point.x - rawDownAt.x) + abs(point.y - rawDownAt.y) > 6 {
+                rawMovedFar = true
+            }
+            AevonRingMenu.presented?.remoteMoved(to: point, source: "bar")
+            return true
+
+        case 3, 4:
+            guard barHeld else { return false }
+            barHeld = false
+            let held = rawMovedFar
+            let openedHere = rawOpenedHere
+            rawMovedFar = false
+            guard let menu = AevonRingMenu.presented else {
+                expanded = false
+                return true
+            }
+            if phase == 4 {
+                expanded = false
+                menu.remoteCancelled(source: "bar")
+                Log.write("ring: bar raw cancelled by the system")
+                return true
+            }
+            if held {
+                expanded = false
+                menu.remoteLift(at: point, source: "bar")
+            } else if openedHere {
+                // 短按 = 点一下竖条。跟踪式呈现换成常驻式，和 `expand()` 一样。
+                AevonRingMenu.dismissCurrent()
+                expanded = false
+                expand()
+                Log.write("ring: bar raw tapped open")
+            } else {
+                expanded = false
+                collapse()
+                Log.write("ring: bar raw tapped closed")
+            }
+            return true
+
+        default:
+            return barHeld
+        }
+    }
+
+    /// 0.0.49 — 把竖条那一层重新插回窗口栈顶。
+    ///
+    /// Aevon(47) #3 的现象是「注销后第一次非常灵敏，锁屏一次之后就不容易触发」。
+    /// 条子的位置、长度、宽度都没变（日志里 `size=` 一直是同一组数），变的只有
+    /// 窗口栈：锁屏 → 解锁会让 SpringBoard 重排一遍窗口，我们这一层可能被一个
+    /// **透明但会接触摸**的窗口压住 —— 条子照样看得见（上面那层是透明的），按下去
+    /// 却不算我们的。所以每次解锁 / 回到前台，把 level 抬一格再放回去：UIKit 在
+    /// 每次 level 变化时都会把窗口重新插进窗口栈，这一下就是置顶，而且不重建
+    /// 窗口、不碰 rootViewController、不丢已经挂上的手势。
+    private func raiseWindow() {
+        guard let window = window, !window.isHidden else { return }
+        let level = window.windowLevel
+        window.windowLevel = UIWindow.Level(rawValue: level.rawValue + 1)
+        window.windowLevel = level
+        window.isHidden = false
+        Log.write("ring: bar layer put back on top (level="
+                  + String(Int(level.rawValue)) + ")")
+    }
+
     // MARK: - 0.0.45 系统面板豁免
 
     /// 锁屏 / 控制中心 / 通知中心 —— 竖条在这三处不出现（Aevon(43) #3）。
@@ -555,6 +717,9 @@ final class RingHost: NSObject {
         let hidden = overlayStrikes >= 2 && !barHeld
         guard pad.isHidden != hidden else { return }
         pad.isHidden = hidden
+        // 0.0.49 — 面板刚退下去，正是窗口栈最不可靠的时刻：顺手把这一层放回顶上，
+        // 免得「看得见但按不到」。
+        if !hidden { raiseWindow() }
         Log.write("ring: summon bar " + (hidden ? "hidden (system overlay up)"
                                                  : "shown (system overlay gone)"))
     }

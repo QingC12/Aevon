@@ -358,6 +358,22 @@ def build_panel(panel_id, title, intro, items):
         specs.append({"cell": "PSButtonCell", "label": "竖条回到屏幕中央",
                       "action": "resetGrip:", "defaults": DOMAIN})
 
+        # 0.0.49 — 竖条的长与宽（Aevon(47) #3 直接要求加的两个滑块）。
+        # 两个都是百分比：长度按屏幕高度算，宽度按 40 pt 算。宽度上限写死在
+        # 40 pt —— 竖条贴在屏幕右缘，那里有页面自己的点击目标。
+        specs.append({"cell": "PSGroupCell", "label": "竖条大小",
+                      "footerText": "长度按屏幕高度的百分比算（4–20%，默认 6%，"
+                                    "本机约 37–186 pt）。宽度按 40 pt 的百分比算"
+                                    "（10–100%，默认 20% ⇒ 8 pt），上限就是 40 pt："
+                                    "竖条贴在屏幕右缘，再宽就会挡住页面自己的点击"
+                                    "（返回、列表行、滑条）。改完立刻生效，不用注销。"})
+        specs.append({"cell": "PSSliderCell", "label": "长度（屏幕高度 %）",
+                      "key": "!ring.barLength", "default": 6.0,
+                      "min": 4.0, "max": 20.0, "showValue": True, "defaults": DOMAIN})
+        specs.append({"cell": "PSSliderCell", "label": "宽度（40 pt 的 %）",
+                      "key": "!ring.barWidth", "default": 20.0,
+                      "min": 10.0, "max": 100.0, "showValue": True, "defaults": DOMAIN})
+
 
         # 手势：母本把这些写进 GestureIntroduction 原文，圆盘这边没有独立设置项，
         # 但功能必须能被发现 —— 一个只有作者知道的长按，等于没有做。

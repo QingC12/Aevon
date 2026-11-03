@@ -44,12 +44,30 @@ struct RingConfig {
     /// same number means the same place after a rotation.
     var barY: CGFloat = 50
 
+    /// 0.0.49 — 竖条的长度，按**屏幕高度的百分比**存（默认 6 %）。
+    ///
+    /// Aevon(47) #3 asked whether the "hard to trigger after locking" problem
+    /// was about length and width. It is not (see `RingHost.raiseWindow`), but
+    /// the operator wants the shape in his own hands, so both became settings.
+    /// A percentage rather than points so the strip keeps its proportion on a
+    /// 932 pt phone and on an 844 pt one, and after a rotation.
+    var barLength: CGFloat = 6
+
+    /// 0.0.49 — 竖条的宽度，按**40 pt 的百分比**存（默认 20 % ⇒ 8 pt）。
+    ///
+    /// 40 pt is the ceiling on purpose: the strip lives on the screen edge where
+    /// pages have their own tap targets (back, list rows, sliders), and a wider
+    /// strip would start stealing them. So the UI shows a percentage and the
+    /// code never lets the result exceed 40 pt.
+    var barWidth: CGFloat = 20
+
     /// Every key whose change has to be mirrored to ring.plist. One list, so a
     /// new ring control cannot be added to the UI and forgotten here.
     static let mirroredKeys: Set<String> = [
         "Radius", "IconWidth", "RotationAngle", "Star",
         "DampingFraction", "CustomSpringAnimation", "VIBRATE", "INTENSITY",
         "Speed", "!ring.desktop", "!ring.barY",
+        "!ring.barLength", "!ring.barWidth",
     ]
 
     // MARK: Reading
@@ -86,6 +104,8 @@ struct RingConfig {
         config.speed = clamp(number("Speed", 1), 0.2, 2.0)
         config.desktop = flag("!ring.desktop", true)
         config.barY = clamp(number("!ring.barY", 50), 0, 100)
+        config.barLength = clamp(number("!ring.barLength", 6), 4, 20)
+        config.barWidth = clamp(number("!ring.barWidth", 20), 10, 100)
         return config
     }
 
@@ -113,6 +133,8 @@ struct RingConfig {
             "summary": summary,
             "desktop": desktop,
             "barY": Double(barY),
+            "barLength": Double(barLength),
+            "barWidth": Double(barWidth),
             "writtenAt": Date().timeIntervalSince1970,
         ]
     }
@@ -148,6 +170,8 @@ struct RingConfig {
         config.speed = clamp(number("Speed", 1), 0.2, 2.0)
         config.desktop = flag("desktop", true)
         config.barY = clamp(number("barY", 50), 0, 100)
+        config.barLength = clamp(number("barLength", 6), 4, 20)
+        config.barWidth = clamp(number("barWidth", 20), 10, 100)
         return config
     }
 
