@@ -56,18 +56,52 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
 
     // MARK: - Geometry
 
-    /// 4 列是单手能舒服够到的上限：再多，最左那一列拇指就要伸直。
-    private let columnCount = 4
+    /// 0.0.58 — 4 列变 5 列。4 列时一屏只看得到两行半（20 个），拇指要滑
+    /// 两三次才翻完一页；5 列 × 70 pt 的行高把同一块高度塞进三行多，一页
+    /// 三十个。列再往上加，最左那一列就要伸手去够，所以 5 是这一版的止点。
+    private let columnCount = PanelRowView.columns
     private let sideInset: CGFloat = 18
     /// 右侧多留一条，给字母索引。索引压在网格上会挡住最后一列的长名字。
     private let indexLane: CGFloat = 22
     private let columnGap: CGFloat = 8
-    private let rowHeight: CGFloat = 88
-    private let headerHeight: CGFloat = 32
+    /// 88 → 70：图标从 54 降到 44 之后，一格只需要 44 + 6 + 14 ≈ 64，
+    /// 留 6 给上下呼吸。行高不跟着降，缩小图标就只是让格子变空。
+    private let rowHeight: CGFloat = 70
+    private let headerHeight: CGFloat = 26
     /// 0.0.57 — 76 变 118：多出来的 42 是搜索框那一行。抽屉高度没变，列表短
     /// 了一条，但 4 列 × 88 pt 的网格仍然一次能看到两行半。
     private let titleAreaHeight: CGFloat = 118
     private let searchHeight: CGFloat = 38
+
+    // MARK: - 拼音（0.0.58）
+
+    /// 名字 → 拼音拉丁串（大写、无声调）。
+    ///
+    /// 0.0.57 之前分组只看 `name.first`：中文的第一个字符不在 A–Z 里，于是
+    /// 所有中文应用都被扔进「其他」，看起来就像「只有英文会排序」。其实
+    /// 排序本身没问题（`localizedStandardCompare` 在中文环境下就是按拼音），
+    /// 坏的是**分组键**。
+    ///
+    /// `applyingTransform(.toLatin:)` 走 ICU：「微信」→「wēi xìn」，再
+    /// `stripDiacritics` 去掉声调 →「wei xin」。日文、韩文同样走罗马字。
+    /// 已经是拉丁字母的名字原样返回，所以这条对英文没有副作用。
+    private static var keyCache: [String: String] = [:]
+
+    static func sortKey(_ name: String) -> String {
+        if let cached = keyCache[name] { return cached }
+        let latin = name.applyingTransform(.toLatin, reverse: false)?
+            .applyingTransform(.stripDiacritics, reverse: false) ?? name
+        let key = latin.uppercased()
+        keyCache[name] = key
+        return key
+    }
+
+    /// 首字母分组键。不是 A–Z 的一律进「#」——emoji 开头的名字仍然归「其他」，
+    /// 因为它们确实没有拼音。
+    static func indexKey(_ name: String) -> Character {
+        guard let first = sortKey(name).first, first >= "A", first <= "Z" else { return "#" }
+        return first
+    }
 
     // MARK: - Data
 
@@ -136,7 +170,11 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
     private func build() {
         backgroundColor = .clear
 
-        dim.backgroundColor = UIColor.black.withAlphaComponent(0.38)
+        dim.backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor.black.withAlphaComponent(0.58)
+                : UIColor.black.withAlphaComponent(0.26)
+        }
         dim.alpha = 0
         dim.addTarget(self, action: #selector(dimTapped), for: .touchUpInside)
         addSubview(dim)
@@ -159,10 +197,12 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
         blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         sheet.addSubview(blur)
 
-        // 顶部一层极淡的白色渐变：把「这是一块玻璃」说清楚，深色桌面上
-        // 才不会看成一块死板的灰。
-        sheen.colors = [UIColor.white.withAlphaComponent(0.14).cgColor,
-                        UIColor.white.withAlphaComponent(0.0).cgColor]
+        // 顶部一层极淡的白色渐变：把「这是一块玻璃」说清楚。
+        //
+        // 0.0.58 — 颜色不再写死。CAGradientLayer 的 `colors` 是 CGColor，
+        // 它**不是**动态色：写一次就冻住，系统的深浅切换对它无效。浅色下
+        // 白 0.14 落在浅底上是一条看不见的白线，深色下它又是唯一的光。
+        // 所以颜色进 `applyPalette()`，由 trait 变化重设一次。
         sheen.startPoint = CGPoint(x: 0.5, y: 0)
         sheen.endPoint = CGPoint(x: 0.5, y: 1)
         sheet.layer.addSublayer(sheen)
@@ -241,8 +281,34 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
         pan.delegate = self
         sheet.addGestureRecognizer(pan)
 
+        applyPalette()
         loadData()
         buildIndex()
+    }
+
+    /// 0.0.58 — 深浅两套配色。
+    ///
+    /// 面板住在 SpringBoard 的窗口里，那扇窗没有写 `overrideUserInterfaceStyle`，
+    /// 所以 `traitCollection` 跟着系统走，`.label` / `.secondaryLabel` /
+    /// `systemMaterial` 这些动态色自己会变。这张表只管**不会**自己变的那几样：
+    /// `CAGradientLayer.colors` 是 CGColor（写一次就冻住）、阴影强度、遮罩浓度。
+    ///
+    /// 三个数不是调色，是三种故障：浅色下把高光留在 0.14 看不见（玻璃变成
+    /// 一块死灰）；浅色下把阴影留在 0.55 会把桌面压成脏边；深色下把遮罩压到
+    /// 0.26 则面板浮不起来，背景和它抢同一个亮度。
+    private func applyPalette() {
+        let dark = traitCollection.userInterfaceStyle == .dark
+        sheen.colors = [UIColor.white.withAlphaComponent(dark ? 0.13 : 0.42).cgColor,
+                        UIColor.white.withAlphaComponent(0.0).cgColor]
+        sheetHost.layer.shadowOpacity = dark ? 0.55 : 0.18
+        // 键盘跟面板一起变：从浅色面板上弹出一块深色键盘，那一下比配错色还刺眼。
+        searchField.keyboardAppearance = dark ? .dark : .light
+    }
+
+    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
+        super.traitCollectionDidChange(previous)
+        guard previous?.userInterfaceStyle != traitCollection.userInterfaceStyle else { return }
+        applyPalette()
     }
 
     private func loadData() {
@@ -266,14 +332,14 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
             sections.append(Section(title: "已在圆盘 · \(pinned.count)", apps: pinned))
         }
 
-        // 按首字母分组。中文名按拼音排不了（没有索引数据），统一进「#」，
-        // 这条和桌面上的系统文件夹逻辑一致，用户不需要学新东西。
+        // 按首字母分组。0.0.58 — 中文不再一股脑塞进「其他」：先把名字转成
+        // 拉丁（拼音），去掉声调，再取首字母。系统的 `applyingTransform`
+        // 走 ICU，一个中文名 ≈ 「wēi xìn」→「wei xin」→ W，和系统通讯录
+        // 的索引条是同一套规则。转换结果按 bundleID 缓存，只在打开面板时
+        // 算一次 —— 三百个应用逐个转是这一版唯一可能感觉到慢的地方。
         var buckets: [Character: [InstalledApp]] = [:]
         for app in rest {
-            let first = app.name.first ?? "#"
-            let upper = String(first).uppercased()
-            let letter = upper.first ?? "#"
-            let key: Character = (letter >= "A" && letter <= "Z") ? letter : "#"
+            let key = AevonAppPanel.indexKey(app.name)
             buckets[key, default: []].append(app)
         }
         for key in buckets.keys.sorted(by: { a, b in
@@ -281,7 +347,13 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
             if b == "#" { return true }
             return a < b
         }) {
-            guard let apps = buckets[key] else { continue }
+            guard var apps = buckets[key] else { continue }
+            apps.sort { a, b in
+                let ka = AevonAppPanel.sortKey(a.name)
+                let kb = AevonAppPanel.sortKey(b.name)
+                if ka != kb { return ka.localizedStandardCompare(kb) == .orderedAscending }
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            }
             sections.append(Section(title: key == "#" ? "其他" : String(key), apps: apps))
         }
 
@@ -322,6 +394,11 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
             let ap = a.name.lowercased().hasPrefix(needle)
             let bp = b.name.lowercased().hasPrefix(needle)
             if ap != bp { return ap }
+            // 结果里的次序和分组视图用同一把尺：拼音。否则同一个词在「分组」
+            // 和「搜索」两种视图里的相对位置会不一样，找过一次的位置就失效。
+            let ka = AevonAppPanel.sortKey(a.name)
+            let kb = AevonAppPanel.sortKey(b.name)
+            if ka != kb { return ka.localizedStandardCompare(kb) == .orderedAscending }
             return a.name.localizedStandardCompare(b.name) == .orderedAscending
         }
 
@@ -505,9 +582,13 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
         // 先取回调再 dismiss —— dismiss 会把 onPick 置 nil，写在后面就永远拿到 nil。
         let pick = onPick
         dismiss(reason: "picked")
-        // 先让面板走完收起路，再开浮窗：两段动画叠在一起时，浮窗的第一帧
-        // 会落在面板还在收缩的那一层上，看起来像闪了一下。
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { pick?(bundleID) }
+        // 0.0.58 — 0.16 s 的等待去掉，改成下一拍。
+        //
+        // 那 160 ms 是 0.0.56 为「面板收起动画与浮窗第一帧叠在一起」加的。现在
+        // 浮窗在冷启动时是 alpha 0 等第一帧的（见 FloatHost），面板收起时它根本
+        // 还没显示 —— 叠加不存在了，而 160 ms 是整条链上最便宜就能省掉的一段：
+        // 应用启动是串行的，早 160 ms 发出去，第一帧就早 160 ms。
+        DispatchQueue.main.async { pick?(bundleID) }
     }
 
     @objc private func indexTapped(_ sender: UIButton) {
@@ -682,6 +763,10 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
 
 private final class PanelRowView: UIView {
 
+    /// 一行的格子数。`AevonAppPanel.columnCount` 读的就是这里 —— 布局只认
+    /// 一个来源，两处各写一个 5 早晚会变成 5 和 4。
+    static let columns = 5
+
     private let titleLabel = UILabel()
     private var cells: [PanelAppCell] = []
     private var headerMode = false
@@ -690,12 +775,12 @@ private final class PanelRowView: UIView {
         super.init(frame: frame)
         backgroundColor = .clear
 
-        titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 11.5, weight: .semibold)
         titleLabel.textColor = .secondaryLabel
         addSubview(titleLabel)
         titleLabel.isHidden = true
 
-        for _ in 0..<4 {
+        for _ in 0..<PanelRowView.columns {
             let cell = PanelAppCell(frame: .zero)
             cell.isHidden = true
             addSubview(cell)
@@ -736,11 +821,12 @@ private final class PanelRowView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         if headerMode {
-            titleLabel.frame = CGRect(x: 0, y: bounds.height - 22, width: bounds.width, height: 18)
+            titleLabel.frame = CGRect(x: 2, y: bounds.height - 20, width: bounds.width, height: 16)
             return
         }
+        let count = CGFloat(cells.count)
         let gap: CGFloat = 8
-        let width = (bounds.width - gap * 3) / 4
+        let width = (bounds.width - gap * (count - 1)) / count
         for (i, cell) in cells.enumerated() {
             cell.frame = CGRect(x: CGFloat(i) * (width + gap), y: 0,
                                 width: width, height: bounds.height)
@@ -756,7 +842,10 @@ private final class PanelAppCell: UIControl {
     let label = UILabel()
     var bundleID = ""
 
-    private static let side: CGFloat = 54
+    /// 0.0.58 — 54 → 44。5 列的格宽是 (335 − 32) / 5 ≈ 60，图标 54 在 60 的
+    /// 格子里只留 3 pt 边，横向挤成一条。44 让每格两侧各留 8，视觉上才是
+    /// 一排并列的图标，而不是一条被切开的色带。
+    private static let side: CGFloat = 44
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -764,7 +853,7 @@ private final class PanelAppCell: UIControl {
         iconView.isUserInteractionEnabled = false
         addSubview(iconView)
 
-        label.font = .systemFont(ofSize: 10.5, weight: .regular)
+        label.font = .systemFont(ofSize: 9.5, weight: .regular)
         label.textColor = .label
         label.textAlignment = .center
         label.numberOfLines = 1
@@ -791,7 +880,7 @@ private final class PanelAppCell: UIControl {
     override func layoutSubviews() {
         super.layoutSubviews()
         let side = PanelAppCell.side
-        iconView.frame = CGRect(x: (bounds.width - side) / 2, y: 2, width: side, height: side)
-        label.frame = CGRect(x: 0, y: side + 6, width: bounds.width, height: 14)
+        iconView.frame = CGRect(x: (bounds.width - side) / 2, y: 6, width: side, height: side)
+        label.frame = CGRect(x: 0, y: side + 9, width: bounds.width, height: 13)
     }
 }

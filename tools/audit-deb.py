@@ -701,15 +701,15 @@ def main():
                   b"AevonRingMultiRing",
                   b"win: icon launch ",
                   b"win: icon scene up after ",
-                  # 0.0.57 — 冷启动封面。母本 `ReflectManager` 的 `_launching` /
-                  # `_showCover` / `_covered` / `_cover`：启动期间先放封面上，
-                  # 首帧到了再撤。三条缺一不可 —— `cold start cover` 是它决定
-                  # 要画（判据 contentState != 2），`cover lifted after` 是它真的
-                  # 撤了（带毫秒数，能直接读出这段空窗多长），没有第一条说明
-                  # 判据把冷启动认成了热启动，没有第二条说明封面永远撤不掉。
-                  b"win: cold start cover cs=",
-                  b"win: cover shown for ",
-                  b"win: cover lifted after ",
+                  # 0.0.58 — 冷启动不再盖图标，改成卡片按住不显示。三条缺一不可：
+                  # `cold start cs=` 是判据命中（contentState != 2，热启动不会打），
+                  # `card waiting for first frame` 是卡片真的被按住，
+                  # `first frame shown after` 是它真的露出来了（带毫秒数，能直接
+                  # 读出这段空窗多长）。缺第一条说明判据把冷启动当成了热启动；
+                  # 缺第三条说明卡片永远不显示 —— 那是比闪黑更糟的一版。
+                  b"win: cold start cs=",
+                  b"win: card waiting for first frame",
+                  b"win: first frame shown after ",
                   # 0.0.42 — 多圈几何随旧版圆盘移交：布局规则（外圈一定比内圈多、
                   # 相邻圈错开半格）在 AevonRingMenu.distribution / radii 里，
                   # 断言落在圆心旋转模式的日志标记上（日志字面量，必进二进制）。

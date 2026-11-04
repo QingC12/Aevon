@@ -973,7 +973,7 @@ zStackParticipantDidChange:
         // reach a window. This is the one signal that does not depend on the
         // scene settings crossing into the app's own copy.
         markHosted(bundleID)
-        pollForScene(bundleID, ticks: 0, fallback: fallback)
+        pollForScene(bundleID, ticks: 0, start: Date(), fallback: fallback)
     }
 
     // MARK: - 0.0.44 hosted mark
@@ -1003,14 +1003,22 @@ zStackParticipantDidChange:
         Log.write("win: hosted mark cleared for " + bundleID)
     }
 
-    /// Four seconds of looking, four times a second. A suspended launch is a
-    /// process bring-up, so the first look is expected to miss; the ceiling
-    /// exists so a tap that goes nowhere ends instead of leaving a hold armed.
-    private static func pollForScene(_ bundleID: String, ticks: Int,
+    /// 4 秒内找 scene。
+    ///
+    /// 0.0.58 — 前 30 拍从 250 ms 压到 60 ms。原来那 250 ms 是「一秒看四次」，
+    /// 而场景从挂起启动到出现通常只要 120~300 ms —— 也就是**第一次看见它，
+    /// 平均已经晚了 125 ms，最坏 250 ms**，这段时间卡片还没建，屏幕上什么都
+    /// 没有。挂起启动本身已经把「等 App 进程」这一段省掉了，剩下的这一拍就
+    /// 成了整条链上最贵的一段延迟。
+    ///
+    /// 1.8 秒之后退回 250 ms：那时候还没 scene，就是真没起来，没必要每秒查
+    /// 十七次到第四秒。
+    private static func pollForScene(_ bundleID: String, ticks: Int, start: Date,
                                      fallback: @escaping (String) -> Void) {
         if let scene = sceneFor(bundleID) {
             unmark()
-            Log.write("win: icon scene up after " + String(ticks * 250) + "ms")
+            let ms = Int(Date().timeIntervalSince(start) * 1000)
+            Log.write("win: icon scene up after " + String(ms) + "ms ticks=" + String(ticks))
             emitNotes(AevonTakeNotes())
             float(scene, bundleID: bundleID)
             // A hold with no card under it is a scene that never sleeps again.
@@ -1023,15 +1031,16 @@ zStackParticipantDidChange:
             }
             return
         }
-        guard ticks < 16 else {
+        guard Date().timeIntervalSince(start) < 4.0 else {
             unmark()
             AevonHookDisarm()
             Log.write("win: icon " + bundleID + " produced no scene")
             fallback("no scene in 4s")
             return
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            pollForScene(bundleID, ticks: ticks + 1, fallback: fallback)
+        let gap: Double = ticks < 30 ? 0.06 : 0.25
+        DispatchQueue.main.asyncAfter(deadline: .now() + gap) {
+            pollForScene(bundleID, ticks: ticks + 1, start: start, fallback: fallback)
         }
     }
 
@@ -1228,28 +1237,24 @@ zStackParticipantDidChange:
             }
         }
 
-        // 0.0.57 — 冷启动封面（母本的 `_showCover` / `_covered` / `_cover`）。
+        // 0.0.58 — 冷启动不再画任何东西，只把卡片按住不显示。
         //
-        // 判据用 `contentState`，不是「刚刚 launch 过」：热启动回来的 App 也
-        // 有一个刚建好的 scene 对象，但它带着画 —— 给它盖一层就是自己造的一
-        // 次闪。只有真的没内容（!= 2）才画。
-        //
-        // 图标与名字和圆盘、面板同源（`RingIcons`），所以封面上那枚图标就是
-        // 用户刚才点的那个，不是一个通用占位。
-        var cover: FloatHost.Cover?
-        if let id = bundleID {
+        // 0.0.57 在这里造过一版「图标 + 名字」的封面，被否了。留下的判据没有
+        // 变，因为它是对的：只有 `contentState != 2`（真没画）才需要等；热启
+        // 动回来的 App 带着画面，把卡片藏 0.16 秒是自己造的一次闪。
+        var awaiting = false
+        if bundleID != nil {
             let state = AevonContentStateOf(scene)
-            if state != 2 {
-                let app = RingIcons.ringApp(for: id)
-                cover = FloatHost.Cover(name: app.name, icon: app.icon)
-                Log.write(String(format: "win: cold start cover cs=%d app=%@",
-                                 Int(state), id))
+            awaiting = (state != 2)
+            if awaiting {
+                Log.write(String(format: "win: cold start cs=%d, card held until first frame",
+                                 Int(state)))
             }
         }
 
         // Window first, activate second. This is the whole difference from
         // 0.0.20, and the difference between a picture and a black phone.
-        guard let host = FloatHost.show(view, cover: cover,
+        guard let host = FloatHost.show(view, awaitingFrame: awaiting,
                                         onClose: { reason in closeCard(reason) }) else {
             Log.write("win: no window - nothing activated")
             return
@@ -1336,10 +1341,9 @@ zStackParticipantDidChange:
             // 从来不是这条时钟看见的。
             let content = AevonContentStateOf(scene)
             let level = AevonSceneLevel(scene)
-            // 0.0.57 — 首帧到了就揭开冷启动封面。这只是「揭开」，不碰播放状态：
-            // 撤早了会露出空画面，所以判据只看 contentState，不看节拍数。没封
-            // 面的卡片这里每次早退，代价是一次可选判断。
-            if content == 2 { host.revealCover("first frame") }
+            // 0.0.58 — 首帧到了就把卡片露出来（0.0.57 这里是揭开封面）。
+            // 判据只看 contentState：卡片藏着的时候画面还没到，早露就是黑。
+            if content == 2 { host.revealContent("first frame") }
             // Read before the push, so the line below describes what the system
             // did rather than what this turn did.
             let attempts = AevonDeactCount()

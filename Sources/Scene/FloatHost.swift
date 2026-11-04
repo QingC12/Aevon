@@ -85,24 +85,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 0.0.54 — 从画面顶部裁掉的源坐标高度（状态栏 + App 顶栏，见 `show`）。
     private var cropTop: CGFloat = 0
 
-    /// 0.0.57 — 冷启动封面。
+    /// 0.0.58 — 卡片是不是在等第一帧。
     ///
-    /// 母本 `ReflectManager` 的字段表里有 `_launching` / `_showCover` /
-    /// `_covered` / `_cover` 四个，而**整张表里没有任何快照或图像缓存字段**
-    /// （`_snapshots` 属于 `AppSearcher`，是应用搜索用的）。也就是说她的 cover
-    /// 不是截图 —— 这正好绕开被否掉的那条路：冷启动本来也没有旧快照可用。
-    /// 她画的是即时可画的东西，唯一的图像来源是 `_icon`。
-    ///
-    /// 这里做同一件事：卡片先出来，画面还没内容时盖一层「图标 + 名字」，
-    /// 首帧到达再撤。撤的时机由守护节拍给（`contentState == 2`）。
-    private var cover: UIView?
-    private var coverAt: CFTimeInterval = 0
-
-    /// 封面上要画的东西。名字与图标都从 `RingIcons` 取，和圆盘、面板同源。
-    struct Cover {
-        let name: String
-        let icon: UIImage?
-    }
+    /// 母本 `ReflectManager` 里有 `_launching` / `_showCover` / `_covered` /
+    /// `_cover` 四个字段，但整张表里没有任何快照或图像缓存字段 —— 她的 cover
+    /// 不是截图。0.0.57 按这四条做了一版「图标 + 名字」的封面，被否了：那不是
+    /// 画面，只是另一张图。这一版改成不画任何东西，等真画面自己到。
+    private var awaitingFrame = false
+    private var frameAt: CFTimeInterval = 0
 
     private var pan: UIPanGestureRecognizer?
     private var press: UILongPressGestureRecognizer?
@@ -211,7 +201,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// view. A nil answer means "activate nothing": a presenter whose view is
     /// not in a window is 0.0.20's black screen, and that is not worth one more
     /// phone.
-    static func show(_ view: UIView, cover model: Cover? = nil,
+    static func show(_ view: UIView, awaitingFrame: Bool = false,
                      onClose: @escaping (String) -> Void) -> FloatHost? {
         let host = shared
         host.teardown()
@@ -288,10 +278,33 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         view.transform = CGAffineTransform(scaleX: plan.scale, y: plan.scale)
         card.addSubview(view)
 
-        // 0.0.57 — 封面在画面之上、手势之下。只给冷启动画：热启动的 scene
-        // 早就有内容，盖一层反而是一次多余的闪。
-        if let model = model {
-            host.installCover(model, in: card)
+        // 0.0.58 — 冷启动不再盖图标。
+        //
+        // 0.0.57 盖的是「图标 + 名字」。它不是黑屏，但也不是那个 App —— 用户
+        // 看到的是「点了微信，出来一张微信的卡片封面」，那是应用商店的观感，
+        // 不是系统该有的观感（Aevon(52) 的原话：这样不好看）。
+        //
+        // 母本没有这一步，原因在它的选择子表：`launchApplicationWithIdentifier:
+        // suspended:` 根本不在 `__objc_selrefs` 里，它走的是
+        // `_activateBundleID:requestID:isTrusted:options:source:originalSource:
+        // withResult:` 与 `_createSceneWithDefinition:...` —— 系统自己的激活路
+        // 径，App 从诞生那一瞬就是「该画」的状态，第一帧不需要谁去激活。
+        // 我们这条挂起启动的路做不到这一点（见 SceneProbe 的唤醒段），所以
+        // 能改的不是「画得更好」，而是**不让空窗被看见**：
+        //
+        //   卡片先建好、但 alpha 为 0 —— 桌面上什么都不多出来；
+        //   第一帧到的那个节拍淡入；三秒还没到就强制露出来，让操作者至少能关掉。
+        //
+        // 这比「先给一块深色板再换成画面」少一次亮度的硬切换：那一次切换本身
+        // 就是被投诉的那个「闪」。
+        if awaitingFrame {
+            host.awaitingFrame = true
+            host.frameAt = CACurrentMediaTime()
+            card.alpha = 0
+            Log.write("win: card waiting for first frame")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak host] in
+                host?.revealContent("timeout")
+            }
         }
         // 0.0.49 — 光晕在卡片**下面**。描边撤掉之后，深色壁纸上的卡片边界看不出来
         // （Aevon(47) #2）；母本的做法不是画线，而是给卡片加一层柔光 —— 二进制里
@@ -411,7 +424,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         card?.removeFromSuperview()
         grip = nil
         shield = nil
-        cover = nil
+        awaitingFrame = false
         card = nil
         content = nil
         visible = .zero
@@ -1082,68 +1095,25 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 冷启动的 App 要几百毫秒才画得出第一帧，这段空窗里卡片是透明的，
     /// 露出来的是窗口后面的黑。母本的办法不是等，是先放一个封面上去。
     ///
-    /// 封面只画两样东西：App 的图标、App 的名字。没有截图（见属性区的说明），
-    /// 所以它对每一个 App 都成立，包括第一次安装、从没进过前台的。
-    private func installCover(_ model: Cover, in card: UIView) {
-        cover?.removeFromSuperview()
-        let plate = UIView(frame: card.bounds)
-        plate.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        plate.isUserInteractionEnabled = false
-        plate.backgroundColor = UIColor(white: 0.07, alpha: 1)
-
-        // 中间略亮：纯平的一块在深色壁纸上像「没画出来」，这是同一个观感的
-        // 另一种失败，只是这次是我们自己造的。
-        let shade = CAGradientLayer()
-        shade.frame = plate.bounds
-        shade.colors = [UIColor(white: 0.17, alpha: 1).cgColor,
-                        UIColor(white: 0.06, alpha: 1).cgColor]
-        shade.locations = [0, 1]
-        plate.layer.addSublayer(shade)
-
-        let side = Swift.min(card.bounds.width * 0.34, 104)
-        let tile = UIImageView(image: model.icon)
-        tile.frame = CGRect(x: (card.bounds.width - side) / 2,
-                            y: card.bounds.height / 2 - side * 0.62,
-                            width: side, height: side)
-        tile.contentMode = .scaleAspectFit
-        tile.clipsToBounds = true
-        tile.layer.cornerRadius = side * 0.225
-        tile.layer.cornerCurve = .continuous
-        plate.addSubview(tile)
-
-        let name = UILabel(frame: CGRect(x: 14,
-                                         y: tile.frame.maxY + 12,
-                                         width: card.bounds.width - 28,
-                                         height: 22))
-        name.text = model.name
-        name.textAlignment = .center
-        name.textColor = UIColor.white.withAlphaComponent(0.82)
-        name.font = .systemFont(ofSize: 15, weight: .medium)
-        plate.addSubview(name)
-
-        card.addSubview(plate)
-        cover = plate
-        coverAt = CACurrentMediaTime()
-        Log.write(String(format: "win: cover shown for %@ icon=%@",
-                         model.name, model.icon == nil ? "none" : "yes"))
-
-        // 上限兜底：App 没起来、或者起来了一直不画，封面不能变成永久界面。
-        // 到时撤掉，卡片至少还是那个会跟手会缩放的窗口。
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) { [weak self] in
-            self?.revealCover("timeout")
-        }
-    }
-
-    /// 首帧到了（或超时）：淡出封面。重复调用安全 —— 撤过一次之后 `cover`
-    /// 就是 nil，后面每一拍都从这里早退，不会把日志刷满。
-    func revealCover(_ why: String) {
-        guard let plate = cover else { return }
-        cover = nil
-        Log.write(String(format: "win: cover lifted after %.0fms (%@)",
-                         (CACurrentMediaTime() - coverAt) * 1000, why))
-        UIView.animate(withDuration: 0.18,
-                       animations: { plate.alpha = 0 },
-                       completion: { _ in plate.removeFromSuperview() })
+    /// 第一帧到了（或三秒超时）：把卡片露出来。
+    ///
+    /// 0.0.58 —— 这一步以前叫 `revealCover`，作用是撤掉一层图标板。现在没有
+    /// 板要撤：卡片自己从 alpha 0 上来，所以只有「什么时候」还有意义。
+    ///
+    /// 淡入而不是直接置 1。画面自己浮现像系统在放大图标；卡片弹出来像被塞了
+    /// 一个窗口 —— 同一个 0.16 秒，两种观感。
+    func revealContent(_ why: String) {
+        guard awaitingFrame else { return }
+        awaitingFrame = false
+        let ms = (CACurrentMediaTime() - frameAt) * 1000
+        Log.write(String(format: "win: first frame shown after %.0fms (%@)",
+                         ms, why as NSString))
+        guard let card = card else { return }
+        UIView.animate(withDuration: 0.16,
+                       delay: 0,
+                       options: [.curveEaseOut, .beginFromCurrentState],
+                       animations: { card.alpha = 1 },
+                       completion: nil)
     }
 
     /// The way out of 停靠小窗: a tap anywhere on its picture. The scene view
