@@ -104,6 +104,7 @@ static volatile sig_atomic_t AevonStep = 0;
 #define AEVON_STEP_HOOK   4
 #define AEVON_STEP_SHEET  5
 #define AEVON_STEP_TICK   6
+#define AEVON_STEP_DEFER  7   // 0.0.95 — 延后执行的那一次写入
 #define AEVON_STEP_RESOLVE 7
 
 /// 0.0.94 — 「停在哪一句」。
@@ -2517,9 +2518,42 @@ static CFTimeInterval AevonVideoScanNext = 0.0;
 /// Aevon(78) 那次卡住是主线程被我们吃掉的形状，宁可少居中两秒，也不能卡住手机。
 static CFTimeInterval AevonVideoPause = 0.0;
 
+/// 0.0.95 — 排版期**写入**的延后执行。
+///
+/// Aevon(85) 的看门狗把 0.0.94 那条「某一次调用没返回」换成了更硬的形状：8 条
+/// `app: hang` 全是 `step=4 sub=1 d=1`（停在 App 的原实现里、不是自我递归），而
+/// `hook` 从 59300 涨到 527855 —— **33,468 次排版调用/秒，连续 16 秒，主线程连
+/// 一秒的 `alive` 都没跑过**。这 16 秒里 `c=6000 b=f870` 一次没变 ⇒ 我们一次都
+/// 没再写：风暴不是我们刷出来的，是我们那一手 `setTransform:` 把它点着的。
+///
+/// 道理很朴素：App 正在算这一页的布局，我们中途把它要量的那个视图挪走，它
+/// 「还得再排一次」的判据就永远成立，于是在同一个调用栈里排到 3 万次/秒。
+/// 所以写入**不能发生在排版调用栈里**。现在遇到这种时候只排一个待办，等本轮
+/// runloop 末尾（CA 提交前后）再执行 —— 视觉上仍是这一帧，物理上已经不在
+/// App 的排版栈里，那个判据看不见我们。
+///
+/// 全程不存任何视图指针：待办只记「哪个标记」，执行时从当前层级里现找活着的
+/// 那一格，再走已有的下标链（`AevonVideoPathResolve`）。
+static volatile int AevonDeferQueued = 0;
+
+/// 0.0.95 — 钩子频率熔断。
+///
+/// 上限只能是「频率」（0.0.88 的按次数配额让锁屏后永久失效）。这里每秒结算一次
+/// 钩子调用数：>200 就留一行 `video hook n=/s`（风暴前的爬坡看得见），>2500 就
+/// 认「已经是风暴」—— 停写、停扫、跳过整段处理 3 秒，把主线程还回去。3 秒后
+/// 自动解除，不永久放弃。
+static volatile int AevonHookBurst = 0;
+static CFTimeInterval AevonHookBurstAt = 0.0;
+static volatile int AevonHookHold = 0;
+#define AEVON_HOOK_WARN   200
+#define AEVON_HOOK_STORM  2500
+#define AEVON_HOOK_HOLD   3.0
+
 static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via);
 static void AevonLayoutHook(id self, SEL _cmd);
 static BOOL AevonVideoKnownApply(UIView *cell, const char *via);
+static void AevonVideoDeferNote(void);
+static void AevonVideoDeferFlush(void);
 
 /// 0.0.89 — 每 0.5 s 结算一次「我们吃了主线程多少」。
 /// Aevon(79) 的卡屏只能从「App 侧日志空白 4.5 秒」反推，太绕了。这一行直接把
@@ -2654,6 +2688,8 @@ static void AevonLayoutHookBody(id self, SEL _cmd) {
     if (orig != NULL) ((void (*)(id, SEL))orig)(self, _cmd);
     AevonSub = AEVON_SUB_ORIG_END;
     if (AevonVideoBusy) return;
+    // 0.0.95 — 熔断窗口内什么都不做（原实现照跑，App 的排版不受影响）。
+    if (AevonHookHold) return;
     if (![self isKindOfClass:[UIView class]]) return;
     // 0.0.88 — 便宜的门全部排在扫描之前，而且第一道门就是「你到底是不是我们管的类」。
     //
@@ -2750,10 +2786,46 @@ static void AevonLayoutHookBody(id self, SEL _cmd) {
 ///   · **一次没回来** —— `hook` 是几十、`d` 是 1；
 ///   · **回来了太多次** —— `hook` 上千、`d` 涨到几十（又一次自我递归）。
 /// 看门狗把这两个数写在 `app: hang` 那一行里，就不再需要靠猜。
+/// 0.0.95 — 钩子频率熔断（每秒结算一次，只有热的时候才取时间）。
+///
+/// Aevon(85) 里 `hook` 从 59300 涨到 527855 = 33,468 次/秒，而这一版之前没有任何
+/// 常态读数能看出「一次滑动到底多少次」—— 于是「正常」是多少谁也不知道。现在
+/// >200 次/秒就留一行，风暴前的爬坡会在下一份日志里第一次显形。
+static void AevonHookGuard(void) {
+    AevonHookBurst += 1;
+    if (((int)AevonHookBurst & 127) != 0) return;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    double win = now - AevonHookBurstAt;
+    if (win < 1.0) return;
+    int n = (int)((double)AevonHookBurst / win);
+    AevonHookBurst = 0;
+    AevonHookBurstAt = now;
+    if (n < AEVON_HOOK_WARN) return;
+    char line[96];
+    snprintf(line, sizeof(line), "video hook n=%d/s", n);
+    AevonPageWrite(line);
+    if (n < AEVON_HOOK_STORM) return;
+    // 已经是风暴：停写、停扫、跳过整段处理 3 秒。这个上限只按**频率**，
+    // 3 秒后自动解除 —— 不做终身配额（0.0.88 那次锁屏后永久失效的教训）。
+    AevonHookHold = 1;
+    AevonVideoPause = now + AEVON_HOOK_HOLD;
+    AevonDeferQueued = 0;
+    snprintf(line, sizeof(line), "video storm n=%d/s hold=3s", n);
+    AevonPageWrite(line);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(AEVON_HOOK_HOLD * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonHookHold = 0;
+        AevonHookBurst = 0;
+        AevonHookBurstAt = CFAbsoluteTimeGetCurrent();
+    });
+}
+
 static void AevonLayoutHook(id self, SEL _cmd) {
     AevonDepth += 1;
     AevonHookCalls += 1;
     if ((int)AevonDepthMax < AevonDepth) AevonDepthMax = AevonDepth;
+    AevonHookGuard();
     AevonLayoutHookBody(self, _cmd);
     AevonDepth -= 1;
 }
@@ -2773,6 +2845,18 @@ static void AevonVideoWrite(UIView *band, UIView *cell, CGRect rb,
     // 停住 —— 而进程还活着（Aevon(82) 的「页面点不动、日志每秒还在写」正是这个形状）。
     // 这一句的代价是一次 TLS 读；收益是这条路不可能再把事务栈弄坏。
     if (![NSThread isMainThread]) return;
+    // 0.0.95 — **排版调用栈里一律不写**，改成排一个待办。
+    //
+    // `AevonDepth > 0` 就是我们正站在某个被钩的 `layoutSubviews` 里（`AevonLayoutHook`
+    // 进出各加一）。在这儿改 App 的几何 = 在它量这一页的中途把东西挪走，它「还得
+    // 再排一次」的判据永远成立 —— Aevon(85) 的 33,468 次/秒就是这么来的。
+    if (AevonDepth > 0) {
+        AevonVideoDeferNote();
+        return;
+    }
+    // 熔断窗口内不写（风暴之后自动恢复）。
+    if (AevonHookHold) return;
+    if (CFAbsoluteTimeGetCurrent() < AevonVideoPause) return;
     CGFloat cellH = [cell bounds].size.height;
     CGFloat want = (cellH - rb.size.height) / 2.0;
     CGFloat gap = want - rb.origin.y;
@@ -2958,6 +3042,52 @@ static BOOL AevonVideoKnownApply(UIView *cell, const char *via) {
     return NO;
 }
 
+/// 0.0.95 — 从**当前层级**里找出指针尾数匹配的那一格；找不到返回 nil。
+///
+/// 只把「刚从 `subviews` 里取出来的对象」交出去，绝不去 cast 我们自己存下来的地址 ——
+/// 0.0.90 的 SIGSEGV 就是把缓存的裸指针 cast 回对象发消息。
+static UIView *AevonLiveCellWithTag(UIScrollView *view, uintptr_t tag) {
+    if (view == nil || tag == 0) return nil;
+    NSArray *kids = [view subviews];
+    NSUInteger limit = kids.count < 16 ? kids.count : 16;
+    for (NSUInteger i = 0; i < limit; i++) {
+        UIView *kid = [kids objectAtIndex:i];
+        if ((uintptr_t)kid == tag) return kid;
+    }
+    return nil;
+}
+
+/// 0.0.95 — 「刚才那次写入被压到本轮末尾」。
+static void AevonVideoDeferNote(void) {
+    if (AevonDeferQueued) return;
+    AevonDeferQueued = 1;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        AevonVideoDeferFlush();
+    });
+}
+
+/// 0.0.95 — 本轮 runloop 末尾补上排版期被压下来的写入。
+///
+/// 只对「记账还在、且那一格现在仍然活着」的页做：格子是从当前层级里现找的，
+/// 找得到就顺着下标链取画面（微秒级），找不到就跳过。所以压下来这件事本身
+/// 不会制造任何新的失效路径。
+static void AevonVideoDeferFlush(void) {
+    AevonDeferQueued = 0;
+    if (![NSThread isMainThread]) return;
+    if (AevonHookHold) return;
+    if (!AevonAppHookAllowed()) return;
+    if (!AevonCardIsUp()) return;
+    AevonStep = AEVON_STEP_DEFER;
+    UIScrollView *view = AevonPagerGet();
+    if (view == nil || [view window] == nil) return;
+    for (int i = 0; i < AEVON_PAGE_SLOTS; i++) {
+        if (AevonVideoPages[i].cell == 0 || AevonVideoPages[i].count <= 0) continue;
+        UIView *cell = AevonLiveCellWithTag(view, AevonVideoPages[i].cell);
+        if (cell == nil) continue;
+        AevonVideoKnownApply(cell, "defer");
+    }
+}
+
 static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
     AevonStep = AEVON_STEP_SCAN;
     if (cell == nil) return;
@@ -3127,6 +3257,10 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
 /// `via=tick` 在这份日志里意味着**没赶上排版的时刻** —— 屏幕上会跳一下。
 static void AevonVideoCenter(void) {
     AevonStep = AEVON_STEP_TICK;
+    // 0.0.95 — 熔断的兜底解除：`dispatch_after` 那条路要等主线程空下来才会跑，
+    // 而「空下来」正是我们要判的事。心跳只要还能跑，就按时间把它放掉，
+    // 避免一次风暴把画面永久判死。
+    if (AevonHookHold && CFAbsoluteTimeGetCurrent() >= AevonVideoPause) AevonHookHold = 0;
     AevonVideoLaneNow = -1;
     UIScrollView *view = AevonPagerGet();
     if (view == nil || [view window] == nil) return;
