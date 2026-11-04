@@ -729,6 +729,11 @@ def main():
                       # 出现了说明这一页本来就重，那 3 秒的静默是买保险。
                       b"video hook n=%d/s",
                       b"video storm n=%d/s hold=3s",
+                      # 0.0.96 — 提前装钩子（B 路）每张卡一行：`n` = 这次新挂上的
+                      # 类数（页 + 画面区，最多 AEVON_HOOK_SLOTS=12）。
+                      # 判据：n>0 说明 B 路真的执行了；整份日志一条都没有 ⇒
+                      # 开卡那一拍翻页器还没建出页，或者候选全被尺寸筛掉了。
+                      b"video hook pre n=%d",
                       b"app: boot pid=%d",
                       # 0.0.91 — 死因证词。signal handler 只做 open/write/close
                       # （崩溃现场不能碰 NSString/stdio），`step=` 说死在哪个函数里；
