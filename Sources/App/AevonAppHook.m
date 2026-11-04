@@ -351,11 +351,22 @@ static BOOL AevonCanvasIsShrunk(void) {
     return answer;
 }
 
-/// 每个进程只安排一次。`AevonScheduleGeometry` 自己也是幂等的，这层只是省掉
-/// 重复调用带来的两次 dispatch。
-static void AevonArmGeometry(void) {
+/// 每个进程只安排一次，而且一秒最多问一次。
+///
+/// 这个函数由两个状态钩子的「非后台」那一支调用，而 `applicationState` /
+/// `activationState` 在热路径上可能每秒被问上百次 —— 所以节流必须在**这里**，
+/// 不能指望调用点。装上之后（`armed`）连时间戳都不再看。
+static void AevonGeometryChance(void) {
     static int armed = 0;
+    static CFAbsoluteTime stamp = 0;
     if (armed) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (stamp > 0 && now - stamp < 1.0) return;
+    stamp = now;
+    // 判据只用几何，不用 settings 那一对 —— Aevon(59) 的抖音连 `AevonHosted()`
+    // 都没成立过（整场没有 `app: promoted`），拿它当前置条件就永远量不到。
+    // 「画布比屏幕矮」是这块卡存在的直接后果，与谁写的 settings 无关。
+    if (!AevonCanvasIsShrunk()) return;
     armed = 1;
     AevonScheduleGeometry();
 }
@@ -373,13 +384,14 @@ static void AevonArmGeometry(void) {
 /// 场景遍历（有 1 s 缓存），收益是「视频偏上」终于有读数。
 static NSInteger AevonApplicationState(id self, SEL _cmd) {
     NSInteger state = ((NSInteger (*)(id, SEL))AevonOriginalApplicationState)(self, _cmd);
+    if (state != 2) {                          // not UIApplicationStateBackground
+        // 0.0.69 — 不是后台也要有机会安排量尺。Aevon(59) 的抖音一次都没进过下面
+        // 那一支（挂起启动后被系统直接激活），于是「视频偏上」整场没有读数。
+        // `AevonGeometryChance` 一秒最多问一次、装上就不再问，热路径不受影响。
+        AevonGeometryChance();
+        return state;
+    }
     if (!AevonHosted()) return state;
-    // 0.0.69 — 量尺的入口挪到这里（见 `AevonCanvasIsShrunk`）：原来它在
-    // 「state == 2 才改写」那个分支里，而 Aevon(59) 的抖音一次都没进过那个分支
-    // （挂起启动后被系统直接激活），于是整场没有一行 `app: geom` —— 而「视频
-    // 偏上」正是那一行要量的事。现在只要「这块画布比屏幕矮」就安排一次。
-    if (AevonCanvasIsShrunk()) AevonArmGeometry();
-    if (state != 2) return state;              // not UIApplicationStateBackground
     AevonNote("applicationState");
     return 0;                                  // UIApplicationStateActive
 }
@@ -389,9 +401,11 @@ static NSInteger AevonApplicationState(id self, SEL _cmd) {
 /// refuses to handle an event — and `2` is `UISceneActivationStateBackground`.
 static NSInteger AevonActivationState(id self, SEL _cmd) {
     NSInteger state = ((NSInteger (*)(id, SEL))AevonOriginalActivationState)(self, _cmd);
+    if (state != 2) {
+        AevonGeometryChance();
+        return state;
+    }
     if (!AevonHosted()) return state;
-    if (AevonCanvasIsShrunk()) AevonArmGeometry();
-    if (state != 2) return state;
     AevonNote("activationState");
     return 0;                                  // UISceneActivationStateForegroundActive
 }
