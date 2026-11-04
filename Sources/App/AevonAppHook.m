@@ -642,8 +642,6 @@ static int AevonRemeasureWaits = 0;
 static int AevonPlayBefore = 0;
 static int AevonPlayNotes = 0;
 static int AevonResumes = 0;
-/// 0.0.79 — 「这个 App 要整屏画布」的记号只写一次。
-static int AevonWantWrote = 0;
 
 static void AevonPagerKeep(UIScrollView *view) {
     if (view == nil) return;
@@ -1239,36 +1237,28 @@ static void AevonPageState(const char *reason) {
     AevonPageWrite(body);
 }
 
-/// 0.0.79 — 这一族 App 要一块「整屏画布」，卡片按整屏比例去缩。
+/// 0.0.82 — 「整屏画布」这条路**撤掉了**。0.0.79 装过它，Aevon(72) 撤了。
 ///
-/// Aevon(69) 的哔哩哔哩竖版把结论钉死了：窗口、根视图、导航容器全是 717
-/// （`geom early scene=430x717 win=430x717 root=430x717`），而它自己的翻页器
-/// 是 `BBStoryBaseTableView:0,0,430x932`、页是 `BBStoryPortraitCardCell:0,0,430x932`
-/// —— 页高 932、父视图 838（= 932 − 59 − 34）。三个数全是 932 派生的，说明这一页
-/// 是**按整屏排的**，不是「行高没跟上」：`setNeedsLayout` 三层（0.0.78 做的）
-/// 之后仍是 932，`stuck settle … n=3` 就是它的回执。
+/// 当时的理由是成立的：哔哩哔哩竖版那一页就是 932 高（`BBStoryPortraitCardCell:0,0,430x932`），
+/// 5:3 的卡只有 717，右侧那一列按钮的下半截必然在框外。于是 0.0.79 让 App 在
+/// 自己的 tmp 里写一个记号（`aevon-full`），宿主下一次开卡时给整屏画布，卡片按
+/// 整屏比例缩 —— 整页看得见。
 ///
-/// 这里没有能算的余地：页就是 932 高，卡片只有 717，切掉的 215 pt 正是竖版故事
-/// 右侧那一列按钮的下半截。所以换的不是页面，是**画布**：给这个 App 一块整屏大小
-/// 的 scene，卡片按整屏比例缩（430×932 的 0.668 ≈ 287×623），整页都看得见。
+/// 问题不在判据，在**记号的寿命**：一次判定变成了一条永久的政策。0.0.81 的分账
+/// （卡片恒 5:3、画布按等比装进去）把它变成了看得见的东西 —— Aevon(73) 的读数：
 ///
-/// 宿主没法问「你的页多大」，只能由这一侧留个记号：写在自己的 tmp 里，卡片关掉
-/// 之后宿主去读（`AevonDrainAppLog` 同一条路），下一次给这个 App 开卡时生效。
-/// 记号里带屏幕高度，换机型或改分辨率就作废；宿主那边还有 30 天的时效。
-static void AevonWantFullCanvas(CGFloat height) {
-    if (AevonWantWrote) return;
-    NSString *tmp = NSTemporaryDirectory();
-    if (tmp.length == 0) return;
-    NSString *path = [tmp stringByAppendingPathComponent:@"aevon-full"];
-    FILE *file = fopen([path fileSystemRepresentation], "w");
-    if (file == NULL) return;
-    AevonWantWrote = 1;
-    fprintf(file, "h=%.0f\n", height);
-    fclose(file);
-    char body[120];
-    snprintf(body, sizeof(body), "want full canvas at=%.0f", height);
-    AevonPageWrite(body);
-}
+///   win: fat scene ratio=1.667 screen=430x932 render=430x932 full=1 ... card=366x610
+///   win: scale factor=0.655 shown=282x610 fill=366x610
+///   win: letterbox side=42pt flat=1 canvas=430x932
+///
+/// 430×932 装进 366×610，两边各让 42 pt：卡片是 5:3 的，画面是 9:19.5 的，
+/// 中间那条黑边就是「这个 App 被一份旧记号按整屏排版」的形状。用户的原话是
+/// 「虽然悬浮窗的尺寸是 5:3，但是内容却是 16:9，并且两边存在黑边」，并且给了
+/// 判决：**主页面按 5:3 真重排**优先于「竖版那一页显示不全」。
+///
+/// 所以这里不再留记号，也不再有第二个画布来源：画布恒等于卡片的形状（5:3），
+/// App 就按 717 排。`stuck` 那几行读数留着（它仍然在量、仍然在置脏），只是不再
+/// 换画布 —— 竖版那一页被切掉的 215 pt 是产品形状的账，不拿整台机器的观感去换。
 
 /// 0.0.78 — 「App 没跟上」这一族：翻页器比窗口还高。
 ///
@@ -1315,10 +1305,6 @@ static void AevonStuckReport(const char *reason, CGFloat box, CGFloat full) {
              [view contentSize].height,
              kid != nil ? [kid frame].size.height : 0.0, AevonStuckLines);
     AevonPageWrite(body);
-    // 0.0.79 — 第二次仍然高出一大截，就不再指望它自己缩：这一族 App 要的是整屏
-    // 画布（见 `AevonWantFullCanvas`）。第一次不写，是因为刚开卡那一两拍本来就
-    // 可能撞在中间态上 —— 一次抖动不该换来一个永久的「这个 App 用整屏卡」。
-    if (AevonStuckLines >= 2 && box - full > 40.0) AevonWantFullCanvas(box);
     if (kid == nil) return;
 
     // ② 被切掉的是谁：在翻页器坐标里，底边落在窗口以下的叶子视图。
@@ -1437,6 +1423,88 @@ static void AevonSheetReport(void) {
     char cut[520];
     snprintf(cut, sizeof(cut), "sheet cut%s (below the window)", [list UTF8String]);
     AevonPageWrite(cut);
+}
+
+/// 0.0.82 — 分享面板：把「屏幕底边」和「窗口底边」之间那一段让出来。
+///
+/// Aevon(71)/(72)/(73) 三轮都是同一句：卡里点抖音「分享」，只看得见联系人头像，
+/// 底部的发送按钮不在。0.0.80 量清楚了一件事 —— 面板不是没画，是被窗口切掉了：
+///
+///   app: page sheet DUXSheetNavigationController h=932 top=0 box=717
+///   app: page sheet cut UILabel:376,853,76x14 UIImageView:425,822,21x24 … (below the window)
+///
+/// 面板的 view 是 **430×932**（App 按 `UIScreen` 高排的），窗口只有 717。它从
+/// y=0 一直铺到 932，所以被切掉的正好是最后 215 pt —— 而这类面板是**从屏幕底边
+/// 往上摆**的，底部那一截就是按钮行（786…867，读数里全在那里）。
+///
+/// 不做的事先写明：不去改 `UIScreen`（0.0.65 / 0.0.67 两次事故），也不把窗口拉
+/// 成 932（那等于整屏画布，Aevon(73) 已经判过）。这里只做一件事 —— **把这一张
+/// 浮层整体往上抬 `溢出` 这么多**，让它自己的底边和窗口的底边对齐。
+///
+/// 为什么这是划算的：抬之前看不见的是 y∈[717, 932]，抬之后看不见的是 y∈[0, 215]，
+/// 面积一样，但后者是这类面板的空白/遮罩区，前者是按钮。这不是替 App 排版，是
+/// 把「屏幕差 215」这件事补在唯一能补的一层上 —— 而且只碰这一张浮层，卡片、
+/// 画布、别的窗口一个都不动。
+///
+/// 三条守卫，任何一条不成立就什么都不做（最坏情况就是今天这样）：
+///   · 只有「底边真的超出窗口 8 pt 以上」才抬，超出 320 pt 说明这不是「差一截」；
+///   · 连续两拍底边没变（面板停稳）才动手，动画途中不碰；
+///   · 一张浮层最多抬 4 次 —— App 自己把 frame 改回去时补一次，改不回来就算了。
+static int AevonLiftCount = 0;
+static void *AevonLiftSheet = NULL;
+static CGFloat AevonLiftSeen = 0.0;
+static int AevonLiftSame = 0;
+
+static void AevonSheetLift(void) {
+    UIWindow *win = AevonKeyWindow();
+    if (win == nil) return;
+    UIViewController *top = [win rootViewController];
+    if (top == nil) return;
+    int hops = 0;
+    while ([top presentedViewController] != nil && hops < 6) {
+        top = [top presentedViewController];
+        hops += 1;
+    }
+    if (hops == 0) {
+        // 没有浮层：这一张结束了，下一张从头开始数。
+        AevonLiftSheet = NULL;
+        AevonLiftCount = 0;
+        AevonLiftSeen = 0.0;
+        AevonLiftSame = 0;
+        return;
+    }
+    UIView *sheet = [top view];
+    if (sheet == nil) return;
+    if (AevonLiftSheet != (void *)sheet) {
+        AevonLiftSheet = (void *)sheet;
+        AevonLiftCount = 0;
+        AevonLiftSeen = 0.0;
+        AevonLiftSame = 0;
+    }
+    if (AevonLiftCount >= 4) return;
+    CGRect r = [sheet convertRect:[sheet bounds] toView:win];
+    CGFloat winH = [win bounds].size.height;
+    if (winH < 200.0 || r.size.height < 200.0) return;
+    CGFloat over = CGRectGetMaxY(r) - winH;
+    if (over < 8.0) {
+        AevonLiftSeen = over;
+        AevonLiftSame = 0;
+        return;
+    }
+    if (over > 320.0) return;
+    // 停稳：底边和上一拍一样（面板的入场动画大概 0.4 s，0.75 s 一拍，两拍足够）。
+    if (fabs(over - AevonLiftSeen) < 2.0) AevonLiftSame += 1;
+    else AevonLiftSame = 0;
+    AevonLiftSeen = over;
+    if (AevonLiftSame < 1) return;
+    CGPoint center = [sheet center];
+    [sheet setCenter:CGPointMake(center.x, center.y - over)];
+    AevonLiftCount += 1;
+    AevonLiftSame = 0;
+    char body[160];
+    snprintf(body, sizeof(body), "sheet lift by=%.0f h=%.0f box=%.0f n=%d",
+             over, r.size.height, winH, AevonLiftCount);
+    AevonPageWrite(body);
 }
 
 /// 把 offset 挪到最近的整页上。
@@ -2044,7 +2112,12 @@ static void AevonPagerWatchTick(void *context) {
     if (!AevonEverHosted) return;
     // 0.0.80 — 1.5 s 一拍看一次「有没有浮层」。只在卡片在屏时看：全屏时窗口就是
     // 932，浮层本来就装得下，量它是白跑。
-    if (shrunk && (AevonWatchTicks % 10) == 0) AevonSheetReport();
+    if (shrunk) {
+        if ((AevonWatchTicks % 10) == 0) AevonSheetReport();
+        // 0.0.82 — 抬浮层要快一点：「差 215 pt」在屏幕上就是「按钮不见了」，
+        // 用户等不了 1.5 s，0.6 s 一拍、要两拍一致（面板停稳）才动手。
+        if ((AevonWatchTicks % 4) == 0) AevonSheetLift();
+    }
 
     // 窗口高度变了（过渡钩子没响的那一类 App、或者系统自己去改的）：上一拍的
     // 高度就是翻页器记忆里的页高。24 pt 容差躲开宿主自己 717→716→717 那一手。

@@ -635,10 +635,10 @@ def main():
                       b"resume play %s was=%d paused=%d n=%d",
                       b"resume gone %s playing=0 paused=0",
                       b"resume mute no AVPlayerLayer",
-                      # ② 哔哩哔哩竖版：页就是 932 高，5:3 的卡装不下。第二次确认
-                      #    stuck 之后 App 侧留一个记号（`want full canvas`），宿主
-                      #    下一次给这个 App 开卡时改用整屏画布（`full=1`）。
-                      b"want full canvas at=%.0f",
+                      # ② 哔哩哔哩竖版：页就是 932 高，5:3 的卡装不下。0.0.79 在这里
+                      #    留过一个「下次给整屏画布」的记号，0.0.82 撤了 —— 见下面
+                      #    的反向断言。不再换画布，`stuck` 那几行读数照旧（它仍在
+                      #    量、仍在置脏），所以上面两条断言原样保留。
                       # 0.0.80 — 「卡屏」的成因：`stale` 把**视口外面**的旧页也数进去
                       # 了（`k0=AWEFeedViewCell:932,932x430` 在 0–717 的视口下面），于是
                       # 「页不齐」永远成立，`beginUpdates/endUpdates` 每 0.35 s 一次、
@@ -648,9 +648,14 @@ def main():
                       b"rebuild stop n=%d top=%.0f box=%.0f stale=%d",
                       # 0.0.80 — 分享面板（Aevon(71)）：只量不改。`sheet` 带层名/高度/
                       # 顶边/画布高，`sheet cut` 列出「底边落在窗口以下」的叶子视图 ——
-                      # 那里面就是看不见的发送按钮。下一版要动画布，靠的就是这两行。
+                      # 那里面就是看不见的发送按钮。
                       b"sheet %.32s h=%.0f top=%.0f box=%.0f",
                       b"sheet cut%s (below the window)",
+                      # 0.0.82 — 面板「往上抬一截」。读到这一行，说明面板的底边确实
+                      # 超出了窗口（`by=` 是超出的量），而且我们把它对齐回来了。
+                      # 反过来说：日志里没有这一行、也没有 `sheet` 行，才是「面板
+                      # 没出现」；只有 `sheet` 没有 `lift`，就是三条守卫之一没过。
+                      b"sheet lift by=%.0f h=%.0f box=%.0f n=%d",
                       b"settle gave up after 90s",
                       b"player b=%.0fx%.0f grav=%s src=%.0fx%.0f",
                       b"videoGravity",
@@ -717,7 +722,16 @@ def main():
                       b"released, relayout",                                # gone
                       # 名片 + 冷启动那对组合：名片写不进去时判据永远不成立，
                       # 每次开窗都会先杀掉那个 App。
-                      b"/var/mobile/Library/Logs/Aevon/bridge"):            # gone
+                      b"/var/mobile/Library/Logs/Aevon/bridge",              # gone
+                      # 0.0.82 — 「整屏画布」整条撤掉。Aevon(73) 的读数是
+                      # `render=430x932 full=1 card=366x610` + `letterbox side=42pt`：
+                      # 卡片是 5:3，画面是 9:19.5，两边各让 42 pt。成因不是判据太松，
+                      # 是**记号活得太久** —— 0.0.79 把一次判定写进 App 的 tmp，
+                      # 从此这个 App 每次开卡都是整屏画布。用户拍板：主页面按 5:3
+                      # 真重排优先于竖版那一页显示不全。所以记号与它的读取路径
+                      # 都不许再回来；画布只有一个来源（`fatRender` 的 5:3）。
+                      b"want full canvas",                                   # gone
+                      b"aevon-full"):                                        # gone
             if token in bridge:
                 bad(f"bridge: {token.decode()} 又出现了 —— 在 App 进程里改屏幕、"
                     f"或者替别人的窗口强制重排，这两件事已经各自毁过一个版本，"
@@ -1039,6 +1053,11 @@ def main():
                   # how long it lived.
                   b"win: card closed by ",
                   b"win: background retry door=",
+                  # 0.0.82 — 交还后台改成「拆完 presenter 再写」。Aevon(73) 里每一张卡
+                  # 都是 `door=1 fg=yes` + 0.6 s 后 `retry door=1 fg=no`：第一次没落地，
+                  # 而那一秒正好是「关掉浮窗后立刻点图标」被按回去的那一秒。这一行
+                  # 就是新时序的读数（`first=` 是拆之前那一次的返回值）。
+                  b"win: background after teardown door=",
                   b"hook: selftest got=%ld want=102",
                   b"_setDeactivationReasons:onScene:withSettings:reason:",
                   b"_scene:interceptUpdateWithNewSettings:",

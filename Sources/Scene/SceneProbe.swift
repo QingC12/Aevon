@@ -1235,7 +1235,6 @@ zStackParticipantDidChange:
             AevonSceneFrameClear()
             Log.write("win: scene frame restored door=" + String(restoreDoor)
                       + " wrote=" + String(AevonFrameWriteCount()))
-            let door = AevonPushBackground(scene)
             _ = AevonCallVoid(presenter, "deactivate")
             _ = AevonCallVoid(presenter, "invalidate")
             // 0.0.68 — 顺序回到「先拆 presenter，再摘卡片」。0.0.67 把它提到
@@ -1243,6 +1242,19 @@ zStackParticipantDidChange:
             // 复位已经删了（见 `FloatHost.teardown`），提前的唯一理由也就不在了，
             // 而「在系统对象还活着的时候动那棵树」正是这一版要撤的东西。
             FloatHost.hide()
+            // 0.0.82 — 交还后台这一拍搬到拆完 presenter 之后。
+            //
+            // Aevon(73) 里每一张卡关掉都是同一个形状：`background door=1 fg=yes`
+            // （写了、没落地），0.6 s 后 `background retry door=1 fg=no`（这次落地
+            // 了）。两次之间那 0.6 s 就是「关掉浮窗后不能立刻打开全屏抖音」的全部
+            // 原因：用户在那一秒里点图标，系统刚把 App 拉起来，我们那一次补写又
+            // 把它按回后台 —— 看着就是「点了没反应」。
+            //
+            // 第一次写不进去，是因为写的时候 presenter 还活着（`deactivate` 还没
+            // 调），场景的归属权还在我们手里。拆完 presenter 再写，一次就够；
+            // 下面那条 0.35 s 的补写留着，万一这一次也没落地。
+            let door = AevonPushBackground(scene)
+            Log.write("win: background after teardown door=" + String(door))
             // 0.0.70 — 关卡这一拍把 App 写的读数取回来。必须在 `clearHosted()`
             // 之前：那个函数会把 `hostedBundle` 清空，之后就不知道去哪个容器里取了。
             drainAppLog("on close")
@@ -1296,9 +1308,15 @@ zStackParticipantDidChange:
                       + " fg=" + flag(back))
             // A hand-back that did not land is the same defect one layer down:
             // the app would spend the rest of the session believing it is in
-            // front. One retry, half a second later, and then the log says so.
+            // front. One retry, a third of a second later, and then the log says so.
+            //
+            // 0.0.82 — 0.6 s 改成 0.35 s，并且加了 `!cardUp`：Aevon(73) 里那 0.6 s
+            // 与「用户关掉卡片立刻点图标」撞在一起，补写把刚被系统拉起来的 App
+            // 又按回后台。窗口越短越不会撞上；真撞上（新卡已经开出来）就不补了
+            // —— 那时 scene 属于新的一张卡，再写后台就是错的。
             if back != 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    guard !cardUp else { return }
                     let again = AevonPushBackground(scene)
                     let now = value(of: scene, "settings").map {
                         AevonBoolOf($0, "isForeground")
@@ -1335,7 +1353,7 @@ zStackParticipantDidChange:
         // 0.0.20, and the difference between a picture and a black phone.
         // 0.0.65 — 没有 `onReshape` 了：画布在开窗那一刻定死（屏宽 × 5:3），
         // 之后角拖动只做等比例缩放，没有任何路径会再改 scene 的 frame。
-        guard let host = FloatHost.show(view, awaitingFrame: awaiting, bundle: bundleID,
+        guard let host = FloatHost.show(view, awaitingFrame: awaiting,
                                         onClose: { reason in closeCard(reason) }) else {
             Log.write("win: no window - nothing activated")
             return

@@ -205,22 +205,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 画布尺寸变成一个需要持久化的变量。Aevon(57) 的判决是这条路没有价值：
     /// 「几何缩放没有任何用处」。于是它连同 `CanvasHeight` 一起撤掉 —— 少一个
     /// 状态，就少一整类「读回来和上次不一样」的错位。
-    static func fatRender(in screen: CGSize, full: Bool = false) -> CGSize {
+    static func fatRender(in screen: CGSize) -> CGSize {
         guard screen.width > 100, screen.height > 200 else {
             return CGSize(width: 430, height: 717)
         }
-        // 0.0.79 — 「整屏画布」：有些 App 的竖版页就是按整屏高度排的。
-        //
-        // Aevon(69) 的哔哩哔哩：窗口、根视图、导航容器全是 717，而它的翻页器与页
-        // 是 `BBStoryBaseTableView:0,0,430x932` / `BBStoryPortraitCardCell:0,0,430x932`
-        // —— 932 是整屏，`838 = 932 − 59 − 34` 是整屏减安全区。置脏三层也不动，
-        // 因为它不是「行高没跟上」，是**这一页只按整屏设计**。5:3 的卡装不下它，
-        // 切掉的 215 pt 正是右侧那一列按钮的下半截。
-        //
-        // 换的不是页面，是画布：给这块 scene 整屏大小，卡片按整屏比例缩
-        // （`plan` 会算出 ≈287×623，scale 0.668）。整页都看得见，拖角还能放大 ——
-        // 画布不变，放大只是同一张画面的等比缩放。
-        if full { return CGSize(width: screen.width.rounded(), height: screen.height.rounded()) }
+        // 0.0.82 — 画布只有一个来源，就是这一行。0.0.79 在这里加过一个 `full`
+        // 分支（整屏画布），0.0.82 撤掉了，原因写在 `AevonAppHook.m` 里那段注释：
+        // 记号是持久的，一次判定变成永久政策，最后的表现是「卡片 5:3、画面 9:19.5、
+        // 两边各 42 pt 黑边」。用户拍板：主页面按 5:3 真重排优先。
         // 高宽比 = 高 / 宽。5:3 的高度是宽度的 1.667 倍。
         let w = screen.width
         var h = w * fatAspect
@@ -233,46 +225,24 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 0.0.81 — 画布装进卡片的那个比例。
     ///
     /// 0.0.60~0.0.80 只有一个比例：卡片是画布的等比缩小，两者形状永远相同。于是
-    /// 「卡片形状」这件事一直是被画布决定的 —— 哔哩哔哩竖版那一页按整屏 932 排
-    /// （见 `wantsFullCanvas`），卡片就跟着变成 282×610（9:19.5）。Aevon(72) 的
-    /// 判决是：**卡片的形状不该由某个 App 的页面决定**。
+    /// 「卡片形状」这件事一直是被画布决定的 —— 哔哩哔哩竖版那一页按整屏 932 排，
+    /// 卡片就跟着变成 282×610（9:19.5）。Aevon(72) 的判决是：**卡片的形状不该由
+    /// 某个 App 的页面决定**。
     ///
-    /// 所以从这一版起分成两件事：
+    /// 所以从 0.0.81 起分成两件事：
     ///   · 卡片形状 = 5:3，和别的 App 一样（`plan` 只按 `fatAspect` 算）；
     ///   · 画布怎么装进这张卡 = 等比、取小的那一边、居中（这个函数）。
     ///
-    /// 画布比卡片瘦长（哔哩哔哩竖版 430×932 装进 5:3）时，两边会各留一条；
-    /// 画布正好是 5:3 时（所有普通 App）两条都是 0，和以前一模一样 —— 这一个
-    /// 函数对旧路径是恒等变换。
+    /// 0.0.82 起画布也恒为 5:3（整屏画布那条路撤了），两者形状永远相同，这个函数
+    /// 于是回到恒等变换（比例 0.851，`shown` 与 `fill` 相等）。留着它是因为它是
+    /// 「画布和卡片不是同一个形状」这一件事的**唯一**落点：哪一天真的又需要装
+    /// 一块不一样的画布，装法已经在这里，不需要再发明一次。
     static func fitScale(for source: CGSize, in card: CGSize) -> CGFloat {
         guard source.width > 16, source.height > 16,
               card.width > 16, card.height > 16 else { return 1 }
         return Swift.min(card.width / source.width, card.height / source.height)
     }
 
-    /// 0.0.79 — 这个 App 上一次是不是「翻页器比窗口高」。
-    ///
-    /// App 侧写不了宿主的东西，宿主也看不见别人的视图树，所以记号走 App 自己的
-    /// tmp：`AevonAppHook` 在确认 stuck 之后写 `aevon-full`（内容是 `h=<页高>`），
-    /// 这里在开卡之前读一次。三条校验，缺一不可：
-    ///   · 文件里记的高度必须等于**这台机器现在的屏高** —— 换机型、改分辨率立刻作废；
-    ///   · 只认 30 天内的记号 —— 那个 App 后来自己改好了（或我们后来改好了），
-    ///     不该永远按整屏开；
-    ///   · 读不到就当没有。默认仍然是 5:3，这条不是每个 App 的默认路径。
-    static func wantsFullCanvas(_ bundle: String?) -> Bool {
-        guard let bundle, !bundle.isEmpty else { return false }
-        guard let log = AevonAppLogPathOf(bundle) else { return false }
-        let marker = (log as NSString).deletingLastPathComponent + "/aevon-full"
-        guard let text = try? String(contentsOfFile: marker, encoding: .utf8) else { return false }
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: marker),
-              let when = attrs[.modificationDate] as? Date,
-              Date().timeIntervalSince(when) < 30 * 24 * 3600 else { return false }
-        let screen = UIScreen.main.bounds.height
-        for line in text.split(separator: "\n") where line.hasPrefix("h=") {
-            if let h = Double(line.dropFirst(2)), abs(h - Double(screen)) <= 2.0 { return true }
-        }
-        return false
-    }
     /// 0.0.49 — 卡片下面那层柔光。跟着 card 的 frame 与圆角走。
     private var glow: UIView?
     /// 0.0.45 — 吸附 (docked) size, from the master's 「贴边缩小」.
@@ -335,8 +305,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// view. A nil answer means "activate nothing": a presenter whose view is
     /// not in a window is 0.0.20's black screen, and that is not worth one more
     /// phone.
+    ///
+    /// 0.0.82 — `bundle:` 参数随「按 App 换画布」一起撤了：画布只有一个来源，
+    /// 宿主侧不再需要知道这是谁。
     static func show(_ view: UIView, awaitingFrame: Bool = false,
-                     bundle: String? = nil,
                      onClose: @escaping (String) -> Void) -> FloatHost? {
         let host = shared
         host.teardown()
@@ -376,8 +348,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.0.79 — 只有一个例外：这个 App 上一次把「我的页是整屏高」写在记号里
         // （哔哩哔哩的竖版故事）。那就给它整屏画布，卡片按整屏比例缩 —— 见
         // `wantsFullCanvas` 与 `fatRender` 的 `full` 分支。
-        let fullCanvas = FloatHost.wantsFullCanvas(bundle)
-        let source = FloatHost.fatRender(in: window.bounds.size, full: fullCanvas)
+        // 0.0.82 — 那个例外撤了：画布恒为 5:3，`render` 与 `hosted` 从此永远相等。
+        let source = FloatHost.fatRender(in: window.bounds.size)
 
         // 0.0.61 — 这一行才是「小胖屏」真正生效的地方。
         //
@@ -494,13 +466,15 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         host.installGrip(on: host.makeBand() ?? root)
         host.installGestures()
 
-        // 0.0.60 — 日志改成小胖屏口径。`hosted=` 是下发承载面的逻辑尺寸，
-        // `card=` 是它在屏幕上的尺寸；两者相等（scale 1.000）就是「一比一、
-        // App 按这个尺寸重新布局」，不等就是我们在缩放一张别人排好的画面。
-        let fatA = String(format: "win: fat scene ratio=%.3f screen=%.0fx%.0f render=%.0fx%.0f full=%d",
+        // 0.0.60 起是「与手机等宽、高按 5:3」的日志口径。`hosted=` 是下发承载面
+        // 的逻辑尺寸，`card=` 是它在屏幕上的尺寸；两者除一个 scale 之外相等就是
+        // 「App 按这个尺寸重新布局」。0.0.82 起 `render=` 不再有第二种可能：
+        // 0.0.79 那个 `full=0/1` 的读数随整屏画布一起撤了，这一行里 `render=`
+        // 与 `hosted=` 必须永远是同一个数；不一样的版本，就是又有人换过画布。
+        let fatA = String(format: "win: fat scene ratio=%.3f screen=%.0fx%.0f render=%.0fx%.0f",
                           FloatHost.fatAspect,
                           window.bounds.width, window.bounds.height,
-                          source.width, source.height, fullCanvas ? 1 : 0)
+                          source.width, source.height)
         let fatB = String(format: " hosted=%.0fx%.0f card=%.0fx%.0f at %.0f,%.0f held=%d",
                           source.width, source.height,
                           card.bounds.width, card.bounds.height,
@@ -526,8 +500,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                   + " fill=" + String(format: "%.0fx%.0f",
                                       card.bounds.width, card.bounds.height)
                   + " card_corner_pt=" + String(format: "%.0f", card.layer.cornerRadius))
-        // 0.0.81 — 画布装进 5:3 之后两边各留多少。0 就是老路径（画布本来就是
-        // 5:3 的形状），只有「整屏画布」那一族会打出这一行。
+        // 0.0.81 — 画布装进 5:3 之后两边各留多少。
+        //
+        // 0.0.82 起画布恒为 5:3，两边必然是 0（取整误差 ≤ 0.5 pt，这条不打印）。
+        // 留着它是因为它是「卡片和画布不是一个形状」唯一的读数：哪一天这一行又
+        // 打出 42，就说明画布又被谁换成了整屏 —— Aevon(73) 的哔哩哔哩就是这个数。
         let barSide = Swift.max(0, (frame.width - visible.width * plan.scale) / 2)
         if barSide > 0.5 {
             Log.write(String(format: "win: letterbox side=%.0fpt flat=%d canvas=%.0fx%.0f",
