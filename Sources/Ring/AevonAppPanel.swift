@@ -430,7 +430,10 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
 
     /// 只有从标题区起手的下滑才是「收起」。从列表里起手是滚动 ——
     /// 两者抢同一根手指时，位置比速度更能说明意图。
-    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+    ///
+    /// `override` 不是抄漏：UIView 自己就实现了这个委托方法，子类再写一遍
+    /// 必须显式覆盖 —— 0.0.56 第一次构建就是在这里停下的。
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
         let velocity = pan.velocity(in: sheet)
         guard velocity.y > abs(velocity.x) else { return false }
