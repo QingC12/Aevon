@@ -65,7 +65,18 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         case right
         case top
         case bottomMiddle
-        case bottomCorner
+        /// 0.0.69 — 底角拆成两个。
+        ///
+        /// 母本的语言包把左右两角当成两件事：`LeftCornerTrim`「左角::滑动进一步
+        /// 调整比例, 长按反向调整」、`RightCornerTrim`「右角::点击切换基础窗口
+        /// 比例」，而 `GestureIntroduction` 里「长按」只出现在「边中区域…长按切换
+        /// 横竖」这一句上。Aevon(59) 的要求与这条一致：**长按重启只留在右下角，
+        /// 左下角这一格空出来给横屏手势**。合并成一个 `bottomCorner` 时这两件事
+        /// 无法分开 —— 一个格子只能有一个长按。
+        case bottomLeft
+        case bottomRight
+
+        var isCorner: Bool { self == .bottomLeft || self == .bottomRight }
     }
 
     private var window: FloatWindow?
@@ -470,7 +481,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let fit = " inset=" + String(format: "%.0f/%.0f", host.bandInset.x, host.bandInset.y)
             + " corner=" + String(format: "%.0f", card.layer.cornerRadius)
         Log.write(ring + cell + room + fit
-                  + " 外侧 (四边 拖动, 左右 点吸附, 底中 上滑关, 底角 缩放/长按复位)")
+                  + " 外侧 (四边 拖动, 左右 点吸附, 底中 上滑关, 左下 缩放, 右下 缩放/长按复位)")
         return window.isHidden ? nil : host
     }
 
@@ -865,12 +876,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// (「浮窗手势区域为边缘外侧」), and a perimeter with one dead edge is what
     /// three rounds of 「四边手势失效」 were actually reporting.
     private func zoneFor(_ point: CGPoint) -> Zone {
-        guard let card = card else { return .bottomCorner }
+        guard let card = card else { return .bottomRight }
         let size = card.bounds.size
         if point.y > size.height {
             let cell = FloatHost.cell(in: size)
-            let middle = point.x >= cell.minX && point.x <= cell.maxX
-            return middle ? .bottomMiddle : .bottomCorner
+            if point.x >= cell.minX && point.x <= cell.maxX { return .bottomMiddle }
+            return point.x < cell.minX ? .bottomLeft : .bottomRight
         }
         if point.y < 0 { return .top }
         return point.x < 0 ? .left : .right
@@ -889,7 +900,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         case .right: return "right"
         case .top: return "top"
         case .bottomMiddle: return "bottom-middle"
-        case .bottomCorner: return "bottom-corner"
+        case .bottomLeft: return "bottom-left"
+        case .bottomRight: return "bottom-right"
         }
     }
 
@@ -937,7 +949,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // Only 边角: the sides' long press is nothing at all now, and a press
             // that begins disables the pan, so allowing it there would cost the
             // move gesture its finger for 0.4 s.
-            return zone == .bottomCorner
+            return zone == .bottomRight
         }
         return true
     }
@@ -962,9 +974,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.0.43 — a corner drag resizes; every other band moves. The anchor is
         // the opposite corner, read once here: a zone is which cell the finger
         // landed in, not a thing that changes mid-drag.
-        if zone == .bottomCorner {
+        if zone.isCorner {
             resizeStart = card.frame
-            resizeFromLeft = start.x < card.bounds.width / 2
+            // 0.0.69 — 锚点由格子决定，不再由手指落在卡片中线哪一侧推出来：
+            // 左下角拖 = 右上角不动，右下角拖 = 左上角不动。
+            resizeFromLeft = zone == .bottomLeft
             logResize()
         } else {
             resizeStart = nil
@@ -989,7 +1003,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let dx = total.x - panStep.x
         let dy = total.y - panStep.y
         panStep = total
-        if zone == .bottomCorner, let start = resizeStart {
+        if zone.isCorner, let start = resizeStart {
             // 边角拖动 = 等比例缩放（0.0.43 起；0.0.65 起只剩这一种）。
             //
             // 0.0.63/0.0.64 在这里分过两条路：宽度跟手指（改窗口比例、抬手换画布
@@ -1049,7 +1063,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     private func dragEnd(total: CGPoint, velocity: CGPoint) {
         guard let card = card, let window = window else { return }
-        if zone == .bottomCorner, resizeStart != nil {
+        if zone.isCorner, resizeStart != nil {
             resizeStart = nil
             // 画布不动，也就没有重排要付：只把画面按新尺寸摆正、把圆角按新
             // 宽度重算一次（圆角跟着卡宽，不跟着卡高）。
@@ -1116,10 +1130,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard let window = window else { return }
         switch gesture.state {
         case .began:
+            // 0.0.69 — 只有右下角是「重启」。左下角这一格不响应长按：母本的
+            // `GestureIntroduction` 里「长按」只作为「切换横竖」出现，而 Aevon(59)
+            // 明确要把左下角留给横屏手势。识别器的 delegate 已经挡了一层，这里
+            // 再判一次是因为 `zone` 在抬手前可能被另一条路改过。
+            guard zone == .bottomRight else { return }
             // A press that becomes a drag must not also drag the card.
             pan?.isEnabled = false
-            Log.write("win: gesture long press corner, 重启 as geometry reset")
-            resetToPlan(in: window.bounds)
+            if resetToPlan(in: window.bounds) {
+                Log.write("win: gesture long press right corner, 重启 as geometry reset")
+            }
         case .ended, .cancelled, .failed:
             pan?.isEnabled = true
         default:
@@ -1251,7 +1271,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             }
             // 边角长按 = 复位。这条路没有 UILongPressGestureRecognizer 可用
             // （事件根本没进 UIKit），所以按住不动这件事自己计时。
-            if zone == .bottomCorner {
+            if zone == .bottomRight {
                 let work = DispatchWorkItem { [weak self] in
                     guard let self = self else { return }
                     self.rawPressFired()
@@ -1297,9 +1317,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     }
 
     private func rawPressFired() {
-        guard rawActive, !rawMoved, zone == .bottomCorner, let window = window else { return }
-        Log.write("win: raw long press corner, 重启 as geometry reset")
-        resetToPlan(in: window.bounds)
+        guard rawActive, !rawMoved, zone == .bottomRight, let window = window else { return }
+        // 0.0.69 — 只有真的动了才写这一行。已经是默认尺寸时 `resetToPlan` 回
+        // false，日志里就只剩它自己那句 `already default`。
+        if resetToPlan(in: window.bounds) {
+            Log.write("win: raw long press corner, 重启 as geometry reset")
+        }
     }
 
     /// 手指是否落在环上：卡片之外，且离卡片边缘不超过 `reach`。卡片坐标系，
@@ -1411,9 +1434,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     /// `重启`, as much of it as a window can do by itself: back to the frame the
     /// card was built with, with the remembered placement cleared first.
-    private func resetToPlan(in bounds: CGRect) {
-        guard let card = card, natural.height > 16, bounds.width > 64 else { return }
-        CardLayout.reset()
+    ///
+    /// 0.0.69 — 返回「真的做了没有」。Aevon(59)：卡片本来就在默认的 5:3 尺寸上
+    /// 长按，什么都不该发生 —— 原来的实现仍然清记忆、重算、重设 frame，虽然
+    /// 落地数值一样，但 `CardLayout.reset()` 把用户记住的位置抹掉了，下一次开
+    /// 窗就换了地方。所以「已经默认」必须在这里早退，而且早退要在清记忆之前。
+    @discardableResult
+    private func resetToPlan(in bounds: CGRect) -> Bool {
+        guard let card = card, natural.height > 16, bounds.width > 64 else { return false }
         // 0.0.65 — 形状不再存盘，也就没有「复位形状」这件事：画布永远是
         // `fatRender` 算出来的那一块，复位只把卡片摆回开窗时的位置与大小。
         // 0.0.54 — 复位要和 `show` 算同一件事：按原始比例布局，再把高度减掉
@@ -1423,6 +1451,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let base = self.plan(in: bounds, source: natural)
         var frame = base.frame
         frame.size.height = Swift.max(80, base.frame.height - cropTop * base.scale)
+        // 1.5 pt 是「同一个尺寸」的容差：`fatRender` 四舍五入、屏幕高度系数
+        // 取整，都可能让同一个默认值落成 347.4 与 347。停靠中（`miniFrame`
+        // 非 nil）永远不算默认，长按要能把它还原回来。
+        if miniFrame == nil,
+           abs(card.frame.width - frame.width) < 1.5,
+           abs(card.frame.height - frame.height) < 1.5 {
+            Log.write("win: long press corner, already default " + size(card.bounds.size)
+                      + " — no action")
+            return false
+        }
+        CardLayout.reset()
         card.frame = clamped(frame, in: bounds)
         miniFrame = nil
         shield?.removeFromSuperview()
@@ -1431,6 +1470,40 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         syncGrip()
         Log.write("win: card reset to " + size(card.bounds.size)
                   + " at " + point(card.frame.origin))
+        return true
+    }
+
+    // MARK: - 0.0.69 激活之后再交一次画布尺寸
+
+    /// 承载面的尺寸在 `show` 里就写好了 —— 但那一步发生在 `presenter.activate`
+    /// **之前**。
+    ///
+    /// Aevon(59) 的第一条（「每一次打开时内容尺寸不对，必须手动缩放一下才显示正确
+    /// 的顶栏底栏」）和上一版遗留的第二条是同一件事，判据是这个调用顺序，不是猜：
+    ///
+    ///   · `show` 里的 `view.bounds = source`（932 → 717）跑在 `activate` 前一行；
+    ///   · 日志里 `view cls=_UIScenePresentationView … natural=430x932` 之后紧跟
+    ///     `hosted bounds after=430x717` —— **视图**确实换了尺寸；
+    ///   · 而真机上「手动缩放一下」改的正是这个尺寸：`followContent` 每帧重写
+    ///     `transform`/`center`，承载上下文随之重排一次，App 才开始按 717 排版。
+    ///
+    /// 也就是说：尺寸写在了 presenter 还没接管的时候，那一次 resize 没有被当成
+    /// 「App 的窗口变了」。这里补的正是那一次，而且只碰我们自己的承载视图 ——
+    /// 同一个对象、同一个进程、1 pt 的真实变化。绝不下沉到 App 的窗口去
+    /// （0.0.67 那么做毁过一台手机）。
+    func reassertCanvas() {
+        guard let content = content, natural.height > 16 else { return }
+        let target = CGRect(origin: .zero, size: natural)
+        content.bounds = CGRect(x: 0, y: 0, width: natural.width, height: natural.height + 1)
+        // 两次写在同一个 runloop 里会被合并成一次布局，App 看不到「变过」。
+        // 0.02 s 之后写第二次，中间隔一次提交。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            guard let self = self, let content = self.content else { return }
+            content.bounds = target
+            self.followContent()
+            Log.write("win: canvas re-asserted " + self.size(self.natural)
+                      + " after activate")
+        }
     }
 
     /// A card that can be dragged off the screen can only be brought back by

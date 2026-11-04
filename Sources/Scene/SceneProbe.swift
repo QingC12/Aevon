@@ -1232,6 +1232,25 @@ zStackParticipantDidChange:
             // 复位已经删了（见 `FloatHost.teardown`），提前的唯一理由也就不在了，
             // 而「在系统对象还活着的时候动那棵树」正是这一版要撤的东西。
             FloatHost.hide()
+            // 0.0.69 — presenter 拆掉之后再交一次整屏尺寸。
+            //
+            // 上面那次 `AevonPushSceneFrame` 发生在承载面还在的时候，那时 App 的
+            // 窗口还是 717 —— 它可能把这次 settings 变化当成「卡片里的重排」而
+            // 不是「回到整屏」。Aevon(58) 的「关窗后全屏打开抖音整体偏下、顶上
+            // 露出上一页的底」就是 App 带着 717 的排版回到桌面的样子。
+            //
+            // 这一次只写 scene 的 frame（我们本来就拥有这个量），不碰任何视图，
+            // 0.30 s 后执行，此时 presenter 已经 invalidate。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) { [weak scene] in
+                // 0.3 s 内又开了一张卡：那个 pending 的 frame 目标属于新卡，
+                // 这里再写一次整屏会把它抹掉。
+                guard let scene = scene, !cardUp else { return }
+                let full = UIScreen.main.bounds.size
+                AevonSceneFrameSet(0, 0, Double(full.width), Double(full.height))
+                let door = AevonPushSceneFrame(scene)
+                AevonSceneFrameClear()
+                Log.write("win: frame restore again door=" + String(door))
+            }
             // 0.0.55 — 卡片没了，右缘带重新接触摸。
             AevonRingGrip.cardUp = false
             RingHost.shared.setEdgeActive(true)
@@ -1326,6 +1345,9 @@ zStackParticipantDidChange:
         Log.write("win: state hosting=" + flag(AevonBoolOf(presenter, "isHosting"))
                   + " active=" + flag(AevonBoolOf(presenter, "isActive")))
         Log.write("win: view sublayers=" + String(view.layer.sublayers?.count ?? 0))
+        // 0.0.69 — 尺寸要在 presenter 接管之后再交一次，见 `reassertCanvas`
+        // 上面那段：写在 `activate` 之前的那一次不算「App 的窗口变了」。
+        host.reassertCanvas()
 
         // 0.0.59 — 首帧交给自己的观察器，不再等保活时钟。
         //

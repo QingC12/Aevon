@@ -317,23 +317,71 @@ static void AevonScheduleGeometry(void) {
                      dispatch_get_main_queue(), (void *)AevonGeomLate, AevonGeomTick);
 }
 
+/// 0.0.69 — 「这块画布比屏幕矮」。
+///
+/// 量尺原来只在「状态被改写」那条路上安排，而那条路要求 `applicationState == 2`。
+/// Aevon(59) 的抖音 13:32:58 打开，整场 0 行 `app: geom`：它是挂起启动后被系统
+/// 直接激活的，`applicationState` 从来没回到 2。于是「视频偏上」这件事量不到。
+///
+/// 判据换成几何本身：承载面的 `coordinateSpace.bounds` 比 `UIScreen` 矮 40 pt 以上，
+/// 就说明这个进程正被一块小胖屏演着 —— 真前台 App 的这两者相等，不会命中，
+/// 也就不会往日志里写那二十行。答案缓存 1 s：`applicationState` 可能被高频调用，
+/// 而画布尺寸一秒内不会变两次。
+static BOOL AevonCanvasIsShrunk(void) {
+    static BOOL answer = NO;
+    static CFAbsoluteTime stamp = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (stamp > 0 && now - stamp < 1.0) return answer;
+    stamp = now;
+    answer = NO;
+    UIApplication *application = [UIApplication sharedApplication];
+    if (application == nil) return answer;
+    CGRect screen = [[UIScreen mainScreen] bounds];
+    if (screen.size.height < 200.0) return answer;
+    for (UIScene *scene in [application connectedScenes]) {
+        id box = AevonTryValue(AevonTryValue(scene, @"coordinateSpace"), @"bounds");
+        if (![box isKindOfClass:[NSValue class]]) continue;
+        CGRect rect = CGRectZero;
+        [box getValue:&rect size:sizeof(rect)];
+        if (rect.size.height > 100.0 && rect.size.height < screen.size.height - 40.0) {
+            answer = YES;
+            break;
+        }
+    }
+    return answer;
+}
+
+/// 每个进程只安排一次。`AevonScheduleGeometry` 自己也是幂等的，这层只是省掉
+/// 重复调用带来的两次 dispatch。
+static void AevonArmGeometry(void) {
+    static int armed = 0;
+    if (armed) return;
+    armed = 1;
+    AevonScheduleGeometry();
+}
+
 /// `UIApplicationStateActive`. UIKit checks this before it lets a window see
 /// touches, so this is the flag that has to agree with the picture.
 ///
 /// The original answer is asked first, and anything but "background" is handed
 /// back untouched: a foreground app — or one that is merely inactive under a
-/// system overlay — keeps the state the system gave it. Only the backgrounded
-/// case with a hosted scene is rewritten, which is why the KVC scan below is
-/// also paid only in that case.
+/// system overlay — keeps the state the system gave it.
+///
+/// 0.0.69 — 这里付的那次 KVC 扫描现在覆盖所有「正在卡里」的进程，不再只覆盖
+/// 后台的那一次：量尺（`AevonCanvasIsShrunk`）要在「已经被激活的卡内 App」上
+/// 也能安排，否则抖音那种挂起启动后直接被激活的进程永远量不到。代价是每秒一次
+/// 场景遍历（有 1 s 缓存），收益是「视频偏上」终于有读数。
 static NSInteger AevonApplicationState(id self, SEL _cmd) {
     NSInteger state = ((NSInteger (*)(id, SEL))AevonOriginalApplicationState)(self, _cmd);
+    if (!AevonHosted()) return state;
+    // 0.0.69 — 量尺的入口挪到这里（见 `AevonCanvasIsShrunk`）：原来它在
+    // 「state == 2 才改写」那个分支里，而 Aevon(59) 的抖音一次都没进过那个分支
+    // （挂起启动后被系统直接激活），于是整场没有一行 `app: geom` —— 而「视频
+    // 偏上」正是那一行要量的事。现在只要「这块画布比屏幕矮」就安排一次。
+    if (AevonCanvasIsShrunk()) AevonArmGeometry();
     if (state != 2) return state;              // not UIApplicationStateBackground
-    if (AevonHosted()) {
-        AevonNote("applicationState");
-        AevonScheduleGeometry();
-        return 0;                              // UIApplicationStateActive
-    }
-    return state;
+    AevonNote("applicationState");
+    return 0;                                  // UIApplicationStateActive
 }
 
 /// `UISceneActivationStateForegroundActive`. Same reason, one layer down: the
@@ -341,13 +389,11 @@ static NSInteger AevonApplicationState(id self, SEL _cmd) {
 /// refuses to handle an event — and `2` is `UISceneActivationStateBackground`.
 static NSInteger AevonActivationState(id self, SEL _cmd) {
     NSInteger state = ((NSInteger (*)(id, SEL))AevonOriginalActivationState)(self, _cmd);
+    if (!AevonHosted()) return state;
+    if (AevonCanvasIsShrunk()) AevonArmGeometry();
     if (state != 2) return state;
-    if (AevonHosted()) {
-        AevonNote("activationState");
-        AevonScheduleGeometry();
-        return 0;                              // UISceneActivationStateForegroundActive
-    }
-    return state;
+    AevonNote("activationState");
+    return 0;                                  // UISceneActivationStateForegroundActive
 }
 
 /// 0.0.66 — 这个进程能不能装桥。**宁可不装，也不能装错。**

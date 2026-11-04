@@ -824,6 +824,15 @@ def main():
                   # 0.0.40 — 吸附 is a tap and the way back is the window itself.
                   b"win: card docked ",
                   b"win: card undocked ",
+                  # 0.0.69 — 三条新的行为证据，缺一条就说明这一轮有一件事没落地：
+                  #   · `long press corner, already default` = 长按在默认尺寸上真的
+                  #     什么都不做（Aevon(59) 的第一条）；
+                  #   · `canvas re-asserted` = 承载面尺寸在 `activate` 之后又交了一
+                  #     次（「每次打开内容尺寸不对」的修法，见 FloatHost）；
+                  #   · `frame restore again` = 关窗后第二次交还整屏（退出后偏下）。
+                  b"win: long press corner, already default ",
+                  b"win: canvas re-asserted ",
+                  b"win: frame restore again door=",
                   # 0.0.40 — 闪黑。这一行只在系统真的动过场景的休眠状态时出现，
                   # 它是「黑一下」来自场景被收走 还是 来自合成器 的唯一分界。
                   b"win: scene deactivation #",
