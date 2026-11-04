@@ -57,7 +57,76 @@ import UIKit
 /// 出界（抖音右侧那一列、视频居中都不对）；等宽之后它们全部落在界内，字号与
 /// 圆角也顺带按同一个 scale 收敛。见 `fatRender`。
 final class FloatHost: NSObject, UIGestureRecognizerDelegate {
-    static let shared = FloatHost()
+    /// 0.0.98 — 两个槽，轮流当主窗。
+    ///
+    /// 一个 `static let shared` 就是「整个插件只有一块卡」的另一半：`show` 的第一句
+    /// 是 `host.teardown()`，它拆的永远是同一个宿主，所以第二个窗开出来时第一个必然
+    /// 被连根拔掉 —— 圆盘再选图标「没反应」，往下挖就是这一行。
+    ///
+    /// 现在两个槽交替使用：新窗用另一个槽，旧窗原封不动留在自己那一份对象上降级成
+    /// 停靠小窗。它的 window、card、承载视图、scene 引用都在原处，**不需要搬家**，
+    /// 也就没有「搬家中途画错」这一类错。
+    ///
+    /// 为什么是 2 而不是 11：V1 只验骨架（1 主 + 1 停靠）。V2 扩到 10 个停靠时，
+    /// 要改的是这里的数组长度与「驱逐最老窗」那一套，不是这套模型本身。
+    private static var slots: [FloatHost] = []
+    private static var mainIndex = 0
+
+    private static func ensureSlots() {
+        if slots.isEmpty { slots = [FloatHost(), FloatHost()] }
+    }
+
+    /// 当前主窗的宿主。0.0.97 及以前这是唯一那个宿主，名字留着是为了不改调用点。
+    /// 注意：它是**计算属性**，`mainIndex` 一变它就跟着变 —— 拿住它之后不要再
+    /// 通过 `shared` 读第二次。
+    static var shared: FloatHost {
+        ensureSlots()
+        return slots[mainIndex]
+    }
+
+    /// 全部槽。`AevonFloatTouch` 靠它找手指落在哪一块上。
+    static var everySlot: [FloatHost] {
+        ensureSlots()
+        return slots
+    }
+
+    /// 当前主窗里演的 App；没有主窗时是空串。
+    ///
+    /// 0.0.98 — `cardUp` 原来是「有没有卡」唯一答案，多窗之后它变成「屏幕上还有
+    /// 没有至少一块卡」，于是「新卡起没起来」这件事必须换一个判据。这个名字就是
+    /// 那个判据：它同时要求「主窗槽有位」和「里面放的是谁」。
+    static var mainBundle: String {
+        ensureSlots()
+        let host = slots[mainIndex]
+        return host.window != nil ? host.bundle : ""
+    }
+
+    /// 新主窗该住哪个槽：当前槽空着就给它，否则找另一个空槽；两个都满返回 nil。
+    ///
+    /// 返回 nil 是 V1 唯一的「拒绝服务」出口（屏幕上已经有一主一停两窗）。日志会说
+    /// 清楚是这一条拒的，而不是像 0.0.97 之前那样静悄悄 return。
+    static func takeMainSlot() -> FloatHost? {
+        ensureSlots()
+        let current = slots[mainIndex]
+        if current.window == nil { return current }
+        for (index, slot) in slots.enumerated() where slot.window == nil {
+            mainIndex = index
+            return slot
+        }
+        return nil
+    }
+
+    /// 把当前主窗缩成停靠小窗。主窗位置**不动**：`mainIndex` 不在这里换，
+    /// 换槽发生在 `takeMainSlot()` 找到另一个空槽的那一刻 —— 两件事分开做，
+    /// 是因为「降级」本身不应该让任何指针失效。
+    @discardableResult
+    static func demoteMain() -> String {
+        ensureSlots()
+        let host = slots[mainIndex]
+        guard host.window != nil, host.card != nil else { return "none" }
+        if host.miniFrame != nil { return "already" }
+        return host.dockAsMini()
+    }
 
     /// Which part of the ring a touch landed on.
     private enum Zone {
@@ -93,6 +162,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// "give me the window back" instead of reaching the app.
     private var shield: UIControl?
     private var onClose: ((String) -> Void)?
+    /// 0.0.98 — 这张卡里演的是谁。
+    ///
+    /// C 侧的画布目标与保活名单都按 bundle 分槽，所以宿主必须记住自己那一格是
+    /// 谁的。0.0.82 撤掉这个参数时它用来选画布比例（那件事已经统一成 5:3），
+    /// 现在它只是一个键 —— 但仍然必须存在，否则写画布时不知道该写哪一格。
+    private(set) var bundle = ""
     /// The scene's own size. Every resize is this shape, scaled — the card never
     /// gets an aspect the picture does not have.
     ///
@@ -308,11 +383,27 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     ///
     /// 0.0.82 — `bundle:` 参数随「按 App 换画布」一起撤了：画布只有一个来源，
     /// 宿主侧不再需要知道这是谁。
-    static func show(_ view: UIView, awaitingFrame: Bool = false,
+    static func show(_ view: UIView, bundle: String, awaitingFrame: Bool = false,
                      onClose: @escaping (String) -> Void) -> FloatHost? {
-        let host = shared
+        // 0.0.98 — 取一个空槽，而不是「拿唯一那个宿主先拆掉」。
+        //
+        // 拆了再建有一个致命形状：建窗失败时屏幕上什么都不剩，而旧窗已经被拆过，
+        // 用户看到的是「点了图标，原来的窗也没了」。现在两个槽都占着就返回 nil，
+        // 由调用方说「满了」—— 一个能被日志看见的拒绝，好过一个看不见的拆。
+        guard let host = takeMainSlot() else {
+            Log.write("win: no free slot, " + bundle + " not shown (V1 holds two windows)")
+            return nil
+        }
         host.teardown()
+        host.bundle = bundle
         host.onClose = onClose
+        // 0.0.98 — 多窗的位置在这一行里。读法：
+        //   `slot=` 这次占的是第几个槽（0/1），`armed=` 保活名单里现在有谁，
+        //   `frames=` 有几块画布有目标，`orphan=` 有几处调用点没先登记就设尺寸。
+        // 「第二个窗开出来但停靠的那个黑了」⇒ armed 里少了它，或者 frames 不等于 2。
+        Log.write(String(format: "win: slot taken bundle=%@ slot=%d armed=%@ frames=%ld orphan=%ld",
+                         bundle, mainIndex, AevonHookArmedList(),
+                         AevonFrameArmedCount(), AevonFrameOrphanCount()))
         guard let window = host.makeWindow() else { return nil }
 
         window.backgroundColor = .clear
@@ -361,7 +452,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // `AevonSceneFrameSet` 把目标记在 C 侧，intercept 钩子在系统下一次更新
         // settings 时把它写进 scene 的 frame（母本的路线），SceneProbe 拿到 scene
         // 后还会主动推一次，不等系统那一拍。
-        AevonSceneFrameSet(0, 0, Double(source.width), Double(source.height))
+        // 0.0.98 — 画布目标按窗登记：这一块画布归 `bundle`，不再是「唯一的那一块」。
+        // 0.0.82 撤掉的 `bundle:` 参数因此回来了，但用途完全不同：那时它用来换画布
+        // 比例，现在它只是 C 侧那张表里的一个键。
+        AevonSceneFrameSet(host.bundle, 0, 0, Double(source.width), Double(source.height))
 
         view.transform = .identity
         view.autoresizingMask = []
@@ -581,6 +675,22 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// with the window: holding a presentation view after the presenter is gone
     /// keeps a scene alive that should have been reclaimed.
     static func hide() {
+        shared.teardown()
+    }
+
+    /// 0.0.98 — 只拆「这个 App 那一块」。
+    ///
+    /// 多窗之后「关一个窗」不再等于「拆唯一那个宿主」：关掉主窗时停靠小窗必须
+    /// 活着，否则用户看到的是「关一个，两个都没了」。按 bundle 找宿主；找不到
+    /// （或名字为空，那是老调用点）就退回拆当前主窗 —— 旧行为因此完全不变。
+    static func hide(bundle: String) {
+        ensureSlots()
+        if !bundle.isEmpty {
+            for slot in slots where slot.window != nil && slot.bundle == bundle {
+                slot.teardown()
+                return
+            }
+        }
         shared.teardown()
     }
 
@@ -1220,18 +1330,32 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return
         }
         guard natural.height > 16 else { return }
-        miniFrame = card.frame
-        // 0.0.45 — 贴边缩小, the master's own words for this state. The height
-        // is the only free number (the picture decides the width), and the card
-        // goes flush against the edge it was docked from — an inset mini is a
-        // mini whose whole point (being out of the way) it fails at.
-        // 0.0.54 — 比例取可见区（裁掉顶栏之后），见 `dragMove` 同一处。
-        // 0.0.81 — 小窗也按卡片自己的形状走（5:3），不再取画布比例：画布可能是
-        // 整屏高的（哔哩哔哩），而「停靠小窗」是卡片的一个状态，不是画布的状态。
+        let side: CardLayout.Edge = landed == .left ? .left : .right
+        applyMini(side: side)
+        Log.write("win: card docked " + (side == .left ? "left " : "right ")
+                  + size(card.bounds.size) + " at " + point(card.frame.origin))
+    }
+
+    /// 0.0.98 — 缩成停靠小窗，几何只有这一份。
+    ///
+    /// `dock(zone:)`（手指点边）与 `dockAsMini()`（被新主窗挤下去）是两种触发，
+    /// 但落点必须一模一样：尺寸公式分叉过一次就会变成「点着停靠和自动停靠长得
+    /// 不一样」，那种差异没人能一眼看出来是 bug。所以 `side` 由调用方给，几何
+    /// 全在这里。
+    ///
+    /// 0.0.45 — 贴边缩小，母本自己的说法。高度是唯一的自由量（宽度由画面形状
+    /// 推出来），卡片贴齐它被停靠的那条边 —— 一个离边还有缝的小窗，等于没做到
+    /// 「让开」这件事本身。
+    private func applyMini(side: CardLayout.Edge) {
+        guard let card = card, let window = window else { return }
+        // 展开前的 frame 只记一次：已经停靠过就不再覆盖，否则「取消停靠」会回到
+        // 上一次的小窗尺寸，而不是回到大卡片。
+        if miniFrame == nil { miniFrame = card.frame }
+        // 0.0.81 — 小窗按卡片自己的形状走（5:3），不取画布比例：画布可能是整屏
+        // 高的，而「停靠小窗」是卡片的一个状态，不是画布的状态。
         let ratio = 1.0 / FloatHost.fatAspect
         let height = miniHeight(in: window.bounds)
         let width = height * ratio
-        let side: CardLayout.Edge = landed == .left ? .left : .right
         let x = side == .left ? 0 : window.bounds.width - width
         let y = Swift.min(Swift.max(card.frame.minY, margin),
                           Swift.max(margin, window.bounds.height - height - margin))
@@ -1239,8 +1363,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         followContent()
         installShield()
         syncGrip()
-        Log.write("win: card docked " + (side == .left ? "left " : "right ")
-                  + size(card.bounds.size) + " at " + point(card.frame.origin))
+    }
+
+    /// 被新主窗挤下去：缩成小窗，贴到卡片原来更靠近的那条边。
+    /// 返回落到的边名，给 `win: demote` 那行日志用。
+    private func dockAsMini() -> String {
+        guard let card = card, let window = window, natural.height > 16 else { return "none" }
+        if miniFrame != nil { return "already" }
+        let left = card.frame.midX < window.bounds.width / 2
+        applyMini(side: left ? .left : .right)
+        let name = left ? "left" : "right"
+        Log.write(String(format: "win: card demoted side=%@ %@ at %@",
+                         name, size(card.bounds.size), point(card.frame.origin)))
+        return name
     }
 
     // MARK: - 应用层触摸（0.0.48）
@@ -1832,9 +1967,16 @@ final class BandRoot: UIView {
 /// 是全部。
 ///
 /// 返回 1 = 这条事件已被浮窗吃掉，不要把原事件再交下去。
+///
+/// 0.0.98 — 逐块问。以前只有一个宿主，`shared.touchEntry` 就是全部答案；现在屏幕
+/// 上可能同时有一主一停两块卡，各自的手势环在不同位置，必须让每一块都看见这根手指
+/// —— 谁先认领谁吞，其余原样放行。
 @_cdecl("AevonFloatTouch")
 public func AevonFloatTouch(_ phase: Int32, _ x: Double, _ y: Double, _ stamp: Double) -> Int32 {
-    return FloatHost.shared.touchEntry(phase: Int(phase),
-                                       at: CGPoint(x: CGFloat(x), y: CGFloat(y)),
-                                       stamp: TimeInterval(stamp)) ? 1 : 0
+    let point = CGPoint(x: CGFloat(x), y: CGFloat(y))
+    let when = TimeInterval(stamp)
+    for host in FloatHost.everySlot {
+        if host.touchEntry(phase: Int(phase), at: point, stamp: when) { return 1 }
+    }
+    return 0
 }

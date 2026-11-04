@@ -45,8 +45,15 @@ NSString *AevonHookSummary(void);
 
 /// Which scene may be held awake. Empty means nothing is held, which is the
 /// state before the target is known and the state after the card is taken down.
+///
+/// 0.0.98 — 一张名单，不再是一个名字。停靠小窗的 scene 也要被守住，否则主窗
+/// 一降级，它就从名单里消失，系统下一拍 deactivation 就会把它收走（用户看到
+/// 的是「停靠的那个窗黑掉」）。最多 16 个槽，满了拒绝登记并计数。
 void AevonHookArm(NSString *_Nullable bundle);
-void AevonHookDisarm(void);
+/// `nil` / 空串 = 全部撤回（0.0.97 的语义）。给一个 bundle = 只撤回它。
+void AevonHookDisarm(NSString *_Nullable bundle);
+/// 名单里现在有谁，逗号分隔；空名单回 `"no"`。
+NSString *AevonHookArmedList(void);
 
 /// `-_deactivationReasonsForScene:withSettings:` as a number, `ULLONG_MAX` when
 /// this system does not answer it. Zero and "absent" are different facts.
@@ -95,8 +102,17 @@ NSInteger AevonPushBackground(id _Nullable scene);
 /// `AevonSceneFrameSet` 只是登记目标值，真正写进去有两条路：系统更新 settings 时
 /// 由 intercept 钩子顺手改（母本的路线），以及 `AevonPushSceneFrame` 主动推一次
 /// （建卡那一拍系统未必正好在更新）。`AevonSceneFrameClear` 之后系统自然写回整屏。
-void AevonSceneFrameSet(double x, double y, double width, double height);
+/// 0.0.98 — 画布目标按窗存：`bundle` 指名的那个槽才写。查不到槽（还没登记）
+/// 就什么都不写，并让 `AevonFrameOrphanCount` 加一 —— 「这个窗没画布」和
+/// 「画布写错窗」是两件必须能分开的事。
+void AevonSceneFrameSet(NSString *_Nullable bundle,
+                        double x, double y, double width, double height);
 void AevonSceneFrameClear(void);
+/// 只抹掉一个窗的目标，别的窗不受影响。
+void AevonSceneFrameClearBundle(NSString *_Nullable bundle);
+/// 当前有几块画布有目标；以及有几处调用点忘了先登记。
+long AevonFrameArmedCount(void);
+long AevonFrameOrphanCount(void);
 
 /// 主动推一次。返回门编号：3 = transition，1 = 普通，0 = 没写成或没有门。
 /// 主线程、且不能从钩子里面调（与 push foreground 同一条纪律）。

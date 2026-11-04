@@ -880,7 +880,7 @@ zStackParticipantDidChange:
                           + " running=" + flag(running)
                           + " visible=" + flag(visible)
                           + " fg=" + flag(foreground))
-                AevonHookDisarm()
+                AevonHookDisarm(bundleID)
                 unmark()
                 return
             }
@@ -899,7 +899,7 @@ zStackParticipantDidChange:
             // the only thing that disarms.
             DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
                 if cardUp { return }
-                AevonHookDisarm()
+                AevonHookDisarm(bundleID)
                 unmark()
                 emitNotes(AevonHookSummary())
             }
@@ -931,9 +931,34 @@ zStackParticipantDidChange:
     /// and a dead control on the home screen is worse than a full-screen app.
     static func openCard(_ bundleID: String, fallback: @escaping (String) -> Void) {
         guard !bundleID.isEmpty, !bundleID.hasPrefix("placeholder.") else { return }
-        guard !cardUp else {
-            Log.write("win: icon " + bundleID + " ignored, a card is already up")
-            return
+        // 0.0.98 — 已经有主窗时，先把它降级成停靠小窗，再开新的。
+        //
+        // 0.0.97 及以前这里是 `guard !cardUp else { log("ignored, a card is already
+        // up"); return }` —— 用户说的「主悬浮窗打开时，再次通过圆盘选中图标后没有
+        // 任何反应」就是这一行。它甚至在日志里承认了自己是故意的，所以四份日志里
+        // 这件事长得像「圆盘坏了」。
+        //
+        // 降级只改几何（缩到边缘），不换宿主、不拆 scene：旧窗的对象还留在它自己
+        // 那份 `FloatHost` 上，新的主窗拿到的是另一个空槽。见 `FloatHost.takeMainSlot`。
+        if cardUp {
+            // 同一个 App 再选一次：不降级也不重开。否则点两下就把它自己挤成小窗。
+            if hostedBundle == bundleID {
+                Log.write("win: icon " + bundleID + " is already the main card, ignored")
+                return
+            }
+            let side = FloatHost.demoteMain()
+            if side == "none" {
+                // 主窗的宿主已经不在（恰好刚被关掉）：把标志复位，按「没有卡」继续。
+                // 不复位的话下面 `FloatHost.show` 会找不到空槽，这一下就真的没反应了。
+                Log.write("win: demote found no card, treating as none")
+                cardUp = false
+                AevonRingGrip.cardUp = false
+            } else {
+                // 一整条字面量，不拼：`win: demote ` 只有 12 字节，拼接串会被
+                // 编译器编成立即数，二进制里 grep 不到 —— 闸门会拦，也确实拦对了。
+                Log.write(String(format: "win: demote old=%@ side=%@ new=%@",
+                                 hostedBundle ?? "?", side, bundleID))
+            }
         }
 
         // 0.0.50 — 母本的两招，这一条路上一直只有半招。
@@ -963,7 +988,7 @@ zStackParticipantDidChange:
         let door = AevonLaunchSuspended(sharedApplication(), bundleID)
         Log.write("win: icon launch " + bundleID + " suspended door=" + String(door))
         guard door == 1 else {
-            AevonHookDisarm()
+            AevonHookDisarm(bundleID)
             fallback("suspended door=" + String(door))
             return
         }
@@ -1068,9 +1093,12 @@ zStackParticipantDidChange:
             emitNotes(AevonTakeNotes())
             float(scene, bundleID: bundleID)
             // A hold with no card under it is a scene that never sleeps again.
-            // `float` answers by raising `cardUp`, so its absence is the answer.
-            guard cardUp else {
-                AevonHookDisarm()
+            //
+            // 0.0.98 — 判据从「有没有卡」换成「这个 App 是不是当前主窗」。旧主窗
+            // 降级之后 `cardUp` 一直是 true，用它判等于不管新卡起没起来都算成功，
+            // 那样一条失败会被记成一次成功，下次再去查就是「日志里没有异常」。
+            guard FloatHost.mainBundle == bundleID else {
+                AevonHookDisarm(bundleID)
                 Log.write("win: icon card did not come up, hold released")
                 fallback("card did not come up")
                 return
@@ -1079,7 +1107,7 @@ zStackParticipantDidChange:
         }
         guard Date().timeIntervalSince(start) < 4.0 else {
             unmark()
-            AevonHookDisarm()
+            AevonHookDisarm(bundleID)
             Log.write("win: icon " + bundleID + " produced no scene")
             fallback("no scene in 4s")
             return
@@ -1259,10 +1287,24 @@ zStackParticipantDidChange:
             // 0.0.61 — 逻辑尺寸要还回去。我们写过的东西不会随卡片消失而失效
             // （和 0.0.32 的 foreground 是同一条教训）：不还，那个 App 从此是
             // 377 pt 宽的排版，回到桌面自己打开也是，直到它自己被系统重开。
+            // 0.0.98 — 只还自己那一格。
+            //
+            // 0.0.97 及以前这里写的是「设一个整屏目标 → 推一次 → 全部清掉」，
+            // 因为当时只有一块画布。多窗之后那样做会把**另一个窗**的画布目标
+            // 一起抹掉：关掉主窗，停靠的那个窗就再也不会被写回它自己的尺寸，
+            // 表现是「关一个窗，另一个窗的画面忽然按整屏重排」。
+            let closingBundle = hostedBundle ?? ""
             let screenSize = UIScreen.main.bounds.size
-            AevonSceneFrameSet(0, 0, Double(screenSize.width), Double(screenSize.height))
+            if !closingBundle.isEmpty {
+                AevonSceneFrameSet(closingBundle, 0, 0,
+                                   Double(screenSize.width), Double(screenSize.height))
+            }
             let restoreDoor = AevonPushSceneFrame(scene)
-            AevonSceneFrameClear()
+            if closingBundle.isEmpty {
+                AevonSceneFrameClear()
+            } else {
+                AevonSceneFrameClearBundle(closingBundle)
+            }
             Log.write("win: scene frame restored door=" + String(restoreDoor)
                       + " wrote=" + String(AevonFrameWriteCount()))
             _ = AevonCallVoid(presenter, "deactivate")
@@ -1271,7 +1313,9 @@ zStackParticipantDidChange:
             // `deactivate` 之前，理由是 `FloatHost.hide()` 要复位承载视图；那个
             // 复位已经删了（见 `FloatHost.teardown`），提前的唯一理由也就不在了，
             // 而「在系统对象还活着的时候动那棵树」正是这一版要撤的东西。
-            FloatHost.hide()
+            // 0.0.98 — 按名字拆自己那一块。多窗之后「拆唯一那个宿主」会让关掉
+            // 主窗时连带干掉停靠小窗。
+            FloatHost.hide(bundle: closingBundle)
             // 0.0.82 — 交还后台这一拍搬到拆完 presenter 之后。
             //
             // Aevon(73) 里每一张卡关掉都是同一个形状：`background door=1 fg=yes`
@@ -1309,19 +1353,37 @@ zStackParticipantDidChange:
             // 这一次只写 scene 的 frame（我们本来就拥有这个量），不碰任何视图，
             // 0.30 s 后执行，此时 presenter 已经 invalidate。
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) { [weak scene] in
-                // 0.3 s 内又开了一张卡：那个 pending 的 frame 目标属于新卡，
-                // 这里再写一次整屏会把它抹掉。
-                guard let scene = scene, !cardUp else { return }
+                // 0.0.98 — 判据从「有没有卡」换成「这一个 App 有没有被重新登记」。
+                //
+                // 0.0.75 起这里写的是 `!cardUp`，当时「有卡」就等于「那个 App 又被
+                // 打开了」。多窗之后 `cardUp` 变成「至少还有一个窗」，关掉主窗而
+                // 留着一个停靠小窗时，这条保留的整屏恢复会被无谓地跳过；反过来
+                // 真正要防的「0.3 s 内重开同一个 App」也必须按名字判，不能按数量判。
+                guard let scene = scene else { return }
+                let armed = AevonHookArmedList()
+                if !closingBundle.isEmpty, armed != "no", armed.contains(closingBundle) {
+                    Log.write("win: frame restore skipped, " + closingBundle + " reopened")
+                    return
+                }
                 let full = UIScreen.main.bounds.size
-                AevonSceneFrameSet(0, 0, Double(full.width), Double(full.height))
+                if !closingBundle.isEmpty {
+                    AevonSceneFrameSet(closingBundle, 0, 0,
+                                       Double(full.width), Double(full.height))
+                }
                 let door = AevonPushSceneFrame(scene)
-                AevonSceneFrameClear()
+                if closingBundle.isEmpty {
+                    AevonSceneFrameClear()
+                } else {
+                    AevonSceneFrameClearBundle(closingBundle)
+                }
                 Log.write("win: frame restore again door=" + String(door))
             }
             // 0.0.55 — 卡片没了，右缘带重新接触摸。
             AevonRingGrip.cardUp = false
             RingHost.shared.setEdgeActive(true)
-            AevonHookDisarm()
+            // 0.0.98 — 只把自己从名单里摘掉。多窗时全部清空会把停靠小窗的保活
+            // 一起撤掉，那个窗下一拍就会被系统收走。
+            AevonHookDisarm(closingBundle.isEmpty ? nil : closingBundle)
             clearHosted()
             if let b = closedBundle {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
@@ -1331,11 +1393,15 @@ zStackParticipantDidChange:
                               + " file=" + (AevonAppLogPathOf(b) ?? "none"))
                 }
             }
-            cardUp = false
+            // 0.0.98 — 关掉一块之后，屏幕上可能还留着停靠小窗。`cardUp` 的语义
+            // 是「还有没有至少一块卡」，所以问宿主，不无条件写 false。写 false 的
+            // 后果是下一个 `openCard` 认为没有主窗可降级，直接去抢空槽。
+            let stillUp = !FloatHost.mainBundle.isEmpty
+            cardUp = stillUp
             emitNotes(AevonHookSummary())
             let back = value(of: scene, "settings").map { AevonBoolOf($0, "isForeground") } ?? -1
             Log.write("win: card closed by " + reason + ", background door=" + String(door)
-                      + " fg=" + flag(back))
+                      + " fg=" + flag(back) + " live=" + (stillUp ? "yes" : "no"))
             // A hand-back that did not land is the same defect one layer down:
             // the app would spend the rest of the session believing it is in
             // front. One retry, a third of a second later, and then the log says so.
@@ -1346,7 +1412,13 @@ zStackParticipantDidChange:
             // —— 那时 scene 属于新的一张卡，再写后台就是错的。
             if back != 0 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    guard !cardUp else { return }
+                    // 0.0.98 — 判据按名字，不按「有没有卡」。多窗时 `cardUp` 大概
+                    // 率还是 true（停靠小窗还在），用它判等于这条补写永远不执行；
+                    // 要防的仍然是「0.35 s 内又开了同一个 App」，那只能按 bundle 判。
+                    let armed = AevonHookArmedList()
+                    if !closingBundle.isEmpty, armed != "no", armed.contains(closingBundle) {
+                        return
+                    }
                     let again = AevonPushBackground(scene)
                     let now = value(of: scene, "settings").map {
                         AevonBoolOf($0, "isForeground")
@@ -1383,7 +1455,8 @@ zStackParticipantDidChange:
         // 0.0.20, and the difference between a picture and a black phone.
         // 0.0.65 — 没有 `onReshape` 了：画布在开窗那一刻定死（屏宽 × 5:3），
         // 之后角拖动只做等比例缩放，没有任何路径会再改 scene 的 frame。
-        guard let host = FloatHost.show(view, awaitingFrame: awaiting,
+        guard let host = FloatHost.show(view, bundle: bundleID ?? hostedBundle ?? "",
+                                        awaitingFrame: awaiting,
                                         onClose: { reason in closeCard(reason) }) else {
             Log.write("win: no window - nothing activated")
             return

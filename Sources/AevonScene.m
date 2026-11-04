@@ -233,9 +233,20 @@ typedef struct {
 static AevonHookSlot AevonSlots[AEVON_HOOK_SLOTS];
 static int AevonSlotCount = 0;
 
-/// The bundle id the operator chose, or empty. The hook body compares this
-/// against a scene's own identifier, so no scene is ever held open by accident.
-static char AevonArmed[128];
+/// 0.0.98 — 从「一个 bundle」变成「一组 bundle」。
+///
+/// 0.0.97 及以前这里只有一个名字，整个 tweak 因此只能同时守住一个 scene：
+/// 主窗降级成停靠小窗之后，它的 scene 不再出现在名单里，保活钩子一律放行，
+/// 系统的 deactivation 第一拍就把它收走 —— 用户看到的是「停靠的那个窗黑掉」。
+///
+/// 16 槽不是随手取的：V2 的上限是「主窗 1 + 停靠 10」，再加几张正在降级途中的
+/// 过渡窗，就需要 16 个位置。每个槽 128 字节，整张表 2 KB，常驻代价可以忽略。
+/// 槽满时不覆盖、不淘汰，直接拒绝登记并留下计数 —— 一个没被登记的窗会黑，
+/// 而「窗黑」与「名字没登记上」在日志里必须是两件能分开的事。
+#define AEVON_ARMED_MAX 16
+static char AevonArmed[AEVON_ARMED_MAX][128];
+static int AevonArmedCount = 0;
+static long AevonArmedRefused = 0;
 
 static long AevonDeactSetCalls = 0;
 static long AevonDeactStripped = 0;
@@ -274,24 +285,74 @@ static const char *AevonSceneName(id scene) {
 }
 
 static BOOL AevonIsArmed(void) {
-    return AevonArmed[0] != '\0';
+    return AevonArmedCount > 0;
+}
+
+/// 这个 scene 归不归我们管 —— 逐个槽比对。
+///
+/// 0.0.98 之前这里只有一个名字，`strstr` 一次就是全部答案；现在必须走完整张表，
+/// 否则第二个窗永远不算「我的」，保活与 frame 写入都会漏掉它。
+static int AevonSlotOfScene(id scene) {
+    if (AevonArmedCount <= 0) return -1;
+    const char *name = AevonSceneName(scene);
+    if (name == NULL || name[0] == '\0' || strcmp(name, "?") == 0) return -1;
+    for (int i = 0; i < AEVON_ARMED_MAX; i++) {
+        if (AevonArmed[i][0] == '\0') continue;
+        if (strstr(name, AevonArmed[i]) != NULL) return i;
+    }
+    return -1;
 }
 
 static BOOL AevonSceneIsMine(id scene) {
-    if (!AevonIsArmed()) return NO;
-    const char *name = AevonSceneName(scene);
-    return name != NULL && strstr(name, AevonArmed) != NULL;
+    return AevonSlotOfScene(scene) >= 0;
 }
 
+/// 追加一个名字。已经在表里的不重复登记（同一个 App 被再选一次会走到这里）。
 void AevonHookArm(NSString *bundle) {
     if (bundle == nil) return;
     const char *text = [bundle UTF8String];
-    if (text == NULL) return;
-    strlcpy(AevonArmed, text, sizeof(AevonArmed));
+    if (text == NULL || text[0] == '\0') return;
+    for (int i = 0; i < AEVON_ARMED_MAX; i++) {
+        if (AevonArmed[i][0] == '\0') continue;
+        if (strcmp(AevonArmed[i], text) == 0) return;
+    }
+    for (int i = 0; i < AEVON_ARMED_MAX; i++) {
+        if (AevonArmed[i][0] != '\0') continue;
+        strlcpy(AevonArmed[i], text, sizeof(AevonArmed[i]));
+        __sync_fetch_and_add(&AevonArmedCount, 1);
+        return;
+    }
+    __sync_fetch_and_add(&AevonArmedRefused, 1);
 }
 
-void AevonHookDisarm(void) {
-    AevonArmed[0] = '\0';
+/// 撤回一个名字。`nil` / 空串 = 全部撤回 —— 那是 0.0.97 之前的语义，留在最后
+/// 一个参数位置上，好让还没改完的调用点不会悄悄变成空操作。
+void AevonHookDisarm(NSString *bundle) {
+    if (bundle == nil || [bundle length] == 0) {
+        for (int i = 0; i < AEVON_ARMED_MAX; i++) AevonArmed[i][0] = '\0';
+        AevonArmedCount = 0;
+        return;
+    }
+    const char *text = [bundle UTF8String];
+    if (text == NULL) return;
+    for (int i = 0; i < AEVON_ARMED_MAX; i++) {
+        if (AevonArmed[i][0] == '\0') continue;
+        if (strcmp(AevonArmed[i], text) != 0) continue;
+        AevonArmed[i][0] = '\0';
+        if (AevonArmedCount > 0) __sync_fetch_and_sub(&AevonArmedCount, 1);
+    }
+}
+
+/// 表里现在有谁，逗号分隔。日志用。
+NSString *AevonHookArmedList(void) {
+    if (AevonArmedCount <= 0) return @"no";
+    NSMutableString *out = [NSMutableString string];
+    for (int i = 0; i < AEVON_ARMED_MAX; i++) {
+        if (AevonArmed[i][0] == '\0') continue;
+        if ([out length] > 0) [out appendString:@","];
+        [out appendFormat:@"%s", AevonArmed[i]];
+    }
+    return [out length] > 0 ? out : @"no";
 }
 
 /// A `BOOL` getter read with the ABI it has, as a number, `-1` for "no such
@@ -348,24 +409,70 @@ static volatile int AevonInPush = 0;
 /// （`_scene:interceptUpdateWithNewSettings:`，Aevon(52) 的 `intercept=6/22`）。
 /// 写的是**可变副本**：只对 `*Mutable*` 类调 setter，对不可变对象调 setter 在系统
 /// 里是抛异常，而这里的异常没人接。
-static volatile int AevonFrameArmed = 0;
-static CGRect AevonFrameTarget = {{0.0, 0.0}, {0.0, 0.0}};
+/// 0.0.98 — 画布目标从「一块」变成「每槽一块」。
+///
+/// 一个全局 `AevonFrameTarget` 只够一个窗用：第二个窗一旦开出来，两个 scene 会
+/// 抢同一份目标，谁的 settings 后到谁就把另一个窗的画布改成自己的尺寸 —— 真机上
+/// 的表现是「新窗开了，旧窗的画面忽然变成另一个 App 的排版」。所以目标必须按槽
+/// 存，写入前先按 scene 找到它自己那一格。
+static volatile int AevonFrameMask = 0;             ///< 位 i = 槽 i 有目标
+static CGRect AevonFrameTargets[AEVON_ARMED_MAX];
 static long AevonFrameWrites = 0;
+static long AevonFrameOrphans = 0;                  ///< 没登记就来设尺寸的次数
+
+/// bundle 在登记表里的槽号，-1 = 没登记。
+static int AevonSlotOfBundle(NSString *bundle) {
+    if (bundle == nil || [bundle length] == 0) return -1;
+    const char *text = [bundle UTF8String];
+    if (text == NULL) return -1;
+    for (int i = 0; i < AEVON_ARMED_MAX; i++) {
+        if (AevonArmed[i][0] == '\0') continue;
+        if (strcmp(AevonArmed[i], text) == 0) return i;
+    }
+    return -1;
+}
 
 /// 目标尺寸 = 卡片里那块承载面的尺寸。小于 80 pt 的一律当「没设」，防止一次
 /// 布局没算完的读数把 scene 缩成一条。
-void AevonSceneFrameSet(double x, double y, double width, double height) {
-    if (width < 80.0 || height < 80.0) {
-        AevonFrameArmed = 0;
+///
+/// 0.0.98 — 多一个 `bundle`：说的是「这一块画布归谁」。调用顺序上它一定在
+/// `AevonHookArm` 之后，所以查不到槽只有一个含义 —— 有一处调用点忘了登记。
+/// 那时宁可什么都不写并留下计数，也不要挑一个槽去覆盖别人的画布。
+void AevonSceneFrameSet(NSString *bundle, double x, double y, double width, double height) {
+    int slot = AevonSlotOfBundle(bundle);
+    if (slot < 0) {
+        __sync_fetch_and_add(&AevonFrameOrphans, 1);
         return;
     }
-    AevonFrameTarget = CGRectMake((CGFloat)x, (CGFloat)y, (CGFloat)width, (CGFloat)height);
-    AevonFrameArmed = 1;
+    if (width < 80.0 || height < 80.0) {
+        __sync_fetch_and_and(&AevonFrameMask, ~(1 << slot));
+        return;
+    }
+    AevonFrameTargets[slot] = CGRectMake((CGFloat)x, (CGFloat)y,
+                                         (CGFloat)width, (CGFloat)height);
+    __sync_fetch_and_or(&AevonFrameMask, 1 << slot);
 }
 
-void AevonSceneFrameClear(void) { AevonFrameArmed = 0; }
+/// 全部撤销。关最后一个窗、或这台系统上我们不该再管任何画布时用。
+void AevonSceneFrameClear(void) {
+    __sync_lock_test_and_set(&AevonFrameMask, 0);
+}
+
+/// 单个槽撤销：那个 App 的窗没了，它那一格就不该再被写。
+void AevonSceneFrameClearBundle(NSString *bundle) {
+    int slot = AevonSlotOfBundle(bundle);
+    if (slot < 0) return;
+    __sync_fetch_and_and(&AevonFrameMask, ~(1 << slot));
+}
 
 long AevonFrameWriteCount(void) { return AevonFrameWrites; }
+long AevonFrameOrphanCount(void) { return AevonFrameOrphans; }
+long AevonFrameArmedCount(void) {
+    int mask = AevonFrameMask;
+    long n = 0;
+    for (int i = 0; i < AEVON_ARMED_MAX; i++) if (mask & (1 << i)) n += 1;
+    return n;
+}
 
 /// 读 scene 现在的逻辑尺寸。读不到返回全零 —— 全零在日志里一看就知道是「没读到」，
 /// 不会和一次真的失败混在一起。
@@ -523,8 +630,14 @@ static NSInteger AevonCallSettingsTransition(id target, id settings) {
 ///
 /// 先读再比：已经是目标值就不写。这是 0.0.34 定下的 delta-first —— 一次什么都没
 /// 改变的写入同样要付一次重排，而重排就是一次闪。
-static BOOL AevonWriteFrame(id settings) {
-    if (settings == nil || !AevonFrameArmed) return NO;
+///
+/// 0.0.98 — 目标由 `slot` 点名，不再读全局。调用方必须已经用它自己的 scene 查出
+/// 槽号；查不出槽就不写（那说明这份 settings 不属于任何一个我们登记的窗）。
+static BOOL AevonWriteFrame(id settings, int slot) {
+    if (settings == nil) return NO;
+    if (slot < 0 || slot >= AEVON_ARMED_MAX) return NO;
+    if (!(AevonFrameMask & (1 << slot))) return NO;
+    CGRect target = AevonFrameTargets[slot];
     const char *className = object_getClassName(settings);
     if (className == NULL || strstr(className, "Mutable") == NULL) return NO;
     SEL setter = sel_registerName("setFrame:");
@@ -532,12 +645,12 @@ static BOOL AevonWriteFrame(id settings) {
     SEL getter = sel_registerName("frame");
     if ([settings respondsToSelector:getter]) {
         CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(settings, getter);
-        if (fabs(now.size.width - AevonFrameTarget.size.width) < 0.5
-            && fabs(now.size.height - AevonFrameTarget.size.height) < 0.5) {
+        if (fabs(now.size.width - target.size.width) < 0.5
+            && fabs(now.size.height - target.size.height) < 0.5) {
             return NO;
         }
     }
-    ((void (*)(id, SEL, CGRect))objc_msgSend)(settings, setter, AevonFrameTarget);
+    ((void (*)(id, SEL, CGRect))objc_msgSend)(settings, setter, target);
     __sync_fetch_and_add(&AevonFrameWrites, 1);
     return YES;
 }
@@ -547,17 +660,19 @@ static BOOL AevonWriteFrame(id settings) {
 ///
 /// 返回用过的门（3 = transition，1 = 普通），0 = 没写成或没有门。
 NSInteger AevonPushSceneFrame(id scene) {
-    if (scene == nil || !AevonFrameArmed) return 0;
+    if (scene == nil) return 0;
     if (![NSThread isMainThread]) return 0;
     if (AevonHookDepth > 0) return 0;
     if (AevonInPush) return 0;
+    int slot = AevonSlotOfScene(scene);
+    if (slot < 0 || !(AevonFrameMask & (1 << slot))) return 0;
     SEL settingsSel = sel_registerName("settings");
     if (![scene respondsToSelector:settingsSel]) return 0;
     id current = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
     id candidate = [current mutableCopy];
     if (candidate == nil) candidate = current;
     AevonInPush = 1;
-    BOOL wrote = AevonWriteFrame(candidate);
+    BOOL wrote = AevonWriteFrame(candidate, slot);
     NSInteger path = 0;
     if (wrote) {
         path = AevonCallSettingsTransition(scene, candidate);
@@ -792,7 +907,7 @@ static double AevonLevelOf(id settings) {
 ///
 /// 不可变就返回而不是硬写：对一个不可变 settings 调 setter 在系统里是抛异常，
 /// 而这里的异常没有人接 —— 那就是 SpringBoard 的一次自杀。
-static int AevonAmendSettings(id settings) {
+static int AevonAmendSettings(id settings, int slot) {
     if (settings == nil) return 0;
     const char *className = object_getClassName(settings);
     if (className == NULL || strstr(className, "Mutable") == NULL) return -1;
@@ -824,7 +939,7 @@ static int AevonAmendSettings(id settings) {
     // 挂在这里而不是新开一个钩子，是因为这条门已经被证明会响：Aevon(52) 的日志
     // 里 `intercept=6/22`、`mine=1 amend=1`，说明系统每次更新 settings 都把它
     // 交到我们手上，而我们在系统用之前就改完了它。母本用的是同一个方法。
-    if (AevonWriteFrame(settings)) wrote |= 8;
+    if (AevonWriteFrame(settings, slot)) wrote |= 8;
     return wrote;
 }
 
@@ -1081,11 +1196,12 @@ NSString *AevonHookInstall(void) {
         __block AevonHookSlot *mine = slot;
         id block = ^(id manager, id scene, id settings) {
             long seen = __sync_fetch_and_add(&AevonInterceptCalls, 1);
-            BOOL ours = AevonSceneIsMine(scene);
+            int mineSlot = AevonSlotOfScene(scene);
+            BOOL ours = mineSlot >= 0;
             int wasFront = AevonFlagOf(settings, "isForeground");
             int amended = 0;
             if (ours && !AevonPushBanned) {
-                amended = AevonAmendSettings(settings);
+                amended = AevonAmendSettings(settings, mineSlot);
                 if (amended > 0) __sync_fetch_and_add(&AevonInterceptRewrote, 1);
             }
             if (seen < 6) {
@@ -1118,7 +1234,7 @@ NSString *AevonHookSummary(void) {
      AevonSlotCount, AevonDeactSetCalls, AevonDeactStripped,
      AevonInterceptRewrote, AevonInterceptCalls,
      AevonPushWrote, AevonPushTried, AevonPushPath,
-     AevonIsArmed() ? [NSString stringWithUTF8String:AevonArmed] : @"no"];
+     AevonHookArmedList()];
     long total = AevonTraceCount;
     long limit = (long)(sizeof(AevonTrace) / sizeof(AevonTrace[0]));
     if (total > limit) total = limit;
@@ -1691,18 +1807,20 @@ NSInteger AevonDrainAppLog(NSString *bundleID, long cap) {
 /// 因为那是键盘或状态栏的高度抖动）。17 pt 跨过了常见的那几个阈值（8 / 10 / 16），
 /// 又小到卡片尺寸不变形（画布仍是 717，只是内容按 700 排一拍再按 717 排）。
 NSInteger AevonNudgeSceneFrame(id scene, double delta) {
-    if (scene == nil || !AevonFrameArmed) return 0;
-    CGRect target = AevonFrameTarget;
+    if (scene == nil) return 0;
+    int slot = AevonSlotOfScene(scene);
+    if (slot < 0 || !(AevonFrameMask & (1 << slot))) return 0;
+    CGRect target = AevonFrameTargets[slot];
     if (target.size.height < 120.0) return 0;
     if (fabs(delta) < 0.5) delta = -17.0;
-    AevonFrameTarget = CGRectMake(target.origin.x, target.origin.y,
-                                  target.size.width, target.size.height + delta);
+    AevonFrameTargets[slot] = CGRectMake(target.origin.x, target.origin.y,
+                                         target.size.width, target.size.height + delta);
     NSInteger door = AevonPushSceneFrame(scene);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         // 0.12 s 内关卡了：`AevonSceneFrameClear` 已经把目标抹掉，这里不该再写。
-        if (!AevonFrameArmed) return;
-        AevonFrameTarget = target;
+        if (!(AevonFrameMask & (1 << slot))) return;
+        AevonFrameTargets[slot] = target;
         AevonPushSceneFrame(scene);
     });
     return door;

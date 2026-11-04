@@ -846,6 +846,11 @@ def main():
                       # 「能让行高对上」的最短路径，也是这一版明确不走的那条。
                       b"reloadData",                                        # gone
                       b"hosted, relayout",                                  # gone
+                      # 0.0.98 — 「已经有卡就忽略」这条拒绝撤掉了，改成「旧主窗降级
+                      # + 新图标开主窗」。它若回来，就是「主悬浮窗打开时再选图标没有
+                      # 任何反应」又回来了 —— 这一条比本栏其它任何一条都更容易被
+                      # 悄悄写回去，因为它看起来像一条稳妥的守卫。
+                      b"ignored, a card is already up",                     # gone
                       b"released, relayout",                                # gone
                       # 名片 + 冷启动那对组合：名片写不进去时判据永远不成立，
                       # 每次开窗都会先杀掉那个 App。
@@ -1111,6 +1116,22 @@ def main():
                   # 0.0.40 — 吸附 is a tap and the way back is the window itself.
                   b"win: card docked ",
                   b"win: card undocked ",
+                  # 0.0.98 — 多窗的第一版证据。这一组少一条，就说明「圆盘再选
+                  # 图标有反应」只落地了一半：
+                  #   `win: slot taken` = 新主窗拿到了哪一个槽，后面跟着保活名单、
+                  #     有画布的窗数、以及「没登记就设尺寸」的次数。读法：两个窗
+                  #     都在时 `frames=2`、`orphan=0`；`armed=` 里必须同时有两个
+                  #     bundle，否则降级的那一个下一拍就会被系统收走（黑窗）。
+                  #   `win: demote` = 旧主窗被降级，后面跟着它落到哪条边 —— 用户
+                  #     提的「已存在的悬浮窗自动吸附到屏幕边缘」就是这一行。
+                  #   `win: card demoted` = 降级真的改了几何（尺寸 + 落点）。
+                  #   `win: no free slot, ` = V1 的饱和拒绝：一主一停已经占满，
+                  #     这一下不再是静悄悄 return，而是能在日志里数出来的拒绝。
+                  b"win: slot taken bundle=%@ slot=%d armed=%@ frames=%ld orphan=%ld",
+                  b"win: demote old=%@ side=%@ new=%@",
+                  b"win: card demoted side=%@",
+                  b"win: no free slot, ",
+                  b"win: demote found no card",
                   # 0.0.69 — 三条新的行为证据，缺一条就说明这一轮有一件事没落地：
                   #   · `long press corner, already default` = 长按在默认尺寸上真的
                   #     什么都不做（Aevon(59) 的第一条）；
