@@ -718,6 +718,10 @@ def main():
                   b"SBMainDisplaySceneManager",
                   b"client:didUpdateClientSettings:withDiff:transitionContext:",
                   b" shape cls=%@",
+                  # 0.0.53 — 那个选择子在这台系统上不存在，于是不再猜：装不上时
+                  # 把类自己实现的、名字带 Settings/Client/Scene 的方法全列出来。
+                  # 这一行是「下一版挂哪一份方法」的唯一来源。
+                  b"hook client methods n=",
                   b"presenter %@ -> %@",
                   b"/var/mobile/Library/Logs/Aevon/win.step"):
         if token not in dylib_early:

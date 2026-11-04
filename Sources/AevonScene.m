@@ -659,15 +659,21 @@ static long AevonInterceptCalls = 0;
 static long AevonInterceptRewrote = 0;
 static long AevonClientCalls = 0;
 
-/// 类型编码里的对象参数个数。`v32@0:8@16@24` → 2（头两个 `@` 是 self 与 _cmd）。
+/// 类型编码里的对象参数个数。`v32@0:8@16@24` → 2（三个 `@` 里第一个是 self）。
 /// -1 表示不是 void 返回或编码读不出来，调用方据此跳过，不做任何猜测。
+///
+/// 0.0.53 — 这里原来是 `count - 2`，注释却写着「→ 2」。真机上
+/// `v32@0:8@16@24` 被数成 1、判定形状不符，于是 `SBMainDisplaySceneManager` 与
+/// `SBSceneManager` 两个候选**一个都没装**（Aevon(50)：58 条节拍全是 `ic=0/0`）。
+/// 一个只会拒绝的看门狗，比没有看门狗更坏：它把「装错参数会崩」换成了「永远不装」，
+/// 而且看起来一切正常。self 也在 `@` 里，参数个数只能是 `count - 1`。
 static int AevonObjectArgs(const char *encoding) {
     if (encoding == NULL || encoding[0] != 'v') return -1;
     int count = 0;
     for (const char *p = encoding; *p != '\0'; p++) {
         if (*p == '@') count += 1;
     }
-    return count >= 2 ? count - 2 : -1;
+    return count >= 1 ? count - 1 : -1;
 }
 
 /// `settings.level` 读在 settings 对象上（不是 scene 上）。读不到回 -1。
@@ -1006,6 +1012,29 @@ NSString *AevonHookInstall(void) {
     if (hostVC == Nil) {
         [out appendString:@"hook client: no SBDeviceApplicationSceneViewController\n"];
     } else {
+        // 0.0.53 — Aevon(50) 说这个类在、方法不在。母本的 hook 类名不能替我们
+        // 回答 iOS 17.3.1 上它到底叫什么，所以这里不再猜：把这个类自己实现的、
+        // 名字里带 settings / client / Scene 的方法名全部写进日志，一次拿够。
+        // 只列本类的方法（class_copyMethodList 不含父类），因为 override 才是
+        // 我们要挂的那一份。
+        {
+            unsigned int total = 0;
+            Method *list = class_copyMethodList(hostVC, &total);
+            NSMutableString *names = [NSMutableString string];
+            unsigned int shown = 0;
+            for (unsigned int i = 0; list != NULL && i < total && shown < 28; i++) {
+                const char *nm = sel_getName(method_getName(list[i]));
+                if (nm == NULL) continue;
+                if (strstr(nm, "ettings") == NULL && strstr(nm, "Client") == NULL
+                    && strstr(nm, "client") == NULL && strstr(nm, "Scene") == NULL) {
+                    continue;
+                }
+                [names appendFormat:@"%s ", nm];
+                shown += 1;
+            }
+            if (list != NULL) free(list);
+            [out appendFormat:@"hook client methods n=%u [%@]\n", total, names];
+        }
         AevonHookSlot *slot = AevonReserve("client");
         if (slot == NULL) {
             [out appendString:@"hook client: no slot\n"];
