@@ -1988,36 +1988,91 @@ static void AevonPagerReport(const char *reason) {
     AevonPagerInside(reason);
 }
 
-/// 0.0.85 — 「只有部分视频贴在卡片顶边」：换**选节点的判据**。
+/// 0.0.86 — 居中要换**坐标系**：先在卡片里，再跟卡片的正中比。
 ///
-/// 0.0.84 的思路没错（画面那块矩形被钉在容器顶上，把它挪到正中），但选错了节点，
-/// Aevon(75) 一行读数就把它照出来了：
+/// 0.0.85 的判据选对了节点（Aevon(76) 里终于有了成功的 `video band v=`），算术
+/// 也对，但它在**视频区自己的坐标系**里算：
 ///
-///     app: page video band none cls=AWEAwemePlayVideoPauseIc h=717 box=717
+///     want = (regionH - bandH) / 2;    gap = want - rb.origin.y;   // rb 在 region 里
 ///
-/// 全页大（717）的「暂停图标层」面积最大，被当成了播放器；真正的视频区
-/// `DDanmakuPlayerView:0,0,430x634`（`inside settle` 那一行一直在报）从头到尾
-/// 没被看过一眼。所以「找不到那块矩形」是判据造成的必然结果，和画面怎么排无关 ——
-/// 这也是为什么这一版之前，日志里一条成功的 `video band v=` 都**没有**过。
+/// 只要这块视频区在卡片里不是从 y=0 开始，这个原点偏移就整个漏进了结果 ——
+/// 我们以为摆到了正中，屏幕上却还偏上（或者偏下）。Aevon(76) 的两行读数正好
+/// 把它照出来，而且不是巧合：
 ///
-/// 三个新判据：
-///   · 候选要排除「画面身上的零件」：类名里带 Pause / Icon / Button / Progress /
-///     Mask / Overlay / Cover 之类的一律不是画面（`AevonNotPicture`）；
-///   · 候选按面积从大到小**逐个**试，不是只看最大的那一个；
-///   · 找那块矩形要**递归**往深处走（画面外面常套一层容器），宽度按候选自己的
-///     宽度算 —— 只看直接子视图会漏掉整整一代。
+///     video band v=TTMetalViewVP h=242 box=717 dy=42 n=1 r=TTPlayerView
+///     video band v=TTMetalViewVP h=322 box=717 dy=42 n=1 r=TTPlayerView
 ///
-/// 居中的口径也改了：不是「在直接父视图里居中」，而是在**视频区**（候选自己）里
-/// 居中。Aevon(75) 的数是视频区 430×634、16:9 画面 430×242，两个数一减 `dy=196`
-/// —— 这就是「上下黑边一样宽」。区域比整页还高时（整页播放器那一族）退回上一层
-/// 容器，否则会把画面推到标签栏底下。
+/// 按 `want - dy` 反推 App 自己的原点：242 → 195.5，322 → 155.5，而
+/// `(634 - h) / 2` 分别是 196.0 / 156.0 —— 两个点都对上，说明 App 的排版基准是
+/// **634**（整页 717 减去底部那 83 pt 标签栏），而这个基准在它自己的空间里就已经
+/// 被用过了。所以「再算准一点」这条路在旧的坐标系里是不可能走通的。
 ///
-/// 守卫不变：铺满的竖版不碰、带缩放/旋转的不碰、残差小于 12 pt 不动、一块画面
-/// 最多挪 3 次、平移只用 `transform`（App 重排会重写 `center`/`frame`，一般不碰
-/// transform）。
-static void *AevonVideoNode = NULL;
-static int AevonVideoHits = 0;
-static int AevonVideoNotes = 0;
+/// 这一版只改三件事，改的都是坐标系与落点，选节点那套（排除零件、按面积逐个试、
+/// 递归找矩形）原样保留：
+///   · `rb` 一律换算到**卡片**坐标系（`convertRect:toView:cell`），中间夹几层、
+///     每层原点在哪都不再影响结果；
+///   · 落点是**卡片正中**（`(cellH - bandH) / 2`），不再猜「标签栏算不算在里面」；
+///   · 祖先里带缩放的跳过（那样位移会被一起放大），带裁切的把位移夹在可见范围内
+///     并留一行 `video clip` —— 宁可少挪，不能把画面挪出去变成黑块。
+///
+/// 守卫不变：铺满整页的竖版不碰、带缩放/旋转的不碰、残差小于 8 pt 不动、一块画面
+/// 最多挪 3 次、平移只用 `transform`。每换一页清空记账，并放三行 `video scan`
+/// （候选在卡片里的矩形、目标、缺口）—— 这一版能自查，下一版换判据也靠它。
+typedef struct {
+    void *band;
+    int hits;
+} AevonVideoSlot;
+
+static AevonVideoSlot AevonVideoSlots[3];
+static void *AevonVideoCell = NULL;
+static int AevonVideoScanLeft = 0;
+static int AevonVideoNone = 0;
+
+/// 一块画面在这张卡里挪过几次。按指针认；认不出来就占一个空槽，槽满了顶掉 [0]
+/// （画面在翻页后本来就是新对象，旧记录留着只会挡住新手）。
+static AevonVideoSlot *AevonVideoSlotFor(void *band) {
+    for (int i = 0; i < 3; i++) {
+        if (AevonVideoSlots[i].band == band) return &AevonVideoSlots[i];
+    }
+    for (int i = 0; i < 3; i++) {
+        if (AevonVideoSlots[i].band == NULL) {
+            AevonVideoSlots[i].band = band;
+            AevonVideoSlots[i].hits = 0;
+            return &AevonVideoSlots[i];
+        }
+    }
+    AevonVideoSlots[0].band = band;
+    AevonVideoSlots[0].hits = 0;
+    return &AevonVideoSlots[0];
+}
+
+/// 两个视图在同一棵树上互为祖先/后代。同一块画面常被「画面区 → 画面」两层同时
+/// 命中，两层都挪一次就等于挪了两倍。
+static BOOL AevonVideoKin(UIView *a, UIView *b) {
+    if (a == nil || b == nil) return NO;
+    if (a == b) return YES;
+    for (UIView *p = [a superview]; p != nil; p = [p superview]) if (p == b) return YES;
+    for (UIView *p = [b superview]; p != nil; p = [p superview]) if (p == a) return YES;
+    return NO;
+}
+
+/// 从画面往上到卡片，有没有哪一层会裁。裁的话这块画面往下挪就会被切掉一截，
+/// 那时把位移夹在可见范围内 —— 少挪一点也比挪成黑块强。
+static BOOL AevonVideoClips(UIView *band, UIView *cell, CGFloat *delta) {
+    BOOL clipped = NO;
+    for (UIView *p = [band superview]; p != nil && p != cell; p = [p superview]) {
+        if (![p clipsToBounds]) continue;
+        CGRect b = [p bounds];
+        CGRect r = [band convertRect:[band bounds] toView:p];
+        CGFloat low = b.origin.y - r.origin.y + 8.0;                 // 最多能往上挪这么多（负）
+        CGFloat high = CGRectGetMaxY(b) - CGRectGetMaxY(r) - 8.0;    // 最多能往下挪这么多（正）
+        CGFloat d = *delta;
+        if (d < low) { d = low; clipped = YES; }
+        if (d > high) { d = high; clipped = YES; }
+        *delta = d;
+    }
+    return clipped;
+}
 
 /// 类名里带这些字样的是画面身上的零件，不是画面。
 static BOOL AevonNotPicture(const char *name) {
@@ -2126,73 +2181,129 @@ static void AevonVideoCenter(void) {
     if (page.size.height < 200.0) return;
     UIView *cell = AevonPageKidAt(view, page.size.height, [view contentOffset].y);
     if (cell == nil) return;
+    CGFloat cellH = [cell bounds].size.height;
+    if (cellH < 200.0) return;
+    // 换了一页：上一页的记账（挪过几次、扫过几行）全部作废 —— 画面对象本来就是新的。
+    if (AevonVideoCell != (void *)cell) {
+        AevonVideoCell = (void *)cell;
+        memset(AevonVideoSlots, 0, sizeof(AevonVideoSlots));
+        AevonVideoScanLeft = 3;
+        AevonVideoNone = 0;
+    }
 
     NSMutableArray *players = [NSMutableArray array];
     AevonCollectPlayers(cell, players);
     if (players.count == 0) return;
 
-    UIView *band = nil;
-    UIView *region = nil;
-    UIView *firstTry = nil;
+    UIView *pickBand[2] = {nil, nil};
+    UIView *pickRegion[2] = {nil, nil};
+    CGRect pickRect[2] = {CGRectZero, CGRectZero};
+    CGFloat pickGap[2] = {0.0, 0.0};
+    int picked = 0;
+
     // 两轮：先只试「不是零件」的候选；全都不行再把零件也算进来（个别 App 的播放器
-    // 名字里就带 Button/Icon，宁可多试一轮也不漏）。
-    for (int pass = 0; pass < 2 && band == nil; pass++) {
+    // 名字里就带 Button/Icon，宁可多试一轮也不漏）。最多认两块（画面区 + 画面本身）。
+    for (int pass = 0; pass < 2 && picked < 2; pass++) {
         for (UIView *candidate in players) {
-            const char *name = class_getName([candidate class]);
-            if (pass == 0 && AevonNotPicture(name)) continue;
-            if (firstTry == nil) firstTry = candidate;
-            UIView *found = AevonBandUnder(candidate);
-            if (found != nil) { band = found; region = candidate; break; }
+            if (picked >= 2) break;
+            if (pass == 0 && AevonNotPicture(class_getName([candidate class]))) continue;
+            BOOL dup = NO;
+            for (int i = 0; i < picked; i++) {
+                if (pickRegion[i] == candidate || pickBand[i] == candidate) dup = YES;
+                // 同一棵子树上的两层只认一次：都挪就等于挪两倍。
+                if (AevonVideoKin(candidate, pickRegion[i])) dup = YES;
+            }
+            if (dup) continue;
+            // 只认「铺在这张卡上」的那块画面区：小窗、画中画、列表里的小预览一律放过，
+            // 否则会把某个角落的小播放器搬到卡片正中。
+            CGFloat cellW = [cell bounds].size.width;
+            CGRect cr = [candidate convertRect:[candidate bounds] toView:cell];
+            if (cr.size.width < cellW * 0.8 || cr.size.height < cellH * 0.35) continue;
+            UIView *band = AevonBandUnder(candidate);
+            if (band == nil) continue;
+            BOOL kin = NO;
+            for (int i = 0; i < picked; i++) if (AevonVideoKin(band, pickBand[i])) kin = YES;
+            if (kin) continue;
+
+            // 关键：换算到**卡片**坐标系。中间夹几层、每层原点在哪，都不再进结果。
+            CGRect rb = [band convertRect:[band bounds] toView:cell];
+            CGFloat bandH = [band bounds].size.height;
+            CGFloat scale = bandH > 1.0 ? rb.size.height / bandH : 1.0;
+            CGFloat want = (cellH - rb.size.height) / 2.0;
+            CGFloat gap = want - rb.origin.y;
+
+            // 每个候选一行：在卡片里的矩形、目标、缺口。这一版能自查，下一版换判据
+            // 也靠它（0.0.85 缺的就是「原点到底在哪」这一个数）。
+            if (AevonVideoScanLeft > 0) {
+                AevonVideoScanLeft -= 1;
+                char body[220];
+                snprintf(body, sizeof(body),
+                         "video scan %.20s r=%.0f,%.0f,%.0fx%.0f want=%.0f gap=%.0f",
+                         class_getName([candidate class]),
+                         rb.origin.x, rb.origin.y, rb.size.width, rb.size.height, want, gap);
+                AevonPageWrite(body);
+            }
+            if (rb.size.height < 80.0) continue;
+            // 铺满整页（竖版）：这就是它该有的样子，居中反而会裁掉一截。
+            if (rb.size.height > cellH - 40.0) continue;
+            // 祖先带缩放：我们写的是画面自己的位移，会被一起放大。
+            if (fabs(scale - 1.0) > 0.02) continue;
+            if (fabs(gap) > 320.0) continue;
+
+            pickBand[picked] = band;
+            pickRegion[picked] = candidate;
+            pickRect[picked] = rb;
+            pickGap[picked] = gap;
+            picked += 1;
         }
     }
-    if (band == nil || region == nil) {
-        if (AevonVideoNotes < 6 && firstTry != nil) {
-            AevonVideoNotes += 1;
+
+    if (picked == 0) {
+        if (AevonVideoNone < 2) {
+            AevonVideoNone += 1;
+            UIView *first = [players objectAtIndex:0];
             char body[170];
             snprintf(body, sizeof(body), "video band none cls=%.24s h=%.0f box=%.0f",
-                     class_getName([firstTry class]),
-                     [firstTry bounds].size.height,
-                     [firstTry superview] != nil ? [[firstTry superview] bounds].size.height : 0.0);
+                     class_getName([first class]),
+                     [first bounds].size.height,
+                     [first superview] != nil ? [[first superview] bounds].size.height : 0.0);
             AevonPageWrite(body);
-            AevonVideoTree(firstTry);
+            AevonVideoTree(first);
         }
         return;
     }
-    if (AevonVideoNode != (void *)band) {
-        AevonVideoNode = (void *)band;
-        AevonVideoHits = 0;
-    }
-    CGAffineTransform t = [band transform];
-    // 缩放 / 旋转 / 横向位移都不是我们写的：那是 App 自己的动画，别抢。
-    if (fabs(t.a - 1.0) > 0.01 || fabs(t.d - 1.0) > 0.01 || fabs(t.tx) > 0.5) return;
-    // `convertRect:` 出来的是**含我们加过的那一段位移**的矩形，所以不用像 0.0.84
-    // 那样再减 `t.ty` —— 减一次会把上一刀的位移又算进去。
-    CGRect rb = [band convertRect:[band bounds] toView:region];
-    CGFloat regionH = [region bounds].size.height;
-    CGFloat cellH = [cell bounds].size.height;
-    // 视频区比整页还高（整页播放器那一族）：退回上一层「比整页矮」的容器，否则
-    // 算出来的正中会落到标签栏底下。
-    if (regionH > cellH - 40.0) {
-        UIView *up = [band superview];
-        while (up != nil && [up bounds].size.height > cellH - 40.0) up = [up superview];
-        if (up != nil && [up bounds].size.height >= rb.size.height + 40.0) {
-            region = up;
-            regionH = [region bounds].size.height;
-            rb = [band convertRect:[band bounds] toView:region];
+
+    for (int i = 0; i < picked; i++) {
+        UIView *band = pickBand[i];
+        CGRect rb = pickRect[i];
+        CGFloat want = (cellH - rb.size.height) / 2.0;
+        CGFloat gap = pickGap[i];
+        AevonVideoSlot *slot = AevonVideoSlotFor((void *)band);
+        if (fabs(gap) < 8.0) {          // 已经在卡片正中
+            slot->hits = 0;
+            continue;
         }
+        CGAffineTransform t = [band transform];
+        // 缩放 / 旋转 / 横向位移都不是我们写的：那是 App 自己的动画，别抢。
+        if (fabs(t.a - 1.0) > 0.01 || fabs(t.d - 1.0) > 0.01 || fabs(t.tx) > 0.5) continue;
+        if (slot->hits >= 3) continue;
+        BOOL clip = AevonVideoClips(band, cell, &gap);
+        if (fabs(gap) < 8.0) continue;
+        slot->hits += 1;
+        [band setTransform:CGAffineTransformMakeTranslation(0, t.ty + gap)];
+        if (clip) {
+            char line[210];
+            snprintf(line, sizeof(line), "video clip %.20s moved=%.0f need=%.0f n=%d",
+                     class_getName([band class]), gap, want - rb.origin.y, slot->hits);
+            AevonPageWrite(line);
+        }
+        char body[250];
+        snprintf(body, sizeof(body),
+                 "video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s",
+                 class_getName([band class]), rb.size.height, rb.origin.y,
+                 want, gap, slot->hits, class_getName([pickRegion[i] class]));
+        AevonPageWrite(body);
     }
-    if (regionH < rb.size.height + 40.0) return;
-    CGFloat want = (regionH - rb.size.height) / 2.0;
-    CGFloat gap = want - rb.origin.y;
-    if (fabs(gap) < 12.0) return;
-    if (AevonVideoHits >= 3) return;
-    AevonVideoHits += 1;
-    [band setTransform:CGAffineTransformMakeTranslation(0, t.ty + gap)];
-    char body[240];
-    snprintf(body, sizeof(body), "video band v=%.24s h=%.0f box=%.0f dy=%.0f n=%d r=%.24s",
-             class_getName([band class]), rb.size.height, regionH, gap, AevonVideoHits,
-             class_getName([region class]));
-    AevonPageWrite(body);
 }
 
 /// 0.0.74 — 状态读数的一次性节拍。0.4 / 1.5 / 2.6 s 各一次：App 的重排、内容
