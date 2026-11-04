@@ -217,12 +217,19 @@ static void AevonDumpGeometry(const char *tag) {
     if (application == nil) return;
     UIScreen *screen = [UIScreen mainScreen];
     CGRect box = screen != nil ? [screen bounds] : CGRectZero;
-    NSArray *windows = [application windows];
+    // `[UIApplication windows]` 在 iOS 15 起是废弃 API，而这份文件是按 -Werror
+    // 编的（0.0.63 第一轮就是这么挂的：一条 deprecated 警告等于构建失败）。
+    // 从 windowScene 拿窗口，两条路都还在系统里。
     UIWindow *key = nil;
-    for (UIWindow *one in windows) {
-        if ([one isKeyWindow]) { key = one; break; }
+    for (UIScene *one in [application connectedScenes]) {
+        if (![one isKindOfClass:[UIWindowScene class]]) continue;
+        NSArray *wins = [(UIWindowScene *)one windows];
+        for (UIWindow *w in wins) {
+            if ([w isKeyWindow]) { key = w; break; }
+        }
+        if (key == nil && wins.count > 0) key = [wins objectAtIndex:0];
+        if (key != nil) break;
     }
-    if (key == nil && windows.count > 0) key = [windows objectAtIndex:0];
     CGRect win = key != nil ? [key frame] : CGRectZero;
     UIEdgeInsets safe = key != nil ? [key safeAreaInsets] : UIEdgeInsetsZero;
     UIViewController *root = key != nil ? [key rootViewController] : nil;
@@ -241,7 +248,7 @@ static void AevonDumpGeometry(const char *tag) {
              "%s screen=%.0fx%.0f@%.0f scene=%.0fx%.0f win=%.0fx%.0f "
              "root=%.0fx%.0f safe=%.0f/%.0f",
              tag, box.size.width, box.size.height,
-             screen != nil ? [screen scale] : 0,
+             screen != nil ? [screen scale] : 0.0,
              space.size.width, space.size.height,
              win.size.width, win.size.height,
              view.size.width, view.size.height,
