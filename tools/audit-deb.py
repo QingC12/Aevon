@@ -543,14 +543,29 @@ def main():
                       # 才有页码可指。
                       b"phys=%.0fx%.0f scene=",
                       b"spine%d %s",
-                      b"peers%d n=%lu"):
+                      b"peers%d n=%lu",
+                      # 0.0.67 — 「名片翻了就重排一次」。这两个串不在二进制里，
+                      # 就等于 App 侧没有任何一次主动重排：首次打开仍会按上一块
+                      # 画布排（Aevon(58) 第二条），关卡后仍停在卡片尺寸上
+                      # （同一份日志第三条）。
+                      b"hosted, relayout for the card canvas",
+                      b"released, relayout for the real screen"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")
         # 0.0.66 — 反向断言，比上面那组更重要。0.0.65 的「改屏幕尺寸」把
         # `UIScreen.bounds` / `_referenceBounds` / `_boundsForInterfaceOrientation:`
         # 换成了小胖屏的尺寸，装进每一个加载 UIKit 的进程，真机后果是大量 App
-        # 黑屏、桌面小组件空白、点图标都没反应。这条路不许回来：下面任何一个串
-        # 出现在 AevonApp.dylib 里，就是又有人在 App 进程里动屏幕。
+        # 黑屏、桌面小组件空白、点图标都没反应。
+        #
+        # 0.0.67 — `bounds` 这一个**回来了**（抖音按它摆视频和分页，不改就是
+        # 「视频贴在 932 的坐标里、退出后整体偏下」），但另外两个永远不许回来：
+        #
+        #   · `_referenceBounds` 是 UIKit 算键盘、状态栏、分屏的全局基准，改它
+        #     不是改一个 App 的屏幕，是改整个 UIKit 的世界观；
+        #   · `_boundsForInterfaceOrientation:` 收方向参数而实现无视它，任何请求
+        #     横屏的 App 会拿到竖的小胖屏尺寸。
+        #
+        # 判据也从 `isForeground`（真前台 App 也为 1）换成了名片，见 AevonHosted。
         # 每行末尾的 `# gone` 是给 tools/push-gate.py 看的：反向断言故意不在
         # 源码里，闸门否则会把它当成「漏改的断言」拦下。
         for token in (b"screen %.0fx%.0f -> %.0fx%.0f (hosted scene)",   # gone
@@ -560,8 +575,8 @@ def main():
                       # 每次开窗都会先杀掉那个 App。
                       b"/var/mobile/Library/Logs/Aevon/bridge"):           # gone
             if token in bridge:
-                bad(f"bridge: {token.decode()} 又出现了 —— 0.0.66 已经把"
-                    f"「在 App 进程里改屏幕」整条撤掉，不要再装回去")
+                bad(f"bridge: {token.decode()} 又出现了 —— `_referenceBounds` / "
+                    f"方向版本 / 杀进程那三条都不许回来")
         # 96 KB, not 64: ObjC exception handling (@try around every KVC read on a
         # private key) pulls in the unwind tables and the personality routine,
         # and that is ~45 KB of the 69. Paying it once per process is the price

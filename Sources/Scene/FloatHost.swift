@@ -528,6 +528,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             onClose = nil
             return
         }
+        // 0.0.67 — 交还给系统之前必须把承载面复位。
+        //
+        // Aevon(58) 第三条：关掉浮窗、再从桌面点开抖音，整体页面偏下、顶部露出
+        // 上一个视频的底部。承载视图是系统的对象（`_UIScenePresentationView`），
+        // 我们把它 `bounds` 改成 430x717、又乘了一个 0.86 的 transform，收窗时
+        // 只是 `removeFromSuperview` —— 尺寸和变换都留在对象身上。系统下一次把它
+        // 拿去全屏显示，拿到的是一个又小又缩、以卡片中心对齐的视图，于是画面整体
+        // 下沉，而抖音自己的分页还按 932 算 —— 顶上那条就是上一页的底。
+        //
+        // 复位成 `UIScreen.main.bounds`（这台机器真正的屏幕）与 identity 变换，
+        // 这两样正是我们自己改掉的那两样，其余一概不碰。
+        if let content = content {
+            content.transform = .identity
+            content.bounds = CGRect(origin: .zero, size: UIScreen.main.bounds.size)
+        }
         for sub in card?.subviews ?? [] { sub.removeFromSuperview() }
         grip?.removeFromSuperview()
         glow?.removeFromSuperview()
@@ -550,6 +565,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         rawActive = false
         rawPress?.cancel()
         rawPress = nil
+        lastTouchStamp = 0
+        lastTouchPhase = -1
+        lastTouchEaten = false
         bandInset = .zero
         onClose = nil
         // The band's window goes with it. It is full-screen and one level below
@@ -661,19 +679,34 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // band was 8 pt wide. Aevon(44) read that as 「四周的手势依旧是失效」
         // and it is neither a hit-test bug nor an app-bridge bug — the band was
         // simply not there. Whatever the card's size, it now leaves `reach` on
-        // every side the screen has room for, and is centred when it does not.
+        // every side the screen has room for.
+        //
+        // 0.0.67 — **while it has no room, it keeps the operator's place.**
+        //
+        // The `else` branch used to centre the card, and that was the whole of
+        // Aevon(58)'s 「缩放时会自动挪位置」: the fat canvas is 430 wide, the band
+        // claim is 66 per side, so any card wider than 298 pt fell into the
+        // else branch and had its remembered x thrown away. Every card here is
+        // 350-371 wide — the branch was not an edge case, it was the only case.
+        // Aevon(58) shows it three times over: remembered 12 % (=52 pt) came
+        // back at 30, 10 % (=43) came back at 34, 9 % (=39) landed on 38 — the
+        // last one only because centring happened to agree with the memory.
+        //
+        // A card that wide has already eaten the band's room; `bandRect` shrinks
+        // the ring to whatever is actually left, so centring buys nothing and
+        // costs the operator their place. Keep the place, clamp on screen.
         let room = reach
         if w + room * 2 <= bounds.width {
             x = Swift.min(Swift.max(room, x), bounds.width - w - room)
         } else {
-            x = (bounds.width - w) / 2
+            x = Swift.min(Swift.max(0, x), Swift.max(0, bounds.width - w))
         }
         // Clamp as a rectangle, not as two numbers: a width change from a
         // rotation must not leave the right edge 40 pt outside the screen.
         if h + room * 2 <= bounds.height {
             y = Swift.min(Swift.max(0, y), bounds.height - h - room)
         } else {
-            y = (bounds.height - h) / 2
+            y = Swift.min(Swift.max(0, y), Swift.max(0, bounds.height - h))
         }
         return (CGRect(x: x, y: y, width: w, height: h), h / source.height)
     }
@@ -988,8 +1021,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 frame = CGRect(x: start.minX, y: start.minY,
                                width: w, height: h)
             }
-            card.frame = clamped(frame, in: window.bounds)
-            followContent()
+            // 0.0.67 — 缩放这一路**不夹**，也不再每帧重算圆角。
+            //
+            // 夹这一下就是 Aevon(58) 的「抖动」：`clamped` 的底部预留量取决于
+            // **高度**（`under = frame.height + reach*2 <= bounds.height ? reach : 0`），
+            // 高度是这一手势正在改的量，于是卡片一涨、`maxY` 一落，y 被往上顶；
+            // 手一松或者往下拖，高度回落、y 又被放回来 —— 卡片自己在跳。
+            // 缩放的分支里 x/y 本来就是常量（锚点是对角），唯一会动的只有宽高，
+            // 而宽高在上面已经被 `widest` / `tallest` 挡住了，没有出界的可能。
+            //
+            // 圆角同理：拖大拖小时 `side = min(w, h)` 每帧都变，`cornerRadius`
+            // 每帧都写一次等于每帧重建一次裁剪路径，而卡片底下是远程 scene 层 ——
+            // 观感就是边缘在抖。拖动中不动圆角，抬手时一次算准（`dragEnd`）。
+            card.frame = frame
+            followContent(updateCorner: false)
             syncGrip()
         } else {
             // All four cells move. 0.0.40 removed the two that resized, so a
@@ -1123,6 +1168,35 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     }
 
     // MARK: - 应用层触摸（0.0.48）
+
+    /// 0.0.67 — 同一条事件只处理一次。
+    ///
+    /// Aevon(58) 的日志里每一拍都是成对的：`ring: bar raw down … #1` 紧跟
+    /// `#2`（同一个坐标），`win: touch seen at 347,792` 两行一模一样，
+    /// `win: gesture grab zone=…` 也一样。也就是说 `-[UIApplication sendEvent:]`
+    /// 这一条事件被投递了两次，而两次都进了我们的入口 —— `dragBegin` 被调两遍
+    /// （`resizeStart` 被重设）、`barTouch` 的计数被加两次。
+    ///
+    /// 为什么这版才显形不重要，能不能挡住才重要：`UITouch.timestamp` 对同一条
+    /// 事件是同一个数，对不同事件不同。同相位 + 同时间戳 = 同一条事件，直接
+    /// 回上一次的答案（被吞的继续被吞，没吞的继续不吞）。
+    ///
+    /// 顺带修掉的是圆盘：`summon bar` 的按下计数一直是双倍，选中判定也跟着
+    /// 走两遍。
+    private var lastTouchStamp: TimeInterval = 0
+    private var lastTouchPhase = -1
+    private var lastTouchEaten = false
+
+    func touchEntry(phase: Int, at screen: CGPoint, stamp: TimeInterval) -> Bool {
+        if stamp > 0, stamp == lastTouchStamp, phase == lastTouchPhase {
+            return lastTouchEaten
+        }
+        lastTouchStamp = stamp
+        lastTouchPhase = phase
+        let eaten = rawTouch(phase: phase, at: screen, stamp: stamp)
+        lastTouchEaten = eaten
+        return eaten
+    }
 
     /// 环上的原始触摸。`phase` 用 UITouchPhase 的数值：0 began / 1 moved /
     /// 3 ended / 4 cancelled。返回 true 表示这条事件被浮窗吃掉。
@@ -1320,7 +1394,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     ///
     /// 0.0.54 — 顶部被裁掉 `cropTop` 源点，所以中心也要跟着上移半个裁切量，
     /// 否则缩小一次之后顶部那一条又会滑回卡片里。
-    private func followContent() {
+    private func followContent(updateCorner: Bool = true) {
         guard let card = card, let content = content, visible.height > 16 else { return }
         let scale = card.bounds.height / visible.height
         content.center = CGPoint(x: card.bounds.midX,
@@ -1332,7 +1406,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         //
         // 0.0.64 — 圆角不再读上面那个 `scale`（那是「画面缩放比」，跟着卡片
         // 高度走）。见 `applyCorner`：观感上的圆角只由卡宽决定。
-        applyCorner()
+        //
+        // 0.0.67 — 拖动的每一帧传 false：圆角在 `dragEnd` 里一次算准。
+        if updateCorner { applyCorner() }
     }
 
     /// `重启`, as much of it as a window can do by itself: back to the frame the
@@ -1528,7 +1604,7 @@ final class BandRoot: UIView {
 /// 返回 1 = 这条事件已被浮窗吃掉，不要把原事件再交下去。
 @_cdecl("AevonFloatTouch")
 public func AevonFloatTouch(_ phase: Int32, _ x: Double, _ y: Double, _ stamp: Double) -> Int32 {
-    return FloatHost.shared.rawTouch(phase: Int(phase),
-                                     at: CGPoint(x: CGFloat(x), y: CGFloat(y)),
-                                     stamp: TimeInterval(stamp)) ? 1 : 0
+    return FloatHost.shared.touchEntry(phase: Int(phase),
+                                       at: CGPoint(x: CGFloat(x), y: CGFloat(y)),
+                                       stamp: TimeInterval(stamp)) ? 1 : 0
 }

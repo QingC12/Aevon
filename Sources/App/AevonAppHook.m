@@ -65,8 +65,12 @@ static CFStringRef const AevonKey = CFSTR("!ring.appHook");
 
 static IMP AevonOriginalApplicationState = NULL;
 static IMP AevonOriginalActivationState = NULL;
+static IMP AevonOriginalScreenBounds = NULL;
 static int AevonGate = -1;      // -1 unknown, 0 off, 1 on
 static int AevonLogged = 0;
+
+/// 名片状态翻转时的收尾（0.0.67）。实现在 `AevonGeomWrite` 之后 —— 它要写日志。
+static void AevonHostedFlipped(BOOL hosted);
 
 /// The switch in Settings. Absent means on: the feature is the reason the card
 /// exists, and a card that cannot be touched is not a feature.
@@ -102,72 +106,80 @@ static id AevonTryValue(id object, NSString *key) {
     }
 }
 
-static id AevonSceneSettings(UIScene *scene) {
-    id settings = AevonTryValue(scene, @"settings");
-    if (settings != nil) return settings;
-    settings = AevonTryValue(scene, @"_sceneSettings");
-    if (settings != nil) return settings;
-    id core = AevonTryValue(scene, @"_FBSScene");
-    if (core == nil) core = AevonTryValue(scene, @"_scene");
-    return AevonTryValue(core, @"settings");
+/// 这块卡交给系统的逻辑尺寸 —— 也就是 App 真正在排版的画布。
+///
+/// 读法和 `AevonDumpGeometry` 那条汇总行完全一样（`coordinateSpace.bounds`），
+/// 两处必须同源：一处用来测量、一处用来下发给 `UIScreen`，若各读各的，
+/// 下一份日志里「量到的」和「改成的」就会是两个数。
+static CGRect AevonHostedSpace(void) {
+    UIApplication *application = [UIApplication sharedApplication];
+    if (application == nil) return CGRectZero;
+    for (UIScene *scene in [application connectedScenes]) {
+        id space = AevonTryValue(scene, @"coordinateSpace");
+        id box = AevonTryValue(space, @"bounds");
+        if ([box isKindOfClass:[NSValue class]]) {
+            CGRect rect = CGRectZero;
+            [box getValue:&rect size:sizeof(rect)];
+            return rect;
+        }
+    }
+    return CGRectZero;
 }
 
-static BOOL AevonFlag(id object, NSString *key) {
-    @try {
-        id value = [object valueForKey:key];
-        return [value isKindOfClass:[NSNumber class]] && [value boolValue];
-    } @catch (NSException *exception) {
-        (void)exception;
-        return NO;
-    }
+/// 名片读一次，不缓存。调用方负责节流。
+///
+/// `ts` 是**参考日期秒**（宿主侧 `Date().timeIntervalSinceReferenceDate`），
+/// 和这里的 `CFAbsoluteTimeGetCurrent()` 同一把尺子 —— 两边都不必知道 1970。
+static BOOL AevonMarkRead(void) {
+    NSDictionary *mark = [NSDictionary dictionaryWithContentsOfFile:
+                          @"/var/mobile/Library/Logs/Aevon/hosted.plist"];
+    if (mark == nil) return NO;
+    NSString *bundle = [mark objectForKey:@"bundle"];
+    NSNumber *since = [mark objectForKey:@"ts"];
+    NSString *mine = [[NSBundle mainBundle] bundleIdentifier];
+    if (bundle == nil || mine == nil || since == nil) return NO;
+    if (![bundle isEqualToString:mine]) return NO;
+    // Ten minutes is the card's own cap; a mark older than that is a process
+    // that died holding it, and honouring it would leave an app believing it is
+    // on screen forever.
+    return (CFAbsoluteTimeGetCurrent() - [since doubleValue]) < 600.0;
 }
 
 /// The host's own mark. `Aevon.hostedPath`, written when a card opens and
-/// deleted when it closes. Read at most once a second, and only while the app
-/// is answering "background", so an idle app pays a stat per second at worst.
+/// deleted when it closes. Read at most once a second.
 ///
-/// This exists next to the scene-settings test below because the two can
-/// disagree: the settings write is a message to FrontBoard and the app's own
-/// copy of the settings is a different object. The file is the copy both
-/// processes are guaranteed to see the same way.
+/// 0.0.67 — 这个函数现在是**唯一**的判据（见 `AevonHosted`），所以它顺带成了
+/// 「开卡 / 关卡」这件事在 App 侧的观察点：状态每翻一次，就让 App 按新尺寸重排
+/// 一次（`AevonHostedFlipped`）。刷新周期 1 秒，也就是关卡后最多一秒 App 就会
+/// 按整屏把自己摆回去。
 static BOOL AevonMarkSaysHosted(void) {
     static BOOL answer = NO;
     static CFAbsoluteTime stamp = 0;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (stamp > 0 && now - stamp < 1.0) return answer;
     stamp = now;
-    answer = NO;
-    NSDictionary *mark = [NSDictionary dictionaryWithContentsOfFile:
-                          @"/var/mobile/Library/Logs/Aevon/hosted.plist"];
-    if (mark == nil) return answer;
-    NSString *bundle = [mark objectForKey:@"bundle"];
-    NSNumber *since = [mark objectForKey:@"ts"];
-    NSString *mine = [[NSBundle mainBundle] bundleIdentifier];
-    if (bundle == nil || mine == nil || since == nil) return answer;
-    if (![bundle isEqualToString:mine]) return answer;
-    // Ten minutes is the card's own cap; a mark older than that is a process
-    // that died holding it, and honouring it would leave an app believing it is
-    // on screen forever.
-    answer = (now - [since doubleValue]) < 600.0;
+    answer = AevonMarkRead();
+    AevonHostedFlipped(answer);
     return answer;
 }
 
-/// "Another process is showing one of my scenes." The host side writes exactly
-/// this pair (`AevonWriteFront` sets isForeground, clears isBackgrounded), so
-/// the test costs two KVC reads on a value that is already in memory.
+/// 「别的进程正在演我」。
+///
+/// 0.0.67 — **只剩名片这一条判据。**
+///
+/// 0.0.44 起的第二个判据是 scene settings 的 `isForeground && !isBackgrounded`，
+/// 本意是「名片可能读不到，settings 是内存里的答案」。它有一个致命的重合：
+/// **真前台 App 也满足这两条**。0.0.65 拿它去改 `UIScreen` 的尺寸，于是每个
+/// 正在前台运行的 App、每个渲染守护进程都被告知「你的屏幕是 430x717」——
+/// Aevon(58) 之前那一版的「很多应用打不开、桌面黑屏、小组件空白」就是它。
+///
+/// 名片没有这个重合：它由宿主在开卡时写、关卡时删，内容里带着 bundle id，
+/// 并且只对那一个 App 成立。判据窄一点，代价是「名片写不进去时卡里的 App 不被
+/// 当成前台」，收益是永远不会把别人的手机变成砖。名片写入本身是宿主侧的
+/// 一次 plist 写盘，日志里一直是 `hosted mark <bundle>` 无 failed。
 static BOOL AevonHosted(void) {
     if (!AevonAppHookAllowed()) return NO;
-    if (AevonMarkSaysHosted()) return YES;
-    UIApplication *application = [UIApplication sharedApplication];
-    if (application == nil) return NO;
-    for (UIScene *scene in [application connectedScenes]) {
-        id settings = AevonSceneSettings(scene);
-        if (settings == nil) continue;
-        if (AevonFlag(settings, @"isForeground") && !AevonFlag(settings, @"isBackgrounded")) {
-            return YES;
-        }
-    }
-    return NO;
+    return AevonMarkSaysHosted();
 }
 
 /// One line per process, appended the same way every other Aevon line is
@@ -221,6 +233,148 @@ static void AevonGeomWrite(const char *body) {
         fputs(line, file);
         fclose(file);
     }
+}
+
+// MARK: - 0.0.67 App 侧：按卡片的尺寸再排一次
+
+//
+// Aevon(58) 的头两条是同一件事的两面：
+//
+//   ① 「悬浮窗一次打开时，内容尺寸不对，必须手动缩放一下才会显示正确的内容排版
+//     （例如应用顶栏，底栏等）」
+//   ② 「关闭悬浮窗后全屏打开抖音，抖音的整体页面偏下，顶部出现上个视频的底部页面」
+//
+// 两条都在说**App 不知道自己换了尺寸**。宿主侧的证据是齐的：`scene frame
+// after=430x717 wrote=1`、`hosted bounds after=430x717`、`fat scene render=430x717`
+// —— 交出去的画布确实矮了。但 App 里 `UIScreen` 还是 430x932，于是凡按屏幕算的
+// 东西（抖音的视频层与分页步长）都按 932 算：卡里视频贴在 932 的顶部区域、
+// 下半截露灰底；退出后 offset 与页高不匹配、顶上露出上一页的底。
+//
+// 0.0.65 试过直接改 `UIScreen`，判据是 scene settings 的 `isForeground` —— 那个值
+// **对真前台 App 也是 1**，于是每个前台 App、每个渲染守护进程都被告知「你的屏幕
+// 是 430x717」，整台机器打不开应用、桌面黑屏、小组件空白。这一版把三个口子都收窄：
+//
+//   · 判据只认名片。没有卡 = 没有名片 = 一个字节都不改（见 `AevonHosted`）。
+//   · 只改 `bounds` 一个 getter。`_referenceBounds` 是 UIKit 算键盘、状态栏、分屏的
+//     全局基准，`_boundsForInterfaceOrientation:` 收方向参数而实现无视它 —— 0.0.65
+//     连这两个一起改了，那是灾难的另一半。这一版两个都不碰。
+//   · SpringBoard 进程根本不装（见 `AevonWorthInjecting`），桌面永远拿真屏幕。
+//
+// 改完尺寸还不够：App 里「尺寸变了才重算」的那类布局（分页步长、播放器居中、
+// 顶栏底栏的约束）只认一次真正的 layout pass。所以名片每翻一次，这里补一次
+// 半像素往返 + layoutIfNeeded —— 开卡时让 App 排 717，关卡时让它排回 932。
+
+/// 让每一个 window 走一遍真正的布局。
+///
+/// 只用 `setNeedsLayout` 是不够的：那只是标记，下一次 runloop 才可能处理，而
+/// 抖音这类 App 把页高算在 `viewDidLayoutSubviews` 里、且只在 bounds 变化时才进去。
+/// 半像素的往返是「告诉它 bounds 变了」的最便宜写法，两次 setFrame 在同一个
+/// runloop 内完成，不会上屏。
+static void AevonRelayoutWindows(void) {
+    if (![NSThread isMainThread]) return;
+    UIApplication *application = [UIApplication sharedApplication];
+    if (application == nil) return;
+    for (UIScene *one in [application connectedScenes]) {
+        if (![one isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in [(UIWindowScene *)one windows]) {
+            CGRect f = [w frame];
+            [w setFrame:CGRectMake(f.origin.x, f.origin.y, f.size.width, f.size.height + 0.5)];
+            [w setFrame:f];
+            [w setNeedsLayout];
+            [w layoutIfNeeded];
+            UIView *root = [[w rootViewController] view];
+            [root setNeedsLayout];
+            [root layoutIfNeeded];
+        }
+    }
+}
+
+static void AevonRelayoutTick(void *context) {
+    (void)context;
+    AevonRelayoutWindows();
+}
+
+static void AevonRelayoutLater(double seconds) {
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), NULL, AevonRelayoutTick);
+}
+
+static void AevonWatchTick(void *context);
+
+static int AevonWatchOn = 0;
+static int AevonWatchRounds = 0;
+
+static void AevonWatchSchedule(void) {
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), NULL, AevonWatchTick);
+}
+
+/// 卡开着的时候每秒看一眼名片还在不在。
+///
+/// 关卡之后 App 在后台，`applicationState` / `UIScreen.bounds` 都可能不再被调用,
+/// 光靠「下次有人问我」等不到翻转。这个时钟就是那个「有人」：名片没了就重排一次
+/// 然后停表。900 拍 = 15 分钟，盖住卡片自己的十分钟上限。
+static void AevonWatchArm(void) {
+    if (AevonWatchOn) return;
+    AevonWatchOn = 1;
+    AevonWatchRounds = 0;
+    AevonWatchSchedule();
+}
+
+static void AevonWatchTick(void *context) {
+    (void)context;
+    AevonWatchRounds += 1;
+    if (AevonMarkRead()) {
+        if (AevonWatchRounds < 900) {
+            AevonWatchSchedule();
+            return;
+        }
+        AevonWatchOn = 0;
+        return;
+    }
+    AevonWatchOn = 0;
+    AevonRelayoutWindows();
+    AevonGeomWrite("win released, relayout for the real screen");
+}
+
+/// 名片状态翻了一次。`known < 0` 是进程第一次读，不算翻转 —— 那种情况由
+/// constructor 里的两次延时重排兜住。
+static void AevonHostedFlipped(BOOL hosted) {
+    static int last = -1;
+    int now = hosted ? 1 : 0;
+    if (last == now) return;
+    int known = last;
+    last = now;
+    if (known < 0) {
+        if (now == 1) AevonWatchArm();
+        return;
+    }
+    if (now == 1) {
+        // 开卡：0.05 s 赶上这一拍，0.50 s 兜住「window 还没建」的那个窗口。
+        AevonRelayoutLater(0.05);
+        AevonRelayoutLater(0.50);
+        AevonWatchArm();
+        AevonGeomWrite("hosted, relayout for the card canvas");
+        return;
+    }
+    AevonRelayoutLater(0.05);
+    AevonRelayoutLater(0.60);
+    AevonGeomWrite("released, relayout for the real screen");
+}
+
+/// `UIScreen.bounds`，只在有卡的时候换成卡片的画布尺寸。
+///
+/// 这是「两块屏幕」这件事在 App 侧唯一的开关：抖音按 `UIScreen` 摆视频和分页，
+/// 窗口 717 而屏幕 932，视频就贴在 932 的坐标里。让两者说同一个数，偏上、断层、
+/// 退出后错位一起消失 —— 不是去追每一条错误布局。
+///
+/// 取不到画布（`< 80`）或没有名片时原样返回，落地就是系统自己的答案。
+static CGRect AevonScreenBounds(id self, SEL _cmd) {
+    CGRect box = ((CGRect (*)(id, SEL))AevonOriginalScreenBounds)(self, _cmd);
+    if (!AevonHosted()) return box;
+    CGRect space = AevonHostedSpace();
+    if (space.size.width < 80.0 || space.size.height < 80.0) return box;
+    return CGRectMake(0.0, 0.0, space.size.width, space.size.height);
 }
 
 /// 一行汇总 + 两层视图。汇总回答「App 以为屏幕多大」，视图那几行回答「播放器
@@ -411,21 +565,27 @@ static void AevonAppBoot(void) {
         method_setImplementation(activation, (IMP)AevonActivationState);
     }
 
-    // 0.0.66 — 「改屏幕尺寸」那一整段（`UIScreen.bounds` / `_referenceBounds` /
-    // `_boundsForInterfaceOrientation:`）与「名片」一起删掉了。
+    // 0.0.67 — `UIScreen.bounds` 回来了，但只回来一个 getter，而且只在有名片时改。
     //
-    // 它们想解决的是抖音偏上：那个 App 里有两块屏幕，`UIScreen` 说 932、窗口
-    // 说 717。但 0.0.65 的真机反馈是**全局性故障** —— 大量 App 打不开/黑屏、
-    // 桌面小组件空白、点图标都没反应。这条路的能力边界根本不是「只在卡里演我
-    // 时改」，它被装进了每一个加载 UIKit 的进程：
-    //   · 判据用的是 scene settings 的 `isForeground`，而**真前台 App 也是 1**，
-    //     系统渲染守护进程（小组件、墙纸）同样是。它们各有一套自己的坐标空间，
-    //     一旦被换成「不是屏幕的尺寸」，渲染就没有可用的画布 —— 小组件空白正是
-    //     这个形状；
-    //   · `_boundsForInterfaceOrientation:` 收方向参数，而实现无视它：一个请求
-    //     横屏的 App（相机、视频、游戏）会拿到竖的小胖屏尺寸，布局当场散架；
-    //   · `_referenceBounds` 是 UIKit 算键盘、状态栏、分屏的基准，改它等于改
-    //     整个 UIKit 的世界观。
-    // 收益是「一个 App 的视频居中」，代价是全系统的屏幕尺寸 —— 这笔账不该做。
-    // 宁愿不居中，也不能让别人的手机用不了。
+    // 0.0.66 把它连 `_referenceBounds` / `_boundsForInterfaceOrientation:` 一起删，
+    // 理由是 0.0.65 的真机故障。那个判决对「三个一起改 + 判据是 isForeground」
+    // 成立，对「只改 bounds + 判据是名片」不成立 —— 后者命中的一定是那个正在
+    // 卡片里演我的 App，而它此刻的窗口本来就是 717，让屏幕也说 717 是把两个数
+    // 对齐，不是把别人的屏幕换掉。
+    //
+    // 仍需 `AevonWorthInjecting`：SpringBoard 根本不进这个函数（见 constructor
+    // 第一行），所以桌面、图标网格、小组件永远读真屏幕。
+    Method bounds = class_getInstanceMethod([UIScreen class], sel_registerName("bounds"));
+    if (bounds != NULL) {
+        AevonOriginalScreenBounds = method_getImplementation(bounds);
+        method_setImplementation(bounds, (IMP)AevonScreenBounds);
+    }
+
+    // 开卡前就已经启动的进程（比如上一轮留下来的）也要排一次：constructor 跑在
+    // App 建 window 之前，这里只能延时排两拍，兜住首次打开的「内容尺寸不对」。
+    if (AevonMarkRead()) {
+        AevonRelayoutLater(0.50);
+        AevonRelayoutLater(1.50);
+        AevonWatchArm();
+    }
 }
