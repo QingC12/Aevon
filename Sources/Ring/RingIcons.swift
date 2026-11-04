@@ -55,21 +55,114 @@ enum RingIcons {
     private static var catalogueCache: [InstalledApp]?
     private static var imageCache: [String: UIImage] = [:]
 
-    /// Every installed app, sorted by name. Cached for the life of the process:
-    /// enumerating LaunchServices takes ~70 ms and the picker asks for this on
-    /// every keystroke while searching.
+    /// Every installed app the system will actually launch, sorted by name.
+    /// Cached for the life of the process: enumerating LaunchServices takes
+    /// ~70 ms and the picker asks for this on every keystroke while searching.
+    ///
+    /// 0.0.56 — 这张表不再等于「装在这台机器上的全部 App」。操作者的话是
+    /// 「移除列表里所有白图标应用，因为它们无法打开」，而白图标正是**打不开**
+    /// 这件事在屏幕上的样子：`_applicationIconImageForBundleIdentifier:` 对没有
+    /// 图标资源的系统 App 返回一张纯白方块，点它什么也不会发生。判据有两条，
+    /// 一条问系统、一条看图：
+    ///
+    ///   · LaunchServices 自己说不能启动 / 是隐藏项 / 只是占位安装；
+    ///   · 图标是一张**几乎全白**的图。
+    ///
+    /// 两条都不命中就保留 —— 包括取不到图标的那种（那是彩色字母块，不是白图标，
+    /// 系统偶尔会在 LS 缓存未建立时这样，删掉它等于删掉一个正常 App）。
     static func catalogue() -> [InstalledApp] {
         if let cached = catalogueCache { return cached }
 
-        var items: [InstalledApp] = launchServicesApps().map {
-            InstalledApp(bundleID: $0.bundleID, name: $0.name, path: $0.path)
+        let started = Date()
+        var items: [InstalledApp] = []
+        var prohibit = 0, hidden = 0, placeholder = 0, blank = 0
+
+        for entry in launchServicesApps() {
+            if let rejection = entry.rejection {
+                switch rejection {
+                case "prohibit":    prohibit += 1
+                case "hidden":      hidden += 1
+                default:            placeholder += 1
+                }
+                continue
+            }
+            // 取图标这件事本来要在列表滚动时才做；这里先做一次，因为「白不白」
+            // 是筛选项本身。命中的图直接进 `imageCache`，面板和列表后面显示
+            // 时不用再取第二遍 —— 总成本没有增加，只是提前付。
+            guard let icon = self.icon(for: entry.bundleID, bundlePath: entry.path) else {
+                items.append(InstalledApp(bundleID: entry.bundleID,
+                                          name: entry.name, path: entry.path))
+                continue
+            }
+            if isBlank(icon) {
+                blank += 1
+                if blank <= 20 { Log.write("icons: drop blank " + entry.bundleID) }
+                continue
+            }
+            imageCache[entry.bundleID] = icon
+            items.append(InstalledApp(bundleID: entry.bundleID,
+                                      name: entry.name, path: entry.path))
         }
+
         if items.isEmpty {
             items = filesystemCatalogue()
         }
         items.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         catalogueCache = items
+
+        let dropped = prohibit + hidden + placeholder + blank
+        // 每次进程只打一行，而且**无论有没有丢掉东西都打**：这一行是「过滤到底
+        // 跑没跑、跑了多久」的唯一证据。只在有丢弃时打，就会在「一个都没删掉」
+        // 的那台机器上消失，看起来像功能没生效。
+        Log.write(String(format:
+            "icons: catalogue kept=%d dropped=%d prohibit=%d hidden=%d placeholder=%d blank=%d in %dms",
+            items.count, dropped, prohibit, hidden, placeholder, blank,
+            Int(Date().timeIntervalSince(started) * 1000)))
         return items
+    }
+
+    /// 一张**几乎全白**的图标。0.0.56 的新判据，就是操作者说的「白图标」。
+    ///
+    /// 做法是把它画进 12×12 的位图再数像素：几百个 App 全量做一遍也只是一次
+    /// 缩略重绘（不是解码原图），而「白」这个判断不需要更多精度。
+    ///
+    /// 阈值取 97 % 而不是 100 %：真正的白方块是纯 #FFFFFF，允许一点点边缘噪点；
+    /// 而任何有图案的图标 —— 哪怕白底 —— 图案都会占到 3 % 以上。取不到 CGImage
+    /// 时返回 false（判不了就当它不是白图，不能凭猜测删 App）。
+    private static func isBlank(_ image: UIImage) -> Bool {
+        guard let source = image.cgImage else { return false }
+
+        let side = 12
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress,
+                                          width: side, height: side,
+                                          bitsPerComponent: 8,
+                                          bytesPerRow: side * 4,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            context.interpolationQuality = .low
+            context.draw(source, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return true
+        }
+        guard drawn else { return false }
+
+        var opaque = 0
+        var white = 0
+        var index = 0
+        while index < pixels.count {
+            // 圆角图标四角是透明的；透明像素不参与「白不白」的统计。
+            if pixels[index + 3] >= 128 {
+                opaque += 1
+                if pixels[index] >= 236, pixels[index + 1] >= 236, pixels[index + 2] >= 236 {
+                    white += 1
+                }
+            }
+            index += 4
+        }
+        guard opaque > 0 else { return true }
+        return white * 100 >= opaque * 97
     }
 
     /// Called after the operator adds or removes an app in the picker, so the
@@ -121,12 +214,15 @@ enum RingIcons {
 
     /// - Parameter limit: hard cap, so a phone with 300 apps cannot make the
     ///   preview feel hung. The ring never shows more than 12 anyway.
+    ///
+    /// 0.0.56 — 走 `catalogue()`，不再自己读一遍 LaunchServices：同一个东西
+    /// 有两个来源，就一定会有一天两边不一样（预览里有、列表里没有）。
     static func load(limit: Int = 12) -> (apps: [RingApp], source: IconSource) {
-        let fromLS = launchServicesApps()
-        if !fromLS.isEmpty {
+        let filtered = catalogue()
+        if !filtered.isEmpty {
             var apps: [RingApp] = []
             var real = 0
-            for item in fromLS.prefix(limit) {
+            for item in filtered.prefix(limit) {
                 if let icon = self.icon(for: item.bundleID, bundlePath: item.path) {
                     real += 1
                     imageCache[item.bundleID] = icon
@@ -160,6 +256,9 @@ enum RingIcons {
         let bundleID: String
         let name: String
         let path: String?
+        /// LaunchServices 自己的判决（0.0.56）。nil = 没意见，这一项留在列表里。
+        /// 三个值分别是「禁止启动 / 隐藏项 / 只是占位安装」。
+        let rejection: String?
     }
 
     private static func launchServicesApps() -> [LSItem] {
@@ -203,12 +302,38 @@ enum RingIcons {
                 .takeUnretainedValue() as? URL {
                 path = url.path
             }
-            items.append(LSItem(bundleID: rawID, name: name, path: path))
+            items.append(LSItem(bundleID: rawID, name: name, path: path,
+                                rejection: rejectionReason(of: object)))
         }
 
         // Stable order: LaunchServices returns installation order, which
         // changes after every update and makes screenshots incomparable.
         return items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    /// 三条 LaunchServices 判据，回答「这个 App 点了会不会有反应」。
+    ///
+    /// 都是 `LSApplicationProxy` 上的私有属性，任何一个取不到就当没有意见 ——
+    /// 系统的私有 API 改一次名字不该让整张列表变空。
+    private static func rejectionReason(of proxy: NSObject) -> String? {
+        if boolean(proxy, "isLaunchProhibited") == true { return "prohibit" }
+        if boolean(proxy, "isPlaceholder") == true { return "placeholder" }
+        if let tags = proxy.perform(NSSelectorFromString("appTags"))?
+            .takeUnretainedValue() as? [String], tags.contains("hidden") {
+            return "hidden"
+        }
+        return nil
+    }
+
+    /// `perform` 的返回值永远是对象：BOOL 会被装箱成 NSNumber，所以先按
+    /// NSNumber 读，再退到 Bridged Bool。
+    private static func boolean(_ object: NSObject, _ selectorName: String) -> Bool? {
+        let selector = NSSelectorFromString(selectorName)
+        guard object.responds(to: selector),
+              let value = object.perform(selector)?.takeUnretainedValue() else { return nil }
+        if let number = value as? NSNumber { return number.boolValue }
+        if let flag = value as? Bool { return flag }
+        return nil
     }
 
     // MARK: Filesystem

@@ -43,7 +43,8 @@ AE_RING := Sources/Ring/RingModel.swift Sources/Ring/RingIcons.swift \
 # ---------------------------------------------------------------------------
 TWEAK_NAME := Aevon AevonApp
 Aevon_FILES := Sources/AevonBoot.m Sources/AevonScene.m Sources/Boot.swift $(AE_CORE) $(AE_RING) \
-               Sources/Ring/RingHost.swift Sources/Scene/SceneProbe.swift \
+               Sources/Ring/RingHost.swift Sources/Ring/AevonAppPanel.swift \
+               Sources/Scene/SceneProbe.swift \
                Sources/Scene/FloatHost.swift
 Aevon_FRAMEWORKS := Foundation UIKit ReplayKit Photos AVFoundation AudioToolbox
 # Swift metadata is the bulk of a Swift dylib; dead-strip keeps it honest.

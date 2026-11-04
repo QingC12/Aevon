@@ -656,6 +656,10 @@ final class RingHost: NSObject {
     /// 手指没怎么动就抬手，按 `toggle()` 的语义处理。
     func rawBar(phase: Int, at point: CGPoint, stamp: TimeInterval) -> Bool {
         guard let window = window, let host = window.rootViewController?.view else { return false }
+        // 0.0.56 — 面板在屏时，应用层这条入口也要闭嘴。竖条和右缘带的视图触摸
+        // 已经关了，但这条路走的是 `-[UIApplication sendEvent:]`，不经过视图 ——
+        // 少了这一句，面板上滑一下就会从面板底下长出一个圆盘。
+        guard AevonAppPanel.current == nil else { return false }
         // 只在两种情况下接管：手指落在垫子上，或者这根手指已经在驱动圆盘了。
         // 圆盘是「点一下」开着的时候，盘面上的触摸交给圆盘自己的窗口。
         let onPad = AevonRingGrip.summonRect.contains(point)
@@ -829,6 +833,9 @@ final class RingHost: NSObject {
     // MARK: - Disc (AevonRingMenu, 1:1)
 
     private func expand() {
+        // 0.0.56 — 应用选择面板在屏时不呼圆盘：两者都要屏幕下半部，叠在一起
+        // 就是「点哪儿都不对」。
+        guard AevonAppPanel.current == nil else { return }
         guard !expanded, let host = window?.rootViewController?.view else { return }
         expanded = true
 
@@ -905,12 +912,33 @@ final class RingHost: NSObject {
         _ = workspace.perform(openSelector, with: bundleID)
     }
 
-    /// 圆心（四宫格面板入口）→ 设置。The old plugin opened an in-SpringBoard app
-    /// panel here; this package's panel is the Settings editor (圆盘 App), and
-    /// opening the Settings app is the one honest route a tweak has.
+    /// 圆心（四宫格）→ 应用选择面板（0.0.56）。
+    ///
+    /// 0.0.55 及以前这里是把「设置」App 推到前台 —— 一个 tweak 能诚实做到的
+    /// 唯一一件事。现在圆盘自己有了面板：所有可打开的桌面 App、按拇指的位置
+    /// 排在面板里，点一个直接开浮窗。设置页仍然是圆盘列表的编辑器，但它不再
+    /// 是「想开一个不在盘里的 App」的唯一出口。
+    ///
+    /// 面板在屏期间，竖条和右缘手势带都收回触摸：面板占了屏幕下半部，那两样
+    /// 东西正好压在它上面，留着就是「按哪儿都在呼圆盘」。
     private func openPanel() {
-        Log.write("ring: center panel -> Settings (圆盘 App editor)")
-        launch("com.apple.Preferences")
+        guard let host = window?.rootViewController?.view else { return }
+        AevonRingMenu.dismissCurrent()
+        expanded = false
+        barHeld = false
+        barPad?.isUserInteractionEnabled = false
+        edgePad?.isUserInteractionEnabled = false
+        Log.write("ring: center panel -> app chooser (" + String(RingIcons.catalogue().count) + " apps)")
+        AevonAppPanel.present(in: host,
+                              onPick: { [weak self] bundleID in
+                                  self?.openFromRing(bundleID)
+                              },
+                              onClose: { [weak self] reason in
+                                  guard let self = self else { return }
+                                  self.barPad?.isUserInteractionEnabled = true
+                                  self.edgePad?.isUserInteractionEnabled = !AevonRingGrip.cardUp
+                                  Log.write("ring: app chooser gone (" + reason + "), grip back")
+                              })
     }
 }
 

@@ -643,6 +643,22 @@ def main():
                   b"win: idle timer held mask=",
                   b"win: idle timer kick mask=",
                   b"win: idle timer released mask=",
+                  # 0.0.56 — 圆盘中心的应用选择面板 + 白图标过滤。
+                  # `panel: catalogue built rows=` 是面板真的按过滤后的表建起来了；
+                  # `panel: picked app ` 是选中那一下；`panel: panel closed (` 记
+                  # 的是走了哪条出口（关闭钮 / 点外面 / 下滑 / 选中）；两条
+                  # `app chooser` 证明竖条和右缘带被收回又交还 —— 少了后一条，
+                  # 面板关掉之后竖条就再也不响了。
+                  b"panel: catalogue built rows=",
+                  b"panel: picked app ",
+                  b"panel: panel closed (",
+                  b"ring: center panel -> app chooser (",
+                  b"ring: app chooser gone (",
+                  # 白图标过滤：一条汇总（kept / dropped 与四个理由各多少），
+                  # 外加每个被丢掉的白图标的名字（前 20 个）。只看汇总分不清
+                  # 「删掉的是几个白图标」还是「删掉了半屏正常 App」。
+                  b"icons: catalogue kept=",
+                  b"icons: drop blank ",
                   # 0.0.47 — 手势面搬进自己的窗口（statusBar+1，见
                   # FloatHost.makeBand）。两条：`band window up level=` 证明那一
                   # 层真的建起来了，`band probe` 是该窗口收到的每一次命中提问（点
