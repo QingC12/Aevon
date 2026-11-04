@@ -2593,7 +2593,9 @@ static void AevonAppBoot(void) {
         // 最后一个参数必须是 block（`@?`）。签名对不上就宁可不装 —— 这个钩子
         // 装错一次就是「所有弹出的控制器都少一个 completion」，不是抖动。
         if (encoding != NULL && strstr(encoding, "@?") != NULL) {
-            AevonOriginalPresent = method_getImplementation(present);
+            AevonOriginalPresent =
+                (void (*)(UIViewController *, SEL, UIViewController *, BOOL, void (^)(void)))
+                method_getImplementation(present);
             method_setImplementation(present, (IMP)AevonPresentHook);
         }
     }
