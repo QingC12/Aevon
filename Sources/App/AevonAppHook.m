@@ -529,7 +529,6 @@ static UIScrollView *AevonPagerGet(void) { return AevonPagerStore; }
 /// 归位之后改写成当前页高 —— 它回答的是「App 现在按几页一步走」。
 static CGFloat AevonLastPageHeight = 0.0;
 static int AevonTransLogs = 0;
-static int AevonAlignFixes = 0;
 static int AevonAcquireTries = 0;
 /// 0.0.73 — 窗口尺寸变化**之前**那一版页高，等归位用。
 ///
@@ -561,20 +560,39 @@ static int AevonWatchDead = 0;
 /// 它的运行循环里塞一张作废票。
 static int AevonRebuilds = 0;
 static CFAbsoluteTime AevonRebuildAt = 0.0;
-/// 0.0.76 — 尺寸变化之前停在第几页。
+/// 0.0.77 — 「变化前停在哪一帖」记成**行下标**，不记页码、更不记 pt。
 ///
-/// 0.0.73 起一直在搬「多少 pt」，而**页码才是翻页器真正的记忆单位**：
-/// `932 × 3 = 2796` 与 `717 × 3 = 2151` 是同一帖，`y` 只是它的一种写法。
-/// 尺寸一变，`y` 的写法失效，页码不失效。所以过渡那一拍把页码记下来，等页高
-/// 真的对齐了再按新页高还原 —— 这样即便中途 App 又把 offset 挪到别处，落点
-/// 仍然确定。`-1` 表示没有待还原的页码。
-static NSInteger AevonRestoreIndex = -1;
+/// 为什么页码也不行。Aevon(67) 的四组读数放在一起看只有一个结论：**行原点会从
+/// `N × box` 那个格点上漂走**，漂移量正好是「上面还有几行没重排」× (932 − 717)。
+///
+///   16:02:58 关卡前  box=717 off=13623(19×717) 行=13120 → 视口压在这一行第 503 pt
+///   16:02:43 开卡后  box=717 off=10038(14×717)  行=9320(932 高) → 第 718 pt
+///   16:02:58 关卡后  box=932 off=14912(16×932)  行=14554 → 第 358 pt
+///   16:02:48 卡内    box=717 off=10710          行=10252(932 高) → 第 458 pt
+///
+/// 四行行原点相对 `N × box` 的偏离依次是 +214 / +214 / −358 / +214 —— 214 = 932 − 717，
+/// 也就是「视口上方还有一行仍是旧高度」。所以**任何以 0 为锚的格点算术都必错**：
+/// `round(y/box)*box` 落在两页之间，`N × 新页高` 也一样。16:02:58 那一拍更狠 ——
+/// 视口正好在 `717 × 19` 上，全屏却是断层，说明连 App 自己吸附用的都是那个已漂移的
+/// 格点。这一条把「算得准不准」彻底否掉了：不是精度问题，是坐标系没有共同原点。
+///
+/// 唯一有共同原点的东西是**那一页自己的 frame**。所以这里记「第几行」（`indexPath`），
+/// 每次要用的时候向 App 现问 `rectForRowAtIndexPath:` / `layoutAttributesForItemAtIndexPath:`
+/// —— 它答的是「那一页现在在哪」，而不是「按格点应该在哪」。
+static NSInteger AevonAnchorSection = -1;
+static NSInteger AevonAnchorRow = -1;
+static int AevonAnchorSet = 0;
+/// 一次尺寸变化里真正写过几次 offset。24 次 ≈ 3.6 s 的节拍，够跟着重排走完；
+/// 再多就说明 App 在坚持把 offset 拉回去，继续写只是互相推。
+static int AevonAnchorWrites = 0;
+/// 「App 把行下标弄丢了」只报一次。
+static int AevonAnchorLost = 0;
 
 static void AevonPagerKeep(UIScrollView *view) {
     if (view == nil) return;
     if (view == AevonPagerStore) return;
     // 换了一个翻页器 = 换了一次使用，配额跟着重新开。
-    AevonAlignFixes = 0;
+    AevonAnchorWrites = 0;
 #if __has_feature(objc_arc)
     AevonPagerStore = view;
 #else
@@ -593,7 +611,10 @@ static void AevonPagerForget(void) {
     AevonOldPage = 0.0;
     AevonSettleTicks = 0;
     AevonSettleAge = 0;
-    AevonRestoreIndex = -1;
+    // 0.0.77 — 归位窗口关掉，但**行下标留着**：关卡那一拍 `[view window]` 可能
+    // 正好是 nil（scene 已经在拆），这里若把「在看哪一帖」也一并抹掉，等用户回到
+    // 全屏时就没有落点了 —— 而那正是这条路唯一要服务的时刻。
+    AevonAnchorWrites = 0;
     AevonRebuilds = 0;
     AevonRebuildAt = 0.0;
 }
@@ -647,6 +668,108 @@ static CGFloat AevonWindowHeight(void) {
         }
     }
     return height;
+}
+
+/// 0.0.77 — 视口顶压着的那一页（子视图），不是「最高的那个」。
+///
+/// `AevonCellFrameOf` 取的是「最高的一个」，用来答「一页多高」足够；但归位要的是
+/// 「用户正看着哪一页」，那是**包含视口顶**的那一个。混装时两者常常不是同一个 ——
+/// 一页 932、一页 717，最高的是 932 那页，而用户看的是 717 那页。
+static UIView *AevonPageKidAt(UIScrollView *view, CGFloat box, CGFloat y) {
+    UIView *best = nil;
+    CGFloat bestGap = 0.0;
+    int bestInside = 0;
+    NSArray *kids = [view subviews];
+    NSUInteger limit = kids.count < 16 ? kids.count : 16;
+    for (NSUInteger i = 0; i < limit; i++) {
+        UIView *kid = [kids objectAtIndex:i];
+        CGRect f = [kid frame];
+        // 只认「一页大小」的子视图：页头、贴片、滚动条不是页。
+        if (f.size.height < box * 0.5 || f.size.height > box * 1.5) continue;
+        int inside = (f.origin.y <= y + 0.5 && y < CGRectGetMaxY(f)) ? 1 : 0;
+        CGFloat gap = fabs(f.origin.y - y);
+        if (best == nil || (inside && !bestInside)
+            || (inside == bestInside && gap < bestGap)) {
+            best = kid;
+            bestGap = gap;
+            bestInside = inside;
+        }
+    }
+    return best;
+}
+
+/// 把一个「页」换算成它的行下标。`UITableView` / `UICollectionView` 各一套，
+/// 都不是就放弃 —— 那就只剩 `frame` 可用，也就是 0.0.76 之前的处境。
+static BOOL AevonKidIndexPath(UIScrollView *view, UIView *kid,
+                              NSInteger *sectionOut, NSInteger *rowOut) {
+    if (kid == nil) return NO;
+    NSIndexPath *path = nil;
+    if ([view isKindOfClass:[UITableView class]]
+        && [kid isKindOfClass:[UITableViewCell class]]) {
+        path = [(UITableView *)view indexPathForCell:(UITableViewCell *)kid];
+    } else if ([view isKindOfClass:[UICollectionView class]]
+               && [kid isKindOfClass:[UICollectionViewCell class]]) {
+        path = [(UICollectionView *)view indexPathForCell:(UICollectionViewCell *)kid];
+    }
+    if (path == nil) return NO;
+    if (sectionOut != NULL) *sectionOut = [path section];
+    if (rowOut != NULL) *rowOut = [path item];
+    return YES;
+}
+
+/// 向 App 现问「这一页现在在哪」。
+///
+/// `rectForRowAtIndexPath:` 报的是排版结果 —— 它把上面每一页当前的高度加起来，
+/// 所以那个数里自动含有「还没重排的 215」，不需要我们知道上面有几行是旧的。
+static BOOL AevonIndexPathRect(UIScrollView *view, NSInteger section, NSInteger row,
+                               CGRect *out) {
+    if (section < 0 || row < 0) return NO;
+    NSIndexPath *path = [NSIndexPath indexPathForItem:row inSection:section];
+    if ([view isKindOfClass:[UITableView class]]) {
+        CGRect r = [(UITableView *)view rectForRowAtIndexPath:path];
+        if (r.size.height < 120.0) return NO;
+        if (out != NULL) *out = r;
+        return YES;
+    }
+    if ([view isKindOfClass:[UICollectionView class]]) {
+        UICollectionViewLayoutAttributes *attributes =
+            [(UICollectionView *)view layoutAttributesForItemAtIndexPath:path];
+        if (attributes == nil) return NO;
+        CGRect r = [attributes frame];
+        if (r.size.height < 120.0) return NO;
+        if (out != NULL) *out = r;
+        return YES;
+    }
+    return NO;
+}
+
+/// 0.0.77 — 尺寸变化那一拍：把「用户在看哪一帖」钉成行下标。
+///
+/// 必须在这一拍做，因为这是唯一还能看见旧几何的时刻 —— 之后 `bounds` 就变了，
+/// 视口顶落在哪一页只能靠猜。钉住之后无论 App 怎么重排、怎么自己吸附，我们都
+/// 能回到同一帖：`AevonIndexPathRect` 会跟着它的行原点一起走。
+static void AevonAnchorRemember(UIScrollView *view, CGFloat box) {
+    AevonAnchorSet = 0;
+    AevonAnchorSection = -1;
+    AevonAnchorRow = -1;
+    AevonAnchorWrites = 0;
+    if (view == nil || box < 200.0) return;
+    CGFloat y = [view contentOffset].y;
+    UIView *kid = AevonPageKidAt(view, box, y);
+    NSInteger section = -1;
+    NSInteger row = -1;
+    BOOL ok = AevonKidIndexPath(view, kid, &section, &row);
+    char body[220];
+    snprintf(body, sizeof(body),
+             "anchor keep row=%ld,%ld at=%.0f page=%.0f box=%.0f frame=%.0f h=%.0f ok=%d",
+             (long)section, (long)row, y, box, [view bounds].size.height,
+             kid != nil ? [kid frame].origin.y : -1.0,
+             kid != nil ? [kid frame].size.height : 0.0, ok ? 1 : 0);
+    AevonPageWrite(body);
+    if (!ok) return;
+    AevonAnchorSection = section;
+    AevonAnchorRow = row;
+    AevonAnchorSet = 1;
 }
 
 /// 0.0.76 — 页高到底齐不齐。
@@ -851,111 +974,90 @@ static NSInteger AevonAlignPager(const char *reason) {
     // 就是这个形状，一烧就是 90 拍（13.5 s），而 App 往往几秒之后才重排。
     if (AevonOldPage > 200.0 && fabs(box - AevonOldPage) < 8.0) return -1;
 
-    // ⓪ 0.0.76 — **页高不齐就不再写 offset**，一个数都不写。
+    // ⓪ 请 App 把页重排一遍（只置脏、不逼它排版）。
     //
-    // 0.0.75 在这里做的是「找一页已经按新高度重排好的，把视口摆上去」。那个落点
-    // 确实是最干净的一个，但同一秒里后面那条 `round(y/box)*box` 会把它覆盖掉，
-    // 而混装几何里 `N × box` 一定落在两页之间：
-    //
-    //   15:48:25 snap clean y=1864 -> 2151        （摆到真页上，对）
-    //   15:48:25 scroll    y=2151 -> 1864         （按 932 取整，又挪回两页之间）
-    //   15:48:26 state off=0,1864 k0=1434,932 高 k1=2366,932 高
-    //
-    // `1864 = 2 × 932` 落在一页（1434–2366）的正中间 —— 上一帖的尾巴占上半屏，
-    // 下一帖的头占下半屏。这就是用户第五次拍下来的那个断层，成因是我们自己的第二行。
-    //
-    // 所以这一版把「混装」从「换个落点」改成「不开工」：请 App 自己把页重排一遍
-    // （`AevonPagerRebuild` 只置脏、不逼它排版），等它排齐了下一拍再按整页还原。
+    // 0.0.76 在这里**一请就收工**，视口留在两页之间等 App 慢慢排 —— Aevon(67) 里
+    // `16:02:44~46` 那一串 `state … clean=1 stale=2 off=0,10038` 就是这段等待的样子：
+    // 页在 4 s 之后确实排好了，可这 4 s 用户看到的正是断层。
+    // 0.0.77 把两件事拆开同时做：「请它重排」管**页高**，「摆到那一页开头」管**落点**。
     int cleanPages = 0;
     int stalePages = 0;
     int boxedNow = 0;
     AevonPagerStats(view, box, &cleanPages, &stalePages, &boxedNow);
-    if (stalePages > 0 || !boxedNow) {
-        NSInteger rebuilt = AevonPagerRebuild(reason);
-        // 1 = 已经把「你的页过期了」交回给 App，本拍到此为止。
-        // 0 = 其实已经齐了（判据在中间那一瞬间改了口），落到下面照常还原。
-        if (rebuilt != 0) return rebuilt;
+    if (stalePages > 0 || !boxedNow) AevonPagerRebuild(reason);
+
+    // ① 落点只有一个来源：**那一页自己的原点**。
+    //
+    // 两个来源按优先级取：钉住的行下标（尺寸变化那一拍记下的那一帖，最准）、
+    // 压住视口顶的那一页（用户自己滑到别处时用）。**没有任何算术**：
+    // `round(y/box)*box` 与 `N × 新页高` 都写在「0 是格点原点」这个假设上，而
+    // Aevon(67) 的四组读数证明那个假设不成立（见文件头 `AevonAnchorSection`）。
+    CGRect row = CGRectZero;
+    int anchored = 0;
+    if (AevonAnchorSet
+        && AevonIndexPathRect(view, AevonAnchorSection, AevonAnchorRow, &row)) {
+        anchored = 1;
+    } else {
+        UIView *kid = AevonPageKidAt(view, box, y);
+        if (kid == nil) return -1;
+        row = [kid frame];
     }
-
-    // ① 到这里几何是齐的：一页 = 视口，内容高度是它的整数倍。
-    // 页码优先，取整兜底 —— 页码是尺寸变化那一拍记下的，比任何 y 都稳。
-    CGFloat page = box;
-    if (page < 200.0) return -1;
-
+    if (row.size.height < 120.0) return -1;
+    BOOL cleanRow = fabs(row.size.height - box) <= 2.0;
     CGFloat cap = span.height - box;
     if (cap < 0.0) cap = 0.0;
-    CGFloat target = round(y / box) * box;
-    if (AevonRestoreIndex >= 0) {
-        CGFloat want = (CGFloat)AevonRestoreIndex * box;
-        if (want < 0.0) want = 0.0;
-        if (want > cap) want = cap;
-        if (fabs(want - y) > 1.5) target = want;
-        AevonRestoreIndex = -1;
-    }
-    // 已经在整页上：不动，但也**不作废**后面的机会。
-    if (fabs(y - round(y / box) * box) <= 1.5) {
-        AevonOldPage = 0.0;
-        return 0;
-    }
+    CGFloat target = row.origin.y;
     if (target < 0.0) target = 0.0;
     if (target > cap) target = cap;
-    if (fabs(target - y) <= 1.5) return 0;
-    // 60 次是「够用」与「别打架」的折中：一次使用里用户可能划上百下，错位都要
-    // 能修；而如果 App 自己坚持把 offset 拉回去，再多的次数也只是互相推。
-    if (AevonAlignFixes >= 60) return -1;
+    CGFloat gap = fabs(y - target);
+
+    // 已经压在这一页的开头：这一拍什么都不写。
+    if (gap <= 1.5) {
+        // 只有当「页高也等于视口」时才算收工 —— 否则页高还在往新高度上赶，
+        // 下几拍它的原点和高度都还会动，得继续跟着。
+        if (cleanRow) {
+            AevonOldPage = 0.0;
+            if (anchored) {
+                AevonAnchorSet = 0;
+                char body[200];
+                snprintf(body, sizeof(body),
+                         "anchor done row=%ld,%ld at=%.0f h=%.0f box=%.0f",
+                         (long)AevonAnchorSection, (long)AevonAnchorRow, target,
+                         row.size.height, box);
+                AevonPageWrite(body);
+            }
+        }
+        return 0;
+    }
+    // 没有钉住行下标时才用「三屏」这道门：那是用户自己滑到了别处，追太远就是
+    // 抢方向盘。钉住了就没有这道门 —— 上方每重排一行，这一页的起点就上移 215，
+    // 几十行就是十几屏，而它仍然是同一帖。
+    if (!anchored && gap > box * 3.0) return -1;
+    // 40 次 ≈ 6 s 的节拍：够跟着重排收尾走完。再多就说明 App 在坚持把 offset
+    // 拉回去，继续写只是两边互相推。
+    if (AevonAnchorWrites >= 40) {
+        if (AevonAnchorLost == 0) {
+            AevonAnchorLost = 1;
+            char body[160];
+            snprintf(body, sizeof(body), "align capped moves=%d at=%.0f gap=%.0f",
+                     AevonAnchorWrites, y, gap);
+            AevonPageWrite(body);
+        }
+        return -1;
+    }
     [view setContentOffset:CGPointMake([view contentOffset].x, target) animated:NO];
-    AevonAlignFixes += 1;
-    // 挪完就是「按这个页高一步一页」，下一次核对的基准跟着换。
-    AevonLastPageHeight = box;
-    AevonOldPage = 0.0;
+    AevonAnchorWrites += 1;
+    AevonLastPageHeight = cleanRow ? box : AevonLastPageHeight;
     // 被挪走过一次，就再给一轮机会：App 很可能在重排完成的当口又挪一次。
     if (AevonSettleTicks < 30) AevonSettleTicks = 30;
-    char body[300];
+    char body[320];
     snprintf(body, sizeof(body),
-             "%s scroll y=%.0f -> %.0f page=%.0f box=%.0f cell=%.0f span=%.0f%s",
-             reason, y, target, page, box, AevonCellHeightOf(view, box), span.height,
-             boxedNow ? "" : " stale");
+             "align %s y=%.0f -> %.0f row=%.0f h=%.0f box=%.0f anchor=%d "
+             "clean=%d span=%.0f moves=%d",
+             reason, y, target, row.origin.y, row.size.height, box, anchored,
+             cleanPages, span.height, AevonAnchorWrites);
     AevonPageWrite(body);
     return 1;
-}
-
-/// 0.0.73 — 尺寸刚变的那一拍就地换算，不等 App 重排。
-///
-/// 过渡钩子里视口还是旧的（717），新高度在 `size.height` 里（932），而翻页器的
-/// offset 是按旧页高算的 —— 这三件事在同一时刻都已知，所以**不需要**等 App 重排
-/// 就能写出正确的那一个数：`round(y / 旧页高) × 新高度`。
-///
-/// 为什么非要在这一拍做：关卡之后我们立刻 `AevonPushBackground` + `deactivate`，
-/// App 几十毫秒内就被挂起，挂在 `dispatch_after` 上的归位根本轮不到跑（0.0.71 /
-/// 0.0.72 两份日志里，关卡那一拍都只有一行 `transition`，一条 `scroll` 都没有）。
-/// 而这一行回调是在 App 进程里同步发生的 —— 写下去就已经生效。
-///
-/// 唯一的让步是内容还短：`contentSize` 此刻仍是 `8 × 717`，页码大的时候目标会
-/// 超出可滚范围，`setContentOffset:` 会被 UIKit 夹住。夹住也不丢：`AevonOldPage`
-/// 还留着，App 重排完之后心跳那一路会再补一次。
-static void AevonConvertForTransition(CGFloat oldPage, CGFloat newHeight) {
-    UIScrollView *view = AevonPagerGet();
-    if (view == nil || [view window] == nil) return;
-    if (oldPage < 200.0 || newHeight < 200.0) return;
-    if (fabs(oldPage - newHeight) < 8.0) return;
-    CGFloat y = [view contentOffset].y;
-    CGFloat target = round(y / oldPage) * newHeight;
-    if (fabs(target - y) <= 1.5) return;
-    if (AevonAlignFixes >= 60) return;
-    CGSize span = [view contentSize];
-    CGFloat box = [view bounds].size.height;
-    CGFloat cap = span.height - box;
-    if (cap < 0.0) cap = 0.0;
-    if (target < 0.0) target = 0.0;
-    BOOL pinched = (target > cap);
-    if (pinched) target = cap;
-    [view setContentOffset:CGPointMake([view contentOffset].x, target) animated:NO];
-    AevonAlignFixes += 1;
-    char body[280];
-    snprintf(body, sizeof(body),
-             "transition scroll y=%.0f -> %.0f page=%.0f box=%.0f next=%.0f%s",
-             y, target, oldPage, box, newHeight, pinched ? " pinched" : "");
-    AevonPageWrite(body);
 }
 
 /// 找出「整屏一页」的翻页器并记住它。只在还没认出来的时候跑（一次遍历，
@@ -1264,19 +1366,13 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
         AevonSettleTicks = 90;
         AevonSettleAge = 0;
         AevonWatchTicks = 0;
-        // 0.0.76 — 页码与「重排配额」都在这一拍定下来。
-        //
-        // 页码是翻页器真正的记忆单位：`932 × 3` 与 `717 × 3` 是同一帖，`y` 只是
-        // 它的写法。这里从**旧页高**上取整，是因为这一拍的 offset 还是旧的写法。
-        UIScrollView *pager = AevonPagerGet();
-        if (pager != nil) {
-            CGFloat y = [pager contentOffset].y;
-            AevonRestoreIndex = (NSInteger)llround(y / before);
-            if (AevonRestoreIndex < 0) AevonRestoreIndex = 0;
-        }
+        // 0.0.77 — 「用户在看哪一帖」不在这里记，也不在这拍写 offset。
+        // 行下标要在翻页器还活着的时候取（见下面 `AevonAnchorRemember`），
+        // 而 offset 要等 App 把那一页摆到新位置上才知道该是多少。
         // 每一次真的换屏都重新给配额：一张卡开一次、关一次，各两次重排足够。
         AevonRebuilds = 0;
         AevonRebuildAt = 0.0;
+        AevonAnchorLost = 0;
         // 心跳撞过 2400 拍上限就自己停了，这里把它叫回来 —— 关卡之后要归位的那
         // 一半，全靠这个心跳。
         AevonPagerWatchArm();
@@ -1293,16 +1389,18 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
                  size.height, before, full);
         AevonPageWrite(body);
     }
-    // 0.0.73 — 就在这一拍把 offset 换成新基准。关卡的几十毫秒之后 App 就被挂起，
-    // 挂在 dispatch_after 上的那些拍子根本轮不到跑（0.0.71/0.0.72 两份日志里关卡
-    // 那一拍只有 transition、一条 scroll 都没有），而这一句是在 App 进程里同步
-    // 发生的 —— 写下去就已经生效。
+    // 0.0.77 — **这一拍不再写 offset**，只把「在看哪一帖」钉成行下标。
+    //
+    // 关卡之后 App 几十毫秒内就被挂起，挂在 dispatch_after 上的拍子确实轮不到跑；
+    // 但「这一拍算一个正确的 offset」本来就不可能成立：新页高下的行原点要等 App
+    // 排完才有。Aevon(67) 的 `transition scroll y=13623 -> 17708` 落进
+    // `off=0,14912 / 行 14554` 就是这件事的形状 —— 19 × 932 没算错，行不在那儿。
     if (real) {
         if (AevonPagerGet() == nil || [AevonPagerGet() window] == nil) AevonPagerAcquire();
         // 先记一张「换算前」的：这一张能回答「App 收到 932↔717 时，它的页是不是
-        // 也跟着变了」。换算之后的三拍回答「我们写下去的数有没有被它改掉」。
+        // 也跟着变了」。之后每一拍都在回答「行下标还在不在同一页上」。
         AevonPageState("on transition");
-        AevonConvertForTransition(before, size.height);
+        AevonAnchorRemember(AevonPagerGet(), before);
         for (int i = 0; i < 5; i++) {
             int64_t when = (int64_t)((0.4 + 1.1 * (double)i) * NSEC_PER_SEC);
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, when),
@@ -1384,13 +1482,13 @@ static void AevonPagerWatchTick(void *context) {
         AevonGuardHold = 0;
         AevonRebuilds = 0;
         AevonRebuildAt = 0.0;
-        // 0.0.76 — 这条路同样要记页码：过渡钩子没响的 App 只有这里能拿到
-        // 「变化之前停在第几页」。
+        // 0.0.77 — 这条路同样要钉行下标：过渡钩子没响的 App（根控制器不是标准
+        // 容器）只有这里能拿到「变化之前停在哪一帖」。
         UIScrollView *seen = AevonPagerGet();
-        if (seen != nil && AevonOldPage > 200.0) {
-            CGFloat y = [seen contentOffset].y;
-            AevonRestoreIndex = (NSInteger)llround(y / AevonOldPage);
-            if (AevonRestoreIndex < 0) AevonRestoreIndex = 0;
+        if (seen != nil) {
+            CGFloat seenBox = [seen bounds].size.height;
+            if (seenBox < 200.0) seenBox = AevonOldPage;
+            AevonAnchorRemember(seen, seenBox);
         }
         if (AevonPagerGet() == nil) AevonPagerAcquire();
         AevonAlignPager("watch");

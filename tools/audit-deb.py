@@ -564,15 +564,20 @@ def main():
                       b"app: page ",
                       b"pager keep box=%.0f span=%.0fx%.0f",
                       b"inset=%.0f paging=%d pages=%.0f",
-                      b"scroll y=%.0f -> %.0f page=%.0f",
-                      b" box=%.0f cell=%.0f span=%.0f",
-                      # 0.0.73 — 尺寸刚变那一拍就地换算（不等 App 重排）。关卡之
-                      # 后 App 几十毫秒内被挂起，排在 dispatch_after 上的归位跑不
-                      # 到，所以这一行是「断层真的被改掉」的第一手证据；
-                      # `pinched` 表示那一刻内容还短、目标被 UIKit 夹住，需要
-                      # 等重排完再补一次。
-                      b"transition scroll y=%.0f -> %.0f page=%.0f",
-                      b"next=%.0f",
+                      # 0.0.77 — 落点从「按格点算」改成「问那一页自己在哪」。Aevon(67)
+                      # 的四组读数把格点算术判死了：行原点相对 `N × box` 的偏离依次
+                      # 是 +214 / +214 / −358 / +214，214 = 932 − 717，也就是「视口上方
+                      # 还有几行没重排」。所以这三行是新一轮唯一的判据：
+                      #   `anchor keep …` = 尺寸变化那一拍钉住的行下标，以及当时那一页
+                      #     的 frame/高度（`ok=1` 才是钉住了；`ok=0` 说明这个 App 的
+                      #     翻页器不是 UITableView/UICollectionView，只剩 frame 可用）；
+                      #   `align …`      = 真的挪了一次，带行原点、页高与视口高；
+                      #   `anchor done …` = 那一页终于「原点对齐 + 高度等于视口」，收工。
+                      b"anchor keep row=%ld,%ld at=%.0f",
+                      b"align %s y=%.0f -> %.0f row=%.0f h=%.0f",
+                      b"clean=%d span=%.0f moves=%d",
+                      b"anchor done row=%ld,%ld at=%.0f",
+                      b"align capped moves=%d at=%.0f",
                       # 0.0.74 — 翻页器此刻的形状：视口、内容、offset、单元格，
                       # 以及前三个子视图（页本身）的原点与高度。
                       # 「换算写对了、断层还在」这两个互相矛盾的事实，只有
@@ -640,6 +645,14 @@ def main():
                       # 页高不齐就一帧都不写，所以这条日志连同那条公式一起撤掉；
                       # 它若回来，说明「两条公式抢一个 offset」又回来了。
                       b"snap clean y=%.0f -> %.0f at=%.0f",                 # gone
+                      # 0.0.77 — 三处「按格点算 offset」全部撤掉：`round(y/box)*box`
+                      # 与 `N × 新页高` 都建在「0 是格点原点」上，而 Aevon(67) 证明
+                      # 那个原点每有一行没重排就漂 215。它们若回来，说明又有人在
+                      # 用算术代替「问那一页在哪」。
+                      b"scroll y=%.0f -> %.0f page=%.0f",                   # gone
+                      b"transition scroll y=%.0f -> %.0f page=%.0f",        # gone
+                      b"next=%.0f",                                         # gone
+                      b" box=%.0f cell=%.0f span=%.0f",                     # gone
                       # 强制重排：`layoutIfNeeded` / `setFrame:` 在这个文件里只剩
                       # 一种用法 —— 替别人的 window 排一次版，而那正是 0.0.67 的
                       # 第二个动作。
