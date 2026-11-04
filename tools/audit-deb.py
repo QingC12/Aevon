@@ -585,10 +585,16 @@ def main():
                       # cell 还是 App 自己写的复用视图」—— 那决定了下一版能不能
                       # 直接让它重建页面。类名就在这一列里。
                       b" k%lu=%.28s:%.0f,%.0fx%.0f",
-                      # 0.0.75 — 混装时的唯一干净落点：把视口放到「App 已经按新
-                      # 高度重排好的那一页」上。`at=` 是那一页的原点，`clean/stale`
-                      # 是两种页高各有几页 —— 下一次日志不用再算 8102。
-                      b"snap clean y=%.0f -> %.0f at=%.0f",
+                      # 0.0.76 — 断层的成因从「算错了」改成「算不出来」。Aevon(66)
+                      # 同一秒里两行互相打脸（`snap clean` 摆对了、紧接一行
+                      # `scroll y=2151 -> 1864` 又按 932 取整挪回两页之间），
+                      # 所以 0.0.76 起页高不齐就一帧 offset 都不写，改为请 App
+                      # 自己重排。这两条日志就是那条路的唯一证据：
+                      #   `rebuild …` = 发了「你的页过期了」，带翻页器类名/父类/
+                      #     是不是 UICollectionView/layout 类名与 itemSize；
+                      #   `inside …` = 页里面的尺寸（视频为什么贴到顶栏）。
+                      b"rebuild %s cls=%s<%s> cv=%d",
+                      b"inside %s box=%.0f",
                       b"settle gave up after 90s",
                       b"player b=%.0fx%.0f grav=%s src=%.0fx%.0f",
                       b"videoGravity",
@@ -628,6 +634,12 @@ def main():
                       # App 重排，必须在画面露出来之前做完，不许再动已经上屏的卡。
                       b"win: scene nudge door=",                            # gone
                       b"win: content jiggle ",                              # gone
+                      # 0.0.76 — 「混装时把视口摆到那一页上」这条落点本身是对的，
+                      # 但它与紧随其后的 `round(y/box)*box` 共用同一个 offset，
+                      # 后一条必覆盖前一条，于是同一秒里先摆对、再挪歪。0.0.76 起
+                      # 页高不齐就一帧都不写，所以这条日志连同那条公式一起撤掉；
+                      # 它若回来，说明「两条公式抢一个 offset」又回来了。
+                      b"snap clean y=%.0f -> %.0f at=%.0f",                 # gone
                       # 强制重排：`layoutIfNeeded` / `setFrame:` 在这个文件里只剩
                       # 一种用法 —— 替别人的 window 排一次版，而那正是 0.0.67 的
                       # 第二个动作。
