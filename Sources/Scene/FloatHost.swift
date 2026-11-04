@@ -48,9 +48,14 @@ import UIKit
 ///
 /// 0.0.60 — 那刀裁切撤了。裁切能去掉顶栏，但切掉的东西不会自己回来：App 仍是
 /// 按整屏排好的，卡片只是它的一截。改比例是另一条路 —— 承载面按小胖屏的尺寸
-/// （5 : 3）重新布局，App 会排一版适合这个窗口的界面，顶栏、底栏、抖音右侧
-/// 那一列都在里面（见 `fatScene`）。这也是母本的做法：她的窗口比例是设置项
-/// （`CustomFrameInit` / `RightCornerTrim` / `LeftCornerTrim`），不是屏幕比例。
+/// （5 : 3）重新布局，App 会排一版适合这个窗口的界面，顶栏、底栏都在里面。
+/// 这也是母本的做法：她的窗口比例是设置项（`CustomFrameInit` /
+/// `RightCornerTrim` / `LeftCornerTrim`），不是屏幕比例。
+///
+/// 0.0.62 — 交给系统的那块「屏幕」改成**与手机等宽**（高按 5:3），卡片是它的
+/// 等比缩小。0.0.61 交的是卡片自己的尺寸（345 宽），任何按屏幕宽度布局的层都会
+/// 出界（抖音右侧那一列、视频居中都不对）；等宽之后它们全部落在界内，字号与
+/// 圆角也顺带按同一个 scale 收敛。见 `fatRender`。
 final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     static let shared = FloatHost()
 
@@ -80,9 +85,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// The scene's own size. Every resize is this shape, scaled — the card never
     /// gets an aspect the picture does not have.
     ///
-    /// 0.0.60 — `natural` 现在是**小胖屏的逻辑尺寸**（`fatScene` 算出来的那块，
-    /// 5 : 3），不是屏幕尺寸。承载面的 `bounds` 就是它，所以 App 按这个尺寸
-    /// 排版；卡片与缩放比都按它算。拖大拖小走 transform，`natural` 不变 ——
+    /// 0.0.62 — `natural` 是**交给系统的那块屏幕**（`fatRender` 算的：与手机等宽，
+    /// 高按 5:3），不是卡片尺寸、也不是真机屏幕。承载面的 `bounds` 与 scene 的
+    /// `settings.frame` 都是它，所以 App 按这个尺寸排版；卡片是它的等比缩小
+    /// （scale 约 0.80）。拖大拖小走 transform，`natural` 不变 ——
     /// 窗口在手上被拉扯的时候不该让 App 每一帧重排一次。
     ///
     /// `visible` 与它相等（不再裁顶栏），留成两个名字是因为 `followContent` /
@@ -158,29 +164,35 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 12 : 7 是另一个候选（略瘦一点，高 12 宽 7）。改这一行即可。
     static let fatAspect: CGFloat = 5.0 / 3.0
 
-    /// 小胖屏的逻辑尺寸。按屏幕的实际尺寸算，不写死点数：
+    /// 0.0.62 — 交给系统的「这块屏幕有多大」。
     ///
-    ///   高度 = 屏幕高 × 高度系数（沿用 `CardLayout` 的那个数）
-    ///   宽度 = 高度 ÷ fatAspect（5 : 3 时是 0.6）
+    /// 0.0.60/0.0.61 交的是**卡片本身**的尺寸（345×574）。比例对了，但宽度只有
+    /// 屏幕的 80 %，于是任何按屏幕宽度布局的层都会出界：Aevon(53) 里抖音的右侧
+    /// 点赞/评论那一列按 430 贴在右缘，落在 345 之外，整块看不见；视频在 430×932
+    /// 里居中，被 345×574 的上半截裁掉。
     ///
-    /// 宽度先受屏幕宽度的 92 % 约束，再由屏幕高度封顶 —— 两条都会在窄屏或
-    /// 矮屏上生效，所以同一份代码在 4.7 寸和 6.9 寸上都是「小胖屏」，不是
-    /// 在一种屏幕上刚好。
-    static func fatScene(in screen: CGSize, heightFraction: CGFloat) -> CGSize {
+    /// 母本交给系统的从来不是「小卡片」，是**一个比例的屏幕**：她调的是窗口比例，
+    /// 比例一变 App 就重排一版，而屏幕宽度这个量她从没动过。
+    ///
+    /// 所以这里给的是「和这台手机一样宽、但矮成 5:3」的一块屏幕：
+    ///   宽 = 屏宽，高 = 屏宽 × 高宽比（5:3 ⇒ 416 pt 屏给 430×716）。
+    /// 好处一次解决三件事：
+    ///   ① 按屏幕宽度布局的东西（抖音工具栏、各种贴边浮层）全部落在界内；
+    ///   ② 卡片是从它缩出来的（428 → 345，scale 0.80），字号跟着缩 20 % ——
+    ///      「悬浮窗内字体有点大」不用另加一套缩放，它就是同一个缩放；
+    ///   ③ 圆角按同一个 scale 缩（55 → 44），「太圆」也是同一件事。
+    /// 比例由宽高共同决定，所以它仍然是 5:3，不是把整屏压扁。
+    static func fatRender(in screen: CGSize) -> CGSize {
         guard screen.width > 100, screen.height > 200 else {
-            return CGSize(width: 347, height: 578)
+            return CGSize(width: 430, height: 717)
         }
-        let widest = screen.width * 0.92
-        let tallest = screen.height - 96
-        let fraction = Swift.min(0.80, Swift.max(0.30, heightFraction))
-        var h = screen.height * fraction
-        var w = h / fatAspect
-        if w > widest {
-            w = widest
-            h = w * fatAspect
-        }
-        if h > tallest {
-            h = tallest
+        // 高宽比 = 高 / 宽。5:3 的高度是宽度的 1.667 倍。
+        var w = screen.width
+        var h = w * fatAspect
+        // 矮屏兜底：scene 的 frame 不该高过屏幕。真机上 5:3 从不会触发它
+        // （375 宽 ⇒ 625 高，最矮的全面屏也有 667），留着是防未知机型。
+        if h > screen.height {
+            h = screen.height
             w = h / fatAspect
         }
         return CGSize(width: w.rounded(), height: h.rounded())
@@ -273,8 +285,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // `bounds` 是 scene 的逻辑坐标空间：改它等于告诉 App「你的屏幕有这么大」。
         // 只碰 bounds，不碰 frame —— 后者会连同位置一起挪，0.0.22 的黑屏就是
         // 那么来的。transform 在下面单独设。
-        let fraction = CardLayout.loadRuntime().heightFraction
-        let source = FloatHost.fatScene(in: window.bounds.size, heightFraction: fraction)
+        // 0.0.62 — 交给系统的是「与手机等宽、高按 5:3 的一块屏幕」，不是卡片本身。
+        // 卡片尺寸仍由高度系数决定，但它现在是这块屏幕的**等比缩小**（scale 约
+        // 0.80），所以字号与圆角一起按同一个比例变小 —— 见 `fatRender`。
+        let source = FloatHost.fatRender(in: window.bounds.size)
 
         // 0.0.61 — 这一行才是「小胖屏」真正生效的地方。
         //
@@ -388,9 +402,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.0.60 — 日志改成小胖屏口径。`hosted=` 是下发承载面的逻辑尺寸，
         // `card=` 是它在屏幕上的尺寸；两者相等（scale 1.000）就是「一比一、
         // App 按这个尺寸重新布局」，不等就是我们在缩放一张别人排好的画面。
-        let fatA = String(format: "win: fat scene ratio=%.3f screen=%.0fx%.0f",
+        let fatA = String(format: "win: fat scene ratio=%.3f screen=%.0fx%.0f render=%.0fx%.0f",
                           FloatHost.fatAspect,
-                          window.bounds.width, window.bounds.height)
+                          window.bounds.width, window.bounds.height,
+                          source.width, source.height)
         let fatB = String(format: " hosted=%.0fx%.0f card=%.0fx%.0f at %.0f,%.0f held=%d",
                           source.width, source.height,
                           card.bounds.width, card.bounds.height,
@@ -414,7 +429,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                   + " shown=" + String(format: "%.0fx%.0f",
                                        visible.width * plan.scale, visible.height * plan.scale)
                   + " fill=" + String(format: "%.0fx%.0f",
-                                      card.bounds.width, card.bounds.height))
+                                      card.bounds.width, card.bounds.height)
+                  + " card_corner_pt=" + String(format: "%.0f", card.layer.cornerRadius))
         // Where the ring is, so the next log can be read against the code instead
         // of against a memory. Two `let`s: one long concatenation of format calls
         // is a type-checker timeout, and 0.0.30 lost a build to it.
@@ -605,6 +621,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             h = tallest
             w = h * ratio
         }
+        // 0.0.62 — 不放大。卡片高过承载面高时 scale > 1，画面是插值出来的，
+        // 字会变糊；高度系数调到 80 % 时正好踩到这条（717 × 0.8 = 573，勉强
+        // 还没到，但没有这行就等于把「能不能放大」交给了滑条）。缩放比落在
+        // 0<scale≤1 这一侧，圆角与字号才都只有「变小」这一个方向。
+        if h > source.height {
+            h = source.height
+            w = h * ratio
+        }
 
         let saved = placement.origin(for: placement.edge)
         var x = saved.x * bounds.width
@@ -698,10 +722,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 的缩放比缩一遍，并且和 frame 一起被动画。
     ///
     /// 这里照做：卡片是 430x932 的画面按 0.62 缩小，屏幕圆角 55 就落成 34。
+    /// 0.0.62 — 圆角再收一档。
+    ///
+    /// 之前是「设备圆角 × 视图缩放比」。缩放比从 1.000 掉到 0.80 之后，圆角
+    /// 确实从 55 变成 44，但**它占卡片宽的比例一点没变**（55/430 与 44/345 都是
+    /// 12.8 %）—— 所以「太圆」不会因为缩放而改善，得单独收比例。
+    ///
+    /// `cornerTune` 把 12.8 % 拉到 10 %：345 宽的卡片从 44 落到 34。这是母本
+    /// `ReflectManager.finalCardCorner` 那层意思（设备圆角 × 卡片缩放比）之外的
+    /// 一次人为收敛 —— 她的卡片永远接近整屏，不需要这一档，我们的不是。
+    private let cornerTune: CGFloat = 0.78
+
     private func applyCorner(scale: CGFloat) {
         guard let card = card else { return }
-        let radius = Swift.max(6, Swift.min(FloatHost.deviceCorner() * scale,
-                                            card.bounds.height / 2))
+        let tuned = FloatHost.deviceCorner() * scale * cornerTune
+        let radius = Swift.max(6, Swift.min(tuned, card.bounds.height / 2))
         card.layer.cornerRadius = radius
         card.layer.cornerCurve = .continuous
         card.layer.masksToBounds = true

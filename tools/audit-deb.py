@@ -609,6 +609,11 @@ def main():
                   b"win: scene layerManager layers=",
                   b"win: after 1s hosted=",
                   b"win: scale factor=",
+                  # 0.0.62 — 圆角与字号是同一次缩放的产物，得能在日志里互相印证：
+                  # `scale factor` 掉到 0.80 ⇒ `card_corner_pt` 落在 34 上下。
+                  # 只断言后缀也存在，是因为这一行是拼接出来的，前半段在不在
+                  # 不说明后半段有没有被编进去。
+                  b" card_corner_pt=",
                   # 0.0.33 — the card stays, so the eight second line is gone.
                   # What replaces it is what a card can now be told to do. 0.0.40
                   # dropped resize (both corner drags left), so move, dock and
