@@ -1791,39 +1791,23 @@ zStackParticipantDidChange:
                 Log.write(String(format: "win: first frame watch beats=%ld cs=%ld layers=%ld waited_ms=%ld",
                                  beats, content, layers, ms))
                 host.revealContent("first frame")
-                // 0.0.72 — 两次轻推 + 两次「替操作者缩放一下」。
+                // 0.0.74 — 两次轻推撤掉了。
                 //
-                // 0.0.70 只推了 1 pt（717 → 716 → 717），而 Aevon(62) 的日志里
-                // 那一推之后一条 `app: page transition` 都没有 —— 1 pt 大概没被
-                // App 当成「窗口变了」。所以幅度给到 17 pt（0.85 缩放下 14 px），
-                // 并且把过渡钩子的 8 pt 门从日志上拆掉：下一次日志里有没有
-                // `transition h=700`，就是这条路通不通的唯一判据。
+                // 0.0.72/0.0.73 为了让 App 重排推了两次 17 pt（-17 → 还原 → +17 →
+                // 还原），代价是操作者看得见的两次「跳一下」：Aevon(64) 的原话是
+                // 「悬浮窗的内容会自己跳动，然后完成重排」。而 Aevon(64) 的日志证明
+                // 这两推是多余的 —— 开卡时 App 自己就收到了
+                // `app: page transition h=717 last=932`，之后 `app: geom` 里
+                // scene / win / root / 顶栏 / 底栏 全部已经是 717 版的坐标。
                 //
-                // 第二次推 +17 放在 0.45 s：那正是操作者自己拖角拖动的时间点，
-                // 「手动缩放一下就好」这句话说的就是这一拍。
-                let first = AevonNudgeSceneFrame(scene, -17)
-                Log.write(String(format: "win: scene nudge door=%ld amp=-17 height=%.0f",
-                                 first, AevonSceneFrameOf(scene).height))
-                host.jiggleContent()
-                // 0.0.73 — 每一次 settings 写入之后都要把承载面的位置放回去。
-                //
-                // 上面这两推各自还有一次 0.15 s 的还原，还原本身又是一次 settings
-                // 写入 —— 也就是说这一秒里系统会把承载面的 `frame` 重设三四次。
-                // 交给 200 ms 的心跳也能补，但卡片正是在这一秒淡入，看得见。所以
-                // 按「轻推 + 还原」的节拍各补一次：0.02（第一推之后）、0.18（还原
-                // 之后）、0.55/0.75（第二推与还原）、1.2（geom 那一拍）。
-                for delay in [0.02, 0.18, 0.55, 0.75, 1.2] {
+                // 「第一次打开内容尺寸不对」真正的病根是承载面被系统按 `scene.frame`
+                // 重设（0.0.73 的 `placement put back`），那一条照旧，而且它只写
+                // `transform` 与 `center`，不引起重排，所以完全看不见。
+                for delay in [0.02, 0.35, 1.0] {
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak host] in
                         guard let host = host, host.isUp else { return }
-                        _ = host.reapplyPlacement("after nudge")
+                        _ = host.reapplyPlacement("after first frame")
                     }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak host] in
-                    guard let host = host, host.isUp else { return }
-                    let second = AevonNudgeSceneFrame(scene, 17)
-                    Log.write(String(format: "win: scene nudge door=%ld amp=+17 height=%.0f",
-                                     second, AevonSceneFrameOf(scene).height))
-                    host.jiggleContent()
                 }
                 // 桥接的读数在 App 进程里写，1.2 s / 3.2 s 各一次 —— 4 s 后来取。
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {

@@ -1565,34 +1565,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 又关又开一面新卡，那时候不该再往旧 scene 上写。
     var isUp: Bool { card != nil && window != nil }
 
-    /// 0.0.72 — 把「手动缩放一下」这件事替操作者做掉。
-    ///
-    /// 这一条的判据不是推测，是操作者自己给出的：Aevon(59)/(62) 两次都说「必须
-    /// 手动缩放一下才会显示正确的内容排版（顶栏、底栏）」，而 0.0.69 的
-    /// `reassertCanvas`（承载视图 bounds 717 → 718 → 717）与 0.0.70 的 scene
-    /// 轻推（1 pt）都没有解决它。
-    ///
-    /// 角拖动到底改了什么？`followContent` 只写三个量：`content.center`、
-    /// `content.transform`、圆角。`bounds` 不在其中 —— 也就是说，救回版面的
-    /// 不是「尺寸变了」，而是**承载面被系统重新合成了一次**。一帧画面被重新
-    /// 合成，就会按当前的 `bounds` 重新取一次宿主上下文；App 那一侧那张按旧
-    /// 尺寸排的图，也就跟着换成了新的。
-    ///
-    /// 所以这里照抄那一下：缩放 -2 %、下移 10 pt，0.10 s 之后原样还回去。
-    /// 0.85 缩放下是 12 px、8 px，持续 0.10 s —— 与一次真实角拖动的头两帧同级。
-    /// 只碰我们自己的承载视图，不碰 App 的窗口，也不碰系统的任何测量。
-    func jiggleContent() {
-        guard let content = content, let card = card, visible.height > 16 else { return }
-        let scale = card.bounds.height / visible.height
-        content.transform = CGAffineTransform(scaleX: scale * 0.98, y: scale * 0.98)
-        content.center = CGPoint(x: card.bounds.midX, y: card.bounds.midY + 10)
-        Log.write("win: content jiggle " + String(format: "%.3f", scale))
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
-            self?.followContent()
-            Log.write("win: content jiggle restored")
-        }
-    }
-
     /// A card that can be dragged off the screen can only be brought back by
     /// closing it, so the edges are a wall, not a suggestion.
     ///

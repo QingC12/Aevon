@@ -573,6 +573,13 @@ def main():
                       # 等重排完再补一次。
                       b"transition scroll y=%.0f -> %.0f page=%.0f",
                       b"next=%.0f",
+                      # 0.0.74 — 翻页器此刻的形状：视口、内容、offset、单元格，
+                      # 以及前三个子视图（页本身）的原点与高度。
+                      # 「换算写对了、断层还在」这两个互相矛盾的事实，只有
+                      # `span`/`k0` 能把它们分开，所以这一条是下一轮的判据本身。
+                      b"state %s box=%.0fx%.0f span=%.0fx%.0f off=%.0f,%.0f "
+                      b"cell=%.0f,%.0f,%.0fx%.0f kids=%lu",
+                      b" k%lu=%.0f,%.0fx%.0f",
                       b"player b=%.0fx%.0f grav=%s src=%.0fx%.0f",
                       b"videoGravity",
                       # 兜底：不依赖谁的子类重写了过渡回调，每 0.15 s 看一眼窗口高。
@@ -604,6 +611,13 @@ def main():
                       # 未必读得到；读不到就是「卡里的 App 永远不是前台」，触摸直
                       # 接失效。判据回到 scene settings（见 AevonHosted）。
                       b"hosted.plist",                                      # gone
+                      # 0.0.74 — 两次 17 pt 轻推与「替操作者缩放一下」都被撤掉了：
+                      # Aevon(64) 的原话是「内容会自己跳动，然后完成重排」，而那
+                      # 两次推正是跳动的来源（日志里 `transition h=700 / h=734`
+                      # 一来一回各一次）。它们不该再回来 —— 下一次如果又需要逼
+                      # App 重排，必须在画面露出来之前做完，不许再动已经上屏的卡。
+                      b"win: scene nudge door=",                            # gone
+                      b"win: content jiggle ",                              # gone
                       # 强制重排：`layoutIfNeeded` / `setFrame:` 在这个文件里只剩
                       # 一种用法 —— 替别人的 window 排一次版，而那正是 0.0.67 的
                       # 第二个动作。
@@ -874,15 +888,9 @@ def main():
                   # 「量了也看不见」。
                   b"win: app log lines=",
                   b"applog[%@]: ",
-                  # 0.0.72 — 幅度进了字面量。0.0.70 的 `scene nudge` 是固定 1 pt，
-                  # 日志里看不出推了多大；Aevon(62) 之后它必须自己说出幅度，
-                  # 否则「1 pt 没送到」与「送到了没生效」两件事永远分不开。
-                  b"win: scene nudge door=%ld amp=",
-                  # 0.0.72 — 「手动缩放一下」被替代的那一下。判据是操作者的原话，
-                  # 不是推测：每一次开卡都要有这两行，否则下一次日志里没法知道
-                  # 承载面到底有没有被重新合成。
-                  b"win: content jiggle ",
-                  b"win: content jiggle restored",
+                  # 0.0.74 — 轻推与「替操作者缩放一下」都撤了：Aevon(64) 的原话
+                  # 是「内容会自己跳动」，而那两次 17 pt 正是跳动的来源。反过来
+                  # 还要能证明它们真的不在了 —— 见下面的反向断言。
                   # 0.0.73 — 「第一次打开内容尺寸不对」的真正修法。承载面的
                   # `transform` / `center` 会被系统的 presentation 重设抹掉（每次
                   # scene settings 被写都会），卡片于是按 1:1 裁掉右侧与底栏。
