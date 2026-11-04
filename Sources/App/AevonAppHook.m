@@ -1529,6 +1529,9 @@ static void AevonPagerWatchTick(void *context) {
     }
     if ([view isTracking] || [view isDragging] || [view isDecelerating]) {
         AevonGuardHold = 0;
+        // 用户自己动了手 = 他要看哪一帖由他决定。行下标作废，剩下的交给
+        // 「压住视口顶的那一页」那条路。
+        AevonAnchorSet = 0;
         return;
     }
     // 0.0.73 — 归位窗口。卡片在屏 / 不在屏都要成立：关卡之后我们把窗口还回
@@ -1550,9 +1553,15 @@ static void AevonPagerWatchTick(void *context) {
             AevonSettleTicks = 0;
             AevonSettleAge = 0;
             AevonOldPage = 0.0;
+            // 0.0.77 — 窗口到期就把行下标一起丢掉：留着它，停稳守卫会一直把
+            // 视口往「很久以前那一帖」上拽，而用户早就划到别处去了。
+            AevonAnchorSet = 0;
             AevonPageWrite("settle gave up after 90s");
         }
-        if (AevonSettleTicks == 0) AevonOldPage = 0.0;
+        if (AevonSettleTicks == 0) {
+            AevonOldPage = 0.0;
+            AevonAnchorSet = 0;
+        }
         return;
     }
     // 停稳守卫只在卡片在屏时跑：否则这个 App 从此在桌面上被我们一直管着
