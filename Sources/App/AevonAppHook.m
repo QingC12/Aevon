@@ -560,6 +560,10 @@ static int AevonWatchDead = 0;
 /// 它的运行循环里塞一张作废票。
 static int AevonRebuilds = 0;
 static CFAbsoluteTime AevonRebuildAt = 0.0;
+/// 0.0.78 — 「翻页器比窗口高」这一族的读数次数与上一次的时刻。6 行 × 2.5 s 是
+/// 「够看清一次」与「别把日志刷满」的折中；每次尺寸变化重新计数。
+static int AevonStuckLines = 0;
+static CFAbsoluteTime AevonStuckAt = 0.0;
 /// 0.0.77 — 「变化前停在哪一帖」记成**行下标**，不记页码、更不记 pt。
 ///
 /// 为什么页码也不行。Aevon(67) 的四组读数放在一起看只有一个结论：**行原点会从
@@ -617,6 +621,8 @@ static void AevonPagerForget(void) {
     AevonAnchorWrites = 0;
     AevonRebuilds = 0;
     AevonRebuildAt = 0.0;
+    AevonStuckLines = 0;
+    AevonStuckAt = 0.0;
 }
 
 /// 「一页多高」——从单元格读，不从窗口读。
@@ -829,6 +835,51 @@ static void AevonPagerStats(UIScrollView *view, CGFloat box,
 /// **只置脏，不逼它当场排完。** 0.0.65 / 0.0.67 的两次真机事故（应用打不开、桌面
 /// 黑屏、小组件空白）里，第二个动作正是「替别人的窗口补一次 layoutIfNeeded」，
 /// 所以这一版连 `layoutIfNeeded` 都不出现：谁排、什么时候排，仍然是 App 自己的事。
+/// 0.0.78 — 请表格把**行高缓存**作废，而不是只让它重画。
+///
+/// Aevon(68) 的关卡那一拍把 0.0.76/0.0.77 的前提推翻了：
+///
+///   16:17:56 page anchor keep row=0,4 at=3513 page=717 box=717 frame=3513 h=717 ok=1
+///   16:17:56 page align on resize y=3728 -> 3513 row=3513 h=717 box=932
+///   16:17:56 page state after change box=430x932 off=0,3513 k1=AWEFeedViewCell:3513,717x430
+///   16:18:00 page state after change box=430x932 off=0,3513 k1=AWEFeedViewCell:3513,717x430
+///
+/// 我们把视口摆在「那一帖」的行原点上（3513，没算错），可**那一行本身还是 717 高**，
+/// 而视口已经是 932 —— 于是下面必然露出 215 pt 的下一条（932 − 717）。四秒过去，
+/// `k1` 还是 `717x430`：`setNeedsLayout` 让表格**重画**了，但没有重新问「这一行该
+/// 多高」。屏幕中间那条缝不是我们算错位置，是行高没跟着窗口走。
+///
+/// 为什么之前以为它会自己跟：同一份日志里 `16:17:51 inside settle … c1=717 b=430x717`
+/// 那一行说明它**确实会**变成 717 —— 但只在单元格被重新创建（划走再划回、复用到）
+/// 的时候。已有的行，高度被 UITableView 缓存在内部表里，`setNeedsLayout` 不碰它。
+///
+/// 系统的标准说法是 `beginUpdates` / `endUpdates`：它作废行高缓存并重新问一遍
+/// 「这一行多高」，**不重建单元格、不动数据源**（所以正在播的那一帧不会重来）。
+/// 这两句包在 `performWithoutAnimation:` 里，改高度不带动画；外面套 `@try` ——
+/// 万一 App 正好在自己的更新里，抛异常的是我们，不该是它。
+static BOOL AevonTableRemeasure(UITableView *table) {
+    if (table == nil) return NO;
+    if ([table numberOfSections] < 1) return NO;
+    BOOL began = NO;
+    @try {
+        [UIView performWithoutAnimation:^{
+            [table beginUpdates];
+        }];
+        began = YES;
+    } @catch (NSException *one) {
+        began = NO;
+    }
+    if (!began) return NO;
+    @try {
+        [UIView performWithoutAnimation:^{
+            [table endUpdates];
+        }];
+        return YES;
+    } @catch (NSException *two) {
+        return NO;
+    }
+}
+
 static NSInteger AevonPagerRebuild(const char *reason) {
     UIScrollView *view = AevonPagerGet();
     if (view == nil || [view window] == nil) return -1;
@@ -849,6 +900,7 @@ static NSInteger AevonPagerRebuild(const char *reason) {
     AevonRebuilds += 1;
 
     BOOL collection = [view isKindOfClass:[UICollectionView class]];
+    BOOL table = [view isKindOfClass:[UITableView class]];
     NSString *layoutName = @"-";
     CGSize item = CGSizeZero;
     if (collection) {
@@ -863,16 +915,23 @@ static NSInteger AevonPagerRebuild(const char *reason) {
             [layout invalidateLayout];
         }
     }
+    // 0.0.78 — 表格走「作废行高缓存」这条路；`setNeedsLayout` 只够让它重画。
+    BOOL remeasured = table ? AevonTableRemeasure((UITableView *)view) : NO;
     [view setNeedsLayout];
+    // 视口顶压着的那一行现在有多高。这一列是 0.0.78 唯一的判据：
+    // 它在下一次日志里变成 932（关卡后）或 717（开卡后），就说明这条信号送到了。
+    UIView *topKid = AevonPageKidAt(view, box.size.height, [view contentOffset].y);
     char body[420];
     snprintf(body, sizeof(body),
-             "rebuild %s cls=%s<%s> cv=%d layout=%s item=%.0fx%.0f "
-             "clean=%d stale=%d span=%.0f box=%.0f",
+             "rebuild %s cls=%s<%s> cv=%d tbl=%d layout=%s item=%.0fx%.0f "
+             "clean=%d stale=%d span=%.0f box=%.0f top=%.0f r=%d",
              reason, class_getName([view class]),
              class_getName(class_getSuperclass([view class])),
-             collection ? 1 : 0, [layoutName UTF8String],
+             collection ? 1 : 0, table ? 1 : 0, [layoutName UTF8String],
              item.width, item.height, clean, stale,
-             [view contentSize].height, box.size.height);
+             [view contentSize].height, box.size.height,
+             topKid != nil ? [topKid frame].size.height : 0.0,
+             remeasured ? 1 : 0);
     AevonPageWrite(body);
     return 1;
 }
@@ -934,6 +993,82 @@ static void AevonPageState(const char *reason) {
     AevonPageWrite(body);
 }
 
+/// 0.0.78 — 「App 没跟上」这一族：翻页器比窗口还高。
+///
+/// Aevon(68) 的哔哩哔哩竖版把这一类摊开了：
+///
+///   16:19:23 app: geom early screen=430x932 scene=430x717 win=430x717 root=430x717
+///   16:19:23 app: geom early peers3 n=1 UIScrollView:0,0,430x932
+///   16:19:23 app: geom early peers6 UIView:0,0,430x838|BBStoryBaseTableView:0,0,430x932
+///
+/// 窗口、根视图、导航容器全是 717，翻页器却是 932 —— 比窗口高出 215。它不是「行高
+/// 没跟上」，是**翻页器自己的 frame 还按整屏排着**。于是卡片只看得见它上面 717 pt，
+/// 下面那 215 pt 连画都没画进我们的场景（竖版故事右侧那一列按钮正好长在这一截里）。
+///
+/// 这条路上没有可以「算」的余地：内容就那么多，窗口就那么高。能做的是两件便宜事，
+/// 都不改任何尺寸：
+///   ① 把翻页器上面三层**置脏**（`setNeedsLayout`，不逼它排版）—— 若它的 frame 是
+///      autolayout 排出来的，下一帧自己就变成 717，归位流程当场接上；
+///   ② 记一行 `stuck …`，并列出「底边落在窗口以下」的叶子视图。下一份日志里
+///      `box` 变成 717 就是①成立；一直 932 则说明这个 App 是按 `UIScreen` 高度硬排
+///      的，5:3 的卡装不下它 —— 那是产品形状的账，不是判据的账。
+static void AevonStuckReport(const char *reason, CGFloat box, CGFloat full) {
+    UIScrollView *view = AevonPagerGet();
+    if (view == nil || [view window] == nil) return;
+    if (AevonStuckLines >= 6) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (AevonStuckAt > 0.0 && now - AevonStuckAt < 2.5) return;
+    AevonStuckAt = now;
+    AevonStuckLines += 1;
+
+    // ① 只置脏，不逼排版：谁排、什么时候排，仍然是 App 自己的事。
+    UIView *owner = view;
+    for (int i = 0; i < 3; i++) {
+        owner = [owner superview];
+        if (owner == nil) break;
+        [owner setNeedsLayout];
+    }
+
+    UIView *kid = AevonPageKidAt(view, box, [view contentOffset].y);
+    char body[360];
+    snprintf(body, sizeof(body),
+             "stuck %s box=%.0f full=%.0f cls=%s<%s> span=%.0f kid=%.0f n=%d",
+             reason, box, full, class_getName([view class]),
+             class_getName(class_getSuperclass([view class])),
+             [view contentSize].height,
+             kid != nil ? [kid frame].size.height : 0.0, AevonStuckLines);
+    AevonPageWrite(body);
+    if (kid == nil) return;
+
+    // ② 被切掉的是谁：在翻页器坐标里，底边落在窗口以下的叶子视图。
+    NSMutableArray *todo = [NSMutableArray arrayWithObject:kid];
+    NSMutableString *list = [NSMutableString string];
+    NSUInteger walked = 0;
+    int found = 0;
+    while (todo.count > 0 && walked < 800 && found < 5) {
+        UIView *node = [todo lastObject];
+        [todo removeLastObject];
+        walked += 1;
+        NSArray *kids = [node subviews];
+        for (NSUInteger i = 0; i < kids.count && i < 24; i++) {
+            [todo addObject:[kids objectAtIndex:i]];
+        }
+        if (kids.count > 0) continue;
+        if (node == kid) continue;
+        CGRect r = [node convertRect:[node bounds] toView:view];
+        if (r.size.width < 12.0 || r.size.height < 12.0) continue;
+        if (CGRectGetMaxY(r) <= full + 2.0) continue;
+        found += 1;
+        [list appendFormat:@" %.24s:%.0f,%.0f,%.0fx%.0f",
+         class_getName([node class]), r.origin.x, r.origin.y,
+         r.size.width, r.size.height];
+    }
+    if (list.length == 0) return;
+    char cut[520];
+    snprintf(cut, sizeof(cut), "stuck cut%s (below the window)", [list UTF8String]);
+    AevonPageWrite(cut);
+}
+
 /// 把 offset 挪到最近的整页上。
 ///
 /// 0.0.73 的写法是 `round(y / 旧页高) × 新页高`：先用「变化前的窗口高」取整，
@@ -965,7 +1100,13 @@ static NSInteger AevonAlignPager(const char *reason) {
     CGFloat box = [view bounds].size.height;
     CGFloat full = AevonWindowHeight();
     // App 还没跟上这一次尺寸变化：先把机会留着，下一拍再说。
-    if (full > 200.0 && fabs(box - full) > 8.0) return -1;
+    // 0.0.78 — 差得远（> 40 pt）且内容比窗口高，是另一族：翻页器按整屏排着不肯
+    // 缩回来。这条分支记一行读数、把它的所有者置脏，然后照旧返回 —— 它没有可以
+    // 「算」的落点，能做的只是请它自己改。
+    if (full > 200.0 && fabs(box - full) > 8.0) {
+        if (box > full + 40.0) AevonStuckReport(reason, box, full);
+        return -1;
+    }
     CGSize span = [view contentSize];
     CGFloat y = [view contentOffset].y;
     if (box < 200.0 || span.height < box * 1.2) return -1;
@@ -985,6 +1126,12 @@ static NSInteger AevonAlignPager(const char *reason) {
     int boxedNow = 0;
     AevonPagerStats(view, box, &cleanPages, &stalePages, &boxedNow);
     if (stalePages > 0 || !boxedNow) AevonPagerRebuild(reason);
+    // 0.0.78 — `beginUpdates/endUpdates` 会当场重排，内容高度与 offset 都可能已经
+    // 变了。下面每一条判据都要用**重排之后**的数，所以在这里重新读一遍：拿重排前
+    // 的 `y` 去比 `gap`，会把「刚被它挪走的视口」当成「已经压在页首」，于是行高变
+    // 了、落点没跟，白等一个 90 拍的窗口。
+    span = [view contentSize];
+    y = [view contentOffset].y;
 
     // ① 落点只有一个来源：**那一页自己的原点**。
     //
@@ -1373,6 +1520,8 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
         AevonRebuilds = 0;
         AevonRebuildAt = 0.0;
         AevonAnchorLost = 0;
+        AevonStuckLines = 0;
+        AevonStuckAt = 0.0;
         // 心跳撞过 2400 拍上限就自己停了，这里把它叫回来 —— 关卡之后要归位的那
         // 一半，全靠这个心跳。
         AevonPagerWatchArm();
@@ -1482,6 +1631,8 @@ static void AevonPagerWatchTick(void *context) {
         AevonGuardHold = 0;
         AevonRebuilds = 0;
         AevonRebuildAt = 0.0;
+        AevonStuckLines = 0;
+        AevonStuckAt = 0.0;
         // 0.0.77 — 这条路同样要钉行下标：过渡钩子没响的 App（根控制器不是标准
         // 容器）只有这里能拿到「变化之前停在哪一帖」。
         UIScrollView *seen = AevonPagerGet();

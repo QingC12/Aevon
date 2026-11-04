@@ -600,6 +600,18 @@ def main():
                       #   `inside …` = 页里面的尺寸（视频为什么贴到顶栏）。
                       b"rebuild %s cls=%s<%s> cv=%d",
                       b"inside %s box=%.0f",
+                      # 0.0.78 — 上面那条路（`setNeedsLayout`）只让表格**重画**，
+                      # 没有重新问「这一行该多高」。Aevon(68) 的关卡那一拍是
+                      # `align … row=3513 h=717 box=932`：视口摆对了行原点，可那一行
+                      # 还是 717，于是下面露出 215 pt 的下一条，四秒后 `k1` 仍是
+                      # `717x430`。所以这一版改成请表格**作废行高缓存**
+                      # （`beginUpdates` / `endUpdates`），这两条断言就是它还在的
+                      # 证据 —— 它们同时排除「又回去用 setNeedsLayout 凑」这条路。
+                      b"beginUpdates",
+                      b"endUpdates",
+                      b"performWithoutAnimation:",
+                      b"stuck %s box=%.0f full=%.0f",
+                      b"stuck cut%s (below the window)",
                       b"settle gave up after 90s",
                       b"player b=%.0fx%.0f grav=%s src=%.0fx%.0f",
                       b"videoGravity",
@@ -658,6 +670,10 @@ def main():
                       # 第二个动作。
                       b"layoutIfNeeded",                                    # gone
                       b"setFrame:",                                         # gone
+                      # 0.0.78 — `reloadData` 会让表格把每一屏都重建一次，等于替
+                      # 用户翻了一次页：视频重来、正在看的那一帖被丢掉。它一直是
+                      # 「能让行高对上」的最短路径，也是这一版明确不走的那条。
+                      b"reloadData",                                        # gone
                       b"hosted, relayout",                                  # gone
                       b"released, relayout",                                # gone
                       # 名片 + 冷启动那对组合：名片写不进去时判据永远不成立，
