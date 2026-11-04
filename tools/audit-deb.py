@@ -517,7 +517,12 @@ def main():
     else:
         for token in (b"hosted scene claims foreground", b"applicationState",
                       b"activationState", b"com.apple.springboard",
-                      b"/var/mobile/Library/Logs/Aevon/hosted.plist"):
+                      b"/var/mobile/Library/Logs/Aevon/hosted.plist",
+                      # 0.0.63 — App 这一侧的几何量尺。Aevon(55) 的抖音「视频在中
+                      # 上、下面是纯 #333」在宿主侧三个读数里全都对得上（窗口确实
+                      # 是 430x717），剩下唯一没量的是 App 自己怎么看这块屏幕。
+                      # 这一串不在二进制里，就等于这一轮没有任何新证据。
+                      b"app: geom "):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")
         # 96 KB, not 64: ObjC exception handling (@try around every KVC read on a
@@ -645,6 +650,15 @@ def main():
                   b"win: scene frame push door=",
                   b"win: scene frame after=",
                   b"win: scene frame restored door=",
+                  # 0.0.63 — 边角拖动改成改**窗口比例**（母本 LeftCornerTrim 的
+                  # 文案就是「滑动进一步调整比例」）。三条：`canvas reshaped to=`
+                  # 是画布真的换了形状（App 会因此重排一版），`canvas reshape
+                  # push door=` 是那次写入走没走通，`frame drift now=` 是看门狗
+                  # 在两秒一拍的对账里抓到「scene 被系统改回整屏」——Aevon(55) 的
+                  # 「只有刚打开时排版是对的」如果真有其事，就是这一行。
+                  b"win: canvas reshaped to=",
+                  b"win: canvas reshape push door=",
+                  b"win: frame drift now=",
                   # 0.0.54 的顶栏裁剪在 0.0.60 撤掉了（`topbar_cropped_src=` /
                   # `topbar_kept_pt=` 随实现一起删）：留着一条断言源码里已经不存在
                   # 的字符串，CI 会当场失败。✕ 撤掉之后 `close requested by` 仍在

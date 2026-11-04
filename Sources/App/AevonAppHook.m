@@ -45,6 +45,7 @@
 
 #include <stdio.h>
 #include <time.h>
+#include <dispatch/dispatch.h>
 
 static CFStringRef const AevonDomain = CFSTR("com.aevon");
 static CFStringRef const AevonKey = CFSTR("!ring.appHook");
@@ -180,6 +181,124 @@ static void AevonNote(const char *what) {
     }
 }
 
+// MARK: - 0.0.63 几何量尺（App 这一侧）
+//
+// Aevon(55) 里唯一说不清的是抖音：视频在中上、下面一大片纯 #333。宿主侧的读数
+// 已经全部一致 —— `win: fat scene ratio=1.667 … render=430x717`、
+// `win: scene frame after=430x717`、`win: hosted bounds after=430x717` —— 三行
+// 说的是同一件事：窗口确实是 430x717，那片灰不是我们裁出来的。剩下唯一没量过
+// 的是 **App 自己怎么理解这块屏幕**：`UIScreen` 还是 430x932 吗？key window
+// 多大？播放器那一层挂在哪个坐标里？这三件事只有 App 进程答得出，所以量尺放在
+// 这里而不是宿主那一侧。
+//
+// 只在「这块卡里正在演我」时量（`AevonHosted`），每个进程两次（1.2 s / 3.2 s），
+// 一次十行左右。诊断完就撤 —— 这不是常驻功能。
+
+static void AevonGeomWrite(const char *body) {
+    char line[512];
+    time_t now = time(NULL);
+    struct tm stamp;
+    localtime_r(&now, &stamp);
+    snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d app: geom %s\n",
+             stamp.tm_year + 1900, stamp.tm_mon + 1, stamp.tm_mday,
+             stamp.tm_hour, stamp.tm_min, stamp.tm_sec, body);
+    FILE *file = fopen("/var/mobile/Aevon.log", "a");
+    if (file != NULL) {
+        fputs(line, file);
+        fclose(file);
+    }
+}
+
+/// 一行汇总 + 两层视图。汇总回答「App 以为屏幕多大」，视图那几行回答「播放器
+/// 和底栏各自在哪个坐标里」—— 抖音那个「视频在中上、下面是纯 #333」只要类名
+/// 和 frame 对得上，就不必再猜。
+static void AevonDumpGeometry(const char *tag) {
+    UIApplication *application = [UIApplication sharedApplication];
+    if (application == nil) return;
+    UIScreen *screen = [UIScreen mainScreen];
+    CGRect box = screen != nil ? [screen bounds] : CGRectZero;
+    NSArray *windows = [application windows];
+    UIWindow *key = nil;
+    for (UIWindow *one in windows) {
+        if ([one isKeyWindow]) { key = one; break; }
+    }
+    if (key == nil && windows.count > 0) key = [windows objectAtIndex:0];
+    CGRect win = key != nil ? [key frame] : CGRectZero;
+    UIEdgeInsets safe = key != nil ? [key safeAreaInsets] : UIEdgeInsetsZero;
+    UIViewController *root = key != nil ? [key rootViewController] : nil;
+    UIView *rootView = root != nil ? [root view] : nil;
+    CGRect view = rootView != nil ? [rootView frame] : CGRectZero;
+    CGRect space = CGRectZero;
+    for (UIScene *one in [application connectedScenes]) {
+        id value = AevonTryValue(AevonTryValue(one, @"coordinateSpace"), @"bounds");
+        if ([value isKindOfClass:[NSValue class]]) {
+            [value getValue:&space size:sizeof(space)];
+            break;
+        }
+    }
+    char body[400];
+    snprintf(body, sizeof(body),
+             "%s screen=%.0fx%.0f@%.0f scene=%.0fx%.0f win=%.0fx%.0f "
+             "root=%.0fx%.0f safe=%.0f/%.0f",
+             tag, box.size.width, box.size.height,
+             screen != nil ? [screen scale] : 0,
+             space.size.width, space.size.height,
+             win.size.width, win.size.height,
+             view.size.width, view.size.height,
+             safe.top, safe.bottom);
+    AevonGeomWrite(body);
+    if (key == nil) return;
+    NSArray *subs = [key subviews];
+    UIView *biggest = nil;
+    CGFloat area = -1;
+    NSUInteger count = subs.count < 8 ? subs.count : 8;
+    for (NSUInteger i = 0; i < count; i++) {
+        UIView *one = [subs objectAtIndex:i];
+        CGRect f = [one frame];
+        snprintf(body, sizeof(body), "%s sub=%lu %s %.0f,%.0f,%.0fx%.0f",
+                 tag, (unsigned long)i, class_getName([one class]),
+                 f.origin.x, f.origin.y, f.size.width, f.size.height);
+        AevonGeomWrite(body);
+        CGFloat a = f.size.width * f.size.height;
+        if (a > area) { area = a; biggest = one; }
+    }
+    if (biggest == nil) return;
+    NSArray *kids = [biggest subviews];
+    NSUInteger kids2 = kids.count < 6 ? kids.count : 6;
+    for (NSUInteger i = 0; i < kids2; i++) {
+        UIView *one = [kids objectAtIndex:i];
+        CGRect f = [one frame];
+        snprintf(body, sizeof(body), "%s in=%s:%lu %s %.0f,%.0f,%.0fx%.0f",
+                 tag, class_getName([biggest class]), (unsigned long)i,
+                 class_getName([one class]),
+                 f.origin.x, f.origin.y, f.size.width, f.size.height);
+        AevonGeomWrite(body);
+    }
+}
+
+/// 不用 block：这个文件是编进每个 App 的纯 ObjC，`dispatch_after` 的函数指针
+/// 版本同样便宜，而且不必指望构建参数里一定开着 `-fblocks`。
+///
+/// 两个标签用可写的静态数组而不是字符串字面量：`(void *)"early"` 那一下是
+/// `const char *` → `void *`，编译器会因 -Wcast-qual 报警，而这两个字每台机器
+/// 只写两次，不值得为省几个字节换一条警告。
+static char AevonGeomEarly[] = "early";
+static char AevonGeomLate[] = "late";
+
+static void AevonGeomTick(void *context) {
+    AevonDumpGeometry((const char *)context);
+}
+
+static void AevonScheduleGeometry(void) {
+    static int scheduled = 0;
+    if (scheduled) return;
+    scheduled = 1;
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), (void *)AevonGeomEarly, AevonGeomTick);
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.2 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), (void *)AevonGeomLate, AevonGeomTick);
+}
+
 /// `UIApplicationStateActive`. UIKit checks this before it lets a window see
 /// touches, so this is the flag that has to agree with the picture.
 ///
@@ -193,6 +312,7 @@ static NSInteger AevonApplicationState(id self, SEL _cmd) {
     if (state != 2) return state;              // not UIApplicationStateBackground
     if (AevonHosted()) {
         AevonNote("applicationState");
+        AevonScheduleGeometry();
         return 0;                              // UIApplicationStateActive
     }
     return state;
@@ -206,6 +326,7 @@ static NSInteger AevonActivationState(id self, SEL _cmd) {
     if (state != 2) return state;
     if (AevonHosted()) {
         AevonNote("activationState");
+        AevonScheduleGeometry();
         return 0;                              // UISceneActivationStateForegroundActive
     }
     return state;

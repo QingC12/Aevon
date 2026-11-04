@@ -1273,6 +1273,15 @@ zStackParticipantDidChange:
         // Window first, activate second. This is the whole difference from
         // 0.0.20, and the difference between a picture and a black phone.
         guard let host = FloatHost.show(view, awaitingFrame: awaiting,
+                                        onReshape: { size in
+            // 0.0.63 — 操作者在角上换了窗口的比例。目标值重登记（它一直 armed，
+            // 关窗时才清），然后主动推一次 —— 等 intercept 那一拍，App 会先按
+            // 旧窗口多排一版。
+            AevonSceneFrameSet(0, 0, Double(size.width), Double(size.height))
+            let door = AevonPushSceneFrame(scene)
+            Log.write(String(format: "win: canvas reshape push door=%ld wrote=%ld",
+                             door, AevonFrameWriteCount()))
+        },
                                         onClose: { reason in closeCard(reason) }) else {
             Log.write("win: no window - nothing activated")
             return
@@ -1360,6 +1369,12 @@ zStackParticipantDidChange:
         // 又不会每秒烧一次私有 API（旧版 V0.2.49 定的频率，原样保留）。
         var idleAt = Date()
         var idleProbe = 0
+        // 0.0.63 — 逻辑尺寸的看门狗。0.0.61/0.0.62 只在开窗后 0.25 s / 1.2 s
+        // 各回读一次，卡片活着的那几分钟里 scene 有没有被系统改回整屏，日志里
+        // 从来没有答案。这里两秒对一次账：对不上就重写一次，前四次各记一行
+        // （`win: frame drift now=… want=…`）—— 有这一行，「内容只在刚打开时
+        // 是对的」就不再是靠猜的。
+        var drifts = 0
         // The clock has to be able to stop from the outside, and 0.0.33 gives it
         // a second reason to: the card no longer disappears on a timer, so the
         // only thing that ends this loop is `closeCard` setting `stopped`.
@@ -1380,6 +1395,25 @@ zStackParticipantDidChange:
             let live = value(of: scene, "settings")
             let fg = live.map { AevonBoolOf($0, "isForeground") } ?? -1
             let bg = live.map { AevonBoolOf($0, "isBackgrounded") } ?? -1
+            // 0.0.63 — 逻辑尺寸的看门狗，稳态两秒一次（10 拍 × 200 ms）。目标值
+            // 记在 FloatHost 里（开窗与换比例时更新），真实值当场从 scene 的
+            // settings 读 —— 对不上就重写一次，前四次各记一行。
+            if beat % 10 == 0 {
+                let want = host.canvas
+                if want.height > 200 {
+                    let got = AevonSceneFrameOf(scene)
+                    if got.width > 0,
+                       abs(got.width - want.width) > 1 || abs(got.height - want.height) > 1 {
+                        let door = AevonPushSceneFrame(scene)
+                        if drifts < 4 {
+                            drifts += 1
+                            Log.write(String(format: "win: frame drift now=%.0fx%.0f want=%.0fx%.0f door=%ld",
+                                             got.width, got.height,
+                                             want.width, want.height, door))
+                        }
+                    }
+                }
+            }
             // 0.0.50 — 画面本身的两个读数。`fg` 是我们自己写进去的，切换 App
             // 时它不变；`contentState` 才是「现在有没有画」，`level` 是母本那
             // 三件套里的第二件。Aevon(48) 的四份日志里 fg 一次没掉过，所以黑
