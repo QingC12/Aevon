@@ -553,16 +553,19 @@ def main():
                       # 0.0.71 — 断层那一刀的四个证据。Aevon(61) 的读数已经排除
                       # 「尺寸不对」（主脊八层全是 430x717），剩下的只能是翻页位置：
                       #   · `app: page ` = 这一组读数的通道（和 `app: geom` 并列）；
-                      #   · `pager=%ld fixed=%ld raw=%ld` = 找到几个翻页器、改了几
-                      #     个、以及「视口等高」的候选总数 —— `pager=0` 也是一个
-                      #     有用的答案（说明页面不是按窗口高度切的）；
+                      #   · `pager keep box=… span=…` = 认出来的那个翻页器：视口、
+                      #     内容、单元格、偏移、内边距、是否分页。Aevon(62) 之后
+                      #     这一行是「记住翻页器」这一步的唯一证词 —— 没有它，
+                      #     下一次日志里 `pager=0` 是「没认出」还是「没忘掉」分不开；
                       #   · `scroll y=… -> … page=…` = 真正挪动过的那一次，带前后
-                      #     两个数，下一次日志可以自己复核算术；
+                      #     两个数、页高与单元格高，下一次日志可以自己复核算术；
                       #   · `player b=… grav=… src=…` = 播放器那一层，用来分开
                       #     「翻页错位」和「播放器只有一条」这两种完全不同的成因。
                       b"app: page ",
-                      b" pager=%ld fixed=%ld raw=%ld",
+                      b"pager keep box=%.0f span=%.0fx%.0f",
+                      b"inset=%.0f paging=%d pages=%.0f",
                       b"scroll y=%.0f -> %.0f page=%.0f",
+                      b" box=%.0f cell=%.0f span=%.0f",
                       b"player b=%.0fx%.0f grav=%s src=%.0fx%.0f",
                       b"videoGravity",
                       # 兜底：不依赖谁的子类重写了过渡回调，每 0.15 s 看一眼窗口高。
@@ -864,7 +867,15 @@ def main():
                   # 「量了也看不见」。
                   b"win: app log lines=",
                   b"applog[%@]: ",
-                  b"win: scene nudge door=",
+                  # 0.0.72 — 幅度进了字面量。0.0.70 的 `scene nudge` 是固定 1 pt，
+                  # 日志里看不出推了多大；Aevon(62) 之后它必须自己说出幅度，
+                  # 否则「1 pt 没送到」与「送到了没生效」两件事永远分不开。
+                  b"win: scene nudge door=%ld amp=",
+                  # 0.0.72 — 「手动缩放一下」被替代的那一下。判据是操作者的原话，
+                  # 不是推测：每一次开卡都要有这两行，否则下一次日志里没法知道
+                  # 承载面到底有没有被重新合成。
+                  b"win: content jiggle ",
+                  b"win: content jiggle restored",
                   b"aevon-app.log",
                   # 0.0.40 — 闪黑。这一行只在系统真的动过场景的休眠状态时出现，
                   # 它是「黑一下」来自场景被收走 还是 来自合成器 的唯一分界。

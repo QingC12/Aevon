@@ -121,12 +121,16 @@ NSInteger AevonDrainAppLog(NSString *_Nullable bundleID, long cap);
 /// 那份文件在哪。取不到容器返回 nil —— 日志里要能区分「没写」和「没找到」。
 NSString *_Nullable AevonAppLogPathOf(NSString *_Nullable bundleID);
 
-/// 0.0.70 — 首帧之后把 scene 的尺寸真正动一下再还回去（717 → 716 → 717）。
+/// 0.0.72 — 把 scene 的尺寸真正动一下再还回去，幅度由调用者给。
 ///
 /// 只改承载视图的 bounds 不会让 App 重排：视图变了、scene 没变。冷启的抖音
 /// （`icon scene up after 1085ms`）内容贴顶、同进程第二次开（`0ms`）正常，
-/// 差别就是「有没有走完一次真正的窗口尺寸变化」。返回门编号，0 = 没有可推的目标。
-NSInteger AevonNudgeSceneFrame(id _Nullable scene);
+/// 差别就是「有没有走完一次真正的窗口尺寸变化」。
+///
+/// 0.0.70 用的是固定 1 pt；Aevon(62) 的日志里那一推之后一条 `app: page
+/// transition` 都没有，说明 1 pt 多半没被当成「窗口变了」。现在由调用者给幅度
+/// （开卡用 -17，1 s 后再 +17），返回门编号，0 = 没有可推的目标。
+NSInteger AevonNudgeSceneFrame(id _Nullable scene, double delta);
 
 /// 0.0.50 — 画面到底在不在。`AevonContentStateOf` 读的是 `FBScene.contentState`
 /// （2 = ready 有画，0 = 没准备好 ⇒ 黑，-1 = 没有这个方法），`AevonSceneLevel`

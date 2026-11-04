@@ -1677,22 +1677,30 @@ NSInteger AevonDrainAppLog(NSString *bundleID, long cap) {
     return lines;
 }
 
-/// 0.0.70 — 首帧之后把 scene 的尺寸真正动一下再还回去（717 → 716 → 717）。
+/// 0.0.72 — 把 scene 的尺寸真正动一下再还回去，幅度由调用者给。
 ///
-/// 0.0.69 的 `canvas re-asserted` 动的是承载视图的 bounds：视图变了、scene 没变，
-/// App 没有理由重排。Aevon(60) 里抖音第一次开（冷启，`icon scene up after
-/// 1085ms`）内容贴顶、第二次开（同进程，`0ms`）正常 —— 差别正是「有没有走完一次
-/// 真正的窗口尺寸变化」。幅度 1 pt，0.83 缩放下不到 1 px。
-NSInteger AevonNudgeSceneFrame(id scene) {
+/// 0.0.70 用的是固定 -1 pt（717 → 716 → 717）。Aevon(62) 的日志里，那次轻推
+/// 之后一条 `app: page transition` 都没有 —— 分不清是「1 pt 没送到 UIKit」还是
+/// 「送到了、被我们自己的 8 pt 门滤掉了」。所以这一版两件事一起做：幅度给到
+/// 17 pt（0.85 缩放下约 14 px，卡片首帧之前做，看不见），并且把过渡钩子里那道
+/// 8 pt 的门从**日志**上拆掉 —— 下一次日志里有没有 `transition h=700`，就是
+/// 「这条路通不通」的唯一判据。
+///
+/// 为什么是 17 pt 而不是 1 pt：UIKit 对 `viewWillTransitionToSize:` 不做幅度过滤，
+/// 但 App 自己的排版层会（很多列表控制器在 `fabs(delta) < 一个阈值` 时直接 return，
+/// 因为那是键盘或状态栏的高度抖动）。17 pt 跨过了常见的那几个阈值（8 / 10 / 16），
+/// 又小到卡片尺寸不变形（画布仍是 717，只是内容按 700 排一拍再按 717 排）。
+NSInteger AevonNudgeSceneFrame(id scene, double delta) {
     if (scene == nil || !AevonFrameArmed) return 0;
     CGRect target = AevonFrameTarget;
     if (target.size.height < 120.0) return 0;
+    if (fabs(delta) < 0.5) delta = -17.0;
     AevonFrameTarget = CGRectMake(target.origin.x, target.origin.y,
-                                  target.size.width, target.size.height - 1.0);
+                                  target.size.width, target.size.height + delta);
     NSInteger door = AevonPushSceneFrame(scene);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        // 0.15 s 内关卡了：`AevonSceneFrameClear` 已经把目标抹掉，这里不该再写。
+        // 0.12 s 内关卡了：`AevonSceneFrameClear` 已经把目标抹掉，这里不该再写。
         if (!AevonFrameArmed) return;
         AevonFrameTarget = target;
         AevonPushSceneFrame(scene);

@@ -1784,14 +1784,27 @@ zStackParticipantDidChange:
                 Log.write(String(format: "win: first frame watch beats=%ld cs=%ld layers=%ld waited_ms=%ld",
                                  beats, content, layers, ms))
                 host.revealContent("first frame")
-                // 0.0.70 — 画已经上屏，补一次真正的窗口尺寸变化。
+                // 0.0.72 — 两次轻推 + 两次「替操作者缩放一下」。
                 //
-                // 0.0.69 的 `canvas re-asserted` 只动承载视图的 bounds；scene 没
-                // 变，App 没有理由重排。Aevon(60) 里抖音冷启（`icon scene up after
-                // 1085ms`）内容贴顶、同进程第二次开（`0ms`）正常，差别就是这一次。
-                let door = AevonNudgeSceneFrame(scene)
-                Log.write("win: scene nudge door=" + String(door)
-                          + " height=" + String(format: "%.0f", AevonSceneFrameOf(scene).height))
+                // 0.0.70 只推了 1 pt（717 → 716 → 717），而 Aevon(62) 的日志里
+                // 那一推之后一条 `app: page transition` 都没有 —— 1 pt 大概没被
+                // App 当成「窗口变了」。所以幅度给到 17 pt（0.85 缩放下 14 px），
+                // 并且把过渡钩子的 8 pt 门从日志上拆掉：下一次日志里有没有
+                // `transition h=700`，就是这条路通不通的唯一判据。
+                //
+                // 第二次推 +17 放在 0.45 s：那正是操作者自己拖角拖动的时间点，
+                // 「手动缩放一下就好」这句话说的就是这一拍。
+                let first = AevonNudgeSceneFrame(scene, -17)
+                Log.write(String(format: "win: scene nudge door=%ld amp=-17 height=%.0f",
+                                 first, AevonSceneFrameOf(scene).height))
+                host.jiggleContent()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak host] in
+                    guard let host = host, host.isUp else { return }
+                    let second = AevonNudgeSceneFrame(scene, 17)
+                    Log.write(String(format: "win: scene nudge door=%ld amp=+17 height=%.0f",
+                                     second, AevonSceneFrameOf(scene).height))
+                    host.jiggleContent()
+                }
                 // 桥接的读数在 App 进程里写，1.2 s / 3.2 s 各一次 —— 4 s 后来取。
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
                     drainAppLog("after first frame")
