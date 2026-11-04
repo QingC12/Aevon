@@ -373,7 +373,8 @@ def main():
         bad("window: Window.plist missing")
     else:
         window_items = plistlib.loads(window_plist).get("items", [])
-        geom = [row for row in window_items if row.get("key") == "GeometryScale"]
+        geom = [row for row in window_items
+                if row.get("key") == "GeometryScaleEnabled"]
         if not geom:
             bad("window: 几何缩放 这一行不在 Window.plist 里 —— "
                 "等比例缩放模式没有入口")
@@ -685,6 +686,10 @@ def main():
                   # `corner=` 是按**卡宽**算出来的圆角 —— 0.0.63 按「卡高 / 画布高」
                   # 算，往下压扁时它会掉到 4 %（看着就是直角），这一行能当场读出。
                   b"win: resize mode=",
+                  # 键名 20 字节，所以它真的躺在 __cstring 里 —— 这一条把
+                  # 「plist 写的键」和「代码读的键」钉在同一个串上：任何一边
+                  # 改了名而另一边没改，这里当场失败，而不是等真机上开关没反应。
+                  b"GeometryScaleEnabled",
                   # 0.0.54 的顶栏裁剪在 0.0.60 撤掉了（`topbar_cropped_src=` /
                   # `topbar_kept_pt=` 随实现一起删）：留着一条断言源码里已经不存在
                   # 的字符串，CI 会当场失败。✕ 撤掉之后 `close requested by` 仍在

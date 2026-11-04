@@ -320,7 +320,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.0.64 — 「几何缩放」开关。关（默认）时画布永远是默认的 5:3，
         // 记住的那个形状不参与 —— 关掉这个功能的人不该还背负着上次调出来的
         // 一条古怪比例；但也不抹掉它，重新打开开关时它还在。
-        let geometry = AevonPrefs.bool("GeometryScale", default: false)
+        let geometry = AevonPrefs.bool("GeometryScaleEnabled", default: false)
         let rememberedCanvas = geometry ? CardLayout.loadRuntime().canvasHeight : 0
         let source = FloatHost.fatRender(in: window.bounds.size,
                                         remembered: rememberedCanvas)
@@ -953,7 +953,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.0.64 — 开关在这一拍重读：设置里刚改完，下一次按角就按新语义走，
         // 不必关窗再开。一次 CFPreferences 读（进程内有缓存），不是每帧。
         if zone == .bottomCorner {
-            geometryScale = AevonPrefs.bool("GeometryScale", default: false)
+            geometryScale = AevonPrefs.bool("GeometryScaleEnabled", default: false)
         }
         // Which band the finger found. If the operator reports "it does not
         // work" again, this line says whether the touch arrived and which

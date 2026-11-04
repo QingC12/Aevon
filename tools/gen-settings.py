@@ -45,12 +45,12 @@ VERSION = control_version()
 #
 # 0.0.64 — 「接通」是可以核对的，不是口径：窗口侧真的在读这两个键
 # （CardLayout.preferredHeight / FloatHost.geometryScale），所以它们在这里点名。
-WIRED_KEYS = {"HeightFraction", "GeometryScale"}
+WIRED_KEYS = {"HeightFraction", "GeometryScaleEnabled"}
 
 # 0.0.64 — 本项目自有的键（母本没有），不参与「81 键对账」。
 # 对账的意义是「母本 81 个键一个不多一个不少」，把自己新加的开关算进去
 # 只会让那个数失去意义。
-OWN_KEYS = {"GeometryScale"}
+OWN_KEYS = {"GeometryScaleEnabled"}
 
 # 0.0.41 明确放弃的母本键。界面里没有它们，代码里也没有读取它们的地方 ——
 # 但 81 键的对账必须继续成立，所以放弃本身要记账，而不是让总数悄悄少五位。
@@ -92,7 +92,12 @@ PANELS = [
              note="浮窗第一次打开时的高度（占屏幕高度的比例），宽度按画面比例跟随。"
                   "拖动或缩放过的浮窗以它自己的记忆为准；长按底角可复位到这个值。"),
         # 0.0.64 — 本项目自己的键（母本没有这一项）：「边角拖动」到底改什么。
-        dict(k="GeometryScale", cn="几何缩放", cell="switch", d=False,
+        #
+        # 键名故意长到 20 字节：Swift 把 ≤15 字节的字面量编成立即数，二进制里
+        # 搜不到，审计就无法核对「plist 里写的键」与「代码里读的键」是不是同一个
+        # （0.0.61 的 `" corner="`、0.0.63 的这次 `GeometryScale` 都栽在这条上）。
+        # 改短它，等于把这个开关的唯一核对手段删掉。
+        dict(k="GeometryScaleEnabled", cn="几何缩放", cell="switch", d=False,
              note="关闭（默认）：右下角拖动只把画面等比例放大缩小，窗口形状不变，"
                   "App 不会重排。开启：拖动改的是窗口比例，松手后换一块画布让 App "
                   "按新形状重排一版（顶栏、底栏、贴边工具栏会跟着重新布局，代价是"
