@@ -274,7 +274,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 只碰 bounds，不碰 frame —— 后者会连同位置一起挪，0.0.22 的黑屏就是
         // 那么来的。transform 在下面单独设。
         let fraction = CardLayout.loadRuntime().heightFraction
-        let source = FloatHost.fatScene(in: window.bounds, heightFraction: fraction)
+        let source = FloatHost.fatScene(in: window.bounds.size, heightFraction: fraction)
 
         view.transform = .identity
         view.autoresizingMask = []
