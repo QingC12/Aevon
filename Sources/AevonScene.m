@@ -572,6 +572,20 @@ NSInteger AevonPushForeground(id scene) {
     return path;
 }
 
+/// 0.0.50 — `level` 是我们唯一会写进去、系统不会自己纠正回来的一格。写过就
+/// 得自己收回去，否则卡片关掉之后那个 scene 还停在「前台档」。定义在文件下面，
+/// 因为它的伙伴（`AevonWriteLevelIdle` / `AevonWakeScene`）都在那里。
+static void AevonWriteLevelIdle(id settings);
+static volatile int AevonLevelForced = 0;
+
+static void AevonRestoreLevel(id settings) {
+    if (settings == nil || !AevonLevelForced) return;
+    SEL setter = sel_registerName("setLevel:");
+    if (![settings respondsToSelector:setter]) return;
+    ((void (*)(id, SEL, double))objc_msgSend)(settings, setter, 0.0);
+    AevonLevelForced = 0;
+}
+
 /// Put the scene back where the card found it: `foreground=NO, backgrounded=YES`.
 ///
 /// Aevon(30) is the reason this exists. The card came down, the presenter was
@@ -593,14 +607,17 @@ NSInteger AevonPushBackground(id scene) {
         current = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
     }
     if (AevonFlagOf(current, "isForeground") == 0
-        && AevonFlagOf(current, "isBackgrounded") == 1) {
+        && AevonFlagOf(current, "isBackgrounded") == 1
+        && !AevonLevelForced) {
         return 3;
     }
     id candidate = [current mutableCopy];
     if (candidate == nil) candidate = current;
     AevonWriteFront(candidate, NO);
+    AevonRestoreLevel(candidate);
     void (^amend)(id) = [^(id settings) {
         AevonWriteFront(settings, NO);
+        AevonRestoreLevel(settings);
     } copy];
     // The hand-back goes through the same transition door the push came in
     // through: a background write that stops at the dictionary leaves the app
@@ -864,6 +881,128 @@ unsigned long long AevonReasonsOf(id scene) {
     unsigned long long (*call)(id, SEL, id, id) =
         (unsigned long long (*)(id, SEL, id, id))objc_msgSend;
     return call(manager, getter, scene, settings);
+}
+
+
+// MARK: - 画面到底在不在（0.0.50）
+
+//
+//  Aevon(48) 的日志把 0.0.40 留下的那个选择题答完了，而且答案和当时写的
+//  两种都不是：桌面↔全屏 App 的每一轮，`keepalive beat` 一行不少，`fg=yes`
+//  从头到尾没变过，`wrote` 一直是 1 — 也就是说那段黑**根本不经过 settings**。
+//  我们四版都在盯 `settings.isForeground`，而这个值在切换 App 时从来不变：
+//  它是我们自己写进去的，系统不负责把它改写回来。守护因此一次都没反应，画面
+//  是等系统自己把 scene 接回去才恢复的 —— 用户看到的「闪黑一下」就是这段没人
+//  管的空窗。
+//
+//  该盯的是 `FBScene.contentState`：2 = ready（有画），0 = 没准备好（黑）。
+//  MultiFloat 的第八轮日志里这个数就是判据（`contentState=2` 有画面，
+//  `contentState=0` 黑）。它掉下去的那一刻才是「画面掉了」，而它回来的那一刻
+//  才是「画面回来了」，两者都能写成一行日志，不用再猜。
+
+/// `FBScene.contentState`. 2 = ready, 0 = 还没准备好. -1 = 没有这个方法.
+long AevonContentStateOf(id scene) {
+    if (scene == nil) return -1;
+    SEL sel = sel_registerName("contentState");
+    if (![scene respondsToSelector:sel]) return -1;
+    long (*call)(id, SEL) = (long (*)(id, SEL))objc_msgSend;
+    return call(scene, sel);
+}
+
+/// `scene.settings.level` — 母本那三件套里的第二件（`foreground / level /
+/// idleModeEnabled`）。1 = 前台档, 0 = 后台档。读不到回 -1。
+double AevonSceneLevel(id scene) {
+    if (scene == nil) return -1;
+    SEL settingsSel = sel_registerName("settings");
+    if (![scene respondsToSelector:settingsSel]) return -1;
+    id settings = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
+    if (settings == nil) return -1;
+    SEL levelSel = sel_registerName("level");
+    if (![settings respondsToSelector:levelSel]) return -1;
+    double (*call)(id, SEL) = (double (*)(id, SEL))objc_msgSend;
+    return call(settings, levelSel);
+}
+
+/// 母本写 settings 时一直带着 `level = 1` 与 `idleModeEnabled = NO`，而这个
+/// 文件从 0.0.30 起只写 foreground/backgrounded。两件都按 respondsToSelector
+/// 走，没有 setter 就跳过 —— 一个不存在的 selector 是一个事实，不是一次崩溃。
+///
+/// `level` 先读再写，而且只在一个合理的 level（0…2）上写：这个 getter 的
+/// 类型是这版假设出来的 CGFloat，万一 ABI 不是它，读回来会是一个离谱的数，
+/// 那时候宁可不写 —— 一笔类型写错的 settings，比不写更糟。
+static void AevonWriteLevelIdle(id settings) {
+    if (settings == nil) return;
+    SEL getter = sel_registerName("level");
+    BOOL sane = NO;
+    if ([settings respondsToSelector:getter]) {
+        double current = ((double (*)(id, SEL))objc_msgSend)(settings, getter);
+        sane = (current >= 0.0 && current <= 2.0);
+    }
+    if (sane) {
+        SEL setter = sel_registerName("setLevel:");
+        if ([settings respondsToSelector:setter]) {
+            ((void (*)(id, SEL, double))objc_msgSend)(settings, setter, 1.0);
+            AevonLevelForced = 1;
+        }
+    }
+    SEL idle = sel_registerName("setIdleModeEnabled:");
+    if ([settings respondsToSelector:idle]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(settings, idle, NO);
+    }
+}
+
+static long AevonWakeTried = 0;
+static long AevonWakeWrote = 0;
+static CFAbsoluteTime AevonLastWake = 0;
+
+long AevonWakeCount(void) { return AevonWakeWrote; }
+
+/// 画面掉下去之后的唯一一件事：把 scene 重新说成「在前台」。
+///
+/// 它和 `AevonPushForeground` 的差别只有两处，两处都必要：
+///   · 不做「已经是前台就不写」的早退 —— 画面黑的时候 `fg` 恰恰还是 1，
+///     那条早退正是守护这四版一次都没动的原因（返回 4，零写入）。
+///   · 一起写 `level = 1 / idleModeEnabled = NO`，母本那一组三件套。
+///
+/// 只由 `contentState != 2` 触发，上限 60 次、间隔 200 ms：写得比这更勤就是
+/// 0.0.40 之后被否掉的那种「定时重申」，每一次重申都是一次重提交。
+NSInteger AevonWakeScene(id scene) {
+    if (scene == nil || !AevonIsArmed()) return 0;
+    if (AevonPushBanned) return 0;
+    if (![NSThread isMainThread]) return 0;
+    if (AevonHookDepth > 0) return 0;
+    if (AevonInPush) return 0;
+    if (__sync_fetch_and_add(&AevonWakeTried, 1) > 60) return 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - AevonLastWake < 0.2) return 0;
+    AevonLastWake = now;
+    AevonInPush = 1;
+
+    SEL settingsSel = sel_registerName("settings");
+    id current = nil;
+    if ([scene respondsToSelector:settingsSel]) {
+        current = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
+    }
+    id candidate = [current mutableCopy];
+    if (candidate == nil) candidate = current;
+    AevonWriteFront(candidate, YES);
+    AevonWriteLevelIdle(candidate);
+
+    void (^amend)(id) = [^(id settings) {
+        AevonWriteFront(settings, YES);
+        AevonWriteLevelIdle(settings);
+    } copy];
+
+    NSInteger path = AevonCallSettingsTransition(scene, candidate);
+    if (path == 0) {
+        if (AevonCallBlockMethod(scene, @"updateSettingsWithBlock:", amend)
+            || AevonCallSettings(scene, candidate)) {
+            path = 1;
+        }
+    }
+    if (path != 0) __sync_fetch_and_add(&AevonWakeWrote, 1);
+    AevonInPush = 0;
+    return path;
 }
 
 

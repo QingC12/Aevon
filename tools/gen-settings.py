@@ -388,11 +388,18 @@ def build_panel(panel_id, title, intro, items):
     return {"title": title, "items": specs}
 
 
-def write_plist(path, obj):
+def write_plist(path, obj, text=False):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as fh:
         # 用二进制格式：和系统一致，也避免中文 XML 转义问题
-        plistlib.dump(obj, fh, fmt=plistlib.FMT_BINARY)
+        #
+        # 0.0.50 — 根面板例外，写成 XML 文本。它里面唯一会随版本变的东西是
+        # 「版本」那一行的占位值（`@status.version` 运行时由 Gate 的状态文件
+        # 供给，这里的值只在这一行还没加载时显示），可是二进制 plist 每升一次
+        # 版本就整体换一份不可 diff 的字节：git 认不出、审阅看不见、推送工具
+        # 也只能整块覆盖。XML 之后这一处改动就是一行文本。
+        fmt = plistlib.FMT_XML if text else plistlib.FMT_BINARY
+        plistlib.dump(obj, fh, fmt=fmt)
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +525,7 @@ def main():
 
     panel_items = sum(len(p[3]) for p in PANELS)
     wired = len({it["k"] for p in PANELS for it in p[3]} & WIRED_KEYS)
-    write_plist(os.path.join(BUNDLE, "Root.plist"), build_root(panel_items, wired))
+    write_plist(os.path.join(BUNDLE, "Root.plist"), build_root(panel_items, wired), text=True)
     written.append("Root.plist")
 
     rows, n = html_rows()

@@ -936,9 +936,29 @@ zStackParticipantDidChange:
             return
         }
 
+        // 0.0.50 — 母本的两招，这一条路上一直只有半招。
+        //
+        // `AevonHookInstall()` 从 0.0.27 起只在 `runWindow()` 里被调过，而那条
+        // 路是「手动装钩子 → 6 秒内切回目标 App」的探针流程；从 0.0.38 起真正
+        // 在用的是这条路（圆盘图标 → 挂起启动 → 建卡片）。于是 Aevon(48) 的
+        // 每一份日志里都是 `hook: live=0 deact_set=0 stripped=0` ——
+        // `_setDeactivationReasons:onScene:withSettings:reason:` 这条母本赖以
+        // 让被承载的 scene 不睡下去的钩子，在这条路上**从来没装上过**。
+        // 0.0.35 的日志证明它在真机上装得上也拦得住（`live=4 deact_set=119
+        // stripped=32`），缺的只是这一行调用。
+        //
+        // 放在启动之前：钩子必须在 scene 出现之前就位，否则第一轮切换就已经
+        // 错过了。装不上也不影响开窗 —— 自证失败时它只会往日志写一行。
+        emitNotes(AevonHookInstall())
+        // 先认人，再拉应用：钩子里判「是不是我这一场」只看这个 id，而 scene
+        // 是启动那一瞬才出现的 —— 先装钩子、先报名字，两边都不会抢在前面。
+        // 启动失败就撤回，免得留一个没有浮窗的「保活名单」。
+        AevonHookArm(bundleID)
+
         let door = AevonLaunchSuspended(sharedApplication(), bundleID)
         Log.write("win: icon launch " + bundleID + " suspended door=" + String(door))
         guard door == 1 else {
+            AevonHookDisarm()
             fallback("suspended door=" + String(door))
             return
         }
@@ -946,7 +966,8 @@ zStackParticipantDidChange:
         mark("ICON-launch")
         // Armed before the wait, not after it: a scene that appears and is
         // allowed to sleep in the same half second is a scene found already cold.
-        AevonHookArm(bundleID)
+        // (0.0.50 arms one line earlier, before the launch, for the same reason
+        // one step further out.)
         // 0.0.44 — tell the app itself. The card can forward touches all day;
         // an app that believes it is in the background drops them before they
         // reach a window. This is the one signal that does not depend on the
@@ -1234,6 +1255,11 @@ zStackParticipantDidChange:
         var misses = 0
         var wrote = 0
         var marked = false
+        // 0.0.50 — 掉画的记账。`dropped` 是画面开始黑的那一拍，0 = 现在有画；
+        // `wakes` 是这一轮卡片里唤醒通道真正写出去的次数。
+        var dropped = 0
+        var droppedAt = Date()
+        var wakes = 0
         // 0.0.40 — Aevon(38): the picture goes black for a moment whenever the
         // screen changes owner (desktop → app, app → desktop). Two candidates,
         // and they need different fixes: the scene really is being taken away
@@ -1251,6 +1277,12 @@ zStackParticipantDidChange:
             let live = value(of: scene, "settings")
             let fg = live.map { AevonBoolOf($0, "isForeground") } ?? -1
             let bg = live.map { AevonBoolOf($0, "isBackgrounded") } ?? -1
+            // 0.0.50 — 画面本身的两个读数。`fg` 是我们自己写进去的，切换 App
+            // 时它不变；`contentState` 才是「现在有没有画」，`level` 是母本那
+            // 三件套里的第二件。Aevon(48) 的四份日志里 fg 一次没掉过，所以黑
+            // 从来不是这条时钟看见的。
+            let content = AevonContentStateOf(scene)
+            let level = AevonSceneLevel(scene)
             // Read before the push, so the line below describes what the system
             // did rather than what this turn did.
             let attempts = AevonDeactCount()
@@ -1279,6 +1311,29 @@ zStackParticipantDidChange:
                 unmark()
                 marked = false
             }
+            // 0.0.50 — 掉画判定。`beat >= 2` 是因为第一拍上挂起启动的 scene
+            // 本来就是 0，那不是掉画，是还没来得及画。
+            //
+            // 掉下去的那一刻记一行，回来的那一刻记一行带毫秒数 —— 下一份日志
+            // 就能直接回答「黑了多少毫秒」，不用再靠肉眼对时间戳。
+            var wake = 0
+            if beat >= 3, content >= 0, content != 2 {
+                if dropped == 0 {
+                    dropped = beat
+                    droppedAt = Date()
+                    let one = String(format: "%.1f", level)
+                    Log.write("win: picture dropped cs=" + String(content)
+                              + " lvl=" + one + " fg=" + flag(fg))
+                }
+                wake = AevonWakeScene(scene)
+                if wake != 0 { wakes += 1 }
+            } else if dropped != 0 {
+                let ms = Int(Date().timeIntervalSince(droppedAt) * 1000)
+                Log.write("win: picture back after " + String(ms) + "ms"
+                          + " beats=" + String(beat - dropped)
+                          + " wakes=" + String(wakes))
+                dropped = 0
+            }
             // Eight beats up front say how the first push went; after that one
             // line in four is enough to see the card settle or fail. Two lets,
             // because one long concatenation is a type-checker timeout (0.0.30
@@ -1303,9 +1358,12 @@ zStackParticipantDidChange:
                     + " wrote=" + String(wrote)
                     + " misses=" + String(misses)
                 let layers = String(view.layer.sublayers?.count ?? 0)
+                let shape = " cs=" + String(content)
+                    + " lvl=" + String(format: "%.1f", level)
+                    + " wake=" + String(wakes)
                 Log.write("win: keepalive beat " + String(beat) + state
                           + " reasons=" + reasonsOf(scene)
-                          + " sublayers=" + layers)
+                          + " sublayers=" + layers + shape)
             }
             // The clock runs for the life of the card, not for eight seconds.
             // `stopped` is the only exit, and `closeCard` is the only thing that
@@ -1317,7 +1375,11 @@ zStackParticipantDidChange:
             // 60 ms, so the recovery costs a few frames instead of a blink. The
             // steady state keeps the old interval: a clock that writes 16 lines a
             // second forever is a log nobody can read.
-            let wait: Double = fg == 1 ? 0.25 : 0.06
+            //
+            // 0.0.50 — 判据从 `fg` 换成 `contentState`：没有画也按「不在前台」
+            // 处理。稳态从 250 ms 收到 200 ms，掉画期间仍然是 60 ms。
+            let calm = (fg == 1 && content == 2)
+            let wait: Double = calm ? 0.2 : 0.06
             if !stopped {
                 DispatchQueue.main.asyncAfter(deadline: .now() + wait) { keep() }
             } else if marked {

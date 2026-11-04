@@ -86,6 +86,25 @@ void AevonBanPush(void);
 /// 1 a door opened, 3 already in the background, 0 nothing to write through.
 NSInteger AevonPushBackground(id _Nullable scene);
 
+/// 0.0.50 — 画面到底在不在。`AevonContentStateOf` 读的是 `FBScene.contentState`
+/// （2 = ready 有画，0 = 没准备好 ⇒ 黑，-1 = 没有这个方法），`AevonSceneLevel`
+/// 读 `settings.level`（1 前台档 / 0 后台档 / -1 读不到）。
+///
+/// 这两个数是 Aevon(48) 之后唯一的判据。`settings.isForeground` 是我们自己写
+/// 进去的，切换 App 时从来不变 —— 四份日志里它一次没掉过，所以那条守护在这
+/// 件事上四版都没动过。
+long AevonContentStateOf(id _Nullable scene);
+double AevonSceneLevel(id _Nullable scene);
+
+/// 0.0.50 — 画面掉下去之后的唯一一件事：把 scene 重新说成前台，顺带写
+/// `level = 1 / idleModeEnabled = NO`（母本那一组三件套）。
+///
+/// 不做「已经是前台就不写」的早退 —— 画面黑的时候 `fg` 恰恰还是 1，那条早退
+/// 正是守护四版一次都没动的原因。只由 `contentState != 2` 触发，上限 60 次、
+/// 间隔 200 ms。返回 1/2/3 表示走了哪条门，0 表示没门可走或被节流。
+NSInteger AevonWakeScene(id _Nullable scene);
+long AevonWakeCount(void);
+
 /// 0.0.28 — `- (void)name:(BOOL)`. 1 for "ran", 0 for "no such setter".
 NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL value);
 

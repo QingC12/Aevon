@@ -676,6 +676,14 @@ def main():
                   # 0.0.40 — 闪黑。这一行只在系统真的动过场景的休眠状态时出现，
                   # 它是「黑一下」来自场景被收走 还是 来自合成器 的唯一分界。
                   b"win: scene deactivation #",
+                  # 0.0.50 — Aevon(48) 把 0.0.40 那道选择题答完了：切换 App 的
+                  # 每一轮 fg 都没变过，黑不经过 settings。判据换成 scene 自己的
+                  # contentState，掉下去与回来各一行，回来那行带毫秒数。
+                  b"win: picture dropped cs=",
+                  b"win: picture back after ",
+                  # 母本那三件套里的后两件。这个字面量同时证明 0.0.50 写的是
+                  # level/idle，而不是只写 foreground。
+                  b"setIdleModeEnabled:",
                   b"win: close requested by ",
                   # 0.0.27 — the mother ship's route. The two selectors are the
                   # ones her binary calls and hooks; the selftest string is the
