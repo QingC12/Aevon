@@ -1012,7 +1012,7 @@ zStackParticipantDidChange:
             unmark()
             Log.write("win: icon scene up after " + String(ticks * 250) + "ms")
             emitNotes(AevonTakeNotes())
-            float(scene)
+            float(scene, bundleID: bundleID)
             // A hold with no card under it is a scene that never sleeps again.
             // `float` answers by raising `cardUp`, so its absence is the answer.
             guard cardUp else {
@@ -1129,7 +1129,7 @@ zStackParticipantDidChange:
 
     /// The chain, in the mother ship's order, with the one step she never has to
     /// take because the system takes it for her.
-    private static func float(_ scene: NSObject) {
+    private static func float(_ scene: NSObject, bundleID: String? = nil) {
         guard let manager = value(of: scene, "uiPresentationManager") else {
             Log.write("win: no uiPresentationManager")
             return
@@ -1228,9 +1228,29 @@ zStackParticipantDidChange:
             }
         }
 
+        // 0.0.57 — 冷启动封面（母本的 `_showCover` / `_covered` / `_cover`）。
+        //
+        // 判据用 `contentState`，不是「刚刚 launch 过」：热启动回来的 App 也
+        // 有一个刚建好的 scene 对象，但它带着画 —— 给它盖一层就是自己造的一
+        // 次闪。只有真的没内容（!= 2）才画。
+        //
+        // 图标与名字和圆盘、面板同源（`RingIcons`），所以封面上那枚图标就是
+        // 用户刚才点的那个，不是一个通用占位。
+        var cover: FloatHost.Cover?
+        if let id = bundleID {
+            let state = AevonContentStateOf(scene)
+            if state != 2 {
+                let app = RingIcons.ringApp(for: id)
+                cover = FloatHost.Cover(name: app.name, icon: app.icon)
+                Log.write(String(format: "win: cold start cover cs=%d app=%@",
+                                 Int(state), id))
+            }
+        }
+
         // Window first, activate second. This is the whole difference from
         // 0.0.20, and the difference between a picture and a black phone.
-        guard let host = FloatHost.show(view, onClose: { reason in closeCard(reason) }) else {
+        guard let host = FloatHost.show(view, cover: cover,
+                                        onClose: { reason in closeCard(reason) }) else {
             Log.write("win: no window - nothing activated")
             return
         }
@@ -1316,6 +1336,10 @@ zStackParticipantDidChange:
             // 从来不是这条时钟看见的。
             let content = AevonContentStateOf(scene)
             let level = AevonSceneLevel(scene)
+            // 0.0.57 — 首帧到了就揭开冷启动封面。这只是「揭开」，不碰播放状态：
+            // 撤早了会露出空画面，所以判据只看 contentState，不看节拍数。没封
+            // 面的卡片这里每次早退，代价是一次可选判断。
+            if content == 2 { host.revealCover("first frame") }
             // Read before the push, so the line below describes what the system
             // did rather than what this turn did.
             let attempts = AevonDeactCount()

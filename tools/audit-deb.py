@@ -659,6 +659,12 @@ def main():
                   # 「删掉的是几个白图标」还是「删掉了半屏正常 App」。
                   b"icons: catalogue kept=",
                   b"icons: drop blank ",
+                  # 0.0.57 — 应用面板搜索。`panel: search` 是每次过滤后的结果条数
+                  # （0 也打，所以「搜不到」和「搜索没接上」能分开），
+                  # `panel: keyboard overlap=` 是抽屉为键盘让开的量 —— 这条为 0
+                  # 说明键盘根本没升起来，那就不是布局问题。
+                  b"panel: search ",
+                  b"panel: keyboard overlap=",
                   # 0.0.47 — 手势面搬进自己的窗口（statusBar+1，见
                   # FloatHost.makeBand）。两条：`band window up level=` 证明那一
                   # 层真的建起来了，`band probe` 是该窗口收到的每一次命中提问（点
@@ -695,6 +701,15 @@ def main():
                   b"AevonRingMultiRing",
                   b"win: icon launch ",
                   b"win: icon scene up after ",
+                  # 0.0.57 — 冷启动封面。母本 `ReflectManager` 的 `_launching` /
+                  # `_showCover` / `_covered` / `_cover`：启动期间先放封面上，
+                  # 首帧到了再撤。三条缺一不可 —— `cold start cover` 是它决定
+                  # 要画（判据 contentState != 2），`cover lifted after` 是它真的
+                  # 撤了（带毫秒数，能直接读出这段空窗多长），没有第一条说明
+                  # 判据把冷启动认成了热启动，没有第二条说明封面永远撤不掉。
+                  b"win: cold start cover cs=",
+                  b"win: cover shown for ",
+                  b"win: cover lifted after ",
                   # 0.0.42 — 多圈几何随旧版圆盘移交：布局规则（外圈一定比内圈多、
                   # 相邻圈错开半格）在 AevonRingMenu.distribution / radii 里，
                   # 断言落在圆心旋转模式的日志标记上（日志字面量，必进二进制）。
