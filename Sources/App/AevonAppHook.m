@@ -1988,39 +1988,57 @@ static void AevonPagerReport(const char *reason) {
     AevonPagerInside(reason);
 }
 
-/// 0.0.84 — 「只有部分视频贴在卡片顶边」。
+/// 0.0.85 — 「只有部分视频贴在卡片顶边」：换**选节点的判据**。
 ///
-/// Aevon(75) 的两张截图把形状定死了：横过来的画面（游戏实况、车内视角）在卡片里
-/// 贴着**顶边**显示，下面是一大片纯黑，而说明文字、进度条、标签栏都在原位。竖版
-/// 视频没有这个现象 —— 它铺满整个视频区，压不压顶根本看不出来。所以这不是「排版
-/// 坏了」，而是：**画面这块矩形按「宽度装得下」算出高度之后，被钉在了容器顶上**。
+/// 0.0.84 的思路没错（画面那块矩形被钉在容器顶上，把它挪到正中），但选错了节点，
+/// Aevon(75) 一行读数就把它照出来了：
 ///
-/// 数字对得上：卡片里视频区 430×634（日志 `vid=DDanmakuPlayerView:0,0,430x634`），
-/// 一个 16:9 的画面装进 430 宽只有 242 高，剩下的 392 pt 全在黑里；居中的话上下
-/// 应各留 196。所以修法只有一个动作：把**那块矩形**在它自己的容器里挪到正中。
-/// 不动卡片、不动画布、不动屏幕，也不动说明文字 —— 它们本来就在正确的位置上。
+///     app: page video band none cls=AWEAwemePlayVideoPauseIc h=717 box=717
 ///
-/// 四条守卫：
-///   · 只认「宽度占满、高度比容器矮 40 pt 以上」的矩形；铺满的那些一律不碰
-///     （竖版视频就是这一类，碰它等于把画面裁掉一块）；
-///   · 平移用 `transform` 而不是 `center`：App 重新布局会重写 `center`/`frame`，
-///     一般不会碰 transform，所以它排一次版也弹不回去；
-///   · 原本带缩放/旋转的（`a`、`d` 不是 1）一律不动 —— 那是 App 自己在做动画；
-///   · 一块画面最多挪 3 次，残差小于 12 pt 就当已经在位。找不到「那块矩形」时
-///     只记一行 `video band none`（下一轮靠它换判据），不动任何东西。
+/// 全页大（717）的「暂停图标层」面积最大，被当成了播放器；真正的视频区
+/// `DDanmakuPlayerView:0,0,430x634`（`inside settle` 那一行一直在报）从头到尾
+/// 没被看过一眼。所以「找不到那块矩形」是判据造成的必然结果，和画面怎么排无关 ——
+/// 这也是为什么这一版之前，日志里一条成功的 `video band v=` 都**没有**过。
+///
+/// 三个新判据：
+///   · 候选要排除「画面身上的零件」：类名里带 Pause / Icon / Button / Progress /
+///     Mask / Overlay / Cover 之类的一律不是画面（`AevonNotPicture`）；
+///   · 候选按面积从大到小**逐个**试，不是只看最大的那一个；
+///   · 找那块矩形要**递归**往深处走（画面外面常套一层容器），宽度按候选自己的
+///     宽度算 —— 只看直接子视图会漏掉整整一代。
+///
+/// 居中的口径也改了：不是「在直接父视图里居中」，而是在**视频区**（候选自己）里
+/// 居中。Aevon(75) 的数是视频区 430×634、16:9 画面 430×242，两个数一减 `dy=196`
+/// —— 这就是「上下黑边一样宽」。区域比整页还高时（整页播放器那一族）退回上一层
+/// 容器，否则会把画面推到标签栏底下。
+///
+/// 守卫不变：铺满的竖版不碰、带缩放/旋转的不碰、残差小于 12 pt 不动、一块画面
+/// 最多挪 3 次、平移只用 `transform`（App 重排会重写 `center`/`frame`，一般不碰
+/// transform）。
 static void *AevonVideoNode = NULL;
 static int AevonVideoHits = 0;
 static int AevonVideoNotes = 0;
 
-/// 页里面积最大的那个「类名带 Player / Video」的视图。与 `AevonFindPlayer` 同一个
-/// 口径，区别是要拿回**指针**（那条只需要名字和矩形）。
-static UIView *AevonBiggestPlayerIn(UIView *root) {
-    if (root == nil) return nil;
+/// 类名里带这些字样的是画面身上的零件，不是画面。
+static BOOL AevonNotPicture(const char *name) {
+    if (name == NULL) return YES;
+    static const char *bad[] = {"Pause", "Icon", "Button", "Control", "Progress",
+                                "Slider", "Tip", "Badge", "Mask", "Overlay",
+                                "Cover", "Label", "Hud", "Guide", "Panel", "Toast"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        if (strstr(name, bad[i]) != NULL) return YES;
+    }
+    return NO;
+}
+
+/// 页里所有「类名带 Player / Video」的视图，按面积从大到小。
+/// 不用 `sortUsingComparator:`：这个 dylib 装进每一个 App 进程，能少一条运行库
+/// 依赖就少一条；候选只有个位数，双重循环反而更省。
+static void AevonCollectPlayers(UIView *root, NSMutableArray *out) {
+    if (root == nil || out == nil) return;
     NSMutableArray *todo = [NSMutableArray arrayWithObject:root];
-    UIView *best = nil;
-    CGFloat area = -1.0;
     NSUInteger walked = 0;
-    while (todo.count > 0 && walked < 400) {
+    while (todo.count > 0 && walked < 1600) {
         UIView *node = [todo lastObject];
         [todo removeLastObject];
         walked += 1;
@@ -2028,65 +2046,115 @@ static UIView *AevonBiggestPlayerIn(UIView *root) {
         if (name != NULL
             && (strstr(name, "Player") != NULL || strstr(name, "Video") != NULL)) {
             CGRect b = [node bounds];
-            CGFloat a = b.size.width * b.size.height;
-            if (b.size.height > 100.0 && a > area) { area = a; best = node; }
+            if (b.size.width >= 120.0 && b.size.height >= 120.0) [out addObject:node];
         }
         NSArray *kids = [node subviews];
         if (kids.count > 0) [todo addObjectsFromArray:kids];
     }
-    return best;
+    NSUInteger total = out.count;
+    for (NSUInteger i = 0; i < total; i++) {
+        for (NSUInteger j = i + 1; j < total; j++) {
+            UIView *a = [out objectAtIndex:i];
+            UIView *b = [out objectAtIndex:j];
+            CGFloat aa = [a bounds].size.width * [a bounds].size.height;
+            CGFloat bb = [b bounds].size.width * [b bounds].size.height;
+            if (bb > aa) [out exchangeObjectAtIndex:i withObjectAtIndex:j];
+        }
+    }
 }
 
-/// 容器里那块「宽度占满、高度小一截」的矩形。横版画面就是它。
-static UIView *AevonBandIn(UIView *box) {
-    UIView *best = nil;
-    CGFloat bestH = 0.0;
-    CGFloat boxW = [box bounds].size.width;
-    CGFloat boxH = [box bounds].size.height;
-    for (UIView *kid in [box subviews]) {
-        CGRect b = [kid bounds];
-        if (b.size.width < boxW * 0.9) continue;
-        if (b.size.height < 60.0) continue;
-        if (b.size.height > boxH - 40.0) continue;
-        if (best == nil || b.size.height > bestH) { best = kid; bestH = b.size.height; }
+/// 视频区里那块「宽度接近视频区、高度矮一截」的矩形。横版画面就是它。
+/// 贴顶的优先（用户说的「上移」就是它），没有贴顶的才按面积取。
+static UIView *AevonBandUnder(UIView *region) {
+    if (region == nil) return nil;
+    CGFloat w = [region bounds].size.width;
+    CGFloat h = [region bounds].size.height;
+    if (w < 120.0 || h < 200.0) return nil;
+    NSMutableArray *todo = [NSMutableArray arrayWithObject:region];
+    NSUInteger walked = 0;
+    UIView *top = nil;
+    CGFloat topArea = -1.0;
+    UIView *any = nil;
+    CGFloat anyArea = -1.0;
+    while (todo.count > 0 && walked < 1200) {
+        UIView *node = [todo lastObject];
+        [todo removeLastObject];
+        walked += 1;
+        if (node != region) {
+            CGRect b = [node bounds];
+            if (b.size.width >= w * 0.9 && b.size.height >= 100.0
+                && b.size.height <= h - 40.0) {
+                CGFloat area = b.size.width * b.size.height;
+                if ([node frame].origin.y <= 8.0 && area > topArea) {
+                    topArea = area;
+                    top = node;
+                }
+                if (area > anyArea) { anyArea = area; any = node; }
+            }
+        }
+        NSArray *kids = [node subviews];
+        if (kids.count > 0) [todo addObjectsFromArray:kids];
     }
-    return best;
+    return top != nil ? top : any;
+}
+
+/// 什么都找不到时的那一行：候选有几个、各自多大，以及第一个候选肚子里直接躺着
+/// 的那几个子视图。下一轮要换判据，靠的就是这一行 —— 0.0.84 缺的正是它
+/// （只写了一个被误选成播放器的「暂停图标层」）。
+static void AevonVideoTree(UIView *root) {
+    if (root == nil) return;
+    NSMutableString *list = [NSMutableString string];
+    NSArray *kids = [root subviews];
+    NSUInteger limit = kids.count < 8 ? kids.count : 8;
+    for (NSUInteger i = 0; i < limit; i++) {
+        UIView *kid = [kids objectAtIndex:i];
+        CGRect f = [kid convertRect:[kid bounds] toView:root];
+        [list appendFormat:@"|%.18s:%.0f,%.0f,%.0fx%.0f",
+         class_getName([kid class]), f.origin.x, f.origin.y, f.size.width, f.size.height];
+    }
+    char body[560];
+    snprintf(body, sizeof(body), "video tree b=%.0fx%.0f n=%lu%s",
+             [root bounds].size.width, [root bounds].size.height,
+             (unsigned long)kids.count, [list UTF8String]);
+    AevonPageWrite(body);
 }
 
 static void AevonVideoCenter(void) {
     UIScrollView *view = AevonPagerGet();
     if (view == nil || [view window] == nil) return;
-    CGRect box = [view bounds];
-    if (box.size.height < 200.0) return;
-    UIView *cell = AevonPageKidAt(view, box.size.height, [view contentOffset].y);
+    CGRect page = [view bounds];
+    if (page.size.height < 200.0) return;
+    UIView *cell = AevonPageKidAt(view, page.size.height, [view contentOffset].y);
     if (cell == nil) return;
-    UIView *player = AevonBiggestPlayerIn(cell);
-    if (player == nil) return;
-    UIView *host = [player superview];
-    if (host == nil) return;
-    CGFloat hostH = [host bounds].size.height;
-    CGFloat playerH = [player bounds].size.height;
-    if (hostH < 200.0 || playerH < 60.0) return;
+
+    NSMutableArray *players = [NSMutableArray array];
+    AevonCollectPlayers(cell, players);
+    if (players.count == 0) return;
 
     UIView *band = nil;
-    UIView *holder = nil;
-    if (playerH <= hostH - 40.0) {
-        // 播放器自己就是那一块：它被钉在容器（单元格内容视图）顶上。
-        band = player;
-        holder = host;
-    } else {
-        UIView *inner = AevonBandIn(player);
-        if (inner != nil) { band = inner; holder = player; }
+    UIView *region = nil;
+    UIView *firstTry = nil;
+    // 两轮：先只试「不是零件」的候选；全都不行再把零件也算进来（个别 App 的播放器
+    // 名字里就带 Button/Icon，宁可多试一轮也不漏）。
+    for (int pass = 0; pass < 2 && band == nil; pass++) {
+        for (UIView *candidate in players) {
+            const char *name = class_getName([candidate class]);
+            if (pass == 0 && AevonNotPicture(name)) continue;
+            if (firstTry == nil) firstTry = candidate;
+            UIView *found = AevonBandUnder(candidate);
+            if (found != nil) { band = found; region = candidate; break; }
+        }
     }
-    if (band == nil || holder == nil) {
-        if (AevonVideoNode != (void *)player && AevonVideoNotes < 6) {
+    if (band == nil || region == nil) {
+        if (AevonVideoNotes < 6 && firstTry != nil) {
             AevonVideoNotes += 1;
-            AevonVideoNode = (void *)player;
-            AevonVideoHits = 0;
             char body[170];
             snprintf(body, sizeof(body), "video band none cls=%.24s h=%.0f box=%.0f",
-                     class_getName([player class]), playerH, hostH);
+                     class_getName([firstTry class]),
+                     [firstTry bounds].size.height,
+                     [firstTry superview] != nil ? [[firstTry superview] bounds].size.height : 0.0);
             AevonPageWrite(body);
+            AevonVideoTree(firstTry);
         }
         return;
     }
@@ -2097,19 +2165,33 @@ static void AevonVideoCenter(void) {
     CGAffineTransform t = [band transform];
     // 缩放 / 旋转 / 横向位移都不是我们写的：那是 App 自己的动画，别抢。
     if (fabs(t.a - 1.0) > 0.01 || fabs(t.d - 1.0) > 0.01 || fabs(t.tx) > 0.5) return;
-    CGFloat holderH = [holder bounds].size.height;
-    CGFloat bandH = [band bounds].size.height;
-    CGFloat want = (holderH - bandH) / 2.0;
-    // `frame` 含我们加过的那一段位移，减掉才是 App 排出来的原点。
-    CGFloat base = [band frame].origin.y - t.ty;
-    CGFloat gap = want - base;
+    // `convertRect:` 出来的是**含我们加过的那一段位移**的矩形，所以不用像 0.0.84
+    // 那样再减 `t.ty` —— 减一次会把上一刀的位移又算进去。
+    CGRect rb = [band convertRect:[band bounds] toView:region];
+    CGFloat regionH = [region bounds].size.height;
+    CGFloat cellH = [cell bounds].size.height;
+    // 视频区比整页还高（整页播放器那一族）：退回上一层「比整页矮」的容器，否则
+    // 算出来的正中会落到标签栏底下。
+    if (regionH > cellH - 40.0) {
+        UIView *up = [band superview];
+        while (up != nil && [up bounds].size.height > cellH - 40.0) up = [up superview];
+        if (up != nil && [up bounds].size.height >= rb.size.height + 40.0) {
+            region = up;
+            regionH = [region bounds].size.height;
+            rb = [band convertRect:[band bounds] toView:region];
+        }
+    }
+    if (regionH < rb.size.height + 40.0) return;
+    CGFloat want = (regionH - rb.size.height) / 2.0;
+    CGFloat gap = want - rb.origin.y;
     if (fabs(gap) < 12.0) return;
     if (AevonVideoHits >= 3) return;
     AevonVideoHits += 1;
     [band setTransform:CGAffineTransformMakeTranslation(0, t.ty + gap)];
-    char body[210];
-    snprintf(body, sizeof(body), "video band v=%.24s h=%.0f box=%.0f dy=%.0f n=%d",
-             class_getName([band class]), bandH, holderH, gap, AevonVideoHits);
+    char body[240];
+    snprintf(body, sizeof(body), "video band v=%.24s h=%.0f box=%.0f dy=%.0f n=%d r=%.24s",
+             class_getName([band class]), rb.size.height, regionH, gap, AevonVideoHits,
+             class_getName([region class]));
     AevonPageWrite(body);
 }
 
