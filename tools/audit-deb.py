@@ -578,6 +578,16 @@ def main():
                       b"clean=%d span=%.0f moves=%d",
                       b"anchor done row=%ld,%ld at=%.0f",
                       b"align capped moves=%d at=%.0f",
+                      # 0.0.81 — 「交还整屏」那一路的重排往后推。Aevon(72) 六次开合
+                      # 六次卡屏，唯一插在关卡那一拍的动作就是这次整表重排；现在它
+                      # 只在 App 真的回到前台之后才做。三行是唯一的判据：
+                      #   `hold … wait active` = 还停着（`n=` 是等了几拍，正常一两次）；
+                      #   `resume active … after=` = 回来了，等了多久（秒）；
+                      #   `resume stale …` = 等了 7.5 s 它的 `applicationState`
+                      #     仍然是 background —— 那种情形下我们照做，并把这句写下来。
+                      b"hold reason=%s wait active n=%d box=%.0f target=%.0f",
+                      b"resume active box=%.0f target=%.0f after=%.1fs",
+                      b"resume stale app stays background, acting anyway",
                       # 0.0.74 — 翻页器此刻的形状：视口、内容、offset、单元格，
                       # 以及前三个子视图（页本身）的原点与高度。
                       # 「换算写对了、断层还在」这两个互相矛盾的事实，只有
@@ -827,6 +837,11 @@ def main():
                   # 「窗口看着不对」这一句可读的话。
                   b"win: fat scene ratio=",
                   b"win: hosted bounds after=",
+                  # 0.0.81 — 卡片形状与画布形状分家。卡片从此恒为 5:3（`plan`
+                  # 只按 `fatAspect` 算），画布按等比装进去；装不满时两边留边，
+                  # 这一行就是那条边有多宽。它是「哔哩哔哩 9:19.5 的卡」这个
+                  # 故障唯一的正面读数：没有这一行，下一次只能靠看截图猜。
+                  b"win: letterbox side=%.0fpt flat=%d canvas=%.0fx%.0f",
                   # 0.0.61 — 逻辑尺寸。Aevon(52) 证明了 0.0.60 的错在哪：只改
                   # 承载视图的 bounds，App 仍按整屏排版（`scale=1.000`、字大、
                   # 顶栏偏右、底栏与抖音右侧那一列在框外）。这四条是这一版唯一

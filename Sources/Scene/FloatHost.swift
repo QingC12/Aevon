@@ -230,6 +230,26 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return CGSize(width: w.rounded(), height: h.rounded())
     }
 
+    /// 0.0.81 — 画布装进卡片的那个比例。
+    ///
+    /// 0.0.60~0.0.80 只有一个比例：卡片是画布的等比缩小，两者形状永远相同。于是
+    /// 「卡片形状」这件事一直是被画布决定的 —— 哔哩哔哩竖版那一页按整屏 932 排
+    /// （见 `wantsFullCanvas`），卡片就跟着变成 282×610（9:19.5）。Aevon(72) 的
+    /// 判决是：**卡片的形状不该由某个 App 的页面决定**。
+    ///
+    /// 所以从这一版起分成两件事：
+    ///   · 卡片形状 = 5:3，和别的 App 一样（`plan` 只按 `fatAspect` 算）；
+    ///   · 画布怎么装进这张卡 = 等比、取小的那一边、居中（这个函数）。
+    ///
+    /// 画布比卡片瘦长（哔哩哔哩竖版 430×932 装进 5:3）时，两边会各留一条；
+    /// 画布正好是 5:3 时（所有普通 App）两条都是 0，和以前一模一样 —— 这一个
+    /// 函数对旧路径是恒等变换。
+    static func fitScale(for source: CGSize, in card: CGSize) -> CGFloat {
+        guard source.width > 16, source.height > 16,
+              card.width > 16, card.height > 16 else { return 1 }
+        return Swift.min(card.width / source.width, card.height / source.height)
+    }
+
     /// 0.0.79 — 这个 App 上一次是不是「翻页器比窗口高」。
     ///
     /// App 侧写不了宿主的东西，宿主也看不见别人的视图树，所以记号走 App 自己的
@@ -382,6 +402,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let frame = plan.frame
 
         let card = UIView(frame: frame)
+        // 0.0.81 — 画布装不满卡片时（哔哩哔哩竖版：430×932 按高等比缩进 5:3），
+        // 两边会各露出一条。留透明就是把桌面透进来，看上去像卡片没画完；填黑
+        // 是「这一页之外」的通用答案，和播放器留边同一套观感。画布正好是 5:3
+        // 时（其余所有 App）这一行等于 `.clear`，和以前一模一样。
         card.backgroundColor = .clear
         // 0.0.48 — 白色描边撤掉（Aevon(46) #2「边缘的白色线条太明显」）。
         //
@@ -400,6 +424,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 与 `recenterCard` 都按它对齐中心：0 就是「不用对齐」，两条路径都正确。
         host.cropTop = 0
         host.applyCorner()
+        host.applyBars()
 
         // 承载面保持 scene 自己的坐标空间，整块缩放 —— 改 `frame` 会重写那个
         // 空间，0.0.22 的空白卡片就是那么来的。`bounds` 已经在上面对准小胖屏
@@ -501,6 +526,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                   + " fill=" + String(format: "%.0fx%.0f",
                                       card.bounds.width, card.bounds.height)
                   + " card_corner_pt=" + String(format: "%.0f", card.layer.cornerRadius))
+        // 0.0.81 — 画布装进 5:3 之后两边各留多少。0 就是老路径（画布本来就是
+        // 5:3 的形状），只有「整屏画布」那一族会打出这一行。
+        let barSide = Swift.max(0, (frame.width - visible.width * plan.scale) / 2)
+        if barSide > 0.5 {
+            Log.write(String(format: "win: letterbox side=%.0fpt flat=%d canvas=%.0fx%.0f",
+                             barSide, 1, source.width, source.height))
+        }
         // 0.0.64 — 开窗这一拍就说清「边角拖动现在是什么语义」，并且把圆角的
         // 三个输入都摆在同一行：`mode` 来自设置，`canvas` 是交给系统的形状，
         // `corner` 是按卡宽算出来的那个数。
@@ -693,7 +725,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return (CGRect(x: 0, y: 0, width: cardWidth, height: cardHeight), 1)
         }
         let placement = CardLayout.loadRuntime()
-        let ratio = source.width / source.height
+        // 0.0.81 — 卡片的形状不再跟着画布走。以前 `ratio = source.width /
+        // source.height`，于是「画布是什么形状，卡片就是什么形状」；哔哩哔哩
+        // 要 932 的画布，卡片就成了 9:19.5，用户看到的是「小胖屏对它无效」。
+        // 现在卡片永远是 5:3，画布按 `fitScale` 装进去（等比、居中）。
+        let ratio = 1.0 / FloatHost.fatAspect
 
         var h = bounds.height * placement.heightFraction
         var w = h * ratio
@@ -719,7 +755,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             h = source.height
             w = h * ratio
         }
-
         let saved = placement.origin(for: placement.edge)
         var x = saved.x * bounds.width
         var y = saved.y * bounds.height
@@ -760,7 +795,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         } else {
             y = Swift.min(Swift.max(0, y), Swift.max(0, bounds.height - h))
         }
-        return (CGRect(x: x, y: y, width: w, height: h), h / source.height)
+        return (CGRect(x: x, y: y, width: w, height: h),
+                FloatHost.fitScale(for: source, in: CGSize(width: w, height: h)))
     }
 
     // MARK: - close
@@ -1213,7 +1249,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // goes flush against the edge it was docked from — an inset mini is a
         // mini whose whole point (being out of the way) it fails at.
         // 0.0.54 — 比例取可见区（裁掉顶栏之后），见 `dragMove` 同一处。
-        let ratio = visible.width / Swift.max(visible.height, 1)
+        // 0.0.81 — 小窗也按卡片自己的形状走（5:3），不再取画布比例：画布可能是
+        // 整屏高的（哔哩哔哩），而「停靠小窗」是卡片的一个状态，不是画布的状态。
+        let ratio = 1.0 / FloatHost.fatAspect
         let height = miniHeight(in: window.bounds)
         let width = height * ratio
         let side: CardLayout.Edge = landed == .left ? .left : .right
@@ -1460,7 +1498,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 否则缩小一次之后顶部那一条又会滑回卡片里。
     private func followContent(updateCorner: Bool = true) {
         guard let card = card, let content = content, visible.height > 16 else { return }
-        let scale = card.bounds.height / visible.height
+        let scale = FloatHost.fitScale(for: visible, in: card.bounds.size)
         content.center = CGPoint(x: card.bounds.midX,
                                  y: card.bounds.midY - cropTop * scale / 2)
         content.transform = CGAffineTransform(scaleX: scale, y: scale)
@@ -1473,6 +1511,18 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         //
         // 0.0.67 — 拖动的每一帧传 false：圆角在 `dragEnd` 里一次算准。
         if updateCorner { applyCorner() }
+        applyBars()
+    }
+
+    /// 画布在这张卡片里有没有留边。有就填黑，没有就透明 —— 一个判断，两个
+    /// 调用点（开窗、每次缩放之后），所以卡片不会出现「缩一下底色变了」。
+    private func applyBars() {
+        guard let card = card else { return }
+        let scale = FloatHost.fitScale(for: visible, in: card.bounds.size)
+        let shown = CGSize(width: visible.width * scale, height: visible.height * scale)
+        let bars = shown.width < card.bounds.width - 0.5 || shown.height < card.bounds.height - 0.5
+        let wanted: UIColor = bars ? .black : .clear
+        if card.backgroundColor != wanted { card.backgroundColor = wanted }
     }
 
     // MARK: - 0.0.73 承载面的位置看门狗
@@ -1505,7 +1555,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     @discardableResult
     func reapplyPlacement(_ why: String) -> Bool {
         guard let card = card, let content = content, visible.height > 16 else { return false }
-        let scale = card.bounds.height / visible.height
+        let scale = FloatHost.fitScale(for: visible, in: card.bounds.size)
         let center = CGPoint(x: card.bounds.midX,
                              y: card.bounds.midY - cropTop * scale / 2)
         let at = content.transform

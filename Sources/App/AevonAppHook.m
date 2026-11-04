@@ -600,6 +600,37 @@ static int AevonAnchorSet = 0;
 static int AevonAnchorWrites = 0;
 /// 「App 把行下标弄丢了」只报一次。
 static int AevonAnchorLost = 0;
+/// 0.0.81 — **关卡方向的重排要等 App 真的在前台再做。**
+///
+/// Aevon(72) 把范围收窄到一件事：卡片开着时一切正常，**关掉卡片之后一开全屏就
+/// 卡住**（画面不动、滑不动，等几秒或切一次后台才回来），六次开合六次复现。
+/// 同一份日志里能点名的只有一处「我们插在关卡那一拍的动作」：
+///
+///   17:07:40 transition h=932 last=717 full=932      ← 我们把 scene 还成 932
+///   17:07:40 anchor keep row=0,1 at=932 frame=717 h=717
+///   17:07:40 rebuild watch … box=932 top=932 r=1     ← 紧接着一次整表重排
+///   17:07:40 anchor done row=0,1 at=932 h=932         ← 行高被问成了 932
+///   17:07:19 background retry door=1 fg=no            ← 同一秒里我们把它推去后台
+///
+/// `beginUpdates`/`endUpdates` 是一次真正的批量更新（要重问每一行的高度、要跑
+/// 一次 CATransaction）。0.0.78 起它落在「窗口刚变、进程马上要被挂起」这一拍上，
+/// 0.0.79 起它又变成每次关卡都必然发生（0.0.80 的验收把空转都掐掉了，剩下这
+/// 一次是唯一真正需要发的）。而抖音的翻页是等「当前这一帖准备好」才跟手的。
+///
+/// 所以：**往大走（回整屏）那一拍只记账，不动手**。等用户在 App 里真的回到前台
+/// （原始 `applicationState == active`）之后的第一拍再做 —— 那时窗口、进程、
+/// 渲染管线都在一起，一次批量更新就是一次普通的重排。
+///
+/// 往小走（开卡）不变：那一路是 0.0.78 修好的「第一次打开内容尺寸不对」，而且
+/// App 就在用户眼前，没有任何东西要挂起。
+static int AevonRemeasurePending = 0;
+static CGFloat AevonRemeasureTarget = 0.0;
+static CFAbsoluteTime AevonRemeasureAt = 0.0;
+/// 这一轮「等它真的在前台」说过几次。3 行足够看清一次；再多就只是把日志刷满。
+static int AevonRemeasureLogs = 0;
+/// 已经等了多少拍。只用来兜底「这个 App 回到前台之后 `applicationState` 仍然是
+/// background」那一种（见 `AevonAlignPager` 里 50 拍那段）。
+static int AevonRemeasureWaits = 0;
 /// 0.0.79 — 换屏**之前**那一页有几个播放器在播，以及这一版替它按过几次 play。
 ///
 /// Aevon(69) 的新故障：抖音在两块屏之间来回切之后，画面停在那一帧，要先点一下
@@ -683,6 +714,24 @@ static CGFloat AevonPageHeightOf(UIScrollView *view, CGFloat box) {
     // 差 8 pt 以内算同一个数：717 与 716 是宿主自己那一手，不是换了一页。
     if (page < 200.0 || fabs(page - box) < 8.0) page = box;
     return page;
+}
+
+/// 0.0.81 — **这个 App 自己**（不是我们演给它看的那一面）是不是在前台。
+///
+/// 必须走原始实现：`AevonApplicationState` 那个钩子会在「scene 说前台、App 说
+/// 后台」时把答案改写成 active —— 那正是卡片里应有的答案，也正是这里要排除的
+/// 情形。卡片里真实状态是后台，全屏时才是真的 active，这个区别只有原始实现
+/// 答得出来。
+///
+/// 钩子没装上（`AevonOriginalApplicationState == NULL`）时按「在」处理：宁可不
+/// 推迟，也不要在一个量不出来的状态上永远不动手。
+static BOOL AevonAppIsActive(void) {
+    if (AevonOriginalApplicationState == NULL) return YES;
+    UIApplication *application = [UIApplication sharedApplication];
+    if (application == nil) return YES;
+    SEL cmd = sel_registerName("applicationState");
+    NSInteger state = ((NSInteger (*)(id, SEL))AevonOriginalApplicationState)(application, cmd);
+    return state == 0;                     // UIApplicationStateActive
 }
 
 /// 现在的窗口有多高。与心跳用的是同一把尺子（key window 优先），所以两处读数
@@ -1418,6 +1467,43 @@ static NSInteger AevonAlignPager(const char *reason) {
     if ([view window] == nil) return -1;
     // 手指还在动就别动它。归位是「补一刀」，不是「抢方向盘」。
     if ([view isTracking] || [view isDragging] || [view isDecelerating]) return -1;
+    // 0.0.81 — 交还整屏的那一段：App 还是后台（我们刚把它推下去，或者用户还没
+    // 回到它），这一拍**一行都不写**。见 `AevonRemeasurePending` 的注释 ——
+    // 0.0.78 起那次「整表重排」正好压在挂起前的一拍上，Aevon(72) 六次开合六次
+    // 卡屏。回到前台的第一拍把这件事记完就接着走，中间不多一次机会也不多一次
+    // 重排。
+    if (AevonRemeasurePending) {
+        if (!AevonAppIsActive()) {
+            AevonRemeasureWaits += 1;
+            // 50 拍 ≈ 7.5 s 的运行时间（挂起期间不数）。正常情形用户一秒内就
+            // 回来了；到 50 还不回来只有一种解释：这个 App 的 `applicationState`
+            // 在回到前台之后仍然是 background（Aevon(72) 17:07:26 那行 `promoted`
+            // 就是这个形状）。那时候再等下去就是永不动手，这一版的修复会变成
+            // 一条新的「关窗后断层」—— 宁可写一行说清楚，然后照常做。
+            if (AevonRemeasureWaits < 50) {
+                if (AevonRemeasureLogs < 3) {
+                    AevonRemeasureLogs += 1;
+                    char body[220];
+                    snprintf(body, sizeof(body),
+                             "hold reason=%s wait active n=%d box=%.0f target=%.0f",
+                             reason, AevonRemeasureWaits,
+                             [view bounds].size.height, AevonRemeasureTarget);
+                    AevonPageWrite(body);
+                }
+                return -1;
+            }
+            AevonRemeasurePending = 0;
+            AevonPageWrite("resume stale app stays background, acting anyway");
+        } else {
+            AevonRemeasurePending = 0;
+            char body[220];
+            snprintf(body, sizeof(body), "resume active box=%.0f target=%.0f after=%.1fs",
+                     [view bounds].size.height, AevonRemeasureTarget,
+                     AevonRemeasureAt > 0.0
+                         ? CFAbsoluteTimeGetCurrent() - AevonRemeasureAt : 0.0);
+            AevonPageWrite(body);
+        }
+    }
     CGFloat box = [view bounds].size.height;
     CGFloat full = AevonWindowHeight();
     // App 还没跟上这一次尺寸变化：先把机会留着，下一拍再说。
@@ -1846,6 +1932,19 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
         AevonAnchorLost = 0;
         AevonStuckLines = 0;
         AevonStuckAt = 0.0;
+        // 0.0.81 — 往大走 = 交还整屏：这一路的重排要等 App 真的回到前台再做
+        // （见 `AevonRemeasurePending`）。往小走 = 开卡：App 就在用户眼前，
+        // 照旧立刻做，那一路是 0.0.78 修好的「第一次打开内容尺寸不对」。
+        if (size.height > before + 40.0) {
+            AevonRemeasurePending = 1;
+            AevonRemeasureTarget = size.height;
+            AevonRemeasureAt = CFAbsoluteTimeGetCurrent();
+            AevonRemeasureLogs = 0;
+            AevonRemeasureWaits = 0;
+        } else {
+            AevonRemeasurePending = 0;
+            AevonRemeasureTarget = 0.0;
+        }
         // 心跳撞过 2400 拍上限就自己停了，这里把它叫回来 —— 关卡之后要归位的那
         // 一半，全靠这个心跳。
         AevonPagerWatchArm();
@@ -1956,6 +2055,9 @@ static void AevonPagerWatchTick(void *context) {
         return;
     }
     if (fabs(height - AevonWatchHeight) > 24.0) {
+        // 0.0.81 — 方向要在覆盖之前读出来：`AevonWatchHeight` 下面立刻就被
+        // 改成新的高度，之后再比就永远是「没变」。
+        BOOL grew = (height > AevonWatchHeight + 24.0);
         // 0.0.73 — 旧页高单独存一份，而且续 90 拍机会。过渡钩子没响的那一类
         // App（根控制器不是标准容器）与「挂起之后系统自己去改」都只走这条路。
         AevonOldPage = AevonWatchHeight;
@@ -1973,8 +2075,19 @@ static void AevonPagerWatchTick(void *context) {
         AevonRebuildTop = 0.0;
         AevonStuckLines = 0;
         AevonStuckAt = 0.0;
-        // 0.0.77 — 这条路同样要钉行下标：过渡钩子没响的 App（根控制器不是标准
-        // 容器）只有这里能拿到「变化之前停在哪一帖」。
+        // 0.0.81 — 过渡钩子没响的那一类 App 只有这里能看出方向：窗口变高 =
+        // 交还整屏 ⇒ 重排往后推（同 `AevonRemeasurePending`）；变矮 = 开卡，
+        // 照旧立刻做。
+        if (grew) {
+            AevonRemeasurePending = 1;
+            AevonRemeasureTarget = height;
+            AevonRemeasureAt = CFAbsoluteTimeGetCurrent();
+            AevonRemeasureLogs = 0;
+            AevonRemeasureWaits = 0;
+        } else {
+            AevonRemeasurePending = 0;
+            AevonRemeasureTarget = 0.0;
+        }
         UIScrollView *seen = AevonPagerGet();
         if (seen != nil) {
             CGFloat seenBox = [seen bounds].size.height;
@@ -2039,7 +2152,10 @@ static void AevonPagerWatchTick(void *context) {
         // 0.0.76 — 几何已经齐了的那几拍，顺带把「页里面」量一次：卡片里那个
         // 「视频上移」只在页高正确的时候才看得清，混装时量到的是断层。
         if (did == 0) AevonPagerInside("settle");
-        AevonSettleAge += 1;
+        // 0.0.81 — 等前台的那一段不计寿命：那 90 s 是「App 不肯重排」的兜底，
+        // 不是「用户还没回来」的。把它算进去，用户过一分钟才回全屏就再也
+        // 接不上这一次尺寸变化了。
+        if (!AevonRemeasurePending) AevonSettleAge += 1;
         if (AevonSettleAge > 600) {          // 90 s 硬上限
             AevonSettleTicks = 0;
             AevonSettleAge = 0;
