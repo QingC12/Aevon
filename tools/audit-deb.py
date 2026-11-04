@@ -672,7 +672,11 @@ def main():
                       # 0.0.89 — 行尾多了 `c=`/`b=`/`ty=`：cell 与画面指针的尾 4 位、
                       # 写入前画面自己的位移。同一秒里 `c=` 相同而 `y=` 变回去
                       # = App 把我们的位移抹掉（对打）；`c=` 变了 = 换页。
-                      b"video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s via=%.8s c=%04lx b=%04lx ty=%.0f",
+                      # 0.0.94 — 行尾再加 `ln=`（车道：0 整页 cell、1 视频区、-1 心跳）
+                      # 与 `dr=`（写入那一刻翻页器是否还在拖/惯性滑动）。Aevon(84) 里
+                      # 唯一的 `via=layout` 写入就是死前最后一条读数，可它分不出车道、
+                      # 也分不出当时在不在滑 —— 这两个数就是下一版的判据。
+                      b"video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s via=%.8s c=%04lx b=%04lx ty=%.0f ln=%d dr=%d",
                       # 迟到的原因是「摆得晚」，所以钩住 App 自己的排版那一层：
                       # 字符串在二进制里，说明这条安装路径没被编译掉。
                       b"layoutSubviews",
@@ -722,9 +726,22 @@ def main():
                       # 异常那一路带名字与原因。`alive t=` 是被托管期间每秒一行：
                       # 进程若被系统 SIGKILL，它就停在某一秒上，下一次 `boot` 就是
                       # 死亡时刻 —— 这种杀法谁都拦不住，只能靠「最后一秒」定位。
-                      b"app: crash sig=%d step=%d",
+                      b"app: crash sig=%d step=%d sub=%d d=%d",
                       b"app: crash exc %s: %s step=%d",
                       b"alive t=%d",
+                      # 0.0.94 — **卡死**（不是崩溃）的证词。Aevon(84) 里 App 侧日志
+                      # 14 秒零输出、宿主 `cs=2 sublayers=1` 正常、随后 pid 换了，
+                      # 而 `app: crash` 一条都没有 ⇒ 主线程不回来，不是我们慢
+                      # （`video load` 全程 0 条，没有任何半秒被吃掉 40 ms）。
+                      #   `app: hang step= sub= d= hook= c= b=` = 停在哪一句、重入深度、
+                      #   这 2 秒里钩子被叫了几次、正在改哪一格哪一块。
+                      #   `hook` 很小而 `sub=5` ⇒ 一次没回来（就在 setTransform 上）；
+                      #   `hook` 上千且 `d` 很大 ⇒ 又一次自我递归。
+                      #   `app: hang pc=` 是主线程 PC + 9 层返回地址，配合
+                      #   `app: base=` 就能算出哪些帧落在我们自己这个 dylib 里。
+                      b"app: hang step=%d sub=%d d=%d hook=%d c=%04lx b=%04lx",
+                      b"app: hang pc=%lx",
+                      b"app: base=%lx",
                       b"video reset on foreground",
                       # 0.0.84 — 抬高从「呈现」这一声开始，不再等心跳相位。
                       b"presentViewController:animated:completion:",

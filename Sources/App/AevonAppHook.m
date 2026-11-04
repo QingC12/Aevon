@@ -65,9 +65,15 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <mach/mach.h>
+#if defined(__arm64__) || defined(__aarch64__)
+#include <mach/arm/thread_status.h>
+#endif
 #include <math.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -97,6 +103,50 @@ static volatile sig_atomic_t AevonStep = 0;
 #define AEVON_STEP_WRITE  3
 #define AEVON_STEP_HOOK   4
 #define AEVON_STEP_SHEET  5
+#define AEVON_STEP_TICK   6
+#define AEVON_STEP_RESOLVE 7
+
+/// 0.0.94 — 「停在哪一句」。
+///
+/// Aevon(84) 的证据只有一条：20:42:38 之后 App 侧日志 14 秒零输出，随后进程被换掉
+/// （`app: boot pid=24262`），而 `app: crash` 一条都没有。`step=` 只说「哪个函数」，
+/// 答不出「是不是又一次卡在那句 `setTransform` 里」。所以这一版把粒度压到语句级：
+/// 每个可能不返回的地方先写一次 `AevonSub`，看门狗线程在主线程 2 秒不动时把它连同
+/// 主线程 PC + 调用栈一起写下来。信号处理器与看门狗都只读这个整数，不碰对象。
+static volatile sig_atomic_t AevonSub = 0;
+#define AEVON_SUB_NONE     0
+#define AEVON_SUB_ORIG     1   // 进 App 自己的 layoutSubviews
+#define AEVON_SUB_ORIG_END 2   // App 自己的 layoutSubviews 返回了
+#define AEVON_SUB_RESOLVE  3   // 顺下标链取画面
+#define AEVON_SUB_TX_BEGIN 4   // CATransaction begin
+#define AEVON_SUB_SET      5   // setTransform 那一句
+#define AEVON_SUB_TX_END   6   // CATransaction commit
+#define AEVON_SUB_COLLECT  7   // 整页/视频区 BFS
+#define AEVON_SUB_BAND     8   // 画面区里找那块矩形
+#define AEVON_SUB_PICK     9   // 候选循环
+#define AEVON_SUB_TICK     10  // 心跳那一拍
+
+/// 排版钩子的重入深度（线程私有）。
+///
+/// Aevon(78) 那次「滑着滑着卡住、声音还在放」是钩子递归到栈满；0.0.88 加了安装期的
+/// 判断，但从没有人量过运行期到底有多深。这一次让它有读数：`d=` 在证词里，
+/// 栈溢出（SIGSEGV + 我们的 altstack）也会带着它一起落盘。
+static __thread int AevonDepth = 0;
+static volatile sig_atomic_t AevonDepthMax = 0;
+/// 这段时间里排版钩子被叫了多少次。卡死时这两个数回答的是同一个问题的两半：
+/// 「一次没回来」（`hook` 很小、`d` 正常）还是「回来了太多次」（`hook` 上千）。
+static volatile sig_atomic_t AevonHookCalls = 0;
+/// 正在处理的那一格 / 那块画面，只存尾数，只比较、永不 cast。
+static volatile uintptr_t AevonHangCell = 0;
+static volatile uintptr_t AevonHangBand = 0;
+/// 0.0.94 — 这一次写入是从哪条车道来的：0 = 整页 cell 自己的排版，
+/// 1 = 视频区（画面直接父视图）的排版，-1 = 心跳。
+/// Aevon(84) 的那一次致命写入只知道是 `via=layout`，分不出车道 —— 下一条 `video band`
+/// 行会带 `ln=` 与 `dr=`（写入那一刻翻页器是不是还在拖/惯性滑动），修复才有依据。
+static volatile sig_atomic_t AevonVideoLaneNow = -1;
+/// 主线程活口。一个 0.25 s 的 `dispatch_after_f` 链每拍 +1，与卡片、翻页器都无关 ——
+/// 它要回答的是「主线程还在不在跑这个队列」，不是「某个功能还在不在工作」。
+static volatile sig_atomic_t AevonMainBeat = 0;
 
 static int AevonEverHosted = 0;
 
@@ -2597,10 +2647,12 @@ static UIView *AevonPageCellOf(UIView *node, UIScrollView *view) {
     return nil;
 }
 
-static void AevonLayoutHook(id self, SEL _cmd) {
+static void AevonLayoutHookBody(id self, SEL _cmd) {
     AevonStep = AEVON_STEP_HOOK;
+    AevonSub = AEVON_SUB_ORIG;
     IMP orig = AevonLayoutOriginalFor(object_getClass(self));
     if (orig != NULL) ((void (*)(id, SEL))orig)(self, _cmd);
+    AevonSub = AEVON_SUB_ORIG_END;
     if (AevonVideoBusy) return;
     if (![self isKindOfClass:[UIView class]]) return;
     // 0.0.88 — 便宜的门全部排在扫描之前，而且第一道门就是「你到底是不是我们管的类」。
@@ -2615,6 +2667,7 @@ static void AevonLayoutHook(id self, SEL _cmd) {
     UIView *node = (UIView *)self;
     if ([node bounds].size.width < 120.0 || [node bounds].size.height < 120.0) return;
     BOOL videoLayer = AevonLayoutHookWants(object_getClass(node));
+    AevonVideoLaneNow = videoLayer ? 1 : 0;
     UIScrollView *view = AevonPagerGet();
     // 没有翻页器（还没认出来）就什么都不做：这里每帧都在跑，不能自己去认。
     if (view == nil || [view window] == nil) return;
@@ -2691,6 +2744,20 @@ static void AevonLayoutHook(id self, SEL _cmd) {
     }
 }
 
+/// 0.0.94 — 钩子的外壳只做两件事：数深度、数次数。
+///
+/// Aevon(84) 里「14 秒零输出」有两种形状，读数不一样：
+///   · **一次没回来** —— `hook` 是几十、`d` 是 1；
+///   · **回来了太多次** —— `hook` 上千、`d` 涨到几十（又一次自我递归）。
+/// 看门狗把这两个数写在 `app: hang` 那一行里，就不再需要靠猜。
+static void AevonLayoutHook(id self, SEL _cmd) {
+    AevonDepth += 1;
+    AevonHookCalls += 1;
+    if ((int)AevonDepthMax < AevonDepth) AevonDepthMax = AevonDepth;
+    AevonLayoutHookBody(self, _cmd);
+    AevonDepth -= 1;
+}
+
 /// 0.0.89 — 写一块画面。抽出来是因为现在有两条路要写它：
 /// 「刚认出来那一趟」（tick/layout 首次识别，顺带写读数）与「已经认过的页」
 /// （排版钩子每帧都能撞上，只做几何，不遍历）。
@@ -2741,12 +2808,21 @@ static void AevonVideoWrite(UIView *band, UIView *cell, CGRect rb,
     slot->writes += 1;
     slot->wroteTy = t.ty + gap;
     slot->wroteAt = now;
+    // 0.0.94 — 这三句是整份日志里唯一会改 App 视图几何的调用。Aevon(84) 里唯一一次
+    // `via=layout` 恰好就是死前最后一条读数，所以把「正在改哪一格、哪一块、改到哪
+    // 一步」留在全局里，主线程不回来时看门狗能替它念出来。
+    AevonHangCell = (uintptr_t)cell;
+    AevonHangBand = (uintptr_t)band;
     // 关掉隐式动画：App 的排版常常发生在动画块里，不关的话我们这一手会被它
     // 做成一段滑动，看上去还是「跳一下」，只是慢镜头。
+    AevonSub = AEVON_SUB_TX_BEGIN;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
+    AevonSub = AEVON_SUB_SET;
     [band setTransform:CGAffineTransformMakeTranslation(0, slot->wroteTy)];
+    AevonSub = AEVON_SUB_TX_END;
     [CATransaction commit];
+    AevonSub = AEVON_SUB_NONE;
     AevonWriteCounted();
     if (clip) {
         char line[210];
@@ -2763,13 +2839,18 @@ static void AevonVideoWrite(UIView *band, UIView *cell, CGRect rb,
     //     如果 `c=` 变了，那是换页 —— Aevon(79) 里正是分不清这两者，才只能靠猜。
     //   · `ty=` 是**写之前**画面自己的位移。App 若用 transform 摆位置，这个数不为 0。
     if (slot->writes <= 2) {
-        char body[320];
+        char body[380];
+        // 0.0.94 — 加 `ln=`（车道）与 `dr=`（写入那一刻翻页器是否在拖/惯性滑动）。
+        // Aevon(84) 的致命写入只有 `via=layout` 一个线索，分不清是「整页那一层」
+        // 还是「视频区那一层」，也分不清当时在不在滑动 —— 这两个数就是下一版的判据。
+        UIScrollView *pager = AevonPagerGet();
+        int drag = (pager != nil && ([pager isDragging] || [pager isDecelerating])) ? 1 : 0;
         snprintf(body, sizeof(body),
-                 "video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s via=%.8s c=%04lx b=%04lx ty=%.0f",
+                 "video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s via=%.8s c=%04lx b=%04lx ty=%.0f ln=%d dr=%d",
                  class_getName([band class]), rb.size.height, rb.origin.y,
                  want, gap, slot->writes, rname != NULL ? rname : "?", via,
                  AevonPtrTag(cell),
-                 AevonPtrTag(band), t.ty);
+                 AevonPtrTag(band), t.ty, (int)AevonVideoLaneNow, drag);
         AevonPageWrite(body);
     }
 }
@@ -2828,6 +2909,8 @@ static UIView *AevonVideoPathResolve(UIView *cell, const AevonVideoPath *path) {
 /// 返回值只表示「记账还能用」，不代表这一帧一定写了 transform。
 static BOOL AevonVideoKnownApply(UIView *cell, const char *via) {
     if (cell == nil) return NO;
+    AevonStep = AEVON_STEP_RESOLVE;
+    AevonSub = AEVON_SUB_RESOLVE;
     AevonVideoPage *page = AevonVideoPageFind((uintptr_t)cell);
     if (page == NULL || page->count <= 0) return NO;
     CGFloat cellH = [cell bounds].size.height;
@@ -2884,6 +2967,7 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
     NSMutableArray *players = [NSMutableArray array];
     // 排版钩子里只扫被排版的那一层（视频区自己，几十个视图），不扫整页 ——
     // 钩子每帧都可能跑，整页扫一遍会把滚动拖卡。
+    AevonSub = AEVON_SUB_COLLECT;
     NSUInteger walked = AevonCollectPlayers(hint != nil ? hint : cell, players);
     if (players.count == 0) {
         // 钩子挂在「画面的直接父视图」上时，这一层可能只是个容器（类名里没有
@@ -2914,8 +2998,10 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
             // 只认「铺在这张卡上」的那块画面区：小窗、画中画、列表里的小预览一律放过，
             // 否则会把某个角落的小播放器搬到卡片正中。
             CGFloat cellW = [cell bounds].size.width;
+            AevonSub = AEVON_SUB_PICK;
             CGRect cr = [candidate convertRect:[candidate bounds] toView:cell];
             if (cr.size.width < cellW * 0.8 || cr.size.height < cellH * 0.35) continue;
+            AevonSub = AEVON_SUB_BAND;
             UIView *band = AevonBandUnder(candidate);
             if (band == nil) continue;
             BOOL kin = NO;
@@ -3040,6 +3126,8 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
 /// 心跳那一份：找「用户正看着的那一页」，交给 `AevonVideoCenterFor`。
 /// `via=tick` 在这份日志里意味着**没赶上排版的时刻** —— 屏幕上会跳一下。
 static void AevonVideoCenter(void) {
+    AevonStep = AEVON_STEP_TICK;
+    AevonVideoLaneNow = -1;
     UIScrollView *view = AevonPagerGet();
     if (view == nil || [view window] == nil) return;
     CGRect page = [view bounds];
@@ -3566,10 +3654,15 @@ static void AevonRawNote(const char *line) {
 ///
 /// 写完把信号还原成默认再重新抛：这是**证词**，不是兜底。吞掉异常会让 App 带着
 /// 坏状态继续跑，比死一次更糟。
+///
+/// 0.0.94 — 行尾加 `d=`（重入深度）。Aevon(84) 那次进程被换掉却没有 `app: crash`，
+/// 两种可能各占一半：**栈溢出**（信号在已经爆掉的栈上投递，处理器跑不起来）与
+/// **被系统杀掉**（SIGKILL 谁都拦不住）。装上 altstack 之后前者一定会落到这一行上，
+/// `d=` 就是递归深度的实测值 —— 大数 = 又一次钩子自我递归，小数字 = 不是这条路。
 static void AevonSignalNote(int sig) {
-    char line[160];
-    snprintf(line, sizeof(line), "%ld app: crash sig=%d step=%d\n",
-             (long)time(NULL), sig, (int)AevonStep);
+    char line[200];
+    snprintf(line, sizeof(line), "%ld app: crash sig=%d step=%d sub=%d d=%d\n",
+             (long)time(NULL), sig, (int)AevonStep, (int)AevonSub, AevonDepth);
     AevonRawNote(line);
     signal(sig, SIG_DFL);
     raise(sig);
@@ -3588,10 +3681,27 @@ static void AevonExceptionNote(NSException *e) {
     AevonRawNote(line);
 }
 
+/// 0.0.94 — 栈溢出时用的备用栈。
+///
+/// 栈爆了之后再往那个栈上投递信号，处理器连自己的栈帧都放不下 —— 于是什么都没写，
+/// 我们只看到「pid 换了、没有证词」。`SA_ONSTACK` + 一块独立的 64 KB 把这条路补上：
+/// 溢出会变成一行 `app: crash sig=11 d=<爆炸前的深度>`。
+static char AevonAltStack[64 * 1024];
+
+static void AevonInstallAltStack(void) {
+    stack_t ss;
+    memset(&ss, 0, sizeof(ss));
+    ss.ss_sp = AevonAltStack;
+    ss.ss_size = sizeof(AevonAltStack);
+    ss.ss_flags = 0;
+    sigaltstack(&ss, NULL);
+}
+
 static void AevonInstallCrashNotes(void) {
     const char *path = AevonAppLogPath();
     if (path != NULL) snprintf(AevonCrashPath, sizeof(AevonCrashPath), "%s", path);
     NSSetUncaughtExceptionHandler(&AevonExceptionNote);
+    AevonInstallAltStack();
     int sigs[5] = {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE};
     for (int i = 0; i < 5; i++) {
         struct sigaction sa;
@@ -3600,10 +3710,135 @@ static void AevonInstallCrashNotes(void) {
         sigemptyset(&sa.sa_mask);
         // 交付前先把处理器还原成默认：`raise` 之后仍然按系统的规矩死，
         // 不改变任何人（包括系统的崩溃报告）看到的结局。
+        // 0.0.94 — `SA_ONSTACK`：只有段错误与总线错误会由「栈已经不够用」引起，
+        // 其余三个照旧用主栈（用备用栈反而拿不到现场）。
         sa.sa_flags = SA_RESETHAND;
+        if (sigs[i] == SIGSEGV || sigs[i] == SIGBUS) sa.sa_flags |= SA_ONSTACK;
         sigaction(sigs[i], &sa, NULL);
     }
 }
+
+// MARK: - 0.0.94 卡死（不是崩溃）的证词
+
+/// Aevon(84) 里最难解释的一件事：App 侧日志 14 秒零输出（`alive` 每秒一行，
+/// 从 t=11 直接断掉），宿主侧 `keepalive cs=2 sublayers=1` 却一切正常，随后
+/// `app: boot` 换了 pid，而 `app: crash` 一条都没有。
+///
+/// 这不可能是「慢」：`video load`（每 0.5 s 结算一次、门槛 40 ms）全程 0 条，
+/// 说明没有任何半秒被我们吃掉 40 ms 以上。只剩一种形状 —— **某一次调用没返回**。
+///
+/// 所以这一版加一个与主线程无关的看门狗线程：主线程每 0.25 s 给 `AevonMainBeat`
+/// 加一；看门狗每 0.5 s 看一次，连续 4 次没变（2 s）就把「停在哪一句 + 主线程 PC +
+/// 调用栈」写下来。写的时候主线程不用做任何事 —— 这正是 Aevon(84) 缺的那一块：
+/// 主线程不吭声的时候，谁能替它说话。
+static mach_port_t AevonMainMach = MACH_PORT_NULL;
+static void *AevonImageBase = NULL;
+static volatile sig_atomic_t AevonMainSeen = -1;
+static int AevonHangLines = 0;
+static int AevonHangStale = 0;
+
+/// 主线程的活口链。用 `dispatch_after_f`（不是 block）：这个文件在 Theos 下
+/// 没有开 -fblocks，而且这一条链要从构造函数起一直挂着，越简单越好。
+static void AevonMainBeatTick(void *context) {
+    (void)context;
+    AevonMainBeat += 1;
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), NULL, AevonMainBeatTick);
+}
+
+/// 主线程的 PC 与前几层返回地址。
+///
+/// 只做两件事：`thread_get_state` 读一份寄存器快照，然后顺着帧指针往上走 9 层，
+/// 每层用 `vm_read_overwrite` 读（读不到就停，不 cast、不解引用）。
+/// 拿到的是裸地址，所以构造时把本 dylib 的基址也写一行 `app: base=` ——
+/// 落到 `[base, base+size)` 里的帧就是**我们自己**的代码，其余是抖音/UIKit。
+static void AevonHangStack(void) {
+    if (AevonMainMach == MACH_PORT_NULL) return;
+    arm_thread_state64_t st;
+    mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(AevonMainMach, ARM_THREAD_STATE64,
+                         (thread_state_t)&st, &cnt) != KERN_SUCCESS) return;
+    unsigned long pc = (unsigned long)__darwin_arm_thread_state64_get_pc(st);
+    uint64_t fp = __darwin_arm_thread_state64_get_fp(st);
+    char line[420];
+    int n = snprintf(line, sizeof(line), "%ld app: hang pc=%lx",
+                     (long)time(NULL), pc);
+    for (int i = 0; i < 9 && fp != 0; i++) {
+        if (n < 0 || n > (int)sizeof(line) - 24) break;
+        uint64_t rec[2] = {0, 0};
+        vm_size_t got = 0;
+        kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)fp,
+                                             sizeof(rec), (vm_address_t)rec, &got);
+        if (kr != KERN_SUCCESS || got != sizeof(rec) || rec[1] == 0) break;
+        n += snprintf(line + n, sizeof(line) - n, " %lx", (unsigned long)rec[1]);
+        // 栈只会朝高地址走。不涨就是走到了别的帧（或者内存已经变了），停。
+        if (rec[0] <= fp) break;
+        fp = rec[0];
+    }
+    if (n > 0 && n < (int)sizeof(line) - 2) snprintf(line + n, sizeof(line) - n, "\n");
+    AevonRawNote(line);
+}
+
+static void AevonHangWatchFire(void) {
+    int beat = (int)AevonMainBeat;
+    if (beat != (int)AevonMainSeen) {
+        // 主线程在动：这个窗口是健康的，计数从头再来。
+        AevonMainSeen = beat;
+        AevonHangStale = 0;
+        AevonDepthMax = 0;
+        AevonHookCalls = 0;
+        return;
+    }
+    AevonHangStale += 1;
+    if (AevonHangStale < 4) return;       // 4 × 0.5 s 不动才算卡住
+    if (AevonHangLines >= 8) return;      // 一张卡最多留 8 行，够看趋势，不够撑满日志
+    AevonHangLines += 1;
+    char line[240];
+    snprintf(line, sizeof(line),
+             "%ld app: hang step=%d sub=%d d=%d hook=%d c=%04lx b=%04lx\n",
+             (long)time(NULL), (int)AevonStep, (int)AevonSub, (int)AevonDepthMax,
+             (int)AevonHookCalls, (unsigned long)(AevonHangCell & 0xffffUL),
+             (unsigned long)(AevonHangBand & 0xffffUL));
+    AevonRawNote(line);
+    AevonHangStack();
+    // 这一段 2 秒已经结算：下一行数的是新的 2 秒。
+    AevonHangStale = 0;
+}
+
+static void *AevonHangWatchLoop(void *arg) {
+    (void)arg;
+    for (;;) {
+        struct timespec ts;
+        ts.tv_sec = 0;
+        ts.tv_nsec = 500 * 1000 * 1000;
+        nanosleep(&ts, NULL);
+        AevonHangWatchFire();
+    }
+    return NULL;
+}
+
+static void AevonInstallHangWatch(void) {
+    // 构造函数跑在主线程上，所以这里拿到的就是这个进程的主线程。
+    AevonMainMach = pthread_mach_thread_np(pthread_self());
+    Dl_info info;
+    if (dladdr((void *)&AevonInstallHangWatch, &info) != 0) AevonImageBase = info.dli_fbase;
+    if (AevonImageBase != NULL) {
+        char line[120];
+        snprintf(line, sizeof(line), "%ld app: base=%lx\n",
+                 (long)time(NULL), (unsigned long)AevonImageBase);
+        AevonRawNote(line);
+    }
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t th;
+    if (pthread_create(&th, &attr, AevonHangWatchLoop, NULL) == 0) {
+        //  watchdog 起得来才有读数；起不来就在主线程上跑同一条链（会被卡死一起带走，
+        //  但至少不会假装自己在工作）。
+    }
+    pthread_attr_destroy(&attr);
+}
+
 
 /// 0.0.90 — 每个进程一行证词。
 ///
@@ -3631,6 +3866,12 @@ static void AevonAppBoot(void) {
     // 0.0.91 — 死亡证词。Aevon(81) 里抖音 3 分钟换了三个 pid，而日志里除了
     // `app: boot` 一行什么都没有：进程死得太快，我们连「它怎么死的」都答不出。
     AevonInstallCrashNotes();
+    // 0.0.94 — Aevon(84) 换了一种死法：**不吭声 14 秒再被换掉**，既没有崩，
+    // 也没有任何读数。上面那一组只会在「真的崩了」时落盘，所以再挂一条看门狗：
+    // 主线程 2 秒不动就由另一条线程替它说话，写「停在哪一句 + PC + 调用栈」。
+    AevonInstallHangWatch();
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 4)),
+                     dispatch_get_main_queue(), NULL, AevonMainBeatTick);
 
     // Both getters, both chained: a process that is not hosted keeps the
     // system's answers byte for byte.
