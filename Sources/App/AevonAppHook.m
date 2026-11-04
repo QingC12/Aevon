@@ -43,6 +43,14 @@
 //      one app's video sitting centred. It stays out.
 //    · Both getters chain to the original. If the hosted pair is not detected,
 //      behaviour is exactly the system's own.
+//    · 0.0.71 adds exactly one write into another app's own views: after the
+//      window height changes, a full-bleed pager's content offset is re-aligned
+//      to a whole page (`round(y / oldPage) * newPage`). That is a scroll
+//      position, not a measurement — the app's screen size, safe area, traits
+//      and layout are all still the system's own. It runs only in a process we
+//      have hosted, and the worst case is one wrong page, which a swipe undoes.
+//      The boundary that must not move again is the one 0.0.65 / 0.0.67 crossed:
+//      telling a process its screen is a different size.
 //    · One log line per process, and only when a promotion actually happened.
 //      Every app on the phone loads this dylib; a logger without a gate would
 //      cost more than the feature.
@@ -73,6 +81,11 @@ static IMP AevonOriginalApplicationState = NULL;
 static IMP AevonOriginalActivationState = NULL;
 static int AevonGate = -1;      // -1 unknown, 0 off, 1 on
 static int AevonLogged = 0;
+
+/// 这个进程被我们演过（或正在被演）。置上就不再清 —— 关卡之后那一次「交还整屏」
+/// 同样需要把翻页器对回去，那正是全屏截图里偏下的来源。定义在这里是因为
+/// `AevonCanvasIsShrunk`（几何判据）也要用它。
+static int AevonEverHosted = 0;
 
 /// The switch in Settings. Absent means on: the feature is the reason the card
 /// exists, and a card that cannot be touched is not a feature.
@@ -351,8 +364,15 @@ static void AevonDumpGeometry(const char *tag) {
 static char AevonGeomEarly[] = "early";
 static char AevonGeomLate[] = "late";
 
+/// 0.0.71 — 实现在下面（`AevonPageWrite` 那一族），这里只是先声明。
+static void AevonPagerReport(const char *reason);
+static void AevonPagerWatchArm(void);
+
 static void AevonGeomTick(void *context) {
     AevonDumpGeometry((const char *)context);
+    // 「late」那一拍顺带把翻页器与播放器各量一次：断层是打开几秒之后才看得出的，
+    // 1.2 s 那一拍量到的还是启动时那一版布局。
+    if (context == (void *)AevonGeomLate) AevonPagerReport("late");
 }
 
 static void AevonScheduleGeometry(void) {
@@ -393,6 +413,9 @@ static BOOL AevonCanvasIsShrunk(void) {
         [box getValue:&rect size:sizeof(rect)];
         if (rect.size.height > 100.0 && rect.size.height < screen.size.height - 40.0) {
             answer = YES;
+            // 0.0.71 — 这条判据同时是「我们演过这个进程」的记录点：翻页器的归位
+            // 从这里开始生效，没被卡片打开过的 App 永远不会置上这个位。
+            AevonEverHosted = 1;
             break;
         }
     }
@@ -416,7 +439,329 @@ static void AevonGeometryChance(void) {
     // 「画布比屏幕矮」是这块卡存在的直接后果，与谁写的 settings 无关。
     if (!AevonCanvasIsShrunk()) return;
     armed = 1;
+    AevonPagerWatchArm();
     AevonScheduleGeometry();
+}
+
+// MARK: - 0.0.71 翻页器的位置（断层）
+
+//
+// Aevon(61) 是第一次拿到抖音读数的日志（0.0.70 把桥接日志的落点挪进了沙盒）。
+// 结论并不是「尺寸不对」：
+//
+//   app: geom late screen=430x932@3 phys=430x932 scene=430x717 win=430x717 root=430x717
+//   app: geom late spine0 UILayoutContainerView 0,0,430x717
+//   …
+//   app: geom late peers7 n=4 UIView:430x717|AWEFeedTopBarContainer:430x44|UIImageView:430x717
+//
+// 三次开卡，主脊八层全是 430x717，连页面底图都是 430x717。页面高度等于窗口高度，
+// 系统没有欺骗它，我们也没有裁它。0.0.63 起追的那个「两块屏幕」不是这一条的主因。
+//
+// 「视频贴顶 + 中间断层」的正解在录屏第 27 秒那一帧：**同一个卡片里同时出现了两个
+// 帖子** —— 上面是「慢慢来太阳下山 / 辽宁朝阳 / 00:05」的尾巴，下面是「快递员先乘船
+// 过江…」的开头，中间是两页的交界。这不是排版，是翻页停在了两页之间。
+//
+// 位置是怎么错开的：这块卡的画布固定 430x717，但每开一次卡要把 App 的窗口从 932
+// 推到 717，关一次又还回 932。翻页器记的是「第 N 页 = N × 当时的窗口高」，那个数
+// 不会跟着窗口一起换算 —— 932 与 717 互质的那点余数让 offset 落在两页中间，于是
+// 上半页是上一帖的尾巴、下半页是下一帖的开头。全屏那张截图是同一件事的反向：
+// 卡里留下的 `N × 717` 回到 932 之后，顶部露出上一页的底部（量出来分界在 413.6 pt，
+// 即 `932 − 518`，518 正是那个没能被 932 整除的余数）。
+//
+// 修法只有一句：窗口高度变了之后，把翻页器重新对到整页上（`round(y/H)*H`）。
+// 这不是改系统的任何测量，只碰这个 App 自己的滚动视图；而且只在它被我们演过之后
+// 才碰 —— 没被卡片打开过的 App 一行都不会走到这里。0.0.65 / 0.0.67 拿整台手机的
+// 屏幕尺寸去换一个视频的位置，两次都换来「应用打不开、桌面黑屏、小组件空白」；
+// 这一次动的是别人自己的滚动条位置，最坏结果是跳错一页，滑一下就能回来。
+
+/// 这个进程被我们演过（或正在被演）。置上就不再清 —— 关卡之后那一次「交还整屏」
+/// 同样需要把翻页器对回去，那正是全屏截图里偏下的来源。
+static void AevonPageWrite(const char *body) {
+    char line[512];
+    time_t now = time(NULL);
+    struct tm stamp;
+    localtime_r(&now, &stamp);
+    snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d app: page %s\n",
+             stamp.tm_year + 1900, stamp.tm_mon + 1, stamp.tm_mday,
+             stamp.tm_hour, stamp.tm_min, stamp.tm_sec, body);
+    AevonAppLogWrite(line);
+}
+
+/// 「全屏翻页器」的判据：视口和窗口一样高（±12 pt），内容至少两屏。
+///
+/// 只认这一种，是因为只有它的「一页」等于「一屏」；评论列表、横向卡片流虽然也是
+/// 滚动视图，按高度取整会把它们推到莫名其妙的位置。
+///
+/// 归位用的是 `round(y / 旧页高) × 新页高`，不是 `round(y / 新页高) × 新页高`。
+/// 这一条是有区别的：932→717 时 offset 是 `3 × 932 = 2796`，按新页高取整得到
+/// `4 × 717 = 2868`（**甩到下一页**），按旧页高取整才是 `3 × 717 = 2151`
+/// （停在同一页）。用户的眼睛认的是「第几帖」，不是「第几个像素」。
+static CGFloat AevonLastPageHeight = 0.0;
+
+static NSInteger AevonSnapPages(const char *reason) {
+    UIApplication *application = [UIApplication sharedApplication];
+    if (application == nil) return -1;
+    NSInteger raw = 0;
+    NSInteger found = 0;
+    NSInteger fixed = 0;
+    CGFloat seenY = 0.0;
+    CGFloat seenNew = 0.0;
+    CGFloat seenH = 0.0;
+    for (UIScene *one in [application connectedScenes]) {
+        if (![one isKindOfClass:[UIWindowScene class]]) continue;
+        NSArray *wins = [(UIWindowScene *)one windows];
+        for (UIWindow *win in wins) {
+            CGFloat H = [win bounds].size.height;
+            if (H < 200.0) continue;
+            NSMutableArray *todo = [NSMutableArray arrayWithObject:win];
+            NSUInteger guard = 0;
+            while (todo.count > 0 && guard < 4000) {
+                UIView *node = [todo lastObject];
+                [todo removeLastObject];
+                guard += 1;
+                if ([node isKindOfClass:[UIScrollView class]]) {
+                    UIScrollView *view = (UIScrollView *)node;
+                    CGSize box = [view bounds].size;
+                    CGSize span = [view contentSize];
+                    if (fabs(box.height - H) <= 12.0 && span.height >= box.height * 1.6) {
+                        raw += 1;
+                        // 第二道：内容必须是**整页**的整数倍。长文章、网页、评论
+                        // 列表的内容高度是随便多少，它们不该被按屏取整 —— 那会把
+                        // 人的阅读位置挪走。翻页器的 contentSize 恰好是 N 个页高。
+                        // `isPagingEnabled` 的滚动视图直接放行：页高就是视口高。
+                        CGFloat pages = round(span.height / box.height);
+                        BOOL exact = (pages >= 2.0
+                                      && fabs(span.height - pages * box.height) <= 8.0);
+                        if (exact || [view isPagingEnabled]) {
+                            found += 1;
+                            CGFloat y = [view contentOffset].y;
+                            if (y > 1.0 && box.height > 100.0) {
+                                CGFloat page = AevonLastPageHeight;
+                                if (page < 200.0 || fabs(page - box.height) < 8.0) page = box.height;
+                                CGFloat target = round(y / page) * box.height;
+                                CGFloat cap = span.height - box.height;
+                                if (cap < 0.0) cap = 0.0;
+                                if (target < 0.0) target = 0.0;
+                                if (target > cap) target = cap;
+                                if (fabs(target - y) > 1.5) {
+                                    [view setContentOffset:CGPointMake([view contentOffset].x, target)
+                                                  animated:NO];
+                                    fixed += 1;
+                                    seenY = y;
+                                    seenNew = target;
+                                    seenH = page;
+                                }
+                            }
+                        }
+                    }
+                }
+                NSArray *kids = [node subviews];
+                if (kids.count > 0) [todo addObjectsFromArray:kids];
+            }
+        }
+    }
+    char body[240];
+    snprintf(body, sizeof(body), "%s pager=%ld fixed=%ld raw=%ld",
+             reason, (long)found, (long)fixed, (long)raw);
+    AevonPageWrite(body);
+    if (fixed > 0) {
+        snprintf(body, sizeof(body), "%s scroll y=%.0f -> %.0f page=%.0f",
+                 reason, seenY, seenNew, seenH);
+        AevonPageWrite(body);
+    }
+    return found;
+}
+
+/// 播放器那一层：`bounds` 尺寸 + 填充方式 + 片源尺寸。
+///
+/// 它回答的是另一个可能：「视频贴顶」也可能是播放器只占了一条，剩下的是背景。
+/// `b=430x717 grav=resizeAspectFill src=1080x1920` 说明画面本来就铺满整页，剩下的
+/// 只能是翻页位置；`b=430x242` 则是播放器自己的尺寸不对，两件事的修法完全不同。
+static void AevonDumpPlayers(const char *reason) {
+    UIApplication *application = [UIApplication sharedApplication];
+    if (application == nil) return;
+    SEL gravitySel = NSSelectorFromString(@"videoGravity");
+    NSInteger players = 0;
+    for (UIScene *one in [application connectedScenes]) {
+        if (![one isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *win in [(UIWindowScene *)one windows]) {
+            CALayer *root = [win layer];
+            if (root == nil) continue;
+            NSMutableArray *todo = [NSMutableArray arrayWithObject:root];
+            NSUInteger guard = 0;
+            while (todo.count > 0 && guard < 20000 && players < 2) {
+                CALayer *layer = [todo lastObject];
+                [todo removeLastObject];
+                guard += 1;
+                if ([layer respondsToSelector:gravitySel]) {
+                    CGSize box = [layer bounds].size;
+                    NSString *gravity = nil;
+                    @try {
+                        gravity = [layer valueForKey:@"videoGravity"];
+                    } @catch (NSException *exception) {
+                        (void)exception;
+                    }
+                    CGSize src = CGSizeZero;
+                    @try {
+                        id player = [layer valueForKey:@"player"];
+                        id item = [player valueForKey:@"currentItem"];
+                        id size = [item valueForKey:@"presentationSize"];
+                        if ([size isKindOfClass:[NSValue class]]) {
+                            [size getValue:&src size:sizeof(src)];
+                        }
+                    } @catch (NSException *exception) {
+                        (void)exception;
+                    }
+                    players += 1;
+                    char body[220];
+                    snprintf(body, sizeof(body), "%s player b=%.0fx%.0f grav=%s src=%.0fx%.0f",
+                             reason, box.width, box.height,
+                             [gravity isKindOfClass:[NSString class]]
+                                 ? [gravity UTF8String] : "?",
+                             src.width, src.height);
+                    AevonPageWrite(body);
+                }
+                NSArray *kids = [layer sublayers];
+                if (kids.count > 0) [todo addObjectsFromArray:kids];
+            }
+        }
+    }
+    if (players == 0) {
+        char body[120];
+        snprintf(body, sizeof(body), "%s player none", reason);
+        AevonPageWrite(body);
+    }
+}
+
+static void AevonPagerReport(const char *reason) {
+    if (!AevonAppHookAllowed()) return;
+    AevonSnapPages(reason);
+    AevonDumpPlayers(reason);
+}
+
+static char AevonPagerEarly[] = "on resize";
+static char AevonPagerLate[] = "on resize late";
+
+static void AevonPagerTick(void *context) {
+    const char *reason = (const char *)context;
+    if (!AevonEverHosted) return;
+    AevonSnapPages(reason);
+    // 只有第二拍才量播放器：它比找滚动视图贵得多（要下到图层树），而两次之间
+    // 只要有一份读数就够。
+    if (context == (void *)AevonPagerLate) AevonDumpPlayers(reason);
+}
+
+static IMP AevonOriginalViewTransition = NULL;
+
+/// `-[UIViewController viewWillTransitionToSize:withTransitionCoordinator:]`
+///
+/// 这是 App 自己知道「窗口尺寸变了」的唯一标准时机：卡片把 scene 从 932 推到 717
+/// （或还回去）时，根视图控制器一定会收到它。我们只在这里做一件事 —— 让系统先按
+/// 新尺寸排完（两拍：0.08 s 与 0.45 s，前者卡在布局之后，后者接住 App 自己的
+/// 二次布局），再把翻页器对回整页。
+static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) {
+    UIViewController *vc = (UIViewController *)self;
+    // 旧高度必须在**调用原实现之前**取：这一拍 view 还是旧的尺寸，而它正是
+    // 翻页器记「第 N 页」时用的那个数。
+    CGFloat before = 0.0;
+    if ([vc isViewLoaded]) {
+        UIView *view = [vc view];
+        UIWindow *win = [view window];
+        // 只认根视图控制器：子控制器也会收到这个回调，用它们的高度算页高会把
+        // 一次尺寸变化算成好几种比例。
+        if (win != nil && [win rootViewController] == vc) {
+            before = [view bounds].size.height;
+        }
+    }
+    if (AevonOriginalViewTransition != NULL) {
+        ((void (*)(id, SEL, CGSize, id))AevonOriginalViewTransition)(self, _cmd, size, coordinator);
+    }
+    if (before < 200.0) return;
+    if (fabs(before - size.height) < 8.0) return;
+    if (!AevonAppHookAllowed()) return;
+    UIScreen *screen = [UIScreen mainScreen];
+    CGFloat full = screen != nil ? [screen bounds].size.height : 0.0;
+    // 「被缩小」这件事本身就是证据，不必等前面先量过一次 —— 第一次开卡时没人
+    // 告诉过我们这是不是卡，但 `new < 屏幕 - 40` 已经说明了。
+    if (full > 200.0 && size.height < full - 40.0) AevonEverHosted = 1;
+    if (!AevonEverHosted) return;
+    AevonLastPageHeight = before;
+    char body[160];
+    snprintf(body, sizeof(body), "transition h=%.0f last=%.0f full=%.0f",
+             size.height, before, full);
+    AevonPageWrite(body);
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), (void *)AevonPagerEarly, AevonPagerTick);
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), (void *)AevonPagerLate, AevonPagerTick);
+}
+
+// MARK: - 0.0.71 兜底：卡片开着的时候盯着窗口高
+
+//
+// 上面那个钩子有一个不确定的地方：它挂在 `UIViewController` 的基础实现上。哪一个
+// App 的根控制器重写了 `viewWillTransitionToSize:withTransitionCoordinator:`，
+// 基础实现就不会被调用，钩子也就不会响 —— 而抖音的根是一个自定义的容器控制器，
+// 正是最可能重写的那一类。这不是可以「试试看」的地方：错了就等于这一版什么都没做，
+// 而用户会以为又白改了一次。
+//
+// 所以再加一条不依赖继承关系的路：卡片开着的时候，每 0.15 s 看一眼窗口高度。
+// 它只读一个 `bounds.size.height`，两次之间没有变化就直接返回；真变了（932↔717
+// 是 215 pt，远大于 24 pt 的容差）才做一次归位。
+//
+// 容差 24 pt 是给宿主自己的那一手留的：`AevonNudgeSceneFrame` 会把 scene 写成
+// 716 再写回 717（差 1 pt），那是为了让 App 重排，不该被当成翻页位置变化。
+//
+// 生命周期：只在「已经演过这个进程」之后跑，最多 1200 拍（约 3 分钟），关卡之后
+// 还会跑一拍把翻页器按整屏对回去 —— 全屏那张截图里顶上露出上一页，就是这一拍
+// 之前的状态。
+
+static int AevonWatchTicks = 0;
+static CGFloat AevonWatchHeight = 0.0;
+static int AevonWatchArmed = 0;
+
+static void AevonPagerWatchTick(void *context) {
+    (void)context;
+    AevonWatchTicks += 1;
+    if (AevonWatchTicks > 1200) return;
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), NULL, AevonPagerWatchTick);
+
+    UIApplication *application = [UIApplication sharedApplication];
+    UIScreen *screen = [UIScreen mainScreen];
+    CGFloat full = screen != nil ? [screen bounds].size.height : 0.0;
+    if (application == nil || full < 200.0) return;
+    CGFloat height = 0.0;
+    for (UIScene *one in [application connectedScenes]) {
+        if (![one isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *win in [(UIWindowScene *)one windows]) {
+            CGFloat h = [win bounds].size.height;
+            if (h > 200.0 && (height < 200.0 || [win isKeyWindow])) height = h;
+        }
+    }
+    if (height < 200.0) return;
+    if (height < full - 40.0) AevonEverHosted = 1;
+    if (!AevonEverHosted) return;
+    if (AevonWatchHeight < 200.0) {
+        // 第一拍：只知道「现在是多高」，不知道上一版是多少，先按当前页高对一次。
+        // 这一拍不量播放器 —— 它出现在启动后 150 ms，图层树还在长，走一遍
+        // 两万层等于在首帧前面塞一次卡顿。
+        AevonWatchHeight = height;
+        AevonSnapPages("watch first");
+        return;
+    }
+    if (fabs(height - AevonWatchHeight) <= 24.0) return;
+    // 上一拍的高度就是翻页器记忆里的「页高」—— 这一句是整件事的关键。
+    AevonLastPageHeight = AevonWatchHeight;
+    AevonWatchHeight = height;
+    AevonPagerReport("watch");
+}
+
+static void AevonPagerWatchArm(void) {
+    if (AevonWatchArmed) return;
+    AevonWatchArmed = 1;
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), NULL, AevonPagerWatchTick);
 }
 
 /// `UIApplicationStateActive`. UIKit checks this before it lets a window see
@@ -503,6 +848,15 @@ static void AevonAppBoot(void) {
     if (activation != NULL) {
         AevonOriginalActivationState = method_getImplementation(activation);
         method_setImplementation(activation, (IMP)AevonActivationState);
+    }
+
+    // 0.0.71 — 窗口尺寸变化的那一声。装不上不算错：日志里没有 `app: page
+    // transition` 就说明这条路没通，下一轮改用别的入口，而不是接着猜。
+    SEL transitionSel = sel_registerName("viewWillTransitionToSize:withTransitionCoordinator:");
+    Method transition = class_getInstanceMethod([UIViewController class], transitionSel);
+    if (transition != NULL) {
+        AevonOriginalViewTransition = method_getImplementation(transition);
+        method_setImplementation(transition, (IMP)AevonViewTransition);
     }
 
     // 0.0.68 — 这里曾经又一次装上 `UIScreen.bounds`（0.0.67），真机反馈和 0.0.65

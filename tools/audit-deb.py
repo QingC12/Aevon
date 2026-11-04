@@ -549,7 +549,27 @@ def main():
                       # 0.0.70 — 桥接自己的落点。没有它，这个文件里所有读数在沙盒
                       # App 中都写不出去（`fopen("/var/mobile/Aevon.log")` 在沙盒
                       # 里必然失败），量尺等于白跑。
-                      b"aevon-app.log"):
+                      b"aevon-app.log",
+                      # 0.0.71 — 断层那一刀的四个证据。Aevon(61) 的读数已经排除
+                      # 「尺寸不对」（主脊八层全是 430x717），剩下的只能是翻页位置：
+                      #   · `app: page ` = 这一组读数的通道（和 `app: geom` 并列）；
+                      #   · `pager=%ld fixed=%ld raw=%ld` = 找到几个翻页器、改了几
+                      #     个、以及「视口等高」的候选总数 —— `pager=0` 也是一个
+                      #     有用的答案（说明页面不是按窗口高度切的）；
+                      #   · `scroll y=… -> … page=…` = 真正挪动过的那一次，带前后
+                      #     两个数，下一次日志可以自己复核算术；
+                      #   · `player b=… grav=… src=…` = 播放器那一层，用来分开
+                      #     「翻页错位」和「播放器只有一条」这两种完全不同的成因。
+                      b"app: page ",
+                      b" pager=%ld fixed=%ld raw=%ld",
+                      b"scroll y=%.0f -> %.0f page=%.0f",
+                      b"player b=%.0fx%.0f grav=%s src=%.0fx%.0f",
+                      b"videoGravity",
+                      # 兜底：不依赖谁的子类重写了过渡回调，每 0.15 s 看一眼窗口高。
+                      b"transition h=%.0f last=%.0f full=%.0f",
+                      b"watch first",
+                      b"viewWillTransitionToSize:withTransitionCoordinator:",
+                      b"setContentOffset:"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")
         # 0.0.68 — 反向断言，比上面那组重要得多。这一栏里的每一条都对应一次真机
