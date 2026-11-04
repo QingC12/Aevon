@@ -117,6 +117,21 @@ long AevonWakeCount(void);
 /// 按整场会话计的额度会在几十次切换之后用完，那之后修好的东西自己就过期了。
 void AevonWakeReset(void);
 
+/// 0.0.55 — 浮窗期间禁止空闲熄屏（移植自旧版 AevonNoAutoLockV248/V249 + AevonIdleRelV269）。
+///
+/// `Begin` 记下 `isIdleTimerDisabled` 的原值并打第一拍；`Kick` 每 20 秒一次
+/// （`resetIdleTimer` + `resetIdleTimerAndUndim:` + 断言 acquire）；
+/// `End` 释放断言并写回原值 —— 只放断言不写回、或只写回不放断言，都是旧版踩过的坑。
+///
+/// 返回位掩码：1 = resetIdleTimer，2 = resetIdleTimerAndUndim:，
+/// 4 = isIdleTimerDisabled 写入，8 = 断言通道命中，16 = 私有 reset 变体。
+/// mask 恒为 4 就是「这台机器上协调器一个都没找到」，只能靠 UIApplication 兜底。
+NSInteger AevonIdleTimerBegin(void);
+NSInteger AevonIdleTimerKick(void);
+NSInteger AevonIdleTimerEnd(void);
+/// 这一张卡片里 kick 被调用了几次（判据：卡片开满一分钟应该 ≥ 3）。
+long AevonIdleTimerCount(void);
+
 /// 0.0.28 — `- (void)name:(BOOL)`. 1 for "ran", 0 for "no such setter".
 NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL value);
 

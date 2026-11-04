@@ -283,6 +283,13 @@ enum AevonRingGrip {
     static func barTouch(phase: Int, at point: CGPoint, stamp: TimeInterval) -> Bool {
         return barTouchHandler?(phase, point, stamp) ?? false
     }
+
+    /// 0.0.55 — 浮窗（卡片）此刻在屏上。由 SceneProbe 在开卡/关卡时写。
+    ///
+    /// 右缘那条「贴边左滑呼盘」的触摸带（`edgePad`，15 pt × 底部 35%）与浮窗外侧
+    /// 手势环在右下角是重叠的：卡片贴右缘时，拖卡片底角的手会先落在带宽里。
+    /// 卡片开着就让这条带闭嘴 —— 换 App 还有竖条那条路，而拖卡片没有第二条路。
+    static var cardUp = false
 }
 
 /// The old window manager, reduced to the two things the menu calls:

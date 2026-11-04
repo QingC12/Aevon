@@ -1193,10 +1193,19 @@ zStackParticipantDidChange:
             if closed { return }
             closed = true
             stopped = true
+            // 0.0.55 — 先把空闲熄屏还原，再做别的。反过来的话，中间任何一次
+            // 提前 return（deactivate 抛异常、presenter 已失效）都会让断言留在
+            // 系统里 —— 浮窗关掉之后手机不再自动锁屏，比不修更糟。
+            let idleRelease = AevonIdleTimerEnd()
+            Log.write("win: idle timer released mask=" + String(idleRelease)
+                      + " kicks=" + String(AevonIdleTimerCount()))
             let door = AevonPushBackground(scene)
             _ = AevonCallVoid(presenter, "deactivate")
             _ = AevonCallVoid(presenter, "invalidate")
             FloatHost.hide()
+            // 0.0.55 — 卡片没了，右缘带重新接触摸。
+            AevonRingGrip.cardUp = false
+            RingHost.shared.setEdgeActive(true)
             AevonHookDisarm()
             clearHosted()
             cardUp = false
@@ -1226,7 +1235,16 @@ zStackParticipantDidChange:
             return
         }
         cardUp = true
+        // 0.0.55 — 卡片在屏时右缘带闭嘴（与浮窗外侧手势环在右下角重叠）。
+        AevonRingGrip.cardUp = true
+        RingHost.shared.setEdgeActive(false)
         Log.write("win: window up level=" + String(format: "%.0f", host.level))
+
+        // 0.0.55 — 浮窗期间禁止空闲熄屏。卡片真的起来了才 hold：`show` 失败
+        // 的时候这张卡没有任何东西在播，压住锁屏只是替用户关掉了省电。
+        let idleMask = AevonIdleTimerBegin()
+        Log.write("win: idle timer held mask=" + String(idleMask)
+                  + " saved=" + (idleMask & 4 != 0 ? "app" : "none"))
 
         mark("APP-activate")
         let ran = AevonCallVoid(presenter, "activate")
@@ -1268,12 +1286,27 @@ zStackParticipantDidChange:
         // the one thing that tells them apart — it moves only when the system runs
         // its own deactivation path.
         var deact = AevonDeactCount()
+        // 0.0.55 — 上次重打空闲计时的时间。20 秒 ≪ 系统最短的「自动锁定 30 秒」，
+        // 又不会每秒烧一次私有 API（旧版 V0.2.49 定的频率，原样保留）。
+        var idleAt = Date()
+        var idleProbe = 0
         // The clock has to be able to stop from the outside, and 0.0.33 gives it
         // a second reason to: the card no longer disappears on a timer, so the
         // only thing that ends this loop is `closeCard` setting `stopped`.
         keep = {
             if stopped { return }
             beat += 1
+            // 0.0.55 — 空闲熄屏的续命拍。放在节拍最前面：这一条与画面、与
+            // settings 都没有关系，后面的任何一个 guard 都不该把它挡掉。
+            if Date().timeIntervalSince(idleAt) >= 20 {
+                idleAt = Date()
+                let idleMask = AevonIdleTimerKick()
+                if idleProbe < 8 {
+                    idleProbe += 1
+                    Log.write("win: idle timer kick mask=" + String(idleMask)
+                              + " n=" + String(AevonIdleTimerCount()))
+                }
+            }
             let live = value(of: scene, "settings")
             let fg = live.map { AevonBoolOf($0, "isForeground") } ?? -1
             let bg = live.map { AevonBoolOf($0, "isBackgrounded") } ?? -1

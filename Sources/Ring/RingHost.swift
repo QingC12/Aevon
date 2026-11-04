@@ -116,6 +116,19 @@ final class RingHost: NSObject {
     private var rawOpenedHere = false
     private var barProbe = 0
 
+    /// 0.0.55 — 右缘左滑呼盘的触摸带。旧版 `AevonRingGrip.bandRect` 的同一套几何：
+    /// 贴右缘 15 pt 宽 × 屏幕底部 35 % 高。旧版在这台 17.3.1 上做过 49 次 hold
+    /// 的落点统计（12~15 pt 占 84%，0~6 pt 一次都没有），15 pt 是「拇指顶在屏幕外
+    /// 时手指中心真正落得到的地方」—— 不是拍出来的值，不要凭手感改。
+    private var edgePad: UIView?
+    /// 0.0.55 — 上一次由边缘带呼盘的时间。0.6 s 节流，旧版原值：一次呼盘之后
+    /// 手指往往还贴着边，没有它，收起的圆盘会被同一段滑动立刻再喊出来。
+    private var edgeAt: CFTimeInterval = 0
+    /// 旧版常量：带宽 15 pt / 底部 35 % / 节流 0.6 s（zoneWDefault / zoneHDefault）。
+    private let edgeWidth: CGFloat = 15
+    private let edgeHeightPercent: CGFloat = 35
+    private let edgeInterval: CFTimeInterval = 0.6
+
     private var config = RingConfig()
     private var expanded = false
 
@@ -195,6 +208,7 @@ final class RingHost: NSObject {
         }
 
         addBar()
+        addEdgePad()
         layout()
         startOverlayWatch()
         syncOverlayVisibility()
@@ -230,9 +244,11 @@ final class RingHost: NSObject {
 
         bar?.removeFromSuperview()
         barPad?.removeFromSuperview()
+        edgePad?.removeFromSuperview()
         bar = nil
         barBlur = nil
         barPad = nil
+        edgePad = nil
         window?.isHidden = true
         window = nil
         Log.write("ring: removed from desktop (switch off)")
@@ -351,6 +367,13 @@ final class RingHost: NSObject {
         // 把环上的触摸吃掉了，环的右半边正好压在这里；没有这条线，卡片开着时
         // 点竖条会被当成拖浮窗（见 AevonRingGrip.summonRect）。
         AevonRingGrip.summonRect = barPad?.frame ?? .zero
+        // 0.0.55 — 右缘带：贴右缘 15 pt，从底部往上 35 %。卡片在屏时收回触摸
+        //（`AevonRingGrip.cardUp`），否则右下角拖卡片的手会先落进带子里。
+        let edgeH = bounds.height * edgeHeightPercent / 100
+        edgePad?.frame = CGRect(x: bounds.maxX - edgeWidth,
+                                y: bounds.maxY - edgeH,
+                                width: edgeWidth, height: edgeH)
+        edgePad?.isUserInteractionEnabled = !AevonRingGrip.cardUp
         window.rootViewController?.view.frame = bounds
         paintBar()
 
@@ -441,6 +464,85 @@ final class RingHost: NSObject {
         barBlur = blur
 
         paintBar()
+    }
+
+    /// 0.0.55 — 右缘那条「贴边左滑呼盘」的带子（移植旧版 V0.3.28 AevonEdgeBandOnly328）。
+    ///
+    /// 为什么不是 `UIPanGestureRecognizer`：旧版自建腿用的就是系统那个
+    /// `UIScreenEdgePanGestureRecognizer`（`edges = .right`），它自己只认「从屏幕
+    /// 边缘起手 + 横向划」—— 竖着划会识别失败并把手指还给 App，这正是我们要的
+    /// 那一半放行。换成通用 pan，右缘上下滚动也会被算成呼盘。
+    ///
+    /// 它和竖条的 `barPad` 是两块互不相干的地盘：竖条在屏幕高度 50 % 附近，
+    /// 这条在底部 35 %，各挂各的识别器，谁都不改谁的帧。
+    private func addEdgePad() {
+        guard let host = window?.rootViewController?.view else { return }
+        let pad = UIView(frame: .zero)
+        pad.backgroundColor = .clear
+        pad.isUserInteractionEnabled = true
+        let pan = UIScreenEdgePanGestureRecognizer(target: self,
+                                                   action: #selector(handleEdgePan(_:)))
+        pan.edges = .right
+        pan.maximumNumberOfTouches = 1
+        pad.addGestureRecognizer(pan)
+        host.addSubview(pad)
+        edgePad = pad
+    }
+
+    /// 0.0.55 — 浮窗开/关时同步右缘带能不能接触摸。
+    ///
+    /// 只在 `layout()` 里同步是不够的：卡片是在两次布局之间打开的，那段时间
+    /// 边缘带还开着，右下角的手会先落进带子里 —— 守卫里那句 `cardUp` 能拦住
+    /// 呼盘，拦不住「这根手指已经被吃掉」。
+    func setEdgeActive(_ active: Bool) {
+        edgePad?.isUserInteractionEnabled = active
+    }
+
+    /// 右缘的滑动。语义与竖条那条完全一致（落指 → 圆盘从这一点长出来 → 跟随 →
+    /// 抬手定生死），只是入口不同：竖条要**按住它**，这里只要**贴着右缘往左划**。
+    ///
+    /// 旧版的经验值原样保留：带内不看方向、移动就召唤，0.6 s 节流。
+    @objc private func handleEdgePan(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        guard let window = window, let host = window.rootViewController?.view else { return }
+        let point = gesture.location(in: window)
+        switch gesture.state {
+        case .began:
+            // 卡片在屏：这条带闭嘴（它与浮窗外侧手势环在右下角重叠）。
+            guard !AevonRingGrip.cardUp else { return }
+            let now = CACurrentMediaTime()
+            guard now - edgeAt > edgeInterval else { return }
+            edgeAt = now
+            barHeld = true
+            if let menu = AevonRingMenu.presented {
+                menu.beginRemoteTracking(at: point, source: "edge")
+            } else {
+                expanded = true
+                AevonRingMenu.presentTracking(in: host, at: point, source: "edge")
+                Log.write("ring: edge swipe open at "
+                          + String(format: "%.0f,%.0f", point.x, point.y)
+                          + " band=" + String(format: "%.0f", edgeWidth))
+            }
+
+        case .changed:
+            guard barHeld else { return }
+            AevonRingMenu.presented?.remoteMoved(to: point, source: "edge")
+
+        case .ended, .cancelled, .failed:
+            guard barHeld else { return }
+            barHeld = false
+            expanded = false
+            guard let menu = AevonRingMenu.presented else { return }
+            if gesture.state == .ended {
+                menu.remoteLift(at: point, source: "edge")
+            } else {
+                menu.remoteCancelled(source: "edge")
+            }
+            Log.write("ring: edge swipe released at "
+                      + String(format: "%.0f,%.0f", point.x, point.y))
+
+        default:
+            break
+        }
     }
 
     /// The disc hides the bar while it is open and asks for it back on the way

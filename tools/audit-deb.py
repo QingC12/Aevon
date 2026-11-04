@@ -630,6 +630,19 @@ def main():
                   # 不再有 `close button` 这个理由。
                   b" topbar_cropped_src=",
                   b" topbar_kept_pt=",
+                  # 0.0.55 — 右缘左滑呼盘（移植旧版 bandRect：贴右缘 15 pt × 底部
+                  # 35 %）。`edge swipe open at` 是它真的召回了圆盘，`edge swipe
+                  # released` 是抬手；两条都没有 = 识别器没认领，而不是「带子太窄」。
+                  b"ring: edge swipe open at ",
+                  b"ring: edge swipe released at ",
+                  # 0.0.55 — 浮窗期间禁止空闲熄屏（移植旧版 idle 三通道）。
+                  # `held mask=` 是打开时的位掩码（8 = 断言通道命中，4 = 只有
+                  # UIApplication 兜底），`kick mask=` 是 20 秒一次的续命拍，
+                  # `released mask=` 是关窗时的释放 —— 少了最后一条就是旧版
+                  # Aevon(41) #7「关窗后不再自动锁屏」的原样重演。
+                  b"win: idle timer held mask=",
+                  b"win: idle timer kick mask=",
+                  b"win: idle timer released mask=",
                   # 0.0.47 — 手势面搬进自己的窗口（statusBar+1，见
                   # FloatHost.makeBand）。两条：`band window up level=` 证明那一
                   # 层真的建起来了，`band probe` 是该窗口收到的每一次命中提问（点
