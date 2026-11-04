@@ -1391,7 +1391,7 @@ NSInteger AevonIdleTimerKick(void) {
                         if (gAevonIdleAssertions[i] == assertion) { known = YES; break; }
                     }
                     if (!known) {
-                        gAevonIdleAssertions[gAevonIdleAssertionCount++] = objc_retain(assertion);
+                        gAevonIdleAssertions[gAevonIdleAssertionCount++] = (id)CFRetain((CFTypeRef)assertion);
                     }
                 }
             }
@@ -1436,7 +1436,7 @@ NSInteger AevonIdleTimerEnd(void) {
                 mask |= 1;
                 break;
             }
-            objc_release(assertion);
+            CFRelease((CFTypeRef)assertion);
         }
         gAevonIdleAssertionCount = 0;
     } @catch (NSException *exception) {
