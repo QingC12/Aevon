@@ -45,9 +45,12 @@ import UIKit
 ///
 /// 0.0.54 — 画面里不再有自己的控件。右上角那颗 ✕ 撤了：它压在 App 画面右上角，
 /// 和 App 自己的顶栏挤在一起，既挡内容又不好看；关窗仍有底边上滑与十分钟上限。
-/// 同时把 App 自己的顶栏（状态栏 + 导航栏）裁掉，只在卡片顶端留 `keepTop` 那么
-/// 一段画面 —— 裁干净会让内容贴着圆角开始，那是「不美观」的来源。裁切只改显示，
-/// 不改 scene 的坐标空间：视图整体上移，卡片上沿把它吃掉。
+///
+/// 0.0.60 — 那刀裁切撤了。裁切能去掉顶栏，但切掉的东西不会自己回来：App 仍是
+/// 按整屏排好的，卡片只是它的一截。改比例是另一条路 —— 承载面按小胖屏的尺寸
+/// （5 : 3）重新布局，App 会排一版适合这个窗口的界面，顶栏、底栏、抖音右侧
+/// 那一列都在里面（见 `fatScene`）。这也是母本的做法：她的窗口比例是设置项
+/// （`CustomFrameInit` / `RightCornerTrim` / `LeftCornerTrim`），不是屏幕比例。
 final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     static let shared = FloatHost()
 
@@ -77,12 +80,18 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// The scene's own size. Every resize is this shape, scaled — the card never
     /// gets an aspect the picture does not have.
     ///
-    /// 0.0.54 — `natural` 仍然是 scene 的原始尺寸（画面自身的坐标空间不能动，
-    /// 见 `followContent`），`visible` 是**裁掉顶栏之后**可见的那一块，卡片与
-    /// 缩放比都按它算。两者分开，是因为裁切只影响显示，不影响坐标空间。
+    /// 0.0.60 — `natural` 现在是**小胖屏的逻辑尺寸**（`fatScene` 算出来的那块，
+    /// 5 : 3），不是屏幕尺寸。承载面的 `bounds` 就是它，所以 App 按这个尺寸
+    /// 排版；卡片与缩放比都按它算。拖大拖小走 transform，`natural` 不变 ——
+    /// 窗口在手上被拉扯的时候不该让 App 每一帧重排一次。
+    ///
+    /// `visible` 与它相等（不再裁顶栏），留成两个名字是因为 `followContent` /
+    /// `recenterCard` 都读 `visible`：语义上一个是「坐标空间」，一个是「看得见的
+    /// 那一块」，0.0.60 之后两者重合。
     private var natural: CGSize = .zero
     private var visible: CGSize = .zero
-    /// 0.0.54 — 从画面顶部裁掉的源坐标高度（状态栏 + App 顶栏，见 `show`）。
+    /// 0.0.54 的顶栏裁切量。0.0.60 起恒为 0（改比例而不是裁画面），保留这个量
+    /// 是因为两条对齐路径都按它算中心，0 就是「不用对齐」。
     private var cropTop: CGFloat = 0
 
     /// 0.0.58 — 卡片是不是在等第一帧。
@@ -132,19 +141,50 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 0.0.48 — 原来这里是 `edge = 2`，卡片那圈白描边。描边撤了（见 `show`），
     /// 常量一起撤，免得留一个没人读的 2。
     private let margin: CGFloat = 8
-    /// 0.0.54 — 顶栏。
+    /// 0.0.60 — 小胖屏的宽高比（高 : 宽），5 : 3。
     ///
-    /// 卡片里显示的是 App 的真实画面，于是 App 自己的状态栏和导航栏也跟着进来
-    /// 了：时间、电量、标题、返回键，在 320 pt 宽的卡片上全是噪声（Aevon(51)
-    /// 的验收图上最显眼的就是这一条）。裁掉它，但**不裁干净**：留 `keepTop`
-    /// 那么高的一段画面在顶上，卡片的内容就不会贴着圆角开始 —— 那正是「顶栏
-    /// 留一些，不然不美观」的字面意思。
+    /// 母本没有「裁掉顶栏」这种东西。她的三个设置项在二进制里连成一串：
+    /// `CustomFrameInit`（修改窗口比例）、`RightCornerTrim`（**点击切换基础窗口
+    /// 比例**）、`LeftCornerTrim`（**滑动进一步调整比例, 长按反向调整**），
+    /// 另一个 `HeightFraction`（高度系数）单独管大小。也就是说：她的窗口
+    /// 比例是一个可以选的量，不是屏幕的比例。
     ///
-    /// `chrome` 是导航栏的标准高度（44 pt，所有系统导航栏都是这个数）。状态栏
-    /// 高度按设备问，见 `safeTop`。两者相加就是「App 顶栏」在源坐标里的高度，
-    /// 不同 App 会略有出入，裁多几 pt 只是少显示几行，不会伤到卡片。
-    private let keepTop: CGFloat = 14
-    private let chrome: CGFloat = 44
+    /// 内容之所以完整，是因为 `setResizesHostedContext:` —— 承载面按**窗口自己
+    /// 的尺寸**重新布局，App 会排一版适合这个窗口的界面。0.0.54 那刀（按原比
+    /// 例布局、再把高度减掉顶栏）是「从整屏画面里切一截」，切掉的东西不会自己
+    /// 回来；换比例是「让 App 重新画一张」，顶栏、底栏、抖音右侧那一列都在新布
+    /// 局里。
+    ///
+    /// 12 : 7 是另一个候选（略瘦一点，高 12 宽 7）。改这一行即可。
+    static let fatAspect: CGFloat = 5.0 / 3.0
+
+    /// 小胖屏的逻辑尺寸。按屏幕的实际尺寸算，不写死点数：
+    ///
+    ///   高度 = 屏幕高 × 高度系数（沿用 `CardLayout` 的那个数）
+    ///   宽度 = 高度 ÷ fatAspect（5 : 3 时是 0.6）
+    ///
+    /// 宽度先受屏幕宽度的 92 % 约束，再由屏幕高度封顶 —— 两条都会在窄屏或
+    /// 矮屏上生效，所以同一份代码在 4.7 寸和 6.9 寸上都是「小胖屏」，不是
+    /// 在一种屏幕上刚好。
+    static func fatScene(in screen: CGSize, heightFraction: CGFloat) -> CGSize {
+        guard screen.width > 100, screen.height > 200 else {
+            return CGSize(width: 347, height: 578)
+        }
+        let widest = screen.width * 0.92
+        let tallest = screen.height - 96
+        let fraction = Swift.min(0.80, Swift.max(0.30, heightFraction))
+        var h = screen.height * fraction
+        var w = h / fatAspect
+        if w > widest {
+            w = widest
+            h = w * fatAspect
+        }
+        if h > tallest {
+            h = tallest
+            w = h / fatAspect
+        }
+        return CGSize(width: w.rounded(), height: h.rounded())
+    }
     /// 0.0.49 — 卡片下面那层柔光。跟着 card 的 frame 与圆角走。
     private var glow: UIView?
     /// 0.0.45 — 吸附 (docked) size, from the master's 「贴边缩小」.
@@ -222,30 +262,29 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // A card that shows a phone is a card shaped like a phone: the width is
         // chosen, the height follows the picture's own aspect (0.0.24's fixed
         // 320x480 card is what put black bars at the sides).
-        let natural = view.bounds.size
-        let source = (natural.width > 16 && natural.height > 16) ? natural : window.bounds.size
-
-        // 0.0.54 — 裁掉 App 顶栏，留一段过渡（见 `keepTop` / `chrome`）。
+        // 0.0.60 — 承载面按小胖屏的尺寸重新布局。
         //
-        // 先把视图放回 1:1 再读 `safeAreaInsets`：那是源坐标里的安全区，转过
-        // 一次 scale 之后读到的就是缩放后的数了。
+        // 原来这里用的是 scene 自己的尺寸（整块屏幕），卡片是它的等比缩小 ——
+        // 卡片于是永远和手机一样瘦长（430×932 的 0.62 高 = 267×578），内容只是
+        // 变小。母本不是这样：她用 `setResizesHostedContext:` 让承载面跟着窗口
+        // 的尺寸走，App 会按这个尺寸**重新排一版**，顶栏、底栏、抖音右侧那一列
+        // 都在新布局里 —— 不是从旧布局里裁出来的。
+        //
+        // `bounds` 是 scene 的逻辑坐标空间：改它等于告诉 App「你的屏幕有这么大」。
+        // 只碰 bounds，不碰 frame —— 后者会连同位置一起挪，0.0.22 的黑屏就是
+        // 那么来的。transform 在下面单独设。
+        let fraction = CardLayout.loadRuntime().heightFraction
+        let source = FloatHost.fatScene(in: window.bounds, heightFraction: fraction)
+
         view.transform = .identity
         view.autoresizingMask = []
         view.bounds = CGRect(origin: .zero, size: source)
 
-        // 缩放比要先知道，才能把 `keepTop`（屏幕上的点）换成源坐标里的高度。
-        //
-        // 0.0.54 — 卡片宽度不跟着变：裁顶栏是「把上面那一截拿掉」，不是「换一
-        // 个宽高比的窗口」。所以照原比例布局，再把高度减掉 `crop * scale` ——
-        // 320 pt 的卡片还是 320 pt，只是矮了一条顶栏。
         let plan = host.plan(in: window.bounds, source: source)
-        let keep = host.keepTop / Swift.max(plan.scale, 0.05)
-        let bar = FloatHost.safeTop(of: view, in: window) + host.chrome
-        let crop = Swift.min(Swift.max(0, bar - keep), source.height * 0.25)
-        let visible = CGSize(width: source.width,
-                             height: Swift.max(48, source.height - crop))
-        var frame = plan.frame
-        frame.size.height = Swift.max(80, plan.frame.height - crop * plan.scale)
+        // 0.0.60 — 不再裁顶栏。要的是「完整展示」，可见块就是承载面本身。
+        // `visible` 这个名字留着：`followContent` / `recenterCard` 都读它。
+        let visible = source
+        let frame = plan.frame
 
         let card = UIView(frame: frame)
         card.backgroundColor = .clear
@@ -261,20 +300,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         host.content = view
         host.natural = source
         host.visible = visible
-        host.cropTop = crop
+        // 0.0.60 — 裁切量恒为 0。`cropTop` 这个量还留着，因为 `followContent`
+        // 与 `recenterCard` 都按它对齐中心：0 就是「不用对齐」，两条路径都正确。
+        host.cropTop = 0
         host.applyCorner(scale: plan.scale)
 
-        // The scene view keeps the scene's own coordinate space and is scaled as
-        // a whole — setting `frame` instead rewrites that space, which is what
-        // 0.0.22 did when the card came up empty.
+        // 承载面保持 scene 自己的坐标空间，整块缩放 —— 改 `frame` 会重写那个
+        // 空间，0.0.22 的空白卡片就是那么来的。`bounds` 已经在上面对准小胖屏
+        // 尺寸了（那一步让 App 重新布局），这里只负责把它摆在卡片中间。
         //
-        // 0.0.54 — 顶部裁掉 `crop` 源点：视图整体上移，被卡片的上沿吃掉；底部
-        // 仍然对齐，所以卡片就是「画面从 crop 开始的那一截」，宽度不变、不变形。
-        view.transform = .identity
-        view.autoresizingMask = []
-        view.bounds = CGRect(origin: .zero, size: source)
-        view.center = CGPoint(x: card.bounds.midX,
-                              y: card.bounds.midY - crop * plan.scale / 2)
+        // 0.0.60 — `scale` 初始就是 1.000：卡片的尺寸就是承载面的尺寸，一比一。
+        // 之后拖大拖小走的是 transform，`bounds` 不再变 —— 一个窗口在手上被拉
+        // 扯的时候不该让 App 每一帧都重排一次界面。
+        view.center = CGPoint(x: card.bounds.midX, y: card.bounds.midY)
         view.transform = CGAffineTransform(scaleX: plan.scale, y: plan.scale)
         card.addSubview(view)
 
@@ -335,13 +373,27 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         host.installGrip(on: host.makeBand() ?? root)
         host.installGestures()
 
-        Log.write("win: card "
-                  + String(format: "%.0fx%.0f", card.bounds.width, card.bounds.height)
-                  + " at " + String(format: "%.0f,%.0f", card.frame.origin.x, card.frame.origin.y)
-                  + " natural=" + String(format: "%.0fx%.0f", source.width, source.height)
-                  + " topbar_cropped_src=" + String(format: "%.0f", crop)
-                  + " topbar_kept_pt=" + String(format: "%.0f", host.keepTop)
-                  + (host.awaitingFrame ? " held=1" : " held=0"))
+        // 0.0.60 — 日志改成小胖屏口径。`hosted=` 是下发承载面的逻辑尺寸，
+        // `card=` 是它在屏幕上的尺寸；两者相等（scale 1.000）就是「一比一、
+        // App 按这个尺寸重新布局」，不等就是我们在缩放一张别人排好的画面。
+        let fatA = String(format: "win: fat scene ratio=%.3f screen=%.0fx%.0f",
+                          FloatHost.fatAspect,
+                          window.bounds.width, window.bounds.height)
+        let fatB = String(format: " hosted=%.0fx%.0f card=%.0fx%.0f at %.0f,%.0f held=%d",
+                          source.width, source.height,
+                          card.bounds.width, card.bounds.height,
+                          card.frame.origin.x, card.frame.origin.y,
+                          host.awaitingFrame ? 1 : 0)
+        Log.write(fatA + fatB)
+        // 一次性的证词：presenter 有自己的尺寸管理，万一它把 `bounds` 改回屏幕
+        // 尺寸，这一行会直接说出来 —— 「小胖屏没生效」和「App 不肯按新尺寸重排」
+        // 是两件事，只有这一个读数能把它们分开。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak view] in
+            guard let view = view else { return }
+            Log.write(String(format: "win: hosted bounds after=%.0fx%.0f asked=%.0fx%.0f",
+                             view.bounds.width, view.bounds.height,
+                             source.width, source.height))
+        }
         Log.write("win: scale factor=" + String(format: "%.3f", plan.scale)
                   + " shown=" + String(format: "%.0fx%.0f",
                                        visible.width * plan.scale, visible.height * plan.scale)
@@ -579,16 +631,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         onClose = nil
         Log.write("win: close requested by " + reason)
         DispatchQueue.main.async { hook?(reason) }
-    }
-
-    /// 状态栏高度（源坐标）。先问画面自己，再问窗口，最后退回全面屏的 59：
-    /// 一个把 inset 报成 0 的 App 不代表这台手机没有状态栏。
-    private static func safeTop(of view: UIView, in window: UIWindow) -> CGFloat {
-        let own = view.safeAreaInsets.top
-        if own > 1 { return own }
-        let outer = window.safeAreaInsets.top
-        if outer > 1 { return outer }
-        return 59
     }
 
     // MARK: - ring

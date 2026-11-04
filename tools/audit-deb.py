@@ -622,14 +622,18 @@ def main():
                   # attached to a view that owns its touches.
                   b"win: grip ring band=",
                   b"win: grip touch at ",
-                  # 0.0.54 — 顶栏裁剪。`topbar_cropped_src=` 是源坐标里被裁掉的
-                  # 高度，`topbar_kept_pt=` 是顶端留下的那一段（显示点数）。两个
-                  # 数都在同一行日志里，难看的时候能立刻分清是「裁多了」还是
-                  # 「留少了」；一行都不打，就只能靠看截图猜。✕ 撤掉之后
-                  # `close requested by` 仍在 —— 底边上滑照样走同一条出口，只是
-                  # 不再有 `close button` 这个理由。
-                  b" topbar_cropped_src=",
-                  b" topbar_kept_pt=",
+                  # 0.0.60 — 小胖屏。`win: fat scene ratio=` 是这一版的比例与屏幕
+                  # 尺寸，`hosted=` 是下发给承载面的逻辑尺寸、`card=` 是它显示的
+                  # 尺寸；`hosted bounds after=` 是 0.25 s 之后回读的实际 bounds ——
+                  # presenter 有自己的尺寸管理，这一行才分得清「我们没走到」与
+                  # 「走过去了但被系统改回来了」。三行缺任何一行，真机上就只剩
+                  # 「窗口看着不对」这一句可读的话。
+                  b"win: fat scene ratio=",
+                  b"win: hosted bounds after=",
+                  # 0.0.54 的顶栏裁剪在 0.0.60 撤掉了（`topbar_cropped_src=` /
+                  # `topbar_kept_pt=` 随实现一起删）：留着一条断言源码里已经不存在
+                  # 的字符串，CI 会当场失败。✕ 撤掉之后 `close requested by` 仍在
+                  # —— 底边上滑照样走同一条出口，只是不再有 `close button` 这个理由。
                   # 0.0.55 — 右缘左滑呼盘（移植旧版 bandRect：贴右缘 15 pt × 底部
                   # 35 %）。`edge swipe open at` 是它真的召回了圆盘，`edge swipe
                   # released` 是抬手；两条都没有 = 识别器没认领，而不是「带子太窄」。
