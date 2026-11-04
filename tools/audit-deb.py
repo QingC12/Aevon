@@ -630,6 +630,16 @@ def main():
                   # 「窗口看着不对」这一句可读的话。
                   b"win: fat scene ratio=",
                   b"win: hosted bounds after=",
+                  # 0.0.61 — 逻辑尺寸。Aevon(52) 证明了 0.0.60 的错在哪：只改
+                  # 承载视图的 bounds，App 仍按整屏排版（`scale=1.000`、字大、
+                  # 顶栏偏右、底栏与抖音右侧那一列在框外）。这四条是这一版唯一
+                  # 能自证的读数：`asked=` 是目标，`push door=` 是主动推的门，
+                  # `after=` 是 system 回读（两次，0.25 s / 1.2 s），`restored=`
+                  # 是关窗时有没有还回去 —— 不还，那个 App 从此是 377 宽的排版。
+                  b"win: scene frame asked=",
+                  b"win: scene frame push door=",
+                  b"win: scene frame after=",
+                  b"win: scene frame restored door=",
                   # 0.0.54 的顶栏裁剪在 0.0.60 撤掉了（`topbar_cropped_src=` /
                   # `topbar_kept_pt=` 随实现一起删）：留着一条断言源码里已经不存在
                   # 的字符串，CI 会当场失败。✕ 撤掉之后 `close requested by` 仍在

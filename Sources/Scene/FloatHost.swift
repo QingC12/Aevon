@@ -276,6 +276,18 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let fraction = CardLayout.loadRuntime().heightFraction
         let source = FloatHost.fatScene(in: window.bounds.size, heightFraction: fraction)
 
+        // 0.0.61 — 这一行才是「小胖屏」真正生效的地方。
+        //
+        // 改下面的 `view.bounds` 只换了画布，App 依旧按整屏排版；Aevon(52) 的日志
+        // 把它摊得很清楚：`hosted bounds after=377x628 asked=377x628`（视图确实改
+        // 了），`scale factor=1.000`（一比一），于是 430 宽的界面被直接裁进 377 的
+        // 框 —— 字大、顶栏偏右、底栏与抖音右侧那一列都在框外。
+        //
+        // `AevonSceneFrameSet` 把目标记在 C 侧，intercept 钩子在系统下一次更新
+        // settings 时把它写进 scene 的 frame（母本的路线），SceneProbe 拿到 scene
+        // 后还会主动推一次，不等系统那一拍。
+        AevonSceneFrameSet(0, 0, Double(source.width), Double(source.height))
+
         view.transform = .identity
         view.autoresizingMask = []
         view.bounds = CGRect(origin: .zero, size: source)
@@ -385,6 +397,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                           card.frame.origin.x, card.frame.origin.y,
                           host.awaitingFrame ? 1 : 0)
         Log.write(fatA + fatB)
+        // 0.0.61 — 逻辑尺寸的证词。上面那行说的是「画布多大」，这一行说的才是
+        // 「App 以为自己有多大」。两行都读到同一个数，小胖屏才真的成立。
+        Log.write("win: scene frame asked=" + String(format: "%.0fx%.0f", source.width, source.height)
+                  + " screen=" + String(format: "%.0fx%.0f", window.bounds.width, window.bounds.height))
         // 一次性的证词：presenter 有自己的尺寸管理，万一它把 `bounds` 改回屏幕
         // 尺寸，这一行会直接说出来 —— 「小胖屏没生效」和「App 不肯按新尺寸重排」
         // 是两件事，只有这一个读数能把它们分开。

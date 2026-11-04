@@ -14,6 +14,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import <math.h>
 #import <stdio.h>
 #import <stdlib.h>
 #import <string.h>
@@ -330,6 +331,52 @@ static CFAbsoluteTime AevonLastPush = 0;
 /// deactivation setter this file hooks, and that hook pushes again.
 static volatile int AevonInPush = 0;
 
+// MARK: - 小胖屏：scene 的逻辑尺寸（0.0.61）
+
+/// 0.0.61 — 卡片要的是「App 按这个尺寸重新排一版」，不是「把整屏画面裁进这个框」。
+///
+/// 0.0.60 只改了承载视图的 `bounds`。真机日志证明那一步确实生效了 ——
+/// `win: hosted bounds after=377x628 asked=377x628` —— 可画面还是 430 宽的排版被
+/// 1:1 塞进 377 的框里：字大、顶栏偏右、底栏与抖音右侧那一列全落在框外。
+/// 原因是两套几何只改了一套：`bounds` 是**视图**的尺寸，App 排版看的是 scene 自己
+/// 的 `settings.frame`。
+///
+/// 这一版把 frame 写进 settings，走 0.0.53 已经在真机上响过的那条门
+/// （`_scene:interceptUpdateWithNewSettings:`，Aevon(52) 的 `intercept=6/22`）。
+/// 写的是**可变副本**：只对 `*Mutable*` 类调 setter，对不可变对象调 setter 在系统
+/// 里是抛异常，而这里的异常没人接。
+static volatile int AevonFrameArmed = 0;
+static CGRect AevonFrameTarget = {{0.0, 0.0}, {0.0, 0.0}};
+static long AevonFrameWrites = 0;
+
+/// 目标尺寸 = 卡片里那块承载面的尺寸。小于 80 pt 的一律当「没设」，防止一次
+/// 布局没算完的读数把 scene 缩成一条。
+void AevonSceneFrameSet(double x, double y, double width, double height) {
+    if (width < 80.0 || height < 80.0) {
+        AevonFrameArmed = 0;
+        return;
+    }
+    AevonFrameTarget = CGRectMake((CGFloat)x, (CGFloat)y, (CGFloat)width, (CGFloat)height);
+    AevonFrameArmed = 1;
+}
+
+void AevonSceneFrameClear(void) { AevonFrameArmed = 0; }
+
+long AevonFrameWriteCount(void) { return AevonFrameWrites; }
+
+/// 读 scene 现在的逻辑尺寸。读不到返回全零 —— 全零在日志里一看就知道是「没读到」，
+/// 不会和一次真的失败混在一起。
+CGRect AevonSceneFrameOf(id scene) {
+    if (scene == nil) return CGRectZero;
+    SEL settingsSel = sel_registerName("settings");
+    if (![scene respondsToSelector:settingsSel]) return CGRectZero;
+    id settings = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
+    if (settings == nil) return CGRectZero;
+    SEL getter = sel_registerName("frame");
+    if (![settings respondsToSelector:getter]) return CGRectZero;
+    return ((CGRect (*)(id, SEL))objc_msgSend)(settings, getter);
+}
+
 /// Non-zero while one of the hooked system callbacks is on the stack.
 ///
 /// This is the whole of 0.0.31. `_setDeactivationReasons:onScene:withSettings:reason:`
@@ -467,6 +514,54 @@ static NSInteger AevonCallSettingsTransition(id target, id settings) {
         }
     }
     return 0;
+}
+
+/// 把目标尺寸写进一份 settings。返回「这一次真的写了」。
+///
+/// 先读再比：已经是目标值就不写。这是 0.0.34 定下的 delta-first —— 一次什么都没
+/// 改变的写入同样要付一次重排，而重排就是一次闪。
+static BOOL AevonWriteFrame(id settings) {
+    if (settings == nil || !AevonFrameArmed) return NO;
+    const char *className = object_getClassName(settings);
+    if (className == NULL || strstr(className, "Mutable") == NULL) return NO;
+    SEL setter = sel_registerName("setFrame:");
+    if (![settings respondsToSelector:setter]) return NO;
+    SEL getter = sel_registerName("frame");
+    if ([settings respondsToSelector:getter]) {
+        CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(settings, getter);
+        if (fabs(now.size.width - AevonFrameTarget.size.width) < 0.5
+            && fabs(now.size.height - AevonFrameTarget.size.height) < 0.5) {
+            return NO;
+        }
+    }
+    ((void (*)(id, SEL, CGRect))objc_msgSend)(settings, setter, AevonFrameTarget);
+    __sync_fetch_and_add(&AevonFrameWrites, 1);
+    return YES;
+}
+
+/// 主动把 frame 推一次。intercept 只在系统更新 settings 时给机会，建卡那一拍
+/// 系统未必正好在更新，所以这里不等它。
+///
+/// 返回用过的门（3 = transition，1 = 普通），0 = 没写成或没有门。
+NSInteger AevonPushSceneFrame(id scene) {
+    if (scene == nil || !AevonFrameArmed) return 0;
+    if (![NSThread isMainThread]) return 0;
+    if (AevonHookDepth > 0) return 0;
+    if (AevonInPush) return 0;
+    SEL settingsSel = sel_registerName("settings");
+    if (![scene respondsToSelector:settingsSel]) return 0;
+    id current = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
+    id candidate = [current mutableCopy];
+    if (candidate == nil) candidate = current;
+    AevonInPush = 1;
+    BOOL wrote = AevonWriteFrame(candidate);
+    NSInteger path = 0;
+    if (wrote) {
+        path = AevonCallSettingsTransition(scene, candidate);
+        if (path == 0 && AevonCallSettings(scene, candidate)) path = 1;
+    }
+    AevonInPush = 0;
+    return wrote ? path : 0;
 }
 
 /// One attempt at "you are in front". Answers the door it used so the log can
@@ -721,6 +816,12 @@ static int AevonAmendSettings(id settings) {
             wrote |= 4;
         }
     }
+    // 0.0.61 — 位 8：这一次把 scene 的逻辑尺寸改成了小胖屏的尺寸。
+    //
+    // 挂在这里而不是新开一个钩子，是因为这条门已经被证明会响：Aevon(52) 的日志
+    // 里 `intercept=6/22`、`mine=1 amend=1`，说明系统每次更新 settings 都把它
+    // 交到我们手上，而我们在系统用之前就改完了它。母本用的是同一个方法。
+    if (AevonWriteFrame(settings)) wrote |= 8;
     return wrote;
 }
 

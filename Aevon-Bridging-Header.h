@@ -86,6 +86,29 @@ void AevonBanPush(void);
 /// 1 a door opened, 3 already in the background, 0 nothing to write through.
 NSInteger AevonPushBackground(id _Nullable scene);
 
+/// 0.0.61 — 小胖屏：把 scene 的**逻辑尺寸**改成卡片里那块承载面的尺寸。
+///
+/// 这一步是 0.0.60 缺的那一半。改承载视图的 `bounds` 只改了「画在哪块画布上」，
+/// 没改「App 以为自己有多大的屏幕」—— 真机上的表现就是 430 宽的排版被 1:1 塞进
+/// 377 的框：字大、顶栏偏右、底栏与抖音右侧那一列都在框外。
+///
+/// `AevonSceneFrameSet` 只是登记目标值，真正写进去有两条路：系统更新 settings 时
+/// 由 intercept 钩子顺手改（母本的路线），以及 `AevonPushSceneFrame` 主动推一次
+/// （建卡那一拍系统未必正好在更新）。`AevonSceneFrameClear` 之后系统自然写回整屏。
+void AevonSceneFrameSet(double x, double y, double width, double height);
+void AevonSceneFrameClear(void);
+
+/// 主动推一次。返回门编号：3 = transition，1 = 普通，0 = 没写成或没有门。
+/// 主线程、且不能从钩子里面调（与 push foreground 同一条纪律）。
+NSInteger AevonPushSceneFrame(id _Nullable scene);
+
+/// 真写进 settings 的次数。系统每次把 frame 写成整屏、我们每次又写回小胖屏，
+/// 这个数就会一直涨；它停在 1 说明系统认了，没有再覆盖。
+long AevonFrameWriteCount(void);
+
+/// scene 现在的逻辑尺寸。读不到返回全零（日志里和「真的失败了」不会混）。
+CGRect AevonSceneFrameOf(id _Nullable scene);
+
 /// 0.0.50 — 画面到底在不在。`AevonContentStateOf` 读的是 `FBScene.contentState`
 /// （2 = ready 有画，0 = 没准备好 ⇒ 黑，-1 = 没有这个方法），`AevonSceneLevel`
 /// 读 `settings.level`（1 前台档 / 0 后台档 / -1 读不到）。

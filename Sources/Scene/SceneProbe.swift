@@ -1210,6 +1210,15 @@ zStackParticipantDidChange:
             let idleRelease = AevonIdleTimerEnd()
             Log.write("win: idle timer released mask=" + String(idleRelease)
                       + " kicks=" + String(AevonIdleTimerCount()))
+            // 0.0.61 — 逻辑尺寸要还回去。我们写过的东西不会随卡片消失而失效
+            // （和 0.0.32 的 foreground 是同一条教训）：不还，那个 App 从此是
+            // 377 pt 宽的排版，回到桌面自己打开也是，直到它自己被系统重开。
+            let screenSize = UIScreen.main.bounds.size
+            AevonSceneFrameSet(0, 0, Double(screenSize.width), Double(screenSize.height))
+            let frameDoor = AevonPushSceneFrame(scene)
+            AevonSceneFrameClear()
+            Log.write("win: scene frame restored door=" + String(frameDoor)
+                      + " wrote=" + String(AevonFrameWriteCount()))
             let door = AevonPushBackground(scene)
             _ = AevonCallVoid(presenter, "deactivate")
             _ = AevonCallVoid(presenter, "invalidate")
@@ -1273,6 +1282,25 @@ zStackParticipantDidChange:
         AevonRingGrip.cardUp = true
         RingHost.shared.setEdgeActive(false)
         Log.write("win: window up level=" + String(format: "%.0f", host.level))
+
+        // 0.0.61 — 把 scene 的逻辑尺寸主动推一次。intercept 钩子只在系统更新
+        // settings 时给机会，建卡这一拍它未必正好在更新，所以两条路都走。
+        //
+        // 这一步是「小胖屏」和「整屏缩小」的分界：只改承载视图的 bounds 时，
+        // App 仍然按 430 pt 排版，377 的框只是把它裁了一截（Aevon(52) 的现场：
+        // 字大、顶栏偏右、底栏与抖音右侧那一列全在框外）。
+        let frameDoor = AevonPushSceneFrame(scene)
+        Log.write("win: scene frame push door=" + String(frameDoor)
+                  + " wrote=" + String(AevonFrameWriteCount()))
+        // 两次回读。0.25 s 那次回答「系统收下了没有」，1.2 s 那次回答「它有没有
+        // 被系统改回去」—— scene 重排比视图慢，两个时刻读数不同时，先后就是方向。
+        for delay in [0.25, 1.2] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                let got = AevonSceneFrameOf(scene)
+                Log.write(String(format: "win: scene frame after=%.0fx%.0f wrote=%ld",
+                                 got.width, got.height, AevonFrameWriteCount()))
+            }
+        }
 
         // 0.0.55 — 浮窗期间禁止空闲熄屏。卡片真的起来了才 hold：`show` 失败
         // 的时候这张卡没有任何东西在播，压住锁屏只是替用户关掉了省电。
