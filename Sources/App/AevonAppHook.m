@@ -2083,12 +2083,39 @@ static CFTimeInterval AevonVideoScanAt = 0.0;
 /// `layoutSubviews` 只要发现 cell 还是同一个、band 还挂在它下面，就只做一次
 /// `convertRect:` 加一次写 transform —— 两个 ObjC 调用，微秒级，扫零个视图。
 /// 换页（cell 变了）或 band 掉出卡片（图层重建）才重新认。
-static void *AevonVideoKnownCell = NULL;
-static void *AevonVideoKnownBand[2] = {NULL, NULL};
+/// 0.0.90 — 记住的是**路径**，不是对象。
+///
+/// 0.0.89 这里存的是 `void *band`，快路径每帧把它 cast 回 `UIView *` 直接发消息。
+/// 这个文件是 MRC（Makefile 里没有 `-fobjc-arc`），存下来的是不 retain 的裸指针；
+/// 抖音快速滑动时复用整页 cell，把里面的播放器、画面层摘掉并释放，而 cell 常常
+/// 被复用到同一个地址 —— 地址比较照样通过，下一帧 `layoutSubviews`（每秒最多
+/// 125 次）对着已析构的对象发消息就是 SIGSEGV。Aevon(80) 两次「只剩白色光晕」
+/// 都落在「这一页第一次认出画面」的那一秒，形状完全对得上。
+///
+/// 现在只记「从 cell 往下第几层、第几个子视图」，每帧从**调用方当场给的** cell
+/// 顺着下标现取；取不到、类名不对、矩形不正常就作废重扫。全程只有一个对象是新
+/// 鲜的，结构上不可能再有野指针。
+#define AEVON_PATH_MAX 8
+typedef struct {
+    unsigned char depth;                  // 0 = 无效
+    unsigned char idx[AEVON_PATH_MAX];    // 自上而下每层在 subviews 里的下标
+    char cls[28];                         // 末层类名，取出后再核一次
+} AevonVideoPath;
+
+/// 页指针只做比较，**永不 cast、永不发消息**（它同样是裸指针）。
+static uintptr_t AevonVideoKnownCell = 0;
+static AevonVideoPath AevonVideoKnownPath[2];
 static int AevonVideoKnownCount = 0;
 /// 记账的年龄（心跳拍数）。到点就作废重认一次：App 会在同一页里换版式/换层，
 /// 只认一次会永久指着旧的那块画面。32 拍 ≈ 6 s，代价是每 6 秒一次整页扫描。
 static int AevonVideoKnownAge = 0;
+
+static void AevonVideoKnownForget(void) {
+    AevonVideoKnownCell = 0;
+    AevonVideoKnownCount = 0;
+    AevonVideoKnownAge = 0;
+    memset(AevonVideoKnownPath, 0, sizeof(AevonVideoKnownPath));
+}
 
 /// 0.0.89 — 「这一阵子我们吃了主线程多少」。
 /// 每 0.5 s 结算一次，只有超过 80 ms（16% 的一秒）才记一行。正常时不出声，
@@ -2122,11 +2149,7 @@ static void AevonVideoForget(void) {
     memset(AevonVideoSlots, 0, sizeof(AevonVideoSlots));
     AevonVideoCell = NULL;
     AevonVideoScanLeft = 3;
-    AevonVideoKnownCell = NULL;
-    AevonVideoKnownBand[0] = NULL;
-    AevonVideoKnownBand[1] = NULL;
-    AevonVideoKnownCount = 0;
-    AevonVideoKnownAge = 0;
+    AevonVideoKnownForget();
 }
 
 /// 两个视图在同一棵树上互为祖先/后代。同一块画面常被「画面区 → 画面」两层同时
@@ -2574,38 +2597,77 @@ static void AevonVideoWrite(UIView *band, UIView *cell, CGRect rb,
     }
 }
 
-/// 0.0.89 — 这一页认过没有；认过就直接写，不再遍历。
+/// 0.0.90 — 把「cell 里的一块画面」翻译成一条子视图下标链。
 ///
-/// 失效判据三条，任一不成立就丢掉记账、让调用方去重扫：
-///   · `band` 还挂在这一页下面（图层重建后旧对象会被摘走）；
-///   · `convertRect` 出来的矩形还有个正常尺寸（被 App 收成 0 宽高时不能写）；
-///   · 高度没有变成铺满整页（那是竖版，不该居中 —— App 换了版式）。
+/// 只在**认页那一趟**跑（每页一次），所以这里用 `indexOfObjectIdenticalTo:`
+/// 这种 O(n) 找兄弟下标是可以接受的：认完之后每帧只走 `AevonVideoPathResolve`，
+/// 一次只碰一层的 `subviews`。
+static BOOL AevonVideoPathOf(UIView *cell, UIView *band, AevonVideoPath *out) {
+    if (cell == nil || band == nil || out == nil || band == cell) return NO;
+    unsigned char back[AEVON_PATH_MAX];
+    int depth = 0;
+    UIView *node = band;
+    while (node != nil && node != cell && depth < AEVON_PATH_MAX) {
+        UIView *parent = [node superview];
+        if (parent == nil) return NO;
+        NSUInteger at = [[parent subviews] indexOfObjectIdenticalTo:node];
+        if (at == NSNotFound || at > 250) return NO;
+        back[depth] = (unsigned char)at;
+        depth += 1;
+        node = parent;
+    }
+    if (node != cell || depth == 0) return NO;
+    memset(out, 0, sizeof(*out));
+    out->depth = (unsigned char)depth;
+    for (int i = 0; i < depth; i++) out->idx[i] = back[depth - 1 - i];
+    const char *name = class_getName([band class]);
+    snprintf(out->cls, sizeof(out->cls), "%s", name != NULL ? name : "?");
+    return YES;
+}
+
+/// 从这一帧的 cell 顺着下标链把画面取回来。任何一步对不上就返回 nil ——
+/// 这里**只**会对刚拿到的 `subviews` 数组里的对象发消息，拿不到就不发。
+static UIView *AevonVideoPathResolve(UIView *cell, const AevonVideoPath *path) {
+    if (cell == nil || path == NULL) return nil;
+    if (path->depth == 0 || path->depth > AEVON_PATH_MAX) return nil;
+    UIView *node = cell;
+    for (int i = 0; i < path->depth; i++) {
+        NSArray *kids = [node subviews];
+        if (path->idx[i] >= kids.count) return nil;
+        node = [kids objectAtIndex:path->idx[i]];
+    }
+    const char *name = class_getName([node class]);
+    if (name == NULL || strcmp(name, path->cls) != 0) return nil;
+    return node;
+}
+
+/// 0.0.90 — 这一页认过没有；认过就直接写，不再遍历。
+///
+/// 失效判据四条，任一不成立就丢掉记账、让调用方去重扫：
+///   · 下标链还能从**这一帧的** cell 取回一个对象（不是上次那个对象）；
+///   · 取回来的类名还是当初那个（同一格被换成别的东西）；
+///   · 矩形还有正常尺寸、且没有变成铺满整页（App 换了版式 ⇒ 竖版不居中的规矩照旧）；
+///   · 不隐藏、不透明为 0（同一页里换视频时旧那块会被隐藏）。
 /// 返回值只表示「记账还能用」，不代表这一帧一定写了 transform。
 static BOOL AevonVideoKnownApply(UIView *cell, const char *via) {
-    if (cell == nil || AevonVideoKnownCell != (void *)cell) return NO;
+    if (cell == nil || AevonVideoKnownCell != (uintptr_t)cell) return NO;
     if (AevonVideoKnownCount <= 0) return NO;
     CGFloat cellH = [cell bounds].size.height;
+    CGFloat cellW = [cell bounds].size.width;
     if (cellH < 200.0) return NO;
     BOOL alive = NO;
     for (int i = 0; i < AevonVideoKnownCount && i < 2; i++) {
-        UIView *band = (UIView *)AevonVideoKnownBand[i];
+        UIView *band = AevonVideoPathResolve(cell, &AevonVideoKnownPath[i]);
         if (band == nil) continue;
-        if (![band isDescendantOfView:cell]) continue;
-        // 同一页里换视频时，旧那一块会被隐藏而新的那块浮上来；隐藏的一律当失效。
         if ([band isHidden] || [band alpha] < 0.01) continue;
         CGRect rb = [band convertRect:[band bounds] toView:cell];
-        if (rb.size.width < 40.0 || rb.size.height < 40.0) continue;
+        if (rb.size.width < cellW * 0.5 || rb.size.height < 80.0) continue;
         if (rb.size.height > cellH - 40.0) continue;
         alive = YES;
         AevonVideoWrite(band, cell, rb,
                         class_getName([[band superview] class]), via);
     }
-    if (!alive) {
-        AevonVideoKnownCell = NULL;
-        AevonVideoKnownCount = 0;
-        AevonVideoKnownBand[0] = NULL;
-        AevonVideoKnownBand[1] = NULL;
-    }
+    if (!alive) AevonVideoKnownForget();
     return alive;
 }
 
@@ -2717,11 +2779,24 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
         return;
     }
 
-    // 0.0.89 — 认出来就记下：这一页的 cell 与这两块画面，之后的排版只跟它们比指针。
-    AevonVideoKnownCell = (void *)cell;
-    AevonVideoKnownCount = picked;
-    for (int i = 0; i < 2; i++) {
-        AevonVideoKnownBand[i] = i < picked ? (void *)pickBand[i] : NULL;
+    // 0.0.90 — 认出来就记下**路径**（不是对象）：这一页的 cell 地址 + 两块画面
+    // 各自的下标链。之后的排版从这里走下来现取，永远不碰上一帧的指针。
+    AevonVideoKnownForget();
+    AevonVideoKnownCell = (uintptr_t)cell;
+    int kept = 0;
+    for (int i = 0; i < picked; i++) {
+        if (!AevonVideoPathOf(cell, pickBand[i], &AevonVideoKnownPath[kept])) continue;
+        kept += 1;
+    }
+    AevonVideoKnownCount = kept;
+    // 认一次一行：`d=` 是链的层数，`n=` 是记住几块。链建不起来时 `n=0`，
+    // 那一页就继续走「每次重扫」的老路 —— 不会崩，只会慢。
+    if (hint == nil) {
+        char body[120];
+        snprintf(body, sizeof(body), "video known n=%d d=%d c=%04lx",
+                 kept, kept > 0 ? (int)AevonVideoKnownPath[0].depth : 0,
+                 AevonPtrTag(cell));
+        AevonPageWrite(body);
     }
 
     // 0.0.88 — 钩子只在心跳那一路装（`via == "tick"`，0.6 s 一次）。
@@ -2759,24 +2834,13 @@ static void AevonVideoCenter(void) {
         AevonVideoCell = (void *)cell;
         memset(AevonVideoSlots, 0, sizeof(AevonVideoSlots));
         AevonVideoScanLeft = 3;
-            if ((void *)cell != AevonVideoKnownCell) {
-            AevonVideoKnownCell = NULL;
-            AevonVideoKnownCount = 0;
-            AevonVideoKnownBand[0] = NULL;
-            AevonVideoKnownBand[1] = NULL;
-        }
+        if ((uintptr_t)cell != AevonVideoKnownCell) AevonVideoKnownForget();
     }
     // 0.0.89 — 认过的页心跳也只做几何，不再整页扫一遍。
     // 画面被 App 摆回去时 `AevonVideoWrite` 会补一次（`via=tick`）；真要一直对打，
     // `bounces` 会让我们先歇一秒，而不是每拍都扫。
     AevonVideoKnownAge += 1;
-    if (AevonVideoKnownAge >= 32) {
-        AevonVideoKnownAge = 0;
-        AevonVideoKnownCell = NULL;
-        AevonVideoKnownCount = 0;
-        AevonVideoKnownBand[0] = NULL;
-        AevonVideoKnownBand[1] = NULL;
-    }
+    if (AevonVideoKnownAge >= 32) AevonVideoKnownForget();
     if (AevonVideoKnownApply(cell, "tick")) return;
     AevonVideoCenterFor(cell, nil, "tick");
 }
@@ -3240,12 +3304,29 @@ static BOOL AevonWorthInjecting(void) {
     return YES;
 }
 
+/// 0.0.90 — 每个进程一行证词。
+///
+/// Aevon(80) 两次「只剩白色光晕」只能靠 `geom early/late` 出现两对来反推
+/// 「换了进程」，而 `geom` 要等开卡之后才有。这一行写在构造函数第一句，
+/// 一个进程一行 —— 下一份日志数一下 `app: boot` 有几行，就知道这中间死过几次。
+static void AevonBootNote(void) {
+    time_t now = time(NULL);
+    struct tm stamp;
+    localtime_r(&now, &stamp);
+    char line[160];
+    snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d app: boot pid=%d\n",
+             stamp.tm_year + 1900, stamp.tm_mon + 1, stamp.tm_mday,
+             stamp.tm_hour, stamp.tm_min, stamp.tm_sec, (int)getpid());
+    AevonAppLogWrite(line);
+}
+
 __attribute__((constructor))
 static void AevonAppBoot(void) {
     // 第一个注入点已经拥有 SpringBoard 这个进程。两条 reason 都要看：一是
     // 「一个 getter 上挂两个钩子多了一个」，二是 0.0.65 证明装错进程的代价
     // 不是抖动，是整个桌面。
     if (!AevonWorthInjecting()) return;
+    AevonBootNote();
 
     // Both getters, both chained: a process that is not hosted keeps the
     // system's answers byte for byte.

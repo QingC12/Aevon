@@ -695,6 +695,15 @@ def main():
                       # Aevon(79) 的 4.5 秒卡顿只能从「日志空白」反推，有这一行
                       # 就能直接看是谁、多少次、多少毫秒。
                       b"video load n=%d spent=%.0fms=%.0f%%",
+                      # 0.0.90 — 两行证词，对应 Aevon(80) 的「悬浮窗只剩一圈白色光晕」：
+                      #   `video known n= d= c=` = 这一页认出来的画面**路径**（几块、
+                      #   几层下来、哪一页）。0.0.89 这里存的是对象指针，快路径每帧
+                      #   把上一帧的指针 cast 回 UIView 发消息（MRC，不 retain）——
+                      #   cell 被复用、画面被释放就是野指针，进程当场死。
+                      #   `app: boot pid=` = 每个进程一行。下一份日志数 `app: boot`
+                      #   有几行就知道这中间死过几次，不用再靠 `geom` 出没出两对去猜。
+                      b"video known n=%d d=%d c=%04lx",
+                      b"app: boot pid=%d",
                       b"video reset on foreground",
                       # 0.0.84 — 抬高从「呈现」这一声开始，不再等心跳相位。
                       b"presentViewController:animated:completion:",
@@ -773,6 +782,9 @@ def main():
                       # 真重排优先于竖版那一页显示不全。所以记号与它的读取路径
                       # 都不许再回来；画布只有一个来源（`fatRender` 的 5:3）。
                       b"want full canvas",                                   # gone
+                      # 0.0.90 — 「拿上一帧存下来的视图指针直接发消息」这条路
+                      # 一条都不许留：野指针就是 Aevon(80) 的两次进程死亡。
+                      b"isDescendantOfView:",                                # gone
                       b"aevon-full"):                                        # gone
             if token in bridge:
                 bad(f"bridge: {token.decode()} 又出现了 —— 在 App 进程里改屏幕、"
