@@ -1246,6 +1246,17 @@ zStackParticipantDidChange:
             // 0.0.70 — 关卡这一拍把 App 写的读数取回来。必须在 `clearHosted()`
             // 之前：那个函数会把 `hostedBundle` 清空，之后就不知道去哪个容器里取了。
             drainAppLog("on close")
+            // 0.0.75 — 关卡之后**再来一次**，4 秒后。
+            //
+            // Aevon(65) 里最要命的那一段没有任何读数：App 在关卡后 3 拍
+            // （0.4 / 1.5 / 2.6 s）写下的 `state` 全是旧几何，而它真正按 932
+            // 重排是在用户回到全屏那一刻 —— 之后一条记录都没有，所以「断层」
+            // 只能靠录屏猜。这一次的 `snap clean` / `state` 会落在这 4 秒里。
+            //
+            // 用局部变量记住 bundle：`clearHosted()` 下面就把静态的那一份清了。
+            // 如果这 4 秒内又开了一张同一个 App 的卡，这一份读数属于新的一次，
+            // 让给新卡（`hostedBundle == b` 就跳过）。
+            let closedBundle = hostedBundle
             // 0.0.69 — presenter 拆掉之后再交一次整屏尺寸。
             //
             // 上面那次 `AevonPushSceneFrame` 发生在承载面还在的时候，那时 App 的
@@ -1270,6 +1281,14 @@ zStackParticipantDidChange:
             RingHost.shared.setEdgeActive(true)
             AevonHookDisarm()
             clearHosted()
+            if let b = closedBundle {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                    if hostedBundle == b { return }
+                    let lines = AevonDrainAppLog(b, 400)
+                    Log.write("win: app log lines=" + String(lines) + " from after card closed"
+                              + " file=" + (AevonAppLogPathOf(b) ?? "none"))
+                }
+            }
             cardUp = false
             emitNotes(AevonHookSummary())
             let back = value(of: scene, "settings").map { AevonBoolOf($0, "isForeground") } ?? -1

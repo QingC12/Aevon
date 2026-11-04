@@ -542,6 +542,10 @@ static CGFloat AevonOldPage = 0.0;
 /// 从「我们还原尺寸」到「App 真的重排完」之间隔着一次挂起——用户点图标的那一刻
 /// 才继续，所以这里不能用固定毫秒数。
 static int AevonSettleTicks = 0;
+/// 归位窗口的真实寿命（每拍都加，不管有没有干活）。90 拍「机会」在
+/// 「App 一直不重排」时会永远不消耗，这个计数器负责兜底：90 s 之后无论
+/// 如何都撤销，让停稳守卫重新接管。
+static int AevonSettleAge = 0;
 /// 停稳守卫与窗口高度守卫的几个数（定义在这里，因为过渡钩子也要清它们）。
 static CGFloat AevonGuardY = -1.0;
 static int AevonGuardHold = 0;
@@ -574,6 +578,7 @@ static void AevonPagerForget(void) {
     // 认的翻页器都没了，「上一次尺寸变化」的账也该一起销掉。
     AevonOldPage = 0.0;
     AevonSettleTicks = 0;
+    AevonSettleAge = 0;
 }
 
 /// 「一页多高」——从单元格读，不从窗口读。
@@ -651,20 +656,35 @@ static void AevonPageState(const char *reason) {
     CGPoint off = [view contentOffset];
     CGRect cell = AevonCellFrameOf(view, box.size.height);
     NSArray *kids = [view subviews];
-    NSUInteger n = kids.count < 3 ? kids.count : 3;
-    char body[400];
+    NSUInteger n = kids.count < 4 ? kids.count : 4;
+    // 0.0.75 — 数一遍「几种页高同时存在」。Aevon(65) 已经把答案写在算术里：
+    // span=8102 = 10 × 717 + 932 —— 十一页里只有一页按新高度重排过，其余十页
+    // 还是旧高度。这个数不再靠人算，直接印出来。
+    int cleanN = 0;
+    int staleN = 0;
+    for (NSUInteger i = 0; i < kids.count && i < 12; i++) {
+        CGFloat h = [[kids objectAtIndex:i] frame].size.height;
+        if (h < 120.0) continue;
+        if (fabs(h - box.size.height) <= 2.0) cleanN += 1;
+        else if (AevonOldPage > 200.0 && fabs(h - AevonOldPage) <= 2.0) staleN += 1;
+    }
+    char body[720];
     int at = snprintf(body, sizeof(body),
                       "state %s box=%.0fx%.0f span=%.0fx%.0f off=%.0f,%.0f "
-                      "cell=%.0f,%.0f,%.0fx%.0f kids=%lu",
+                      "cell=%.0f,%.0f,%.0fx%.0f kids=%lu clean=%d stale=%d",
                       reason, box.size.width, box.size.height,
                       span.width, span.height, off.x, off.y,
                       cell.origin.x, cell.origin.y, cell.size.width, cell.size.height,
-                      (unsigned long)kids.count);
+                      (unsigned long)kids.count, cleanN, staleN);
     for (NSUInteger i = 0; i < n; i++) {
-        if (at < 0 || at > (int)sizeof(body) - 40) break;
-        CGRect f = [[kids objectAtIndex:i] frame];
-        at += snprintf(body + at, sizeof(body) - (size_t)at, " k%lu=%.0f,%.0fx%.0f",
-                       (unsigned long)i, f.origin.y, f.size.height, f.size.width);
+        if (at < 0 || at > (int)sizeof(body) - 60) break;
+        UIView *kid = [kids objectAtIndex:i];
+        CGRect f = [kid frame];
+        // 类名也带上：下一次如果还要判断「这到底是 UICollectionView 的 cell 还是
+        // 自己写的复用视图」，答案就在这一列里，不必再猜一轮。
+        at += snprintf(body + at, sizeof(body) - (size_t)at, " k%lu=%.28s:%.0f,%.0fx%.0f",
+                       (unsigned long)i, class_getName([kid class]),
+                       f.origin.y, f.size.height, f.size.width);
     }
     AevonPageWrite(body);
 }
@@ -695,6 +715,8 @@ static NSInteger AevonAlignPager(const char *reason) {
     UIScrollView *view = AevonPagerGet();
     if (view == nil) return -1;
     if ([view window] == nil) return -1;
+    // 手指还在动就别动它。归位是「补一刀」，不是「抢方向盘」。
+    if ([view isTracking] || [view isDragging] || [view isDecelerating]) return -1;
     CGFloat box = [view bounds].size.height;
     CGFloat full = AevonWindowHeight();
     // App 还没跟上这一次尺寸变化：先把机会留着，下一拍再说。
@@ -702,6 +724,74 @@ static NSInteger AevonAlignPager(const char *reason) {
     CGSize span = [view contentSize];
     CGFloat y = [view contentOffset].y;
     if (box < 200.0 || span.height < box * 1.2) return -1;
+    // 视口还是旧尺寸：这一次尺寸变化还没走到翻页器身上。**等它**，别拿旧几何
+    // 算出一个「已经对齐」然后把这拍机会烧掉 —— 0.0.74 的 `off=0,2151 / box=717`
+    // 就是这个形状，一烧就是 90 拍（13.5 s），而 App 往往几秒之后才重排。
+    if (AevonOldPage > 200.0 && fabs(box - AevonOldPage) < 8.0) return -1;
+
+    // ⓪ 0.0.75 — **混装**：一部分页正好是新高度，另一部分页正好还是旧高度。
+    //
+    // 这是 Aevon(65) 的读数直接说出来的，不是推测：
+    //
+    //   state on transition  box=430x717 span=430x8604 off=0,2151
+    //   state after change   box=430x932 span=430x8102 off=0,0
+    //                          cell=0,717,430x932  k0=717,932x430  k2=0,717x430
+    //
+    // `8102 = 10 × 717 + 932`。十一页里只有一页按 932 重排过，其余十页仍是 717。
+    // 在这个几何里，**任何标称页高都算不出正确位置**：按 717 取整会把视口放到
+    // 932 页的中间，按 932 取整会落到 717 页的中间 —— 两种都必然出现「上一帖只
+    // 剩一截」。0.0.73/0.0.74 一直在算的那条公式，前提「App 已经整体按新高度重排」
+    // 从来没成立过；而第一次关卡（offset 本来就是 0、我们什么都没写）同样出现
+    // 断层，正好把「是算术问题」这个假设否掉了。
+    //
+    // 唯一干净的落点：**App 已经按新高度重排好的那一页，把视口正好放在它上面。**
+    // 它就是重排时被重建的那一页，也就是用户当时正在看的那一帖。
+    if (AevonOldPage > 200.0 && fabs(AevonOldPage - box) > 8.0) {
+        CGRect clean = CGRectNull;
+        int cleanN = 0;
+        int staleN = 0;
+        NSArray *kids = [view subviews];
+        NSUInteger limit = kids.count < 12 ? kids.count : 12;
+        for (NSUInteger i = 0; i < limit; i++) {
+            CGRect f = [[kids objectAtIndex:i] frame];
+            if (f.size.height < 120.0) continue;
+            if (fabs(f.size.height - box) <= 2.0) {
+                cleanN += 1;
+                if (CGRectIsNull(clean)
+                    || fabs(f.origin.y - y) < fabs(clean.origin.y - y)) {
+                    clean = f;
+                }
+            } else if (fabs(f.size.height - AevonOldPage) <= 2.0) {
+                staleN += 1;
+            }
+        }
+        if (cleanN > 0 && staleN > 0 && !CGRectIsNull(clean)) {
+            CGFloat target = clean.origin.y;
+            CGFloat cap0 = span.height - box;
+            if (cap0 < 0.0) cap0 = 0.0;
+            if (target < 0.0) target = 0.0;
+            if (target > cap0) target = cap0;
+            // 一页以外不去追：那是「换了一帖」，不是「把这一帖摆正」。
+            if (fabs(target - y) > 1.5 && fabs(target - y) <= box * 3.0
+                && AevonAlignFixes < 60) {
+                [view setContentOffset:CGPointMake([view contentOffset].x, target)
+                             animated:NO];
+                AevonAlignFixes += 1;
+                AevonLastPageHeight = box;
+                AevonOldPage = 0.0;
+                if (AevonSettleTicks < 30) AevonSettleTicks = 30;
+                char body[300];
+                snprintf(body, sizeof(body),
+                         "%s snap clean y=%.0f -> %.0f at=%.0f clean=%d stale=%d "
+                         "span=%.0f box=%.0f",
+                         reason, y, target, clean.origin.y, cleanN, staleN,
+                         span.height, box);
+                AevonPageWrite(body);
+                return 1;
+            }
+            if (fabs(target - y) <= 1.5) return 0;
+        }
+    }
 
     // ① 内容现在按几页一步走？整数倍成立就是一页 = 视口。
     CGFloat inBox = round(span.height / box);
@@ -919,7 +1009,7 @@ static int AevonStateLines = 0;
 static void AevonStateTick(void *context) {
     (void)context;
     if (!AevonEverHosted) return;
-    if (AevonStateLines >= 200) return;
+    if (AevonStateLines >= 260) return;
     AevonStateLines += 1;
     AevonPageState((const char *)context);
 }
@@ -996,6 +1086,7 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
     if (real) {
         AevonOldPage = before;
         AevonSettleTicks = 90;
+        AevonSettleAge = 0;
         AevonWatchTicks = 0;
         // 心跳撞过 2400 拍上限就自己停了，这里把它叫回来 —— 关卡之后要归位的那
         // 一半，全靠这个心跳。
@@ -1023,11 +1114,15 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
         // 也跟着变了」。换算之后的三拍回答「我们写下去的数有没有被它改掉」。
         AevonPageState("on transition");
         AevonConvertForTransition(before, size.height);
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 5; i++) {
             int64_t when = (int64_t)((0.4 + 1.1 * (double)i) * NSEC_PER_SEC);
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, when),
                              dispatch_get_main_queue(), (void *)AevonStateLate, AevonStateTick);
         }
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)),
+                         dispatch_get_main_queue(), (void *)AevonStateLate, AevonStateTick);
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)),
+                         dispatch_get_main_queue(), (void *)AevonStateLate, AevonStateTick);
     }
     for (int i = 0; i < 5; i++) {
         int64_t when = (int64_t)((0.05 + 0.22 * (double)i) * NSEC_PER_SEC);
@@ -1092,6 +1187,7 @@ static void AevonPagerWatchTick(void *context) {
         // App（根控制器不是标准容器）与「挂起之后系统自己去改」都只走这条路。
         AevonOldPage = AevonWatchHeight;
         AevonSettleTicks = 90;
+        AevonSettleAge = 0;
         AevonLastPageHeight = AevonWatchHeight;
         AevonWatchHeight = height;
         AevonWatchTicks = 0;
@@ -1101,11 +1197,19 @@ static void AevonPagerWatchTick(void *context) {
         AevonAlignPager("watch");
         // 0.0.74 — 关卡之后 App 被挂起，过渡钩子里排的那几拍不跑；用户点图标
         // 回到全屏时，这里才是「App 已经按 932 重排完」的第一个观测点。
-        for (int i = 0; i < 3; i++) {
+        // 0.0.75 — 5 拍而不是 3 拍：加上的 6 s / 12 s 两拍是给「关卡之后用户
+        // 过一会儿才回到全屏」那一段的。Aevon(65) 里关卡后只剩 3 拍（0.4 / 1.5 /
+        // 2.6 s），拍完 App 还是旧几何，而它真正重排发生在用户回来那一刻 —— 那
+        // 一刻没有任何读数，正是「断层查了五轮」一直缺的那一段。
+        for (int i = 0; i < 5; i++) {
             int64_t when = (int64_t)((0.4 + 1.1 * (double)i) * NSEC_PER_SEC);
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, when),
                              dispatch_get_main_queue(), (void *)AevonStateLate, AevonStateTick);
         }
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)),
+                         dispatch_get_main_queue(), (void *)AevonStateLate, AevonStateTick);
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)),
+                         dispatch_get_main_queue(), (void *)AevonStateLate, AevonStateTick);
         return;
     }
 
@@ -1137,8 +1241,17 @@ static void AevonPagerWatchTick(void *context) {
     if (AevonSettleTicks > 0) {
         // 0.0.74 — 只有「这一拍真的读到了东西」才消耗机会。读不到（视口还没
         // 跟上、翻页器不在窗口里）不算用过，否则中间态会把整个窗口白烧掉。
+        // 0.0.75 — 「读到了、但那还是旧几何」也算没到（`AevonAlignPager` 现在
+        // 对这种情形直接返回 -1），于是窗口能一直撑到 App 真正重排完。
         NSInteger did = AevonAlignPager("settle");
         if (did >= 0) AevonSettleTicks -= 1;
+        AevonSettleAge += 1;
+        if (AevonSettleAge > 600) {          // 90 s 硬上限
+            AevonSettleTicks = 0;
+            AevonSettleAge = 0;
+            AevonOldPage = 0.0;
+            AevonPageWrite("settle gave up after 90s");
+        }
         if (AevonSettleTicks == 0) AevonOldPage = 0.0;
         return;
     }
