@@ -1215,9 +1215,9 @@ zStackParticipantDidChange:
             // 377 pt 宽的排版，回到桌面自己打开也是，直到它自己被系统重开。
             let screenSize = UIScreen.main.bounds.size
             AevonSceneFrameSet(0, 0, Double(screenSize.width), Double(screenSize.height))
-            let frameDoor = AevonPushSceneFrame(scene)
+            let restoreDoor = AevonPushSceneFrame(scene)
             AevonSceneFrameClear()
-            Log.write("win: scene frame restored door=" + String(frameDoor)
+            Log.write("win: scene frame restored door=" + String(restoreDoor)
                       + " wrote=" + String(AevonFrameWriteCount()))
             let door = AevonPushBackground(scene)
             _ = AevonCallVoid(presenter, "deactivate")
