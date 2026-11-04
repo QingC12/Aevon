@@ -952,7 +952,7 @@ def main():
                   b" background, nothing to float",
                   b"win: no uiPresentationManager",
                   b"win: no presentationView",
-                  b"win: no window - nothing activated",
+                  b"win: no window - presenter released",
                   b"win: window up level=",
                   b"win: activate ran=",
                   b"win: state hosting=",
@@ -1131,7 +1131,24 @@ def main():
                   b"win: demote old=%@ side=%@ new=%@",
                   b"win: card demoted side=%@",
                   b"win: no free slot, ",
+                  b"win: no free slot, %@ declined before demote",
                   b"win: demote found no card",
+                  # 0.0.99 — 修 Aevon(87) 的一组证据：
+                  #   `win: card docked … nth=` = 停靠落点由排列表算（不是「按卡片原来
+                  #     靠哪边」），`nth=` 是当前停靠总数，决定尺寸档位。
+                  #   `win: gesture gate open zone=` = 长按闸门真的开了（两侧按住才
+                  #     移动、底中按住才关闭）。
+                  #   `win: gesture edge-middle not a close up=` 后面带 `gate=0/1`：
+                  #     轻滑底中不关闭，是这一版「上滑关闭容易误触」的修法。
+                  #   `win: no window - presenter released` = 开窗失败后 presenter
+                  #     被拆掉。这条缺了，同一个 App 第二次选就是主线程卡死。
+                  #   `win: hide found no window for ` = 找错名字时不拆别人的窗。
+                  b"win: card docked %.0fx%.0f at %.0f,%.0f nth=%d",
+                  b"win: gesture gate open zone=",
+                  b"raw gesture gate open zone=",
+                  b"win: gesture edge-middle not a close up=%d vx=%d dy=%d gate=%d",
+                  b"win: no window - presenter released",
+                  b"win: hide found no window for ",
                   # 0.0.69 — 三条新的行为证据，缺一条就说明这一轮有一件事没落地：
                   #   · `long press corner, already default` = 长按在默认尺寸上真的
                   #     什么都不做（Aevon(59) 的第一条）；
@@ -1238,6 +1255,12 @@ def main():
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the probe would never reach SpringBoard")
+
+    # 0.0.99 — 用户定档「两侧轻滑不移动，只有长按后拖才移动」。
+    # 正向证据已在上面（`gesture gate open zone=` / `raw gesture gate open zone=`）；
+    # 这里只留一条反向：0.0.98 及以前那一版**没有**闸门，两侧一碰就走。
+    # 不断言 OC 选择子名（`gestureRecognizerShouldBegin` 之类）——Swift 的协议扩展
+    # 方法名不一定落进 `__objc_methname`，拿它当断言就是拿构建成败赌一个假设。
 
     # 0.0.66 — 「旧进程就先杀掉」这条路不许回来。它要读一张名片文件判断进程
     # 新旧，而那一步依赖沙箱里的写盘；写不进去时判据永远不成立，于是每次开窗

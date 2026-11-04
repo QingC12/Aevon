@@ -67,13 +67,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 停靠小窗。它的 window、card、承载视图、scene 引用都在原处，**不需要搬家**，
     /// 也就没有「搬家中途画错」这一类错。
     ///
-    /// 为什么是 2 而不是 11：V1 只验骨架（1 主 + 1 停靠）。V2 扩到 10 个停靠时，
-    /// 要改的是这里的数组长度与「驱逐最老窗」那一套，不是这套模型本身。
+    /// 0.0.99 — 2 → 11。V1 只验骨架，第三个 App 来的时候两个槽都占着，
+    /// 于是「先降级、后找槽」变成了「旧主窗被缩小、新窗开不出来」，屏幕上只剩
+    /// 两圈停靠小窗和一圈手势光晕 —— Aevon(87) 的原话是「变成不显示悬浮窗只有
+    /// 白色光晕」。槽位够用之后这条失败路径根本不会被走到。
+    ///
+    /// 11 = 1 主 + 10 停靠（用户定档：右侧 5 → 左侧 5）。上限与排列见
+    /// `dockHeight` / `dockAsMini`。
     private static var slots: [FloatHost] = []
     private static var mainIndex = 0
+    static let slotCap = 11
 
     private static func ensureSlots() {
-        if slots.isEmpty { slots = [FloatHost(), FloatHost()] }
+        if slots.isEmpty { slots = (0..<slotCap).map { _ in FloatHost() } }
     }
 
     /// 当前主窗的宿主。0.0.97 及以前这是唯一那个宿主，名字留着是为了不改调用点。
@@ -98,7 +104,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     static var mainBundle: String {
         ensureSlots()
         let host = slots[mainIndex]
-        return host.window != nil ? host.bundle : ""
+        // 0.0.99 — 停靠中的那个不算主窗。多窗之后「主窗」= 这个槽里有一张**大**
+        // 卡片；一个被降级成停靠小窗的宿主仍然有 window，但它已经让位了。
+        guard host.window != nil, host.miniFrame == nil else { return "" }
+        return host.bundle
     }
 
     /// 新主窗该住哪个槽：当前槽空着就给它，否则找另一个空槽；两个都满返回 nil。
@@ -114,6 +123,100 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return slot
         }
         return nil
+    }
+
+    /// 0.0.99 — 「先问有没有槽，再决定降不降级」。
+    ///
+    /// 0.0.98 的顺序是反的：`openCard` 先 `demoteMain()` 把主窗缩成小窗，然后
+    /// `show` 才发现没槽。两个槽都占着时，这一下把旧主窗缩小了、新窗开不出来，
+    /// 屏幕上只剩两圈停靠小窗和一圈手势光晕（Aevon(87)）。判据要在动手之前问。
+    static func hasFreeSlot() -> Bool {
+        ensureSlots()
+        return slots.contains { $0.window == nil }
+    }
+
+    // MARK: - 0.0.99 停靠排列
+
+    /// 停靠小窗的排列顺序：右列 0~4 从上往下，左列 0~4 从上往下。
+    ///
+    /// 用户定档「右侧吸附 5 个之后从左边顶部继续排」。分两列存而不是一张总表，
+    /// 是因为**手工点边停靠**要落在被点的那一侧（两侧红区都是「点击停靠」），
+    /// 而**自动降级**才按「右侧先满」排队。一张总表做不到这两件事同时成立。
+    private static var dockRight: [FloatHost] = []
+    private static var dockLeft: [FloatHost] = []
+    private static let columnCap = 5
+
+    private static func columnIndex(_ host: FloatHost) -> (right: Bool, row: Int)? {
+        if let i = dockRight.firstIndex(where: { $0 === host }) { return (true, i) }
+        if let i = dockLeft.firstIndex(where: { $0 === host }) { return (false, i) }
+        return nil
+    }
+
+    private static func slotIndex(of host: FloatHost) -> Int? {
+        ensureSlots()
+        return slots.firstIndex(where: { $0 === host })
+    }
+
+    /// 一个停靠小窗该占第几格。`preferLeft` 表示「手指点的是左边」。
+    @discardableResult
+    private static func claimDock(_ host: FloatHost, preferLeft: Bool) -> Bool {
+        if columnIndex(host) != nil { return preferLeft }
+        // 优先落被点的那一侧；那一列满了再换列。两列都满就挤掉右列最上面那个
+        // （它是最早停靠的），这是 V1 的兜底，V2 会换成「只换主窗内容」。
+        if preferLeft {
+            if dockLeft.count < columnCap { dockLeft.append(host); return true }
+            if dockRight.count < columnCap { dockRight.append(host); return false }
+            dockRight.removeFirst()
+            dockRight.append(host)
+            return false
+        }
+        if dockRight.count < columnCap { dockRight.append(host); return false }
+        if dockLeft.count < columnCap { dockLeft.append(host); return true }
+        dockLeft.removeFirst()
+        dockLeft.append(host)
+        return true
+    }
+
+    private static func releaseDock(_ host: FloatHost) {
+        dockRight.removeAll { $0 === host }
+        dockLeft.removeAll { $0 === host }
+    }
+
+    /// 数量分档：1~2 个 280 pt、3~4 个 220 pt、5 个及以上 186 pt。
+    ///
+    /// 932 ÷ 5 = 186.4，所以「一列装满五个」是这个数唯一的来处。
+    private static func dockHeight(count: Int) -> CGFloat {
+        if count >= 5 { return 186 }
+        if count >= 3 { return 220 }
+        return 280
+    }
+
+    /// 重新摆所有停靠小窗。数量跨档时（第 3 个、第 5 个出现）调用一次。
+    static func relayoutDocked() {
+        ensureSlots()
+        let count = dockRight.count + dockLeft.count
+        guard count > 0 else { return }
+        let height = dockHeight(count: count)
+        for (row, host) in dockRight.enumerated() {
+            host.placeDock(right: true, row: row, height: height)
+        }
+        for (row, host) in dockLeft.enumerated() {
+            host.placeDock(right: false, row: row, height: height)
+        }
+    }
+
+    /// 把这一格摆到指定列的第 `row` 行。只改几何，不碰内容。
+    private func placeDock(right: Bool, row: Int, height: CGFloat) {
+        guard let card = card, let window = window else { return }
+        let width = height / FloatHost.fatAspect
+        let x = right ? window.bounds.width - width : 0
+        let y = CGFloat(row) * height
+        card.frame = CGRect(x: x, y: y, width: width, height: height)
+        // `miniFrame` **不动**：它记的是「取消停靠要回到的那个大卡片」，不是
+        // 「小窗现在在哪」。在这里覆盖它，取消停靠就会回到一个小窗尺寸。
+        followContent()
+        installShield()
+        syncGrip()
     }
 
     /// 把当前主窗缩成停靠小窗。主窗位置**不动**：`mainIndex` 不在这里换，
@@ -207,6 +310,24 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     private var zone: Zone = .left
     private var panStep: CGPoint = .zero
+    /// 0.0.99 — 长按闸门。
+    ///
+    /// 用户定档的五格（对照他发的那张图）：**两侧轻滑什么都不做，只有按住
+    /// 0.4 秒之后拖才移动**；底部中间轻滑是移动，按住 0.4 秒之后上滑才是关闭。
+    /// 这两条都要一个「这次触摸里长按有没有成立」的读数，就是 `gateAt`。
+    ///
+    /// 为什么记时刻而不是布尔：两条输入路径里，长按都可能比 `dragBegin` **晚**
+    /// 成立（手指先落、停 0.4 秒、再移动 → 长按先到、pan 后到，`dragBegin` 是
+    /// pan 的到来）。布尔会在 `dragBegin` 那一拍被抹掉；时刻不会，它只由触摸
+    /// 结束清（`gateReset`），所以「按住再拖」这一整段都看得到闸门。
+    private var gateAt: CFTimeInterval = 0
+    private var gateOpen: Bool { gateAt > 0 && CACurrentMediaTime() - gateAt < 3.0 }
+
+    private func gateOpenNow(_ on: Bool) {
+        gateAt = on ? CACurrentMediaTime() : 0
+    }
+
+    private func gateReset() { gateAt = 0 }
     /// 0.0.43 — the frame a corner resize started from, and which corner the
     /// finger is on. The opposite corner is the anchor that never moves.
     private var resizeStart: CGRect?
@@ -391,7 +512,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 用户看到的是「点了图标，原来的窗也没了」。现在两个槽都占着就返回 nil，
         // 由调用方说「满了」—— 一个能被日志看见的拒绝，好过一个看不见的拆。
         guard let host = takeMainSlot() else {
-            Log.write("win: no free slot, " + bundle + " not shown (V1 holds two windows)")
+            Log.write("win: no free slot, " + bundle + " not shown")
             return nil
         }
         host.teardown()
@@ -647,10 +768,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// file would make a temporary size look like the operator's chosen one.
     private func remember(in bounds: CGRect) {
         guard let card = card, bounds.width > 0, bounds.height > 0 else { return }
-        if miniFrame != nil {
-            miniFrame = card.frame
-            return
-        }
+        // 0.0.99 — 停靠中不改记忆。
+        //
+        // `miniFrame` 是「取消停靠要回到的那个大卡片」，不是「小窗现在在哪」。
+        // 0.0.98 及以前这里把 `card.frame`（小窗）写进去，于是拖一下停靠小窗、
+        // 再取消停靠，回到的是一个 168×280 的「大卡片」。
+        if miniFrame != nil { return }
         var placement = CardLayout.loadRuntime()
         let origin = card.frame.origin
         let normalized = CGPoint(x: origin.x / bounds.width, y: origin.y / bounds.height)
@@ -688,8 +811,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         if !bundle.isEmpty {
             for slot in slots where slot.window != nil && slot.bundle == bundle {
                 slot.teardown()
+                // 0.0.99 — 关掉的若是主窗，`mainIndex` 要指向还活着的那一个，
+                // 否则 `mainBundle` 从此回答空串，下一个 `openCard` 会以为屏幕上
+                // 没有卡而跳过错位。
+                if slots[mainIndex].window == nil,
+                   let alive = slots.firstIndex(where: { $0.window != nil }) {
+                    mainIndex = alive
+                }
                 return
             }
+            // 0.0.99 — 名字对不上就**什么都不拆**。0.0.98 这里退回拆当前主窗，
+            // 多窗之后那等于「找不到 A 就把 B 关掉」。
+            Log.write("win: hide found no window for " + bundle)
+            return
         }
         shared.teardown()
     }
@@ -699,6 +833,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             bandWindow?.isHidden = true
             bandWindow = nil
             onClose = nil
+            FloatHost.releaseDock(self)
+            FloatHost.relayoutDocked()
             return
         }
         // 0.0.68 — 收窗时**不碰**承载视图。
@@ -749,6 +885,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         window.isHidden = true
         window.rootViewController = nil
         self.window = nil
+        // 0.0.99 — 关掉的窗必须退出停靠表，否则后面的小窗会按一个空槽算位置。
+        FloatHost.releaseDock(self)
+        FloatHost.relayoutDocked()
     }
 
     private func makeWindow() -> FloatWindow? {
@@ -1111,13 +1250,41 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         if gesture === tap {
             return zone == .left || zone == .right
         }
+        if gesture === pan {
+            // 0.0.99 — 两侧轻滑不许开 pan。
+            //
+            // 用户定档「两侧：点击停靠，长按拖拽移动」——轻滑既不停靠也不移动。
+            // 若让 pan 在闸门没开时也起来，`UIPanGestureRecognizer` 一开始就会把
+            // 同一次触摸从 tap 那里抢走（识别器之间是排他的），于是「点一下停靠」
+            // 会一起失效。让 pan 在闸门关着时不开，tap 才有机会赢。
+            //
+            // 「按住 0.4 秒再拖」不受影响：那时闸门已经打开，pan 才起步。
+            if zone == .left || zone == .right {
+                return gateOpen
+            }
+            return true
+        }
         if gesture === press {
-            // Only 边角: the sides' long press is nothing at all now, and a press
-            // that begins disables the pan, so allowing it there would cost the
-            // move gesture its finger for 0.4 s.
-            return zone == .bottomRight
+            // 0.0.99 — 长按现在有三种意思，三格都需要它：
+            //   右下角 = 恢复默认尺寸（0.0.39 起的「重启」）
+            //   两侧   = 打开移动闸门（轻滑不移动，按住拖才移动）
+            //   底中   = 打开关闭闸门（轻滑只是移动，按住后上滑才关）
+            return zone == .bottomRight || zone == .bottomMiddle
+                || zone == .left || zone == .right
         }
         return true
+    }
+
+    /// 0.0.99 — 长按与拖动必须能同时活着。
+    ///
+    /// 五格里的「两侧：按住 0.4 秒之后拖才移动」要求长按先成立、拖动后接上。
+    /// UIKit 默认的排他规则会让先成立的那个把另一个判负，于是「按住再拖」永远
+    /// 拖不动 —— 长按赢了，pan 已经失败。`allowableMovement = 12` 保证轻滑的
+    /// 长按一定失败（手指动了 >12 pt），所以放开并行不会让轻滑也开闸。
+    func gestureRecognizer(_ gesture: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        let pair = (gesture === press && other === pan) || (gesture === pan && other === press)
+        return pair
     }
 
     /// 0.0.48 — 手势逻辑从识别器里拆了出来：同一段代码现在有两个入口。
@@ -1132,6 +1299,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard let card = card else { return }
         zone = zoneFor(start)
         panStep = .zero
+        // 0.0.99 — 闸门不在这里归零：长按有可能比这一拍晚成立。清点在
+        // `dragEnd` / `rawTouch` 的抬起那一拍（`gateReset`）。
         // Which band the finger found. If the operator reports "it does not
         // work" again, this line says whether the touch arrived and which
         // zone it was counted as — two very different defects.
@@ -1219,6 +1388,22 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // drag on the band is a drag on the band, wherever it started;
             // 0.0.43 gave the corners their own meaning back, so a drag on
             // a corner is a resize and this branch is the other three.
+            //
+            // 0.0.99 — 两侧要长按闸门。用户原话「两侧红色为点击停靠，长按拖拽
+            // 移动」：轻滑不移动，只有按住 0.4 秒之后才跟手。顶部与底部中间不要
+            // 闸门（底部中间是「轻滑为移动悬浮窗」）。
+            //
+            // 闸门关着时**不移动，但 `panStep` 照旧推进**（上面那三行已经做了）：
+            // 它记的是「手指上一拍在哪」，所以长按成立之后的第一帧位移只有手指
+            // 那一帧真正走过的距离，卡片不会瞬移半个屏幕。
+            if (zone == .left || zone == .right) && !gateOpen {
+                return
+            }
+            // 0.0.99 — 底中长按之后的那一段是「关闭手势」，不是移动。
+            // 不挡住的话，按住 0.4 秒再上滑会一边把卡片往上拖一边关掉。
+            if zone == .bottomMiddle && gateOpen {
+                return
+            }
             var frame = card.frame
             frame.origin.x += dx
             frame.origin.y += dy
@@ -1229,6 +1414,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     private func dragEnd(total: CGPoint, velocity: CGPoint) {
         guard let card = card, let window = window else { return }
+        // 0.0.99 — 两侧轻滑：闸门没开就什么都没发生。不做 `remember`，也不写
+        // 「moved」—— 那张卡片根本一动没动，写一行只会让下一份日志看起来像
+        // 「移动了但没生效」。
+        if (zone == .left || zone == .right) && !gateOpen && miniFrame == nil {
+            gateReset()
+            return
+        }
+        if miniFrame != nil { return }
         if zone.isCorner, resizeStart != nil {
             resizeStart = nil
             // 画布不动，也就没有重排要付：只把画面按新尺寸摆正、把圆角按新
@@ -1242,30 +1435,28 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return
         }
         if zone == .bottomMiddle {
-            // 边中区域快速上滑关闭. Two readings, either one closes.
+            // 0.0.99 — 关闭要「先按住 0.4 秒」。
             //
-            // Travel first. 0.0.36 read speed alone, and Aevon(35) recorded four
-            // attempts at `up=-159 / 0 / -199 / -2327` — not one of them
-            // positive, on a phone where the operator was swiping up. A velocity
-            // sample is the last frame or two of the finger; a thumb that reaches
-            // its target and settles flips the sign without ever going back down.
-            // Travel is the whole path and cannot flip. Speed stays as the second
-            // reading, because a short hard flick barely travels and is still a
-            // flick.
+            // Aevon(87) 之前的规则是「快速上滑就关」，而用户的原话是「现在的
+            // 上滑关闭容易误触」。五格图里底中是两件事：轻滑 = 移动，长按 0.4 秒
+            // 之后上滑 = 关闭。闸门就是这两件事的分界，没有第二套判据。
             let lift = -total.y
             let up = -velocity.y
             let byTravel = lift > 50 && abs(total.y) > abs(total.x)
             let bySpeed = up > flick && up > abs(velocity.x)
-            if byTravel || bySpeed {
+            if gateOpen, byTravel || bySpeed {
                 Log.write("win: gesture edge-middle flick up=" + String(Int(up))
                           + " dy=" + String(Int(total.y)) + " -> close")
                 requestClose("edge swipe up")
                 return
             }
-            Log.write("win: gesture edge-middle not a flick up=" + String(Int(up))
-                      + " vx=" + String(Int(velocity.x))
-                      + " dy=" + String(Int(total.y)))
+            Log.write(String(format: "win: gesture edge-middle not a close up=%d vx=%d dy=%d gate=%d",
+                             Int(up), Int(velocity.x), Int(total.y), gateOpen ? 1 : 0))
+
+            // 底中轻滑只是移动：这一格不 dock、不 close，落在这里就是「移动」，
+            // 由下面的 `remember` 收尾。
         }
+        gateReset()
         Log.write("win: card moved to " + point(card.frame.origin)
                   + " size=" + size(card.bounds.size))
         remember(in: window.bounds)
@@ -1293,21 +1484,38 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// restore the very numbers the operator wanted gone — the remembered
     /// placement has to go first, or "restart" is a no-op.
     @objc private func handlePress(_ gesture: UILongPressGestureRecognizer) {
-        guard let window = window else { return }
+        guard let window = window, let grip = grip else { return }
         switch gesture.state {
         case .began:
-            // 0.0.69 — 只有右下角是「重启」。左下角这一格不响应长按：母本的
-            // `GestureIntroduction` 里「长按」只作为「切换横竖」出现，而 Aevon(59)
-            // 明确要把左下角留给横屏手势。识别器的 delegate 已经挡了一层，这里
-            // 再判一次是因为 `zone` 在抬手前可能被另一条路改过。
-            guard zone == .bottomRight else { return }
-            // A press that becomes a drag must not also drag the card.
-            pan?.isEnabled = false
-            if resetToPlan(in: window.bounds) {
-                Log.write("win: gesture long press right corner, 重启 as geometry reset")
+            // 0.0.99 — 五格里的长按有三种意思：
+            //   右下角 = 恢复默认尺寸（0.0.39 起的「重启」，读记忆之前先清记忆）
+            //   两侧   = 开移动闸门
+            //   底中   = 开关闭闸门
+            // 左下角仍然不响应长按：母本 `GestureIntroduction` 里「长按」只作为
+            // 「切换横竖」出现，Aevon(59) 明确把左下角留给横屏手势（V4 做）。
+            //
+            // 这里**重新算一次格子**，不读 `zone`：两侧的 pan 在闸门关着时根本
+            // 不会开始（见 `gestureRecognizerShouldBegin`），`dragBegin` 也就没跑，
+            // `zone` 会一直是上一次那个。长按是第一现场，格子从这里读最可靠。
+            let here = zoneFor(cardPoint(gesture.location(in: grip)))
+            if here == .bottomRight {
+                // A press that becomes a drag must not also drag the card.
+                pan?.isEnabled = false
+                if resetToPlan(in: window.bounds) {
+                    Log.write("win: gesture long press right corner, 重启 as geometry reset")
+                }
+                return
             }
+            guard here == .left || here == .right || here == .bottomMiddle else { return }
+            gateOpenNow(true)
+            Log.write("win: gesture gate open zone=" + name(here))
         case .ended, .cancelled, .failed:
             pan?.isEnabled = true
+            // 0.0.99 — **不在这里清闸门**。
+            //
+            // 抬手那一拍，长按与拖动谁先收到 `ended` 是不确定的；清早了
+            // `dragEnd` 就会看到「闸门关着」，于是「按住拖」的落点不被记住、
+            // 「按住后上滑」也不关。闸门只由 `dragEnd` 与原始触摸的抬起清。
         default:
             break
         }
@@ -1326,7 +1534,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard landed == .left || landed == .right else { return }
         // `window` 不再在这里读：几何全部搬进 `applyMini` 了。留着这个判断是为了
         // 「没有窗口就没有卡片」这条早退语义不变 —— 少了它，`undock` 会拿到半死状态。
-        guard let card = card, window != nil else { return }
+        guard card != nil, window != nil else { return }
         if miniFrame != nil {
             undock()
             return
@@ -1334,8 +1542,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard natural.height > 16 else { return }
         let side: CardLayout.Edge = landed == .left ? .left : .right
         applyMini(side: side)
-        Log.write("win: card docked " + (side == .left ? "left " : "right ")
-                  + size(card.bounds.size) + " at " + point(card.frame.origin))
     }
 
     /// 0.0.98 — 缩成停靠小窗，几何只有这一份。
@@ -1349,32 +1555,37 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 推出来），卡片贴齐它被停靠的那条边 —— 一个离边还有缝的小窗，等于没做到
     /// 「让开」这件事本身。
     private func applyMini(side: CardLayout.Edge) {
-        guard let card = card, let window = window else { return }
+        guard let card = card, window != nil else { return }
         // 展开前的 frame 只记一次：已经停靠过就不再覆盖，否则「取消停靠」会回到
         // 上一次的小窗尺寸，而不是回到大卡片。
         if miniFrame == nil { miniFrame = card.frame }
-        // 0.0.81 — 小窗按卡片自己的形状走（5:3），不取画布比例：画布可能是整屏
-        // 高的，而「停靠小窗」是卡片的一个状态，不是画布的状态。
-        let ratio = 1.0 / FloatHost.fatAspect
-        let height = miniHeight(in: window.bounds)
-        let width = height * ratio
-        let x = side == .left ? 0 : window.bounds.width - width
-        let y = Swift.min(Swift.max(card.frame.minY, margin),
-                          Swift.max(margin, window.bounds.height - height - margin))
-        card.frame = CGRect(x: x, y: y, width: width, height: height)
-        followContent()
-        installShield()
-        syncGrip()
+        // 0.0.99 — 位置不再由「卡片原来靠哪边」决定。
+        //
+        // 0.0.98 那版每个小窗各自按自己原来的 x 贴边、y 沿用卡片原来的 y，于是
+        // 三个以上必然叠在一起（Aevon(87) 的 `card docked left 168x280 at 0,28`
+        // 与 `at 0,75` 就是两张窗抢同一个位置）。现在停靠是一个**列**：谁先停靠
+        // 谁排上面，序号决定一切。`side` 仍然收下，只用来决定「这一格先试哪一边」。
+        // `side` 只决定「这一格先试哪一列」；落点由排列表算。
+        FloatHost.claimDock(self, preferLeft: side == .left)
+        FloatHost.relayoutDocked()
+        let landed = card.frame
+        Log.write(String(format: "win: card docked %.0fx%.0f at %.0f,%.0f nth=%d",
+                         landed.width, landed.height,
+                         landed.origin.x, landed.origin.y,
+                         FloatHost.dockCount))
     }
+
+    /// 停靠表里现在有几个。
+    static var dockCount: Int { dockRight.count + dockLeft.count }
 
     /// 被新主窗挤下去：缩成小窗，贴到卡片原来更靠近的那条边。
     /// 返回落到的边名，给 `win: demote` 那行日志用。
     private func dockAsMini() -> String {
         guard let card = card, let window = window, natural.height > 16 else { return "none" }
         if miniFrame != nil { return "already" }
-        let left = card.frame.midX < window.bounds.width / 2
-        applyMini(side: left ? .left : .right)
-        let name = left ? "left" : "right"
+        applyMini(side: card.frame.midX < window.bounds.width / 2 ? .left : .right)
+        // 落点由排列表决定，不由「原来靠哪边」决定 —— 所以名字要等摆完之后再读。
+        let name = card.frame.midX < window.bounds.width / 2 ? "left" : "right"
         Log.write(String(format: "win: card demoted side=%@ %@ at %@",
                          name, size(card.bounds.size), point(card.frame.origin)))
         return name
@@ -1490,15 +1701,18 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             rawMoved = false
             rawStamp = stamp
             rawVelocity = .zero
+            // 0.0.99 — 新的一次触摸，闸门先关上（上一条的手指可能没走完收尾）。
+            gateReset()
             dragBegin(at: local)
             if rawProbe < 20 {
                 rawProbe += 1
                 Log.write("win: raw touch grab zone=" + name(zone)
                           + " at " + point(local))
             }
-            // 边角长按 = 复位。这条路没有 UILongPressGestureRecognizer 可用
-            // （事件根本没进 UIKit），所以按住不动这件事自己计时。
-            if zone == .bottomRight {
+            // 0.0.99 — 长按在这一条路上也得有，因为事件根本没进 UIKit：底中
+            // 「按住 0.4 秒才允许关闭」与两侧「按住才允许移动」都要自己计时。
+            if zone == .bottomRight || zone == .bottomMiddle
+                || zone == .left || zone == .right {
                 let work = DispatchWorkItem { [weak self] in
                     guard let self = self else { return }
                     self.rawPressFired()
@@ -1544,12 +1758,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     }
 
     private func rawPressFired() {
-        guard rawActive, !rawMoved, zone == .bottomRight, let window = window else { return }
-        // 0.0.69 — 只有真的动了才写这一行。已经是默认尺寸时 `resetToPlan` 回
-        // false，日志里就只剩它自己那句 `already default`。
-        if resetToPlan(in: window.bounds) {
-            Log.write("win: raw long press corner, 重启 as geometry reset")
+        guard rawActive, !rawMoved, let window = window else { return }
+        if zone == .bottomRight {
+            // 0.0.69 — 只有真的动了才写这一行。已经是默认尺寸时 `resetToPlan` 回
+            // false，日志里就只剩它自己那句 `already default`。
+            if resetToPlan(in: window.bounds) {
+                Log.write("win: raw long press corner, 重启 as geometry reset")
+            }
+            return
         }
+        // 0.0.99 — 两侧与底中：长按成立 = 开闸门。手指还在屏幕上，接下来的移动
+        // 或上滑才有意义。
+        guard zone == .left || zone == .right || zone == .bottomMiddle else { return }
+        gateOpenNow(true)
+        Log.write("win: raw gesture gate open zone=" + name(zone))
     }
 
     /// 手指是否落在环上：卡片之外，且离卡片边缘不超过 `reach`。卡片坐标系，
@@ -1625,13 +1847,23 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     @objc private func undock() {
         guard let card = card, let window = window, let saved = miniFrame else { return }
         miniFrame = nil
+        // 0.0.99 — 走了就得让位：后面的小窗要顶上来，尺寸档位也可能跨回去。
+        FloatHost.releaseDock(self)
+        // 0.0.99 — 取消停靠 = 升为主窗。多窗之后「还原来那张大卡片」不再是唯一
+        // 结果：别的槽里可能还坐着一个主窗，两张一样大的卡片会叠在一起。
+        // `mainIndex` 跟着转移，`FloatHost.mainBundle` 才回答得对。
+        if let index = FloatHost.slotIndex(of: self) {
+            FloatHost.mainIndex = index
+        }
         card.frame = clamped(saved, in: window.bounds)
         followContent()
         shield?.removeFromSuperview()
         shield = nil
         syncGrip()
         Log.write("win: card undocked " + size(card.bounds.size)
-                  + " at " + point(card.frame.origin))
+                  + " at " + point(card.frame.origin)
+                  + " promoted=" + bundle)
+        FloatHost.relayoutDocked()
     }
 
     // MARK: - geometry

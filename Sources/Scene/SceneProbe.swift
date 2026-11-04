@@ -942,8 +942,19 @@ zStackParticipantDidChange:
         // 那份 `FloatHost` 上，新的主窗拿到的是另一个空槽。见 `FloatHost.takeMainSlot`。
         if cardUp {
             // 同一个 App 再选一次：不降级也不重开。否则点两下就把它自己挤成小窗。
-            if hostedBundle == bundleID {
+            if hostedBundle == bundleID || FloatHost.mainBundle == bundleID {
                 Log.write("win: icon " + bundleID + " is already the main card, ignored")
+                return
+            }
+            // 0.0.99 — **先问有没有槽，再决定降不降级**。
+            //
+            // 0.0.98 的顺序是反的，这是 Aevon(87) 那个「第三个 App → 不显示悬浮窗、
+            // 只剩白色光晕」的全部原因：两个槽都在用时，`demoteMain()` 先把主窗缩成
+            // 小窗，然后 `FloatHost.show` 才发现没槽，于是新窗开不出来、旧窗已经被
+            // 缩小，屏幕上只剩停靠小窗和一圈手势环。槽位现在是 11 个，正常用不到
+            // 这条；但拒绝必须发生在动手之前，否则下一次槽满还是同一个画面。
+            guard FloatHost.hasFreeSlot() else {
+                Log.write(String(format: "win: no free slot, %@ declined before demote", bundleID))
                 return
             }
             let side = FloatHost.demoteMain()
@@ -1072,6 +1083,19 @@ zStackParticipantDidChange:
         hostedBundle = nil
         try? FileManager.default.removeItem(atPath: Aevon.hostedPath)
         Log.write("win: hosted mark cleared for " + bundleID)
+    }
+
+    /// 0.0.99 — 只清「确实是我这一张」的那份记号。
+    ///
+    /// `clearHosted()` 是无条件的：多窗之后关掉停靠小窗会顺手抹掉主窗那份
+    /// `hosted.plist`，那个 App 下一拍就不认为自己在浮窗里了。
+    private static func clearHosted(_ bundleID: String) {
+        guard !bundleID.isEmpty else { clearHosted(); return }
+        if let current = hostedBundle, current != bundleID {
+            Log.write("win: hosted mark kept for " + current + " (closing " + bundleID + ")")
+            return
+        }
+        clearHosted()
     }
 
     /// 4 秒内找 scene。
@@ -1293,7 +1317,13 @@ zStackParticipantDidChange:
             // 因为当时只有一块画布。多窗之后那样做会把**另一个窗**的画布目标
             // 一起抹掉：关掉主窗，停靠的那个窗就再也不会被写回它自己的尺寸，
             // 表现是「关一个窗，另一个窗的画面忽然按整屏重排」。
-            let closingBundle = hostedBundle ?? ""
+            // 0.0.99 — 还的是**这张卡自己的**那一格，不是 `hostedBundle`。
+            //
+            // `hostedBundle` 是单值：多窗之后它记的是「最后被登记的那个 App」，
+            // 于是关掉停靠小窗时会把主窗的 bundle 当成自己的（Aevon(87) 里
+            // `hosted mark cleared for com.apple.DocumentsApp` 出现在关别的窗那一拍）。
+            // `bundleID` 是这个 scene 自己的，唯一正确。
+            let closingBundle = bundleID ?? hostedBundle ?? ""
             let screenSize = UIScreen.main.bounds.size
             if !closingBundle.isEmpty {
                 AevonSceneFrameSet(closingBundle, 0, 0,
@@ -1342,7 +1372,7 @@ zStackParticipantDidChange:
             // 用局部变量记住 bundle：`clearHosted()` 下面就把静态的那一份清了。
             // 如果这 4 秒内又开了一张同一个 App 的卡，这一份读数属于新的一次，
             // 让给新卡（`hostedBundle == b` 就跳过）。
-            let closedBundle = hostedBundle
+            // 0.0.99 — 名字取自这张卡自己（见上面 `closingBundle` 那段）。
             // 0.0.69 — presenter 拆掉之后再交一次整屏尺寸。
             //
             // 上面那次 `AevonPushSceneFrame` 发生在承载面还在的时候，那时 App 的
@@ -1384,7 +1414,8 @@ zStackParticipantDidChange:
             // 0.0.98 — 只把自己从名单里摘掉。多窗时全部清空会把停靠小窗的保活
             // 一起撤掉，那个窗下一拍就会被系统收走。
             AevonHookDisarm(closingBundle.isEmpty ? nil : closingBundle)
-            clearHosted()
+            clearHosted(closingBundle)
+            let closedBundle = closingBundle.isEmpty ? nil : closingBundle
             if let b = closedBundle {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
                     if hostedBundle == b { return }
@@ -1393,6 +1424,7 @@ zStackParticipantDidChange:
                               + " file=" + (AevonAppLogPathOf(b) ?? "none"))
                 }
             }
+
             // 0.0.98 — 关掉一块之后，屏幕上可能还留着停靠小窗。`cardUp` 的语义
             // 是「还有没有至少一块卡」，所以问宿主，不无条件写 false。写 false 的
             // 后果是下一个 `openCard` 认为没有主窗可降级，直接去抢空槽。
@@ -1458,7 +1490,28 @@ zStackParticipantDidChange:
         guard let host = FloatHost.show(view, bundle: bundleID ?? hostedBundle ?? "",
                                         awaitingFrame: awaiting,
                                         onClose: { reason in closeCard(reason) }) else {
-            Log.write("win: no window - nothing activated")
+            // 0.0.99 — 失败必须**拆掉刚建的这个 presenter**。
+            //
+            // 这是 Aevon(87) 那个「卡屏 + 只剩白色光晕」的第二层原因，也是更深
+            // 的那一层：`AevonCreatePresenter(manager, "com.aevon.float", 0)` 已经
+            // 在这个 scene 上建好了一个 presenter，`FloatHost.show` 却在之后才
+            // 因为没槽返回 nil。那个 presenter 于是**留在了 scene 上**，既没有
+            // `deactivate` 也没有 `invalidate`。
+            //
+            // 日志把后果记得很清楚：22:26:35 第一次建好 presenter 后被拒；22:27:19
+            // 用户再选同一个 App，日志停在 `scene layerManager layers=-1` 之后再
+            // 也没有下一行 —— 同一个 scene 上第二次创建同标识的 presenter，主线程
+            // 就卡在那儿。用户看到的就是「卡屏」，之后屏幕上只剩一圈手势环。
+            //
+            // 顺序与 `closeCard` 一致：先停手再交还，最后才拆。反过来的话，
+            // 被 invalidate 的 presenter 还挂着一个「我还在承载」的断言。
+            _ = AevonCallVoid(presenter, "deactivate")
+            _ = AevonCallVoid(presenter, "invalidate")
+            if let b = bundleID {
+                AevonHookDisarm(b)
+                clearHosted(b)
+            }
+            Log.write("win: no window - presenter released")
             return
         }
         cardUp = true
