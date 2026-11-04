@@ -629,6 +629,18 @@ def main():
                       #    stuck 之后 App 侧留一个记号（`want full canvas`），宿主
                       #    下一次给这个 App 开卡时改用整屏画布（`full=1`）。
                       b"want full canvas at=%.0f",
+                      # 0.0.80 — 「卡屏」的成因：`stale` 把**视口外面**的旧页也数进去
+                      # 了（`k0=AWEFeedViewCell:932,932x430` 在 0–717 的视口下面），于是
+                      # 「页不齐」永远成立，`beginUpdates/endUpdates` 每 0.35 s 一次、
+                      # 一次开卡十来次 —— 那几秒主线程在反复整表重排。这两个断言是
+                      # 新的收口：`rebuild stop` 证明「发完没变就不再发」这道验收真的
+                      # 生效过（下一份日志里它有、且每条会话最多一行，就是判对了）。
+                      b"rebuild stop n=%d top=%.0f box=%.0f stale=%d",
+                      # 0.0.80 — 分享面板（Aevon(71)）：只量不改。`sheet` 带层名/高度/
+                      # 顶边/画布高，`sheet cut` 列出「底边落在窗口以下」的叶子视图 ——
+                      # 那里面就是看不见的发送按钮。下一版要动画布，靠的就是这两行。
+                      b"sheet %.32s h=%.0f top=%.0f box=%.0f",
+                      b"sheet cut%s (below the window)",
                       b"settle gave up after 90s",
                       b"player b=%.0fx%.0f grav=%s src=%.0fx%.0f",
                       b"videoGravity",

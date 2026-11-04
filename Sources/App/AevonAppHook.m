@@ -556,11 +556,19 @@ static int AevonWatchArmed = 0;
 /// 心跳撞上 2400 拍上限之后置 1。过渡钩子可以把它重新叫起来 —— 否则一张用得久
 /// 一点的卡，守卫就会在用户还在用的时候自己先停了。
 static int AevonWatchDead = 0;
-/// 0.0.76 — 「请 App 重排」的次数与上一次的时刻。12 次是够用与别死循环的折中：
-/// 一次开卡/关卡各需要一到两次，而如果 App 坚持不重排，再发也只是每 0.25 s 往
-/// 它的运行循环里塞一张作废票。
+/// 0.0.76 — 「请 App 重排」的次数与上一次的时刻。
+///
+/// 0.0.80 把上限从 12 收到 4，并且加了一道**它到底管不管用**的判据：
+///
+/// 0.0.78/0.79 的写法是「只要页高不齐就发」，发到 12 次为止。Aevon(71) 里这段
+/// 每次都发、每次都没用（`clean=1 stale=1 top=717 box=717` 连续九条，四秒里一行
+/// 都没变），而每一次都是整表重排。**没有验收的发信号，等于把重活挂在定时器上。**
+/// 现在连续两次发完页高一点没变，就判这个 App 不吃这一口，本次尺寸变化内不再发。
 static int AevonRebuilds = 0;
 static CFAbsoluteTime AevonRebuildAt = 0.0;
+static int AevonRebuildSame = 0;
+static int AevonRebuildDead = 0;
+static CGFloat AevonRebuildTop = 0.0;
 /// 0.0.78 — 「翻页器比窗口高」这一族的读数次数与上一次的时刻。6 行 × 2.5 s 是
 /// 「够看清一次」与「别把日志刷满」的折中；每次尺寸变化重新计数。
 static int AevonStuckLines = 0;
@@ -635,6 +643,9 @@ static void AevonPagerForget(void) {
     AevonAnchorWrites = 0;
     AevonRebuilds = 0;
     AevonRebuildAt = 0.0;
+    AevonRebuildSame = 0;
+    AevonRebuildDead = 0;
+    AevonRebuildTop = 0.0;
     AevonStuckLines = 0;
     AevonStuckAt = 0.0;
 }
@@ -936,16 +947,38 @@ static void AevonAnchorRemember(UIScrollView *view, CGFloat box) {
 ///
 /// 所以判据从「选公式」改成「开不开工」：页高不齐就一帧 offset 都不写，只请 App
 /// 重排（`AevonPagerRebuild`）。三个数一次算完，两处读数（state / rebuild）共用。
+/// 0.0.80 — 只数**压着视口的那几页**，不数已经被回收、躺在视口外面的旧页。
+///
+/// Aevon(71) 把这条判据的错误写在了时间戳上：
+///
+///   16:57:24 state box=430x717 off=0,0 k0=AWEFeedViewCell:932,932x430 k2=…:0,717x430
+///   16:57:24 rebuild settle … clean=1 stale=1 top=717 box=717      ← 每 0.25 s 一次
+///   16:57:27 同上，连续 9 条
+///
+/// 视口是 0–717，`k2`（0,717 高）正压在视口上，是最干净的一页；`k0` 在 y=932，
+/// 整页都在视口**下面**，是刚才那一轮复用留下的、还没被重新量过的旧行。它不影响
+/// 任何人看到的东西 —— 用户滑到它时它会被重建、按当下高度量一次。
+///
+/// 旧判据把它算成 `stale`，于是 `stale>0` 永远成立，`AevonPagerRebuild` 就去作废
+/// 行高缓存（`beginUpdates/endUpdates` = 整表重排）。一次开卡 12 次、每 0.25 s
+/// 一次，连续三秒 —— 这三秒里 App 主线程在反复重排整张表：画面不动、滑动不响应。
+/// 切后台之所以能救回来，是因为窗口一脱离，`AevonPagerWatchTick` 的 `[view window]`
+/// 那道门就关了，风暴自己停下。
 static void AevonPagerStats(UIScrollView *view, CGFloat box,
                             int *cleanOut, int *staleOut, int *alignedOut) {
     int clean = 0;
     int stale = 0;
+    CGFloat y = [view contentOffset].y;
     NSArray *kids = [view subviews];
     NSUInteger limit = kids.count < 12 ? kids.count : 12;
     for (NSUInteger i = 0; i < limit; i++) {
-        CGFloat h = [[kids objectAtIndex:i] frame].size.height;
+        CGRect f = [[kids objectAtIndex:i] frame];
+        CGFloat h = f.size.height;
         // 「一页」只可能落在视口高的一半到一个半之间：页头、贴片、滚动条不是页。
         if (h < box * 0.5 || h > box * 1.5) continue;
+        // 整页都在视口上边 / 下边：回收池里的旧行，不在这一屏里，不算数。
+        if (CGRectGetMaxY(f) <= y + 2.0) continue;
+        if (f.origin.y >= y + box - 2.0) continue;
         if (fabs(h - box) <= 2.0) clean += 1;
         else stale += 1;
     }
@@ -1035,12 +1068,33 @@ static NSInteger AevonPagerRebuild(const char *reason) {
     AevonPagerStats(view, box.size.height, &clean, &stale, &aligned);
     // 已经齐了：不是重建的对象。
     if (stale == 0 && aligned) return 0;
-    if (AevonRebuilds >= 12) return -1;
+    // 0.0.80 — 上一次发完、这一拍再看，页高一点没动 ⇒ 这口它不吃，别再发。
+    if (AevonRebuildDead) return -1;
+    if (AevonRebuilds >= 4) return -1;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    // 0.25 s 的间隔：App 的重排本身要一两帧，连发只是把同一次重排排队。
-    if (AevonRebuildAt > 0.0 && now - AevonRebuildAt < 0.25) return -1;
+    // 0.35 s 的间隔：App 的重排本身要一两帧，连发只是把同一次重排排队。
+    if (AevonRebuildAt > 0.0 && now - AevonRebuildAt < 0.35) return -1;
+    // 发之前先量：视口那一页现在多高。上一次发的效果只会在**这一次**的读数里出现，
+    // 所以验收点天然落在这里，不需要额外的延时拍。
+    UIView *probe = AevonPageKidAt(view, box.size.height, [view contentOffset].y);
+    CGFloat beforeTop = probe != nil ? [probe frame].size.height : 0.0;
+    if (AevonRebuildTop > 200.0 && beforeTop > 200.0
+        && fabs(beforeTop - AevonRebuildTop) < 1.0 && stale > 0) {
+        AevonRebuildSame += 1;
+    } else {
+        AevonRebuildSame = 0;
+    }
+    if (AevonRebuildSame >= 2) {
+        AevonRebuildDead = 1;
+        char stop[220];
+        snprintf(stop, sizeof(stop), "rebuild stop n=%d top=%.0f box=%.0f stale=%d",
+                 AevonRebuildSame, beforeTop, box.size.height, stale);
+        AevonPageWrite(stop);
+        return -1;
+    }
     AevonRebuildAt = now;
     AevonRebuilds += 1;
+    AevonRebuildTop = beforeTop;
 
     BOOL collection = [view isKindOfClass:[UICollectionView class]];
     BOOL table = [view isKindOfClass:[UITableView class]];
@@ -1244,6 +1298,95 @@ static void AevonStuckReport(const char *reason, CGFloat box, CGFloat full) {
     if (list.length == 0) return;
     char cut[520];
     snprintf(cut, sizeof(cut), "stuck cut%s (below the window)", [list UTF8String]);
+    AevonPageWrite(cut);
+}
+
+/// 0.0.80 — App 自己弹出来的浮层有多高，以及它被切掉的那一截里有什么。
+///
+/// Aevon(71) 的第二件事：卡片里点抖音的「分享」，只看得见联系人头像，底部的
+/// 发送按钮不见了。这类面板是**从屏幕底边往上**摆的（`y = 屏幕高 − 面板高`），
+/// 而卡片交给 App 的是 717 高的画布 —— 932 − 717 = 215，正好是底部那一截。
+/// 面板按 932 摆、被 717 的窗口裁掉下面 215，按钮就活在被裁掉的那一截里。
+///
+/// 这一版不去动它（把面板往上推是替 App 排版，改画布又会让卡片变窄），只把两件
+/// 事量清楚：**是哪一层、多高、被切掉的叶子视图在什么位置**。下一版才有得选。
+static int AevonSheetLines = 0;
+static char AevonSheetSeen[96] = {0};
+static CGFloat AevonSheetH = 0.0;
+
+static UIWindow *AevonKeyWindow(void) {
+    UIApplication *application = [UIApplication sharedApplication];
+    if (application == nil) return nil;
+    UIWindow *best = nil;
+    for (UIScene *one in [application connectedScenes]) {
+        if (![one isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *win in [(UIWindowScene *)one windows]) {
+            if ([win bounds].size.height < 200.0) continue;
+            if (best == nil || [win isKeyWindow]) best = win;
+        }
+    }
+    return best;
+}
+
+static void AevonSheetReport(void) {
+    if (AevonSheetLines >= 6) return;
+    UIWindow *win = AevonKeyWindow();
+    if (win == nil) return;
+    UIViewController *top = [win rootViewController];
+    if (top == nil) return;
+    int hops = 0;
+    while ([top presentedViewController] != nil && hops < 6) {
+        top = [top presentedViewController];
+        hops += 1;
+    }
+    if (hops == 0) return;                 // 没有浮层，这条路不开口
+    UIView *sheet = [top view];
+    if (sheet == nil) return;
+    CGRect r = [sheet convertRect:[sheet bounds] toView:win];
+    if (r.size.height < 200.0) return;
+    NSString *name = NSStringFromClass([top class]);
+    const char *cls = name.length > 0 ? [name UTF8String] : "-";
+    CGFloat winH = [win bounds].size.height;
+    // 同一层、同一高度只记一次：浮层开着的时候这条时钟还在跑。
+    if (strncmp(AevonSheetSeen, cls, sizeof(AevonSheetSeen) - 1) == 0
+        && fabs(r.size.height - AevonSheetH) < 2.0) {
+        return;
+    }
+    strncpy(AevonSheetSeen, cls, sizeof(AevonSheetSeen) - 1);
+    AevonSheetSeen[sizeof(AevonSheetSeen) - 1] = '\0';
+    AevonSheetH = r.size.height;
+    AevonSheetLines += 1;
+    char body[300];
+    snprintf(body, sizeof(body), "sheet %.32s h=%.0f top=%.0f box=%.0f",
+             cls, r.size.height, r.origin.y, winH);
+    AevonPageWrite(body);
+    if (CGRectGetMaxY(r) <= winH + 40.0) return;
+
+    // 被切掉的是谁：在窗口坐标里，底边落在窗口以下的叶子视图。
+    NSMutableArray *todo = [NSMutableArray arrayWithObject:sheet];
+    NSMutableString *list = [NSMutableString string];
+    NSUInteger walked = 0;
+    int found = 0;
+    while (todo.count > 0 && walked < 900 && found < 5) {
+        UIView *node = [todo lastObject];
+        [todo removeLastObject];
+        walked += 1;
+        NSArray *kids = [node subviews];
+        for (NSUInteger i = 0; i < kids.count && i < 24; i++) {
+            [todo addObject:[kids objectAtIndex:i]];
+        }
+        if (kids.count > 0) continue;
+        CGRect leaf = [node convertRect:[node bounds] toView:win];
+        if (leaf.size.width < 12.0 || leaf.size.height < 12.0) continue;
+        if (CGRectGetMaxY(leaf) <= winH + 2.0) continue;
+        found += 1;
+        [list appendFormat:@" %.24s:%.0f,%.0f,%.0fx%.0f",
+         class_getName([node class]), leaf.origin.x, leaf.origin.y,
+         leaf.size.width, leaf.size.height];
+    }
+    if (list.length == 0) return;
+    char cut[520];
+    snprintf(cut, sizeof(cut), "sheet cut%s (below the window)", [list UTF8String]);
     AevonPageWrite(cut);
 }
 
@@ -1697,6 +1840,9 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
         // 每一次真的换屏都重新给配额：一张卡开一次、关一次，各两次重排足够。
         AevonRebuilds = 0;
         AevonRebuildAt = 0.0;
+        AevonRebuildSame = 0;
+        AevonRebuildDead = 0;
+        AevonRebuildTop = 0.0;
         AevonAnchorLost = 0;
         AevonStuckLines = 0;
         AevonStuckAt = 0.0;
@@ -1797,6 +1943,9 @@ static void AevonPagerWatchTick(void *context) {
     BOOL shrunk = (height < full - 40.0);
     if (shrunk) AevonEverHosted = 1;
     if (!AevonEverHosted) return;
+    // 0.0.80 — 1.5 s 一拍看一次「有没有浮层」。只在卡片在屏时看：全屏时窗口就是
+    // 932，浮层本来就装得下，量它是白跑。
+    if (shrunk && (AevonWatchTicks % 10) == 0) AevonSheetReport();
 
     // 窗口高度变了（过渡钩子没响的那一类 App、或者系统自己去改的）：上一拍的
     // 高度就是翻页器记忆里的页高。24 pt 容差躲开宿主自己 717→716→717 那一手。
@@ -1819,6 +1968,9 @@ static void AevonPagerWatchTick(void *context) {
         AevonGuardHold = 0;
         AevonRebuilds = 0;
         AevonRebuildAt = 0.0;
+        AevonRebuildSame = 0;
+        AevonRebuildDead = 0;
+        AevonRebuildTop = 0.0;
         AevonStuckLines = 0;
         AevonStuckAt = 0.0;
         // 0.0.77 — 这条路同样要钉行下标：过渡钩子没响的 App（根控制器不是标准
