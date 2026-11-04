@@ -62,6 +62,7 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 
 #include <fcntl.h>
@@ -591,6 +592,19 @@ static int AevonAnchorSet = 0;
 static int AevonAnchorWrites = 0;
 /// 「App 把行下标弄丢了」只报一次。
 static int AevonAnchorLost = 0;
+/// 0.0.79 — 换屏**之前**那一页有几个播放器在播，以及这一版替它按过几次 play。
+///
+/// Aevon(69) 的新故障：抖音在两块屏之间来回切之后，画面停在那一帧，要先点一下
+/// （暂停）再点一下（播放）才回来 —— App 的按钮说自己在播、播放器却停着。这种
+/// 状态只有一个来源：**「你被挡住了」比「你回来了」多收到一次**（挂起启动、
+/// 系统去激活、我们自己那一次 `endUpdates` 都会发前者）。这里不猜是哪一次，
+/// 只做一件事：换屏之前记下「本来在播」，换屏之后复看 —— 本来在播、现在停了，
+/// 就替它按下 play。用户自己按暂停的那种情况，`AevonPlayBefore` 是 0，不会碰。
+static int AevonPlayBefore = 0;
+static int AevonPlayNotes = 0;
+static int AevonResumes = 0;
+/// 0.0.79 — 「这个 App 要整屏画布」的记号只写一次。
+static int AevonWantWrote = 0;
 
 static void AevonPagerKeep(UIScrollView *view) {
     if (view == nil) return;
@@ -703,6 +717,136 @@ static UIView *AevonPageKidAt(UIScrollView *view, CGFloat box, CGFloat y) {
     }
     return best;
 }
+
+/// 0.0.79 — 数一页里「在播」与「停着」的播放器。
+///
+/// 只走公开属性：`AVPlayerLayer.player`、`AVPlayer.rate`。类名从
+/// `NSClassFromString` 取，不为此新链一个 AVFoundation —— 这个 dylib 装进每一
+/// 个 App 进程，多一条依赖就多一次「某个进程加载失败」的机会。
+///
+/// 返回值是**正在播**的个数；`pausedOut` 是停着的个数，`firstOut` 是第一个停着的
+/// 播放器（要 play 的就是它）。`-1` 表示这台系统上没有 AVPlayerLayer 这个类。
+static int AevonPlayerScan(UIView *root, int *pausedOut, id *firstOut) {
+    if (pausedOut != NULL) *pausedOut = 0;
+    if (firstOut != NULL) *firstOut = nil;
+    if (root == nil) return 0;
+    Class layerClass = NSClassFromString(@"AVPlayerLayer");
+    if (layerClass == Nil) return -1;
+    int playing = 0;
+    NSMutableArray *todo = [NSMutableArray arrayWithObject:root];
+    NSUInteger walked = 0;
+    while (todo.count > 0 && walked < 700) {
+        UIView *node = [todo lastObject];
+        [todo removeLastObject];
+        walked += 1;
+        CALayer *own = [node layer];
+        // 播放器有两种摆法：整层就是 AVPlayerLayer（`+layerClass`），或者挂在某个
+        // 普通层的子层里。两种都收，深度只到一层 —— 再往下没有播放器，只有几何。
+        for (int pass = 0; pass < 2; pass++) {
+            CALayer *layer = pass == 0
+                ? own : (own != nil && own.sublayers.count > 0
+                         ? [own.sublayers objectAtIndex:0] : nil);
+            if (layer == nil || ![layer isKindOfClass:layerClass]) continue;
+            id player = nil;
+            NSNumber *rate = nil;
+            @try {
+                player = [layer valueForKey:@"player"];
+                rate = [player valueForKey:@"rate"];
+            } @catch (NSException *exception) {
+                (void)exception;
+            }
+            if (player == nil) continue;
+            if ([rate isKindOfClass:[NSNumber class]] && [rate doubleValue] > 0.01) {
+                playing += 1;
+            } else {
+                if (pausedOut != NULL) *pausedOut += 1;
+                if (firstOut != NULL && *firstOut == nil) *firstOut = player;
+            }
+        }
+        NSArray *kids = [node subviews];
+        if (kids.count > 0) [todo addObjectsFromArray:kids];
+    }
+    return playing;
+}
+
+/// 换屏之前的那一拍：记下「视口压着的这一页」里有几个在播。
+///
+/// 只看这一页，不看整棵窗口：抖音会预加载相邻几页，那些播放器本来就该是停的，
+/// 对它们 play 会让两条音轨一起响。而用户正在看的那一页，换屏前后是同一页
+/// （行下标把它钉住了），所以「这一页之前在播」是一个能跨过换屏的判据。
+static void AevonPlayNote(void) {
+    AevonPlayBefore = 0;
+    UIScrollView *view = AevonPagerGet();
+    if (view == nil) return;
+    CGRect box = [view bounds];
+    UIView *kid = AevonPageKidAt(view, box.size.height, [view contentOffset].y);
+    if (kid == nil) return;
+    int paused = 0;
+    int playing = AevonPlayerScan(kid, &paused, NULL);
+    AevonPlayBefore = playing > 0 ? playing : 0;
+    // 一行就够：`was=0` 说明我们这次不打算管（用户本来就停着，或者这一页上没有
+    // AVPlayerLayer）；`was=1 paused=2` 说明看得见播放器、其中两个是停的。
+    if (AevonPlayNotes < 8) {
+        AevonPlayNotes += 1;
+        char body[160];
+        snprintf(body, sizeof(body), "play note was=%d paused=%d",
+                 AevonPlayBefore, paused);
+        AevonPageWrite(body);
+    }
+}
+
+/// 换屏之后的几拍：本来在播、现在停了，就替它按一下 play。
+///
+/// 三拍（0.5 / 1.2 / 2.2 s）而不是一拍：App 的「停」与「该回来了」不一定在同一
+/// 帧里发生，第一拍撞见停着的播放器也可能只是它自己还没开始缓冲。每拍先看
+/// 有没有已经播起来的 —— 有一台在播就收工，绝不与 App 抢方向盘。
+///
+/// 上限 3 次：真机上「点一下暂停再点一下」就恢复，说明播放器本身是好的，
+/// 需要按三次以上就说明这不是「少了一次 play」，再按也只是重复。
+static void AevonResumeTick(void *context) {
+    const char *reason = (const char *)context;
+    if (!AevonEverHosted) return;
+    if (AevonPlayBefore <= 0) return;
+    UIScrollView *view = AevonPagerGet();
+    if (view == nil || [view window] == nil) return;
+    CGRect box = [view bounds];
+    UIView *kid = AevonPageKidAt(view, box.size.height, [view contentOffset].y);
+    if (kid == nil) return;
+    int paused = 0;
+    id first = nil;
+    int playing = AevonPlayerScan(kid, &paused, &first);
+    if (playing < 0) {
+        AevonPlayBefore = 0;
+        AevonPageWrite("resume mute no AVPlayerLayer");
+        return;
+    }
+    if (playing > 0) {
+        AevonPlayBefore = 0;
+        char body[140];
+        snprintf(body, sizeof(body), "resume ok %s playing=%d", reason, playing);
+        AevonPageWrite(body);
+        return;
+    }
+    if (first == nil) {
+        AevonPlayBefore = 0;
+        char body[140];
+        snprintf(body, sizeof(body), "resume gone %s playing=0 paused=0", reason);
+        AevonPageWrite(body);
+        return;
+    }
+    if (AevonResumes >= 3) return;
+    SEL play = sel_registerName("play");
+    if (![first respondsToSelector:play]) return;
+    AevonResumes += 1;
+    ((void (*)(id, SEL))objc_msgSend)(first, play);
+    char body[180];
+    snprintf(body, sizeof(body), "resume play %s was=%d paused=%d n=%d",
+             reason, AevonPlayBefore, paused, AevonResumes);
+    AevonPageWrite(body);
+}
+
+/// 三拍共用的那一句：日志里 `resume …` 后面跟的就是它。
+static char AevonResumeWhy[] = "after switch";
 
 /// 把一个「页」换算成它的行下标。`UITableView` / `UICollectionView` 各一套，
 /// 都不是就放弃 —— 那就只剩 `frame` 可用，也就是 0.0.76 之前的处境。
@@ -993,6 +1137,37 @@ static void AevonPageState(const char *reason) {
     AevonPageWrite(body);
 }
 
+/// 0.0.79 — 这一族 App 要一块「整屏画布」，卡片按整屏比例去缩。
+///
+/// Aevon(69) 的哔哩哔哩竖版把结论钉死了：窗口、根视图、导航容器全是 717
+/// （`geom early scene=430x717 win=430x717 root=430x717`），而它自己的翻页器
+/// 是 `BBStoryBaseTableView:0,0,430x932`、页是 `BBStoryPortraitCardCell:0,0,430x932`
+/// —— 页高 932、父视图 838（= 932 − 59 − 34）。三个数全是 932 派生的，说明这一页
+/// 是**按整屏排的**，不是「行高没跟上」：`setNeedsLayout` 三层（0.0.78 做的）
+/// 之后仍是 932，`stuck settle … n=3` 就是它的回执。
+///
+/// 这里没有能算的余地：页就是 932 高，卡片只有 717，切掉的 215 pt 正是竖版故事
+/// 右侧那一列按钮的下半截。所以换的不是页面，是**画布**：给这个 App 一块整屏大小
+/// 的 scene，卡片按整屏比例缩（430×932 的 0.668 ≈ 287×623），整页都看得见。
+///
+/// 宿主没法问「你的页多大」，只能由这一侧留个记号：写在自己的 tmp 里，卡片关掉
+/// 之后宿主去读（`AevonDrainAppLog` 同一条路），下一次给这个 App 开卡时生效。
+/// 记号里带屏幕高度，换机型或改分辨率就作废；宿主那边还有 30 天的时效。
+static void AevonWantFullCanvas(CGFloat height) {
+    if (AevonWantWrote) return;
+    NSString *tmp = NSTemporaryDirectory();
+    if (tmp.length == 0) return;
+    NSString *path = [tmp stringByAppendingPathComponent:@"aevon-full"];
+    FILE *file = fopen([path fileSystemRepresentation], "w");
+    if (file == NULL) return;
+    AevonWantWrote = 1;
+    fprintf(file, "h=%.0f\n", height);
+    fclose(file);
+    char body[120];
+    snprintf(body, sizeof(body), "want full canvas at=%.0f", height);
+    AevonPageWrite(body);
+}
+
 /// 0.0.78 — 「App 没跟上」这一族：翻页器比窗口还高。
 ///
 /// Aevon(68) 的哔哩哔哩竖版把这一类摊开了：
@@ -1038,6 +1213,10 @@ static void AevonStuckReport(const char *reason, CGFloat box, CGFloat full) {
              [view contentSize].height,
              kid != nil ? [kid frame].size.height : 0.0, AevonStuckLines);
     AevonPageWrite(body);
+    // 0.0.79 — 第二次仍然高出一大截，就不再指望它自己缩：这一族 App 要的是整屏
+    // 画布（见 `AevonWantFullCanvas`）。第一次不写，是因为刚开卡那一两拍本来就
+    // 可能撞在中间态上 —— 一次抖动不该换来一个永久的「这个 App 用整屏卡」。
+    if (AevonStuckLines >= 2 && box - full > 40.0) AevonWantFullCanvas(box);
     if (kid == nil) return;
 
     // ② 被切掉的是谁：在翻页器坐标里，底边落在窗口以下的叶子视图。
@@ -1546,6 +1725,16 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
     // `off=0,14912 / 行 14554` 就是这件事的形状 —— 19 × 932 没算错，行不在那儿。
     if (real) {
         if (AevonPagerGet() == nil || [AevonPagerGet() window] == nil) AevonPagerAcquire();
+        // 0.0.79 — 换屏之前记下「本来在播」，换屏之后三拍复看（见 `AevonPlayNote`）。
+        // 必须在 `AevonAlignPager` 之前：它会把视口挪到那一页的开头，挪的过程本身
+        // 就可能让 App 停掉播放 —— 那时候再记，「本来在播」就已经看不见了。
+        AevonPlayNote();
+        AevonResumes = 0;
+        for (int i = 0; i < 3; i++) {
+            int64_t when = (int64_t)((0.5 + 0.85 * (double)i) * NSEC_PER_SEC);
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, when),
+                             dispatch_get_main_queue(), (void *)AevonResumeWhy, AevonResumeTick);
+        }
         // 先记一张「换算前」的：这一张能回答「App 收到 932↔717 时，它的页是不是
         // 也跟着变了」。之后每一拍都在回答「行下标还在不在同一页上」。
         AevonPageState("on transition");

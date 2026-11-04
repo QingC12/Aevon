@@ -612,6 +612,23 @@ def main():
                       b"performWithoutAnimation:",
                       b"stuck %s box=%.0f full=%.0f",
                       b"stuck cut%s (below the window)",
+                      # 0.0.79 — 断层这一族收口之后，剩下两件：
+                      #
+                      # ① 换屏之后视频不自己播（Aevon(69)：「需要手动点击暂停后
+                      #    再次点击」）。这一组是那条路的全部证据 —— `play note`
+                      #    说换屏之前这一页有几个在播（`was=0` 就是我们不打算管），
+                      #    `resume play` 说替它按了一次，`resume ok` 说它自己回来了
+                      #    （不按），`resume gone` / `resume mute` 说这一页上根本
+                      #    看不见 AVPlayerLayer —— 下一版要换入口的判据就是这两条。
+                      b"play note was=%d paused=%d",
+                      b"resume ok %s playing=%d",
+                      b"resume play %s was=%d paused=%d n=%d",
+                      b"resume gone %s playing=0 paused=0",
+                      b"resume mute no AVPlayerLayer",
+                      # ② 哔哩哔哩竖版：页就是 932 高，5:3 的卡装不下。第二次确认
+                      #    stuck 之后 App 侧留一个记号（`want full canvas`），宿主
+                      #    下一次给这个 App 开卡时改用整屏画布（`full=1`）。
+                      b"want full canvas at=%.0f",
                       b"settle gave up after 90s",
                       b"player b=%.0fx%.0f grav=%s src=%.0fx%.0f",
                       b"videoGravity",

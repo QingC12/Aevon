@@ -205,10 +205,22 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 画布尺寸变成一个需要持久化的变量。Aevon(57) 的判决是这条路没有价值：
     /// 「几何缩放没有任何用处」。于是它连同 `CanvasHeight` 一起撤掉 —— 少一个
     /// 状态，就少一整类「读回来和上次不一样」的错位。
-    static func fatRender(in screen: CGSize) -> CGSize {
+    static func fatRender(in screen: CGSize, full: Bool = false) -> CGSize {
         guard screen.width > 100, screen.height > 200 else {
             return CGSize(width: 430, height: 717)
         }
+        // 0.0.79 — 「整屏画布」：有些 App 的竖版页就是按整屏高度排的。
+        //
+        // Aevon(69) 的哔哩哔哩：窗口、根视图、导航容器全是 717，而它的翻页器与页
+        // 是 `BBStoryBaseTableView:0,0,430x932` / `BBStoryPortraitCardCell:0,0,430x932`
+        // —— 932 是整屏，`838 = 932 − 59 − 34` 是整屏减安全区。置脏三层也不动，
+        // 因为它不是「行高没跟上」，是**这一页只按整屏设计**。5:3 的卡装不下它，
+        // 切掉的 215 pt 正是右侧那一列按钮的下半截。
+        //
+        // 换的不是页面，是画布：给这块 scene 整屏大小，卡片按整屏比例缩
+        // （`plan` 会算出 ≈287×623，scale 0.668）。整页都看得见，拖角还能放大 ——
+        // 画布不变，放大只是同一张画面的等比缩放。
+        if full { return CGSize(width: screen.width.rounded(), height: screen.height.rounded()) }
         // 高宽比 = 高 / 宽。5:3 的高度是宽度的 1.667 倍。
         let w = screen.width
         var h = w * fatAspect
@@ -216,6 +228,30 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         h = Swift.min(h, screen.height)
         h = Swift.max(h, 240)
         return CGSize(width: w.rounded(), height: h.rounded())
+    }
+
+    /// 0.0.79 — 这个 App 上一次是不是「翻页器比窗口高」。
+    ///
+    /// App 侧写不了宿主的东西，宿主也看不见别人的视图树，所以记号走 App 自己的
+    /// tmp：`AevonAppHook` 在确认 stuck 之后写 `aevon-full`（内容是 `h=<页高>`），
+    /// 这里在开卡之前读一次。三条校验，缺一不可：
+    ///   · 文件里记的高度必须等于**这台机器现在的屏高** —— 换机型、改分辨率立刻作废；
+    ///   · 只认 30 天内的记号 —— 那个 App 后来自己改好了（或我们后来改好了），
+    ///     不该永远按整屏开；
+    ///   · 读不到就当没有。默认仍然是 5:3，这条不是每个 App 的默认路径。
+    static func wantsFullCanvas(_ bundle: String?) -> Bool {
+        guard let bundle, !bundle.isEmpty else { return false }
+        guard let log = AevonAppLogPathOf(bundle) else { return false }
+        let marker = (log as NSString).deletingLastPathComponent + "/aevon-full"
+        guard let text = try? String(contentsOfFile: marker, encoding: .utf8) else { return false }
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: marker),
+              let when = attrs[.modificationDate] as? Date,
+              Date().timeIntervalSince(when) < 30 * 24 * 3600 else { return false }
+        let screen = UIScreen.main.bounds.height
+        for line in text.split(separator: "\n") where line.hasPrefix("h=") {
+            if let h = Double(line.dropFirst(2)), abs(h - Double(screen)) <= 2.0 { return true }
+        }
+        return false
     }
     /// 0.0.49 — 卡片下面那层柔光。跟着 card 的 frame 与圆角走。
     private var glow: UIView?
@@ -280,6 +316,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// not in a window is 0.0.20's black screen, and that is not worth one more
     /// phone.
     static func show(_ view: UIView, awaitingFrame: Bool = false,
+                     bundle: String? = nil,
                      onClose: @escaping (String) -> Void) -> FloatHost? {
         let host = shared
         host.teardown()
@@ -316,7 +353,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.80），所以字号与圆角一起按同一个比例变小 —— 见 `fatRender`。
         // 0.0.65 — 画布只有一个来源：屏幕宽度 × 5:3。没有第二个写入口，
         // 「记忆的形状」与开关一起撤了（见 `fatRender`）。
-        let source = FloatHost.fatRender(in: window.bounds.size)
+        // 0.0.79 — 只有一个例外：这个 App 上一次把「我的页是整屏高」写在记号里
+        // （哔哩哔哩的竖版故事）。那就给它整屏画布，卡片按整屏比例缩 —— 见
+        // `wantsFullCanvas` 与 `fatRender` 的 `full` 分支。
+        let fullCanvas = FloatHost.wantsFullCanvas(bundle)
+        let source = FloatHost.fatRender(in: window.bounds.size, full: fullCanvas)
 
         // 0.0.61 — 这一行才是「小胖屏」真正生效的地方。
         //
@@ -431,10 +472,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.0.60 — 日志改成小胖屏口径。`hosted=` 是下发承载面的逻辑尺寸，
         // `card=` 是它在屏幕上的尺寸；两者相等（scale 1.000）就是「一比一、
         // App 按这个尺寸重新布局」，不等就是我们在缩放一张别人排好的画面。
-        let fatA = String(format: "win: fat scene ratio=%.3f screen=%.0fx%.0f render=%.0fx%.0f",
+        let fatA = String(format: "win: fat scene ratio=%.3f screen=%.0fx%.0f render=%.0fx%.0f full=%d",
                           FloatHost.fatAspect,
                           window.bounds.width, window.bounds.height,
-                          source.width, source.height)
+                          source.width, source.height, fullCanvas ? 1 : 0)
         let fatB = String(format: " hosted=%.0fx%.0f card=%.0fx%.0f at %.0f,%.0f held=%d",
                           source.width, source.height,
                           card.bounds.width, card.bounds.height,

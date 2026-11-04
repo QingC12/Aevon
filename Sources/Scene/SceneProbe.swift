@@ -1335,7 +1335,7 @@ zStackParticipantDidChange:
         // 0.0.20, and the difference between a picture and a black phone.
         // 0.0.65 — 没有 `onReshape` 了：画布在开窗那一刻定死（屏宽 × 5:3），
         // 之后角拖动只做等比例缩放，没有任何路径会再改 scene 的 frame。
-        guard let host = FloatHost.show(view, awaitingFrame: awaiting,
+        guard let host = FloatHost.show(view, awaitingFrame: awaiting, bundle: bundleID,
                                         onClose: { reason in closeCard(reason) }) else {
             Log.write("win: no window - nothing activated")
             return
