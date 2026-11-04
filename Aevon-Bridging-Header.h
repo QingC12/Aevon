@@ -170,6 +170,13 @@ NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL v
 ///   0  no such method on UIApplication or LSApplicationWorkspace
 NSInteger AevonLaunchSuspended(id _Nullable application, NSString *_Nullable bundleID);
 
+/// 0.0.65 — 开窗前的「这个进程有没有这一版代码」核对。
+///
+/// 返回 0 什么都不做（没在跑，或者名片对得上）；1 结束了一个旧进程并等到它
+/// 退出；2 结束了但没等到；3 查不到 pid，什么都没做。只有 1/2 之后才值得写一行
+/// 日志，因为只有那时候「冷启动」这个词是真的。
+NSInteger AevonColdStartReady(NSString *_Nullable bundleID);
+
 /// 0.0.28 — the accessor names come from the runtime instead of this source
 
 @interface UIImage (AevonPrivateIcons)

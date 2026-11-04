@@ -364,26 +364,20 @@ def main():
         ok(f"panels: {len(signatures)} panels all different, "
            f"{min(counts)}–{max(counts)} rows each")
 
-    # -- 5c. 几何缩放开关（0.0.64）-----------------------------------------
-    # 这个开关不是「写进域里等以后接线」的那一类：窗口侧每次按角都读它。
-    # 所以包里必须真有一行，而且默认值必须是关 —— 操作者要的是「默认关闭」，
-    # 一个默认开着的开关等于告诉他没得选。
+    # -- 5c. 几何缩放已经撤掉（0.0.65）-------------------------------------
+    # Aevon(57) 的判决是「没有任何用处」，所以这一版删掉的不只是开关，是整条
+    # 路径（换画布 + 记忆形状 + 抬手重排）。这里留一条反向断言：Window.plist 里
+    # 不许再出现那一行 —— 设置里还挂着一个没有实现的开关，比没有更糟。
     window_plist = files.get(f"{BUNDLE_DIR}/Window.plist")
     if window_plist is None:
         bad("window: Window.plist missing")
     else:
         window_items = plistlib.loads(window_plist).get("items", [])
-        geom = [row for row in window_items
-                if row.get("key") == "GeometryScaleEnabled"]
-        if not geom:
-            bad("window: 几何缩放 这一行不在 Window.plist 里 —— "
-                "等比例缩放模式没有入口")
-        elif geom[0].get("default") is not False:
-            bad("window: 几何缩放 的默认值不是关 —— 要的是「默认关闭」")
-        elif geom[0].get("cell") != "PSSwitchCell":
-            bad("window: 几何缩放 不是开关")
+        geom = [row for row in window_items if row.get("key") == "GeometryScaleEnabled"]
+        if geom:
+            bad("window: 几何缩放 这一行还在 —— 0.0.65 已经把它撤了")
         else:
-            ok("window: 几何缩放 switch present, default off")
+            ok(f"window: {len(window_items)} rows, 几何缩放 removed")
 
     # -- 5c. carrier shape (0.0.5, wired to the desktop in 0.0.6) -----------
     # The ring is the first real rendering code in this project, and its
@@ -543,7 +537,23 @@ def main():
                       # 上、下面是纯 #333」在宿主侧三个读数里全都对得上（窗口确实
                       # 是 430x717），剩下唯一没量的是 App 自己怎么看这块屏幕。
                       # 这一串不在二进制里，就等于这一轮没有任何新证据。
-                      b"app: geom "):
+                      b"app: geom ",
+                      # 0.0.65 — 屏幕补丁与名片。Aevon(57) 的量尺把问题摊成
+                      # 两行：同一个进程里 `screen=430x932` 而 `scene=win=root=
+                      # 430x717` —— App 里有两块屏幕，按 UIScreen 布局的那一半
+                      # （抖音的整页与翻页步长）全都比窗口高 215 pt。补丁把
+                      # `bounds` / `_referenceBounds` / `_boundsForInterfaceOrientation:`
+                      # 换成 scene 的尺寸，只在「这块卡里演我」的那几秒生效。
+                      b"screen %.0fx%.0f -> %.0fx%.0f (hosted scene)",
+                      # 量尺本身也要更狠：`spine` 是从根视图往下挑最大子视图的
+                      # 那条主脊，`peers` 是每一层的兄弟；只有走到播放器那一层，
+                      # 「视频偏上」才有页码可指。
+                      b"phys=%.0fx%.0f scene=",
+                      b"spine%d %s",
+                      b"peers%d n=%lu",
+                      # 名片目录。宿主靠它判断「这个进程有没有这一版代码」，
+                      # 两边必须是同一个路径，否则冷启动永远不会触发。
+                      b"/var/mobile/Library/Logs/Aevon/bridge"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")
         # 96 KB, not 64: ObjC exception handling (@try around every KVC read on a
@@ -671,25 +681,21 @@ def main():
                   b"win: scene frame push door=",
                   b"win: scene frame after=",
                   b"win: scene frame restored door=",
-                  # 0.0.63 — 边角拖动改成改**窗口比例**（母本 LeftCornerTrim 的
-                  # 文案就是「滑动进一步调整比例」）。三条：`canvas reshaped to=`
-                  # 是画布真的换了形状（App 会因此重排一版），`canvas reshape
-                  # push door=` 是那次写入走没走通，`frame drift now=` 是看门狗
-                  # 在两秒一拍的对账里抓到「scene 被系统改回整屏」——Aevon(55) 的
-                  # 「只有刚打开时排版是对的」如果真有其事，就是这一行。
-                  b"win: canvas reshaped to=",
-                  b"win: canvas reshape push door=",
+                  # 0.0.65 — 换画布那条路撤了（几何缩放整条删除），只剩看门狗：
+                  # `frame drift now=` 是两秒一拍的对账，抓到「scene 被系统改回
+                  # 整屏」——画布现在只有一个来源，被改回去就是真的被改了，
+                  # 这一行还留着，因为它证明的是「画布还稳着」。
                   b"win: frame drift now=",
-                  # 0.0.64 — 「几何缩放」开关（设置 → 窗口与场景，默认关）与圆角的
-                  # 新算法。三处（开窗 / 按下角 / 抬手）都写同一行：
-                  # `mode=0` 等比例（画布不动）、`mode=1` 改窗口比例（App 重排）；
-                  # `corner=` 是按**卡宽**算出来的圆角 —— 0.0.63 按「卡高 / 画布高」
-                  # 算，往下压扁时它会掉到 4 %（看着就是直角），这一行能当场读出。
-                  b"win: resize mode=",
-                  # 键名 20 字节，所以它真的躺在 __cstring 里 —— 这一条把
-                  # 「plist 写的键」和「代码读的键」钉在同一个串上：任何一边
-                  # 改了名而另一边没改，这里当场失败，而不是等真机上开关没反应。
-                  b"GeometryScaleEnabled",
+                  # 0.0.65 — 只剩一种缩放（等比例），所以这一行不再有 mode：
+                  # `canvas=` 是这块画布（整场缩放里它不该变，变了就是又有人去
+                  # 改 settings），`card=` 是卡片当下的大小，`corner=` 按卡宽算
+                  # —— 0.0.63 按「卡高 / 画布高」算，往下压扁时会掉到 4 %，
+                  # 看着就是直角，这一行能当场读出来。
+                  b"win: resize canvas=",
+                  # 0.0.65 — 旧进程换成新进程。抖音那一次既没有 `app: promoted`
+                  # 也没有 `app: geom`：它的进程在 dylib 落到磁盘之前就起来了。
+                  # 这一行出现 = 宿主认出了旧进程并结束了它；没出现 = 名片对得上。
+                  b"win: icon cold start ",
                   # 0.0.54 的顶栏裁剪在 0.0.60 撤掉了（`topbar_cropped_src=` /
                   # `topbar_kept_pt=` 随实现一起删）：留着一条断言源码里已经不存在
                   # 的字符串，CI 会当场失败。✕ 撤掉之后 `close requested by` 仍在

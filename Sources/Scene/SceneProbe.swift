@@ -955,6 +955,17 @@ zStackParticipantDidChange:
         // 启动失败就撤回，免得留一个没有浮窗的「保活名单」。
         AevonHookArm(bundleID)
 
+        // 0.0.65 — 先确认这个 App 的进程里有没有这一版代码。
+        //
+        // 挂起启动对「已经在跑的 App」只是把 scene 交回来，进程一个字节都不换；
+        // 而 App 侧的一切（状态提升、屏幕尺寸补丁、量尺）都只在启动那一刻加载
+        // 了 dylib 的进程里。旧进程的表现是「改了没效果」，且宿主侧看不出来。
+        // 所以这里用名片核对，只在旧进程时结束它 —— 详见 AevonScene.m。
+        let cold = AevonColdStartReady(bundleID)
+        if cold != 0 {
+            Log.write("win: icon cold start " + bundleID + " code=" + String(cold))
+        }
+
         let door = AevonLaunchSuspended(sharedApplication(), bundleID)
         Log.write("win: icon launch " + bundleID + " suspended door=" + String(door))
         guard door == 1 else {
@@ -973,7 +984,9 @@ zStackParticipantDidChange:
         // reach a window. This is the one signal that does not depend on the
         // scene settings crossing into the app's own copy.
         markHosted(bundleID)
-        pollForScene(bundleID, ticks: 0, start: Date(), fallback: fallback)
+        // 冷启动那一次要重新走完一个进程的启动，4 秒不够宽：给它 7 秒。
+        pollForScene(bundleID, ticks: 0, start: Date(),
+                     limit: cold == 0 ? 4.0 : 7.0, fallback: fallback)
     }
 
     // MARK: - 0.0.44 hosted mark
@@ -1014,6 +1027,7 @@ zStackParticipantDidChange:
     /// 1.8 秒之后退回 250 ms：那时候还没 scene，就是真没起来，没必要每秒查
     /// 十七次到第四秒。
     private static func pollForScene(_ bundleID: String, ticks: Int, start: Date,
+                                     limit: Double = 4.0,
                                      fallback: @escaping (String) -> Void) {
         if let scene = sceneFor(bundleID) {
             unmark()
@@ -1031,18 +1045,19 @@ zStackParticipantDidChange:
             }
             return
         }
-        guard Date().timeIntervalSince(start) < 4.0 else {
+        guard Date().timeIntervalSince(start) < limit else {
             unmark()
             AevonHookDisarm()
             Log.write("win: icon " + bundleID + " produced no scene")
-            fallback("no scene in 4s")
+            fallback("no scene in limit")
             return
         }
         // 0.0.59 — 60 → 40 ms。枚举一次 scene manager 只有几个对象，成本远小于
         // 这一拍白等的时间；前 30 拍（1.2 s）覆盖了「scene 该出现」的全部窗口。
         let gap: Double = ticks < 30 ? 0.04 : 0.25
         DispatchQueue.main.asyncAfter(deadline: .now() + gap) {
-            pollForScene(bundleID, ticks: ticks + 1, start: start, fallback: fallback)
+            pollForScene(bundleID, ticks: ticks + 1, start: start,
+                         limit: limit, fallback: fallback)
         }
     }
 
@@ -1272,16 +1287,9 @@ zStackParticipantDidChange:
 
         // Window first, activate second. This is the whole difference from
         // 0.0.20, and the difference between a picture and a black phone.
+        // 0.0.65 — 没有 `onReshape` 了：画布在开窗那一刻定死（屏宽 × 5:3），
+        // 之后角拖动只做等比例缩放，没有任何路径会再改 scene 的 frame。
         guard let host = FloatHost.show(view, awaitingFrame: awaiting,
-                                        onReshape: { size in
-            // 0.0.63 — 操作者在角上换了窗口的比例。目标值重登记（它一直 armed，
-            // 关窗时才清），然后主动推一次 —— 等 intercept 那一拍，App 会先按
-            // 旧窗口多排一版。
-            AevonSceneFrameSet(0, 0, Double(size.width), Double(size.height))
-            let door = AevonPushSceneFrame(scene)
-            Log.write(String(format: "win: canvas reshape push door=%ld wrote=%ld",
-                             door, AevonFrameWriteCount()))
-        },
                                         onClose: { reason in closeCard(reason) }) else {
             Log.write("win: no window - nothing activated")
             return

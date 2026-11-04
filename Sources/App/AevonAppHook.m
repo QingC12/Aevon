@@ -43,8 +43,11 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
+#include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <time.h>
+#include <unistd.h>
 #include <dispatch/dispatch.h>
 
 static CFStringRef const AevonDomain = CFSTR("com.aevon");
@@ -181,7 +184,157 @@ static void AevonNote(const char *what) {
     }
 }
 
+// MARK: - 0.0.65 「这一版代码在这个进程里吗」
+//
+// Aevon(57) 里有一个只靠读日志就能下的结论：`app: promoted` 对设置和 Sileo
+// 都出现过，对抖音一次都没有 —— 那两次进程是刚启动的，抖音那一个是**旧进程**，
+// 它是在这份 dylib 落到磁盘之前起来的，所以本文件根本不在它里面。宿主侧看
+// 不出来（scene 照样出现、画面照样有），于是「改了没效果」会被记成 bug。
+//
+// 这里让每个进程启动时留一张名片（bundle + pid），宿主在开窗前核对一次：
+// 名片在、pid 还活着 ⇒ 这个进程有这一版代码；否则说明它是旧进程，宿主先把
+// 它结束掉，再用挂起启动重新拉起一个干净的 —— 只有新进程才会带上这里的一切
+// （包括下面的屏幕补丁）。
+//
+// 代价是一行文件写入，发生在进程启动那一下。收益是「有没有装上」不再是猜的。
+
+static NSString *const AevonBridgeDir = @"/var/mobile/Library/Logs/Aevon/bridge";
+
+static void AevonBridgeMark(void) {
+    NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
+    if (bundle.length == 0) return;
+    NSFileManager *files = [NSFileManager defaultManager];
+    [files createDirectoryAtPath:AevonBridgeDir withIntermediateDirectories:YES
+                      attributes:nil error:NULL];
+    NSDictionary *mark = @{ @"pid": @(getpid()),
+                            @"ts": @([[NSDate date] timeIntervalSince1970]) };
+    NSString *path = [AevonBridgeDir stringByAppendingPathComponent:
+                      [bundle stringByAppendingPathExtension:@"plist"]];
+    [mark writeToFile:path atomically:YES];
+}
+
+// MARK: - 0.0.65 屏幕尺寸（App 这一侧）
+//
+// Aevon(57) 的量尺把问题摊成两行，同一个进程、同一时刻：
+//
+//   app: geom early screen=430x932@3 scene=430x717 win=430x717 root=430x717
+//
+// 窗口、根视图、scene 的坐标空间都是 717，而 `UIScreen` 还是 932。也就是说
+// **App 里有两块屏幕**：按 scene/window 布局的代码拿到 717（所以顶栏、底栏都
+// 排好了），按 `UIScreen` 布局的代码拿到 932（所以抖音的整页、翻页步长、播放器
+// 那一层都按 932 算）。一块 932 高的页面塞进 717 的窗口里，必然「视频偏上、
+// 下面一截是它自己的底色」，翻页步长又比窗口高 215 pt，于是能看到两段视频。
+//
+// 母本同一个位置也有一手：她的 App 侧 dylib（SthenoKeyboard，过滤 com.apple.UIKit）
+// 的选择子里同时有 `mainScreen` / `bounds` / `_boundsForInterfaceOrientation:` /
+// `setBounds:` / `setFrame:` / `setTransform:` —— 她同样在 App 进程里改屏幕。
+//
+// 做法：只在这块卡里演我时（scene 自己的 settings 说 foreground），把主屏的
+// `bounds` / `_referenceBounds` / `_boundsForInterfaceOrientation:` 换成 scene
+// 坐标空间的那块尺寸。别的进程、别的时刻，一个字节都不改。
+//
+// 只改「读」：`nativeBounds`、`scale`、`brightness` 都不动 —— 那些是硬件量，
+// 改了只会让画面分辨率对不上。
+
+static IMP AevonOriginalScreenBounds = NULL;
+static IMP AevonOriginalScreenRef = NULL;
+static IMP AevonOriginalScreenOriented = NULL;
+static void AevonGeomWrite(const char *body);   // 定义在下面量尺那一段
+static int AevonScreenHits = 0;
+static int AevonScreenLogged = 0;
+static int AevonScreenBusy = 0;
+static CGRect AevonScreenTarget = { { 0, 0 }, { 0, 0 } };
+static CFAbsoluteTime AevonScreenStamp = 0;
+
+/// 这块卡里正在演我的那块屏幕有多大。0.4 秒一次缓存：`bounds` 是 App 里被
+/// 调用最频繁的 getter 之一，每一帧都去翻 connectedScenes 是不行的。
+static CGRect AevonHostedScreenSize(void) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (AevonScreenStamp > 0 && now - AevonScreenStamp < 0.4) return AevonScreenTarget;
+    AevonScreenStamp = now;
+    AevonScreenTarget = CGRectZero;
+    if (AevonScreenBusy) return AevonScreenTarget;   // 递归自保
+    AevonScreenBusy = 1;
+    UIApplication *application = [UIApplication sharedApplication];
+    if (application != nil) {
+        for (UIScene *scene in [application connectedScenes]) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            id settings = AevonSceneSettings(scene);
+            if (settings == nil) continue;
+            if (!(AevonFlag(settings, @"isForeground") && !AevonFlag(settings, @"isBackgrounded"))) continue;
+            id value = AevonTryValue(AevonTryValue(scene, @"coordinateSpace"), @"bounds");
+            if (![value isKindOfClass:[NSValue class]]) continue;
+            CGRect box = CGRectZero;
+            [value getValue:&box size:sizeof(box)];
+            if (box.size.width > 100 && box.size.height > 200) {
+                box.origin = CGPointZero;
+                AevonScreenTarget = box;
+            }
+            break;
+        }
+    }
+    AevonScreenBusy = 0;
+    return AevonScreenTarget;
+}
+
+/// 主屏 + 宿主尺寸都成立时，把答案换掉。`got` 是系统给的原值，用来判断
+/// 「本来就一样」—— 一样的场合一个字节都不改，真前台的 App 因此完全不受影响。
+///
+/// `depth` 是自保：`[UIScreen mainScreen]` 与读 scene 的坐标空间都可能绕回
+/// `bounds`，而这一层一旦递归就是启动即死循环。进一次、答一次，再问就直接用
+/// 系统的原值。
+static int AevonScreenDepth = 0;
+
+static BOOL AevonScreenRewrite(id screen, CGRect got, CGRect *out) {
+    if (AevonScreenDepth > 0) return NO;
+    if (!AevonAppHookAllowed()) return NO;
+    AevonScreenDepth = 1;
+    BOOL answer = NO;
+    if (screen == [UIScreen mainScreen]) {
+        CGRect want = AevonHostedScreenSize();
+        if (want.size.width > 100 && want.size.height > 200
+            && (fabs(want.size.width - got.size.width) > 2
+                || fabs(want.size.height - got.size.height) > 2)) {
+            *out = want;
+            answer = YES;
+        }
+    }
+    AevonScreenDepth = 0;
+    if (!answer) return NO;
+    AevonScreenHits++;
+    if (!AevonScreenLogged) {
+        AevonScreenLogged = 1;
+        char body[160];
+        snprintf(body, sizeof(body), "screen %.0fx%.0f -> %.0fx%.0f (hosted scene)",
+                 got.size.width, got.size.height, out->size.width, out->size.height);
+        AevonGeomWrite(body);
+    }
+    return YES;
+}
+
+static CGRect AevonScreenBounds(id self, SEL _cmd) {
+    CGRect got = ((CGRect (*)(id, SEL))AevonOriginalScreenBounds)(self, _cmd);
+    CGRect want;
+    if (AevonScreenRewrite(self, got, &want)) return want;
+    return got;
+}
+
+static CGRect AevonScreenRefBounds(id self, SEL _cmd) {
+    CGRect got = ((CGRect (*)(id, SEL))AevonOriginalScreenRef)(self, _cmd);
+    CGRect want;
+    if (AevonScreenRewrite(self, got, &want)) return want;
+    return got;
+}
+
+static CGRect AevonScreenOriented(id self, SEL _cmd, NSInteger orientation) {
+    CGRect got = ((CGRect (*)(id, SEL, NSInteger))AevonOriginalScreenOriented)(self, _cmd, orientation);
+    CGRect want;
+    if (AevonScreenRewrite(self, got, &want)) return want;
+    return got;
+}
+
 // MARK: - 0.0.63 几何量尺（App 这一侧）
+
 //
 // Aevon(55) 里唯一说不清的是抖音：视频在中上、下面一大片纯 #333。宿主侧的读数
 // 已经全部一致 —— `win: fat scene ratio=1.667 … render=430x717`、
@@ -243,43 +396,54 @@ static void AevonDumpGeometry(const char *tag) {
             break;
         }
     }
+    // 硬件那一半单独给：`[screen bounds]` 现在可能已经是补丁后的值，
+    // `nativeBounds / scale` 才是这台机器真实的点数尺寸。两列并排，「补丁生效
+    // 了没有」就不需要再推导。
+    CGRect native = screen != nil ? [screen nativeBounds] : CGRectZero;
+    CGFloat scale = screen != nil ? [screen scale] : 0.0;
     char body[400];
     snprintf(body, sizeof(body),
-             "%s screen=%.0fx%.0f@%.0f scene=%.0fx%.0f win=%.0fx%.0f "
-             "root=%.0fx%.0f safe=%.0f/%.0f",
-             tag, box.size.width, box.size.height,
-             screen != nil ? [screen scale] : 0.0,
+             "%s screen=%.0fx%.0f@%.0f phys=%.0fx%.0f scene=%.0fx%.0f win=%.0fx%.0f "
+             "root=%.0fx%.0f safe=%.0f/%.0f hits=%d",
+             tag, box.size.width, box.size.height, scale,
+             scale > 0 ? native.size.width / scale : 0.0,
+             scale > 0 ? native.size.height / scale : 0.0,
              space.size.width, space.size.height,
              win.size.width, win.size.height,
              view.size.width, view.size.height,
-             safe.top, safe.bottom);
+             safe.top, safe.bottom, AevonScreenHits);
     AevonGeomWrite(body);
-    if (key == nil) return;
-    NSArray *subs = [key subviews];
-    UIView *biggest = nil;
-    CGFloat area = -1;
-    NSUInteger count = subs.count < 8 ? subs.count : 8;
-    for (NSUInteger i = 0; i < count; i++) {
-        UIView *one = [subs objectAtIndex:i];
-        CGRect f = [one frame];
-        snprintf(body, sizeof(body), "%s sub=%lu %s %.0f,%.0f,%.0fx%.0f",
-                 tag, (unsigned long)i, class_getName([one class]),
+    if (rootView == nil) return;
+    // 0.0.65 — 只量两层不够。上一版停在 `UITransitionView / UIDropShadowView`，
+    // 那是 UIKit 的外壳，抖音的播放器在它下面好几层。这里改走「主脊」：从根视图
+    // 开始，每一层挑面积最大的那个子视图往下走八层，同时把这一层的兄弟类名
+    // 列一行 —— 既看得到深度，也看得到分叉。
+    UIView *node = rootView;
+    for (int level = 0; level < 8 && node != nil; level++) {
+        CGRect f = [node frame];
+        snprintf(body, sizeof(body), "%s spine%d %s %.0f,%.0f,%.0fx%.0f",
+                 tag, level, class_getName([node class]),
                  f.origin.x, f.origin.y, f.size.width, f.size.height);
         AevonGeomWrite(body);
-        CGFloat a = f.size.width * f.size.height;
-        if (a > area) { area = a; biggest = one; }
-    }
-    if (biggest == nil) return;
-    NSArray *kids = [biggest subviews];
-    NSUInteger kids2 = kids.count < 6 ? kids.count : 6;
-    for (NSUInteger i = 0; i < kids2; i++) {
-        UIView *one = [kids objectAtIndex:i];
-        CGRect f = [one frame];
-        snprintf(body, sizeof(body), "%s in=%s:%lu %s %.0f,%.0f,%.0fx%.0f",
-                 tag, class_getName([biggest class]), (unsigned long)i,
-                 class_getName([one class]),
-                 f.origin.x, f.origin.y, f.size.width, f.size.height);
+        NSArray *kids = [node subviews];
+        if (kids.count == 0) break;
+        NSMutableString *peers = [NSMutableString string];
+        UIView *best = nil;
+        CGFloat area = -1;
+        NSUInteger limit = kids.count < 10 ? kids.count : 10;
+        for (NSUInteger i = 0; i < limit; i++) {
+            UIView *kid = [kids objectAtIndex:i];
+            if (i > 0) [peers appendString:@"|"];
+            NSString *name = [NSString stringWithUTF8String:class_getName([kid class])] ?: @"?";
+            [peers appendFormat:@"%@:%.0fx%.0f", name,
+             [kid frame].size.width, [kid frame].size.height];
+            CGFloat a = [kid frame].size.width * [kid frame].size.height;
+            if (a > area) { area = a; best = kid; }
+        }
+        snprintf(body, sizeof(body), "%s peers%d n=%lu %s",
+                 tag, level, (unsigned long)kids.count, [peers UTF8String]);
         AevonGeomWrite(body);
+        node = best;
     }
 }
 
@@ -359,5 +523,30 @@ static void AevonAppBoot(void) {
     if (activation != NULL) {
         AevonOriginalActivationState = method_getImplementation(activation);
         method_setImplementation(activation, (IMP)AevonActivationState);
+    }
+
+    // 0.0.65 — 名片（宿主靠它判断「这个进程有没有这一版代码」）。
+    if (AevonAppHookAllowed()) AevonBridgeMark();
+
+    // 0.0.65 — 屏幕补丁。三个都是私有/半私有 getter：`bounds` 是 App 最常用的
+    // 那个，`_referenceBounds` 与 `_boundsForInterfaceOrientation:` 是它下面的两层
+    // （有的代码绕开 `bounds` 直接问这两层，母本的选择子表里也正好有第三个）。
+    // 有哪个不存在就跳哪个，不写死「一定有」。
+    Method bounds = class_getInstanceMethod([UIScreen class], sel_registerName("bounds"));
+    if (bounds != NULL) {
+        AevonOriginalScreenBounds = method_getImplementation(bounds);
+        method_setImplementation(bounds, (IMP)AevonScreenBounds);
+    }
+    Method reference = class_getInstanceMethod([UIScreen class],
+                                               sel_registerName("_referenceBounds"));
+    if (reference != NULL) {
+        AevonOriginalScreenRef = method_getImplementation(reference);
+        method_setImplementation(reference, (IMP)AevonScreenRefBounds);
+    }
+    Method oriented = class_getInstanceMethod([UIScreen class],
+                                              sel_registerName("_boundsForInterfaceOrientation:"));
+    if (oriented != NULL) {
+        AevonOriginalScreenOriented = method_getImplementation(oriented);
+        method_setImplementation(oriented, (IMP)AevonScreenOriented);
     }
 }

@@ -82,11 +82,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// "give me the window back" instead of reaching the app.
     private var shield: UIControl?
     private var onClose: ((String) -> Void)?
-    /// 0.0.63 — 换画布的出口。边角拖动改的是「这个 App 的屏幕有多高」，不是
-    /// 一张图的放大倍数：画布一改，App 就重新排一版（母本 `LeftCornerTrim`
-    /// 的文案就是「滑动进一步调整比例」）。真正的写 settings 在 SceneProbe
-    /// 那一侧 —— 这里只有尺寸，不碰 scene。
-    private var onReshape: ((CGSize) -> Void)?
     /// The scene's own size. Every resize is this shape, scaled — the card never
     /// gets an aspect the picture does not have.
     ///
@@ -102,19 +97,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var natural: CGSize = .zero
     private var visible: CGSize = .zero
 
-    /// 0.0.64 — 「几何缩放」开关（设置 → 窗口与场景，**默认关**）。
-    ///
-    /// 关：右下角拖动只做**等比例**缩放 —— 卡片按自己的形状放大缩小，画布
-    /// （交给系统的那块屏幕）一动不动，App 从头到尾不知道窗口变过。这是 0.0.62
-    /// 及以前的语义，也是操作者要的「普通缩放」。
-    ///
-    /// 开：拖动改的是**窗口的比例**（0.0.63 的行为），抬手时换画布、App 重排一版。
-    /// 顶栏/底栏/贴边工具栏会跟着新形状重新布局，代价是每松一次手多一次布局。
-    ///
-    /// 每次按下时重读一次（CFPreferences 在进程内有缓存，一次读取远小于一帧），
-    /// 所以设置里改完不必重开浮窗 —— 下一次拖角就按新语义走。
-    private var geometryScale = false
-    /// 0.0.64 — 设备屏幕圆角，开窗时读一次。`applyCorner` 每一帧都要用，而
+    /// 0.0.65 — 设备屏幕圆角，开窗时读一次。`applyCorner` 每一帧都要用，而
     /// `_displayCornerRadius` 是一次 KVC。
     private var screenCorner: CGFloat = 0
     /// 0.0.54 的顶栏裁切量。0.0.60 起恒为 0（改比例而不是裁画面），保留这个量
@@ -203,16 +186,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     ///      「悬浮窗内字体有点大」不用另加一套缩放，它就是同一个缩放；
     ///   ③ 圆角按同一个 scale 缩（55 → 44），「太圆」也是同一件事。
     /// 比例由宽高共同决定，所以它仍然是 5:3，不是把整屏压扁。
-    static func fatRender(in screen: CGSize, remembered: CGFloat = 0) -> CGSize {
+    /// 0.0.65 — 形状固定 5:3，不再有「记住的形状」。
+    ///
+    /// 0.0.63/0.0.64 让角拖动改窗口比例（母本 `LeftCornerTrim` 那条路），代价是
+    /// 画布尺寸变成一个需要持久化的变量。Aevon(57) 的判决是这条路没有价值：
+    /// 「几何缩放没有任何用处」。于是它连同 `CanvasHeight` 一起撤掉 —— 少一个
+    /// 状态，就少一整类「读回来和上次不一样」的错位。
+    static func fatRender(in screen: CGSize) -> CGSize {
         guard screen.width > 100, screen.height > 200 else {
             return CGSize(width: 430, height: 717)
         }
         // 高宽比 = 高 / 宽。5:3 的高度是宽度的 1.667 倍。
         let w = screen.width
-        // 0.0.63 — 操作者调过形状就用他调的那个高度，没有才是 5:3。
-        // 宽度永远是屏宽：这一条是 0.0.62 用一整轮真机换来的（见上面那段），
-        // 任何按屏幕宽度布局的层都要落在界内。
-        var h = remembered > 240 ? remembered : w * fatAspect
+        var h = w * fatAspect
         // 矮屏兜底：scene 的 frame 不该高过屏幕。
         h = Swift.min(h, screen.height)
         h = Swift.max(h, 240)
@@ -281,12 +267,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// not in a window is 0.0.20's black screen, and that is not worth one more
     /// phone.
     static func show(_ view: UIView, awaitingFrame: Bool = false,
-                     onReshape: ((CGSize) -> Void)? = nil,
                      onClose: @escaping (String) -> Void) -> FloatHost? {
         let host = shared
         host.teardown()
         host.onClose = onClose
-        host.onReshape = onReshape
         guard let window = host.makeWindow() else { return nil }
 
         window.backgroundColor = .clear
@@ -317,13 +301,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.0.62 — 交给系统的是「与手机等宽、高按 5:3 的一块屏幕」，不是卡片本身。
         // 卡片尺寸仍由高度系数决定，但它现在是这块屏幕的**等比缩小**（scale 约
         // 0.80），所以字号与圆角一起按同一个比例变小 —— 见 `fatRender`。
-        // 0.0.64 — 「几何缩放」开关。关（默认）时画布永远是默认的 5:3，
-        // 记住的那个形状不参与 —— 关掉这个功能的人不该还背负着上次调出来的
-        // 一条古怪比例；但也不抹掉它，重新打开开关时它还在。
-        let geometry = AevonPrefs.bool("GeometryScaleEnabled", default: false)
-        let rememberedCanvas = geometry ? CardLayout.loadRuntime().canvasHeight : 0
-        let source = FloatHost.fatRender(in: window.bounds.size,
-                                        remembered: rememberedCanvas)
+        // 0.0.65 — 画布只有一个来源：屏幕宽度 × 5:3。没有第二个写入口，
+        // 「记忆的形状」与开关一起撤了（见 `fatRender`）。
+        let source = FloatHost.fatRender(in: window.bounds.size)
 
         // 0.0.61 — 这一行才是「小胖屏」真正生效的地方。
         //
@@ -361,7 +341,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         host.content = view
         host.natural = source
         host.visible = visible
-        host.geometryScale = geometry
         host.screenCorner = FloatHost.deviceCorner()
         // 0.0.60 — 裁切量恒为 0。`cropTop` 这个量还留着，因为 `followContent`
         // 与 `recenterCard` 都按它对齐中心：0 就是「不用对齐」，两条路径都正确。
@@ -516,12 +495,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return
         }
         var placement = CardLayout.loadRuntime()
-        // 0.0.64 — 只有「几何缩放」开着才记画布高度。关着的时候画布是默认
-        // 5:3，把它写回去会把操作者以前调出来的形状覆盖成默认值 —— 关一次
-        // 开关就丢掉他调过的东西，比不生效更糟。
-        if geometryScale {
-            placement.canvasHeight = natural.height
-        }
         let origin = card.frame.origin
         let normalized = CGPoint(x: origin.x / bounds.width, y: origin.y / bounds.height)
         placement.edge = origin.x + card.bounds.width / 2 < bounds.width / 2 ? .left : .right
@@ -950,11 +923,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard let card = card else { return }
         zone = zoneFor(start)
         panStep = .zero
-        // 0.0.64 — 开关在这一拍重读：设置里刚改完，下一次按角就按新语义走，
-        // 不必关窗再开。一次 CFPreferences 读（进程内有缓存），不是每帧。
-        if zone == .bottomCorner {
-            geometryScale = AevonPrefs.bool("GeometryScaleEnabled", default: false)
-        }
         // Which band the finger found. If the operator reports "it does not
         // work" again, this line says whether the touch arrived and which
         // zone it was counted as — two very different defects.
@@ -972,13 +940,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
-    /// 0.0.64 — 一行说清这次缩放走的是哪条路。`mode=0` 是等比例（画布不动），
-    /// `mode=1` 是几何缩放（抬手换画布、App 重排）。三个时刻各写一次（按下、
-    /// 抬手、开窗），所以「设置改了没生效」与「生效了但看起来一样」能分开。
+    /// 0.0.65 — 一行说清这次缩放用的是哪块画布。0.0.64 的 `mode=` 撤了：
+    /// 现在只有一种缩放（等比例），模式这个量不存在了。
     private func logResize() {
         guard let card = card else { return }
-        Log.write(String(format: "win: resize mode=%ld canvas=%.0fx%.0f card=%.0fx%.0f corner=%.0f",
-                         geometryScale ? 1 : 0,
+        Log.write(String(format: "win: resize canvas=%.0fx%.0f card=%.0fx%.0f corner=%.0f",
                          natural.width, natural.height,
                          card.bounds.width, card.bounds.height,
                          card.layer.cornerRadius))
@@ -993,36 +959,26 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let dy = total.y - panStep.y
         panStep = total
         if zone == .bottomCorner, let start = resizeStart {
-            // 边角拖动（0.0.43 起是缩放；0.0.63 起可切成改窗口）。
+            // 边角拖动 = 等比例缩放（0.0.43 起；0.0.65 起只剩这一种）。
             //
-            // 0.0.64 — 两条路，由设置里的「几何缩放」决定：
+            // 0.0.63/0.0.64 在这里分过两条路：宽度跟手指（改窗口比例、抬手换画布
+            // 让 App 重排）与宽度由高度推出来（普通缩放）。Aevon(57) 判了第一条
+            // 没用，于是这里只留下一条：**宽度永远由高度和按下时的形状决定**，
+            // 画布（scene 的 settings.frame）在整场缩放里不动。
             //
-            //   关（默认）：**等比例**。高度跟手指，宽度由卡片自己的形状推出来，
-            //     画布（scene 的 settings.frame）一动不动 —— 画面整体放大缩小，
-            //     与 0.0.62 及以前一样。这就是「普通缩放」。
-            //   开：横竖各走各的，抬手时 `reshapeFromCard` 把卡片形状翻译成
-            //     「这块屏幕有多高」，App 重排一版（母本 `LeftCornerTrim`
-            //     「滑动进一步调整比例」）。
-            //
-            // 拖动过程中两条路都不写 settings：四十次每秒的重排不是跟手，是卡。
+            // 这也是最省的一条：App 从头到尾不知道窗口变过，没有一次重排，
+            // 画面只是被 transform 放大缩小 —— 拖动是真跟手。
             let shortest = miniHeight(in: window.bounds)
             let tallest = window.bounds.height - margin * 2
             let widest = window.bounds.width - margin * 2
             var h = Swift.min(tallest, Swift.max(shortest, start.height + total.y))
-            var w: CGFloat
-            if geometryScale {
-                w = Swift.min(widest, Swift.max(130,
-                                                start.width + (resizeFromLeft ? -total.x : total.x)))
-            } else {
-                // 等比例：宽度完全由高度决定。0.0.62 就是这么算的（`w = h * ratio`），
-                // 区别只是比例取「按下时这张卡自己的形状」，而不是画布的形状 ——
-                // 卡与画布本来就同形，取哪一个都一样，取当下的更不容易错位。
-                let ratio = start.width / Swift.max(start.height, 1)
-                w = h * ratio
-                if w > widest {
-                    w = widest
-                    h = Swift.max(shortest, w / ratio)
-                }
+            let ratio = start.width / Swift.max(start.height, 1)
+            var w = h * ratio
+            // 顶到左右边界时反解高度，形状不变 —— 宽度先到就先停，不是把卡片
+            // 压成另一条比例。
+            if w > widest {
+                w = widest
+                h = Swift.max(shortest, w / ratio)
             }
             var frame: CGRect
             if resizeFromLeft {
@@ -1052,14 +1008,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard let card = card, let window = window else { return }
         if zone == .bottomCorner, resizeStart != nil {
             resizeStart = nil
-            if geometryScale {
-                reshapeFromCard(in: window.bounds)
-            } else {
-                // 等比例模式：画布不动，也就没有重排要付。只把画面按新尺寸
-                // 摆正、把圆角按新宽度重算一次（圆角跟着卡宽，不跟着卡高）。
-                followContent()
-                syncGrip()
-            }
+            // 画布不动，也就没有重排要付：只把画面按新尺寸摆正、把圆角按新
+            // 宽度重算一次（圆角跟着卡宽，不跟着卡高）。
+            followContent()
+            syncGrip()
             Log.write("win: card resized to " + point(card.frame.origin)
                       + " size=" + size(card.bounds.size))
             logResize()
@@ -1383,86 +1335,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         applyCorner()
     }
 
-    /// 0.0.63 — 边角拖动改的是**窗口的比例**，不是一张图的放大倍数。
-    ///
-    /// 0.0.43~0.0.62 的边角拖动只改 `card.frame`：卡片长大长小，画面跟着整体
-    /// 放大缩小，交给系统的那块「屏幕」一动不动。于是 Aevon(55) 说的那件事
-    /// 是必然的 —— 一开窗 App 按 5:3 排好一版（顶栏、底栏、工具栏都在），
-    /// 之后在手上怎么拉，App 都不知道窗口变了，只有那张已经排好的画被拉伸。
-    ///
-    /// 母本不是这样：她的三个设置项连成一串（`CustomFrameInit` 修改窗口比例 /
-    /// `RightCornerTrim` 点击切换基础窗口比例 / `LeftCornerTrim` 滑动进一步
-    /// 调整比例），角上那一下改的是**比例**，App 于是重排一版。
-    ///
-    /// 这里照做，并且守住 0.0.62 用一整轮真机换来的那条硬线：画布**宽度恒等于
-    /// 屏宽**。宽度一缩，按 `UIScreen` 宽度布局的层（抖音右侧那一列、各种贴边
-    /// 浮层）就落到界外；高度随便改，App 只是换一个更矮或更高的窗口重新排。
-    ///
-    /// 两个量于是各管一件事：
-    ///   · 卡片宽度 / 屏宽 = 缩放比（字号与圆角跟着它，0.0.62 的观感不变）；
-    ///   · 卡片高 / 这个缩放比 = 画布高度（窗口的形状，App 按它重排）。
-    /// 所以「往右下角拖」= 窗口变大 + 更长，App 真的收到一个新窗口。
-    ///
-    /// 只在抬手时做一次（`dragEnd`）：重排要付一次布局，四十次每秒的重排不是
-    /// 跟手，是卡。
-    private func reshapeFromCard(in bounds: CGRect) {
-        guard let card = card, natural.width > 100, bounds.height > 200 else { return }
-        let screenW = natural.width
-        var scale = card.bounds.width / screenW
-        scale = Swift.min(1, Swift.max(0.30, scale))
-        var want = (card.bounds.height / scale).rounded()
-        want = Swift.min(bounds.height.rounded(), Swift.max(240, want))
-        // 夹紧之后卡片尺寸也要跟着夹紧，否则画面与框错位（多出来的一条会是
-        // 卡片底色，而不是画面）。
-        let fitted = CGSize(width: (screenW * scale).rounded(), height: (want * scale).rounded())
-        if abs(card.bounds.width - fitted.width) > 0.5
-            || abs(card.bounds.height - fitted.height) > 0.5 {
-            var frame = card.frame
-            frame.size = fitted
-            card.frame = clamped(frame, in: bounds)
-        }
-        // 8 pt 以内算「同一块屏幕」：抖一下手指不该让 App 重排一次。
-        if abs(want - natural.height) > 8 {
-            adoptCanvas(CGSize(width: screenW, height: want))
-            // 一条格式串而不是七八段拼接：短于 16 字节的拼接段会被 LLVM 编成
-            // 立即数，二进制里搜不到（0.0.61 的 `" corner="` 就是这么消失的）。
-            Log.write(String(format: "win: canvas reshaped to=%.0fx%.0f card=%.0fx%.0f scale=%.3f",
-                             natural.width, natural.height,
-                             card.bounds.width, card.bounds.height, scale))
-        }
-        followContent()
-        syncGrip()
-    }
-
-    /// 0.0.63 — 换一块画布，四件事一起做，缺一件就是错位：
-    ///
-    ///   ① `natural` / `visible`：以后算比例都按新形状；
-    ///   ② `content.bounds`：承载视图自己的坐标系也得换 —— scene 的 frame 变了
-    ///      而视图 bounds 还是旧的，画面会被压扁或者只画一角（0.0.60 的教训：
-    ///      「画布」和「视图」是两套几何，只改一套等于没改）；
-    ///   ③ `onReshape`：把新的尺寸真的写进 scene settings，App 才会重排；
-    ///   ④ 日志由调用方写（两条路径的说法不一样）。
-    private func adoptCanvas(_ size: CGSize) {
-        natural = size
-        visible = size
-        content?.bounds = CGRect(origin: .zero, size: size)
-        onReshape?(size)
-    }
-
     /// `重启`, as much of it as a window can do by itself: back to the frame the
     /// card was built with, with the remembered placement cleared first.
     private func resetToPlan(in bounds: CGRect) {
         guard let card = card, natural.height > 16, bounds.width > 64 else { return }
         CardLayout.reset()
-        // 0.0.63 — 复位连形状一起复位：操作者调过的画布高度清掉，回到 5:3。
-        // 只复位 frame 而留下那个比例，「重启」会把他调过的东西留在原地。
-        let fresh = FloatHost.fatRender(in: bounds.size, remembered: 0)
-        if abs(fresh.height - natural.height) > 0.5 {
-            adoptCanvas(fresh)
-            Log.write(String(format: "win: canvas reshaped to=%.0fx%.0f card=%.0fx%.0f scale=reset",
-                             fresh.width, fresh.height,
-                             card.bounds.width, card.bounds.height))
-        }
+        // 0.0.65 — 形状不再存盘，也就没有「复位形状」这件事：画布永远是
+        // `fatRender` 算出来的那一块，复位只把卡片摆回开窗时的位置与大小。
         // 0.0.54 — 复位要和 `show` 算同一件事：按原始比例布局，再把高度减掉
         // 顶栏。直接用 `visible` 去 plan 会得到另一条比例（scale 变大、卡片变
         // 宽），复位一次窗口就胖一圈 —— 这是最容易在真机上被当成「新 bug」的

@@ -43,14 +43,12 @@ VERSION = control_version()
 # AevonRingMenu.swift），Ring 面板里不再有「写一个数值、桌面立刻变」的母本键
 # —— 圆盘的增删排序走编辑器，几何不走滑条。接通口径改为按面板逐项核对。
 #
-# 0.0.64 — 「接通」是可以核对的，不是口径：窗口侧真的在读这两个键
-# （CardLayout.preferredHeight / FloatHost.geometryScale），所以它们在这里点名。
-WIRED_KEYS = {"HeightFraction", "GeometryScaleEnabled"}
-
-# 0.0.64 — 本项目自有的键（母本没有），不参与「81 键对账」。
-# 对账的意义是「母本 81 个键一个不多一个不少」，把自己新加的开关算进去
-# 只会让那个数失去意义。
-OWN_KEYS = {"GeometryScaleEnabled"}
+# 0.0.65 — 「接通」是可以核对的，不是口径：窗口侧真的在读这个键
+# （CardLayout.preferredHeight），所以它在这里点名。
+# 0.0.64 的 `GeometryScaleEnabled` 随功能一起撤了（Aevon(57)：没任何用处），
+# 于是 `OWN_KEYS` 也空了 —— 本项目不再往母本的 81 键里加东西。
+WIRED_KEYS = {"HeightFraction"}
+OWN_KEYS = set()
 
 # 0.0.41 明确放弃的母本键。界面里没有它们，代码里也没有读取它们的地方 ——
 # 但 81 键的对账必须继续成立，所以放弃本身要记账，而不是让总数悄悄少五位。
@@ -91,17 +89,6 @@ PANELS = [
         dict(k="HeightFraction", cn="高度系数", cell="slider", d=0.62, rng=(0.30, 0.80),
              note="浮窗第一次打开时的高度（占屏幕高度的比例），宽度按画面比例跟随。"
                   "拖动或缩放过的浮窗以它自己的记忆为准；长按底角可复位到这个值。"),
-        # 0.0.64 — 本项目自己的键（母本没有这一项）：「边角拖动」到底改什么。
-        #
-        # 键名故意长到 20 字节：Swift 把 ≤15 字节的字面量编成立即数，二进制里
-        # 搜不到，审计就无法核对「plist 里写的键」与「代码里读的键」是不是同一个
-        # （0.0.61 的 `" corner="`、0.0.63 的这次 `GeometryScale` 都栽在这条上）。
-        # 改短它，等于把这个开关的唯一核对手段删掉。
-        dict(k="GeometryScaleEnabled", cn="几何缩放", cell="switch", d=False,
-             note="关闭（默认）：右下角拖动只把画面等比例放大缩小，窗口形状不变，"
-                  "App 不会重排。开启：拖动改的是窗口比例，松手后换一块画布让 App "
-                  "按新形状重排一版（顶栏、底栏、贴边工具栏会跟着重新布局，代价是"
-                  "每松一次手多一次布局）。拖动中重读本项，改完不必重开浮窗。"),
         dict(k="Size", cn="尺寸", cell="slider", d=0.60, rng=(0.40, 1.00),
              note="基准尺寸，圆盘展开时按此推导各图标位置。"),
         dict(k="BallparkFigure", cn="近似取值", cell="switch", d=False,
@@ -456,8 +443,7 @@ def build_root(panel_items, wired):
     items.append({"cell": "PSGroupCell", "label": "功能设置",
                   "footerText": f"下面 8 个面板共 {total} 项，母本键与母本一一对应"
                                 f"（母本 81 键中有 {len(DROPPED)} 项已明确放弃，"
-                                f"名单见交付说明），另有 {len(OWN_KEYS)} 项是本项目自有"
-                                f"（窗口与场景 → 几何缩放）。点任一项进入该面板；"
+                                f"名单见交付说明）。点任一项进入该面板；"
                                 f"承载形状已整体换成旧版实现，"
                                 f"其余面板的开关会写入 com.aevon 域，等对应功能落地后即生效。"})
     for pid, title, _intro in [(p[0], p[1], p[2]) for p in PANELS]:

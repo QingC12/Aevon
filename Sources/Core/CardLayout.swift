@@ -54,17 +54,6 @@ public enum CardLayout {
         /// The width follows the scene's own aspect, so one number is enough.
         public var heightFraction: CGFloat
 
-        /// 0.0.63 — 交给系统的那块「屏幕」有多高（宽恒等于屏宽）。
-        ///
-        /// 0.0.62 及以前这个量是常数（`fatRender` 按 5:3 算），所以卡片只能是
-        /// 等比缩放的同一个形状。0.0.63 起边角拖动改的是**窗口的比例**（母本
-        /// `LeftCornerTrim` 的文案就是「滑动进一步调整比例」），画布跟着卡片的
-        /// 形状走，App 每一版都重新排一次 —— 那它就必须被记住，否则重开一次
-        /// 窗口又变成 5:3，操作者刚调好的形状白调。
-        ///
-        /// 0 表示「没记过」，按 `FloatHost.fatAspect` 的默认比例算。
-        public var canvasHeight: CGFloat = 0
-
         /// 0.0.46 — 62 %, and the number comes from a measurement rather than
         /// from that annotation. It is also the value 设置里 `高度系数` ships
         /// with, so the panel and the first frame agree instead of disagreeing
@@ -192,12 +181,6 @@ public enum CardLayout {
         let height = (dict["HeightFraction"] as? NSNumber).map { CGFloat($0.doubleValue) }
             ?? placement.heightFraction
         placement.heightFraction = Swift.min(0.92, Swift.max(0.30, height))
-        // 0.0.63 — 画布高度。0（或文件里没有这一项）= 没调过形状，用默认比例。
-        // 只收 240…1600 这一段：更矮的窗口装不下一行字，更高的不是窗口。
-        if let canvas = (dict["CanvasHeight"] as? NSNumber).map({ CGFloat($0.doubleValue) }),
-           canvas > 240, canvas < 1600 {
-            placement.canvasHeight = canvas
-        }
         return placement
     }
 
@@ -220,8 +203,6 @@ public enum CardLayout {
             "rightPecent": Double(clampFraction(placement.right.x)),
             "rightHeightPecent": Double(clampFraction(placement.right.y)),
             "HeightFraction": Double(placement.heightFraction),
-            // 0.0.63 — 窗口比例。写 0 等于「没调过」，读回来按默认比例算。
-            "CanvasHeight": Double(placement.canvasHeight),
             "layoutVersion": Placement.currentVersion,
             "edgeWidth": Double(edgeWidth),
             "savedAt": Date().timeIntervalSince1970,
