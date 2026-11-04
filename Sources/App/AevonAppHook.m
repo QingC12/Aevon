@@ -69,6 +69,7 @@
 #include <limits.h>
 #include <math.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -2055,7 +2056,40 @@ typedef struct {
 static AevonVideoSlot AevonVideoSlots[3];
 static void *AevonVideoCell = NULL;
 static int AevonVideoScanLeft = 0;
-static int AevonVideoNone = 0;
+/// 0.0.89 — 读数限流改成**按时间**。
+///
+/// Aevon(79) 里 `video band none` 出现 58 次 + `video tree` 58 次，而源码里那两行
+/// 的自带限流是 `AevonVideoNone < 2`（最多 2 次）。能写 58 次只有一个解释：
+/// 每次心跳都命中了「换页」分支（`AevonVideoCell != cell`），把计数清零了。
+/// 于是 45 秒里做了 58 次「整页 4000 节点遍历 + 递归 + 两行日志落盘」—— 卡屏的
+/// 燃料有一半在这里。限流按时间走（每 2 s 最多一条）就不再受清账影响。
+static CFTimeInterval AevonVideoNoneAt = 0.0;
+static CFTimeInterval AevonVideoScanAt = 0.0;
+
+/// 0.0.89 — 「认一次就记住」。
+///
+/// Aevon(79) 的手感是「滑着滑着卡住 4 秒」。日志里我们这一侧单次最贵 25 ms
+/// （`video slow … spent=25ms`），所以卡的不是单次，是**次数**：排版钩子每 8 ms
+/// 就放行一次，每次都要 `AevonCollectPlayers` + `AevonBandUnder` 把整页扫一遍。
+///
+/// 一块画面在一页里只需要认一次。认出来就把 `(cell, band…)` 记下；之后的
+/// `layoutSubviews` 只要发现 cell 还是同一个、band 还挂在它下面，就只做一次
+/// `convertRect:` 加一次写 transform —— 两个 ObjC 调用，微秒级，扫零个视图。
+/// 换页（cell 变了）或 band 掉出卡片（图层重建）才重新认。
+static void *AevonVideoKnownCell = NULL;
+static void *AevonVideoKnownBand[2] = {NULL, NULL};
+static int AevonVideoKnownCount = 0;
+/// 记账的年龄（心跳拍数）。到点就作废重认一次：App 会在同一页里换版式/换层，
+/// 只认一次会永久指着旧的那块画面。32 拍 ≈ 6 s，代价是每 6 秒一次整页扫描。
+static int AevonVideoKnownAge = 0;
+
+/// 0.0.89 — 「这一阵子我们吃了主线程多少」。
+/// 每 0.5 s 结算一次，只有超过 80 ms（16% 的一秒）才记一行。正常时不出声，
+/// 真卡住时下一份日志能直接看到是谁、多少次、多少毫秒 —— 不用再从「日志空白
+/// 4 秒」去反推。
+static int AevonVideoLoadN = 0;
+static double AevonVideoLoadSpent = 0.0;
+static CFTimeInterval AevonVideoLoadAt = 0.0;
 
 /// 一块画面在这张卡里的记账。按指针认；认不出来就占一个空槽，槽满了顶掉 [0]
 /// （画面在翻页后本来就是新对象，旧记录留着只会挡住新手）。
@@ -2081,7 +2115,11 @@ static void AevonVideoForget(void) {
     memset(AevonVideoSlots, 0, sizeof(AevonVideoSlots));
     AevonVideoCell = NULL;
     AevonVideoScanLeft = 3;
-    AevonVideoNone = 0;
+    AevonVideoKnownCell = NULL;
+    AevonVideoKnownBand[0] = NULL;
+    AevonVideoKnownBand[1] = NULL;
+    AevonVideoKnownCount = 0;
+    AevonVideoKnownAge = 0;
 }
 
 /// 两个视图在同一棵树上互为祖先/后代。同一块画面常被「画面区 → 画面」两层同时
@@ -2127,14 +2165,25 @@ static BOOL AevonNotPicture(const char *name) {
 /// 页里所有「类名带 Player / Video」的视图，按面积从大到小。
 /// 不用 `sortUsingComparator:`：这个 dylib 装进每一个 App 进程，能少一条运行库
 /// 依赖就少一条；候选只有个位数，双重循环反而更省。
-static void AevonCollectPlayers(UIView *root, NSMutableArray *out) {
-    if (root == nil || out == nil) return;
+static NSUInteger AevonCollectPlayers(UIView *root, NSMutableArray *out) {
+    if (root == nil || out == nil) return 0;
+    // 0.0.89 — 广度优先 + 预算 4000，两条都是 Aevon(79) 逼出来的。
+    //
+    // 旧版是深度优先（数组当栈、`lastObject` 取尾），预算 1600。抖音一页的视图
+    // （弹幕层 + 评论区 + 图标 + 各种角标）早就超过 1600，深度优先会先把左边某一棵
+    // 子树走到底再回来 —— 日志里那 58 次 `video band none cls=AWEAwemePlayVideoPauseIc`
+    // 就是证据：浅层那块全屏大的「暂停图标层」先被收下（面积最大 ⇒ 排第一），
+    // 真正的视频区 `DDDanmakuPlayerView:0,0,430x634` 一次都没被走到，
+    // 紧跟的 `video tree n=0` 说明连它的子视图都是空的。
+    //
+    // 广度优先保证「浅层的大容器」先被看见（视频区永远比弹幕/评论浅），
+    // 4000 是抖音一页视图数的量级上界。这一条只在「认页」时跑（见
+    // `AevonVideoKnown*`），不是每帧，贵一点换「一次就认全」。
     NSMutableArray *todo = [NSMutableArray arrayWithObject:root];
-    NSUInteger walked = 0;
-    while (todo.count > 0 && walked < 1600) {
-        UIView *node = [todo lastObject];
-        [todo removeLastObject];
-        walked += 1;
+    NSUInteger index = 0;
+    while (index < todo.count && index < 4000) {
+        UIView *node = [todo objectAtIndex:index];
+        index += 1;
         const char *name = class_getName([node class]);
         if (name != NULL
             && (strstr(name, "Player") != NULL || strstr(name, "Video") != NULL)) {
@@ -2154,10 +2203,13 @@ static void AevonCollectPlayers(UIView *root, NSMutableArray *out) {
             if (bb > aa) [out exchangeObjectAtIndex:i withObjectAtIndex:j];
         }
     }
+    return index;
 }
 
 /// 视频区里那块「宽度接近视频区、高度矮一截」的矩形。横版画面就是它。
 /// 贴顶的优先（用户说的「上移」就是它），没有贴顶的才按面积取。
+/// 0.0.89 — 同样改广度优先、预算 3000：视频区里真正那块画面层往往就挂在
+/// 视频区的第二三层，深度优先会先钻进弹幕/进度条那一支。
 static UIView *AevonBandUnder(UIView *region) {
     if (region == nil) return nil;
     CGFloat w = [region bounds].size.width;
@@ -2169,10 +2221,10 @@ static UIView *AevonBandUnder(UIView *region) {
     CGFloat topArea = -1.0;
     UIView *any = nil;
     CGFloat anyArea = -1.0;
-    while (todo.count > 0 && walked < 1200) {
-        UIView *node = [todo lastObject];
-        [todo removeLastObject];
+    while (walked < todo.count && walked < 3000) {
+        NSUInteger at = walked;
         walked += 1;
+        UIView *node = [todo objectAtIndex:at];
         if (node != region) {
             CGRect b = [node bounds];
             if (b.size.width >= w * 0.9 && b.size.height >= 100.0
@@ -2250,6 +2302,26 @@ static CFTimeInterval AevonVideoPause = 0.0;
 
 static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via);
 static void AevonLayoutHook(id self, SEL _cmd);
+static BOOL AevonVideoKnownApply(UIView *cell, const char *via);
+
+/// 0.0.89 — 每 0.5 s 结算一次「我们吃了主线程多少」。
+/// Aevon(79) 的卡屏只能从「App 侧日志空白 4.5 秒」反推，太绕了。这一行直接把
+/// 次数与毫秒写在日志里：`n` 是这段时间排版钩子真正干活（含快路径）的次数，
+/// `spent` 是累计毫秒，`%` 是占这半秒的比例。低于 80 ms 不出声，免得把日志冲掉。
+static void AevonVideoLoadReport(void) {
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - AevonVideoLoadAt < 0.5) return;
+    int n = AevonVideoLoadN;
+    double spent = AevonVideoLoadSpent;
+    AevonVideoLoadAt = now;
+    AevonVideoLoadN = 0;
+    AevonVideoLoadSpent = 0.0;
+    if (spent < 80.0) return;
+    char line[160];
+    snprintf(line, sizeof(line), "video load n=%d spent=%.0fms=%.0f%%",
+             n, spent, spent / 5.0);
+    AevonPageWrite(line);
+}
 
 /// 这个方法是不是**这个类自己**实现的。`class_getInstanceMethod` 会把父类的实现
 /// 借给你，改它等于改父类（对 `layoutSubviews` 来说就是改 UIView，整台机器每一层）。
@@ -2384,9 +2456,34 @@ static void AevonLayoutHook(id self, SEL _cmd) {
     if (now - AevonVideoLayoutAt < 0.008) return;      // 同一帧只做一次
     if (now < AevonVideoPause) return;                 // 上一次太贵，歇一下
     AevonVideoLayoutAt = now;
+    // 0.0.89 — 认过的页只做几何。
+    //
+    // Aevon(79) 的 4.5 秒卡顿不是单次贵（`video slow spent=25ms` 只有一条），
+    // 是次数：这个钩子每 8 ms 就放行一次，而每次都要把页面扫一遍。一页的画面
+    // 只需要认一次 —— 认出来之后，`cell` 还是那一页、`band` 还挂在它下面，
+    // 就只做 `convertRect:` 加写 transform，扫零个视图。快路径也照样算进
+    // `video load`，真出问题时能看到它到底还占多少。
     AevonVideoBusy = 1;
+    CFTimeInterval began = CFAbsoluteTimeGetCurrent();
+    BOOL known = AevonVideoKnownApply(cell, "layout");
+    if (known) {
+        AevonVideoBusy = 0;
+        AevonVideoLoadN += 1;
+        AevonVideoLoadSpent += CFAbsoluteTimeGetCurrent() - began;
+        AevonVideoLoadReport();
+        return;
+    }
     AevonVideoCenterFor(cell, videoLayer ? node : nil, "layout");
     AevonVideoBusy = 0;
+    AevonVideoLoadN += 1;
+    AevonVideoLoadSpent += CFAbsoluteTimeGetCurrent() - began;
+    AevonVideoLoadReport();
+    // 0.0.89 — 扫完没认出来，就把下一次扫排到 0.3 s 之后。
+    //
+    // 这一条是给「这一页真的没有横版画面」留的：不加的话，每 8 ms 一次完整扫描
+    // 会一直失败、一直重扫 —— 一页上千个视图 × 每秒 125 次，主线程就没了。
+    // 认出来了就不用管，接下来走的是快路径。
+    if (AevonVideoKnownCount == 0) AevonVideoLayoutAt = now + 0.292;
     // 自伤保护：一次扫描贵过 8 ms 就不是「一帧内的判断」了，停 2 秒再试。
     // 卡住主线程的代价比画面偏上大得多 —— 这一条是给下一次意外留的刹车，
     // 不是给已知场景用的。
@@ -2400,6 +2497,111 @@ static void AevonLayoutHook(id self, SEL _cmd) {
     }
 }
 
+/// 0.0.89 — 写一块画面。抽出来是因为现在有两条路要写它：
+/// 「刚认出来那一趟」（tick/layout 首次识别，顺带写读数）与「已经认过的页」
+/// （排版钩子每帧都能撞上，只做几何，不遍历）。
+static void AevonVideoWrite(UIView *band, UIView *cell, CGRect rb,
+                            const char *rname, const char *via) {
+    if (band == nil || cell == nil) return;
+    CGFloat cellH = [cell bounds].size.height;
+    CGFloat want = (cellH - rb.size.height) / 2.0;
+    CGFloat gap = want - rb.origin.y;
+    AevonVideoSlot *slot = AevonVideoSlotFor((void *)band);
+    if (fabs(gap) < 8.0) {          // 已经在卡片正中
+        slot->wrote = 0;
+        slot->bounces = 0;
+        slot->holdUntil = 0.0;
+        return;
+    }
+    CGAffineTransform t = [band transform];
+    // 缩放 / 旋转 / 横向位移都不是我们写的：那是 App 自己的动画，别抢。
+    if (fabs(t.a - 1.0) > 0.01 || fabs(t.d - 1.0) > 0.01 || fabs(t.tx) > 0.5) return;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now < slot->holdUntil) return;
+    // App 把我们上次写进去的位移抹掉了（`ty` 和我们写的不一样）：这一次是「对打」。
+    // 连错 30 次（约 1 s 的密集排版）才歇 1 秒 —— 歇完自动再试，**不是永久放弃**。
+    // 0.0.84~0.0.87 的 `hits` 是终身配额，一次锁屏就能把这块画面判死。
+    if (slot->wrote && fabs(t.ty - slot->wroteTy) > 1.0) slot->bounces += 1;
+    if (slot->bounces >= 30) {
+        slot->bounces = 0;
+        slot->holdUntil = now + 1.0;
+        return;
+    }
+    // 同一帧里连着的几次 `layoutSubviews`、两块候选各写一次：40 ms 内只写一次。
+    if (now - slot->wroteAt < 0.04) return;
+    BOOL clip = AevonVideoClips(band, cell, &gap);
+    if (fabs(gap) < 8.0) return;
+    slot->wrote = 1;
+    slot->writes += 1;
+    slot->wroteTy = t.ty + gap;
+    slot->wroteAt = now;
+    // 关掉隐式动画：App 的排版常常发生在动画块里，不关的话我们这一手会被它
+    // 做成一段滑动，看上去还是「跳一下」，只是慢镜头。
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [band setTransform:CGAffineTransformMakeTranslation(0, slot->wroteTy)];
+    [CATransaction commit];
+    if (clip) {
+        char line[210];
+        snprintf(line, sizeof(line), "video clip %.20s moved=%.0f need=%.0f n=%d",
+                 class_getName([band class]), gap, want - rb.origin.y, slot->writes);
+        AevonPageWrite(line);
+    }
+    // 每块画面只记头两次：钩子那条路如果每帧都要补（App 每帧重置 transform），
+    // 写日志只会把真正有用的读数冲掉。
+    //
+    // 0.0.89 — 行尾加 `c=`/`b=`/`ty=`：
+    //   · `c=` 是页（cell）指针尾 4 位，`b=` 是画面指针尾 4 位。同一秒里两次写入
+    //     如果 `c=` 一样而 `y=` 变回去了，就是 **App 把我们的位移抹掉**（对打）；
+    //     如果 `c=` 变了，那是换页 —— Aevon(79) 里正是分不清这两者，才只能靠猜。
+    //   · `ty=` 是**写之前**画面自己的位移。App 若用 transform 摆位置，这个数不为 0。
+    if (slot->writes <= 2) {
+        char body[320];
+        snprintf(body, sizeof(body),
+                 "video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s via=%.8s c=%04lx b=%04lx ty=%.0f",
+                 class_getName([band class]), rb.size.height, rb.origin.y,
+                 want, gap, slot->writes, rname != NULL ? rname : "?", via,
+                 (unsigned long)(((uintptr_t)cell) & 0xffff),
+                 (unsigned long)(((uintptr_t)band) & 0xffff), t.ty);
+        AevonPageWrite(body);
+    }
+}
+
+/// 0.0.89 — 这一页认过没有；认过就直接写，不再遍历。
+///
+/// 失效判据三条，任一不成立就丢掉记账、让调用方去重扫：
+///   · `band` 还挂在这一页下面（图层重建后旧对象会被摘走）；
+///   · `convertRect` 出来的矩形还有个正常尺寸（被 App 收成 0 宽高时不能写）；
+///   · 高度没有变成铺满整页（那是竖版，不该居中 —— App 换了版式）。
+/// 返回值只表示「记账还能用」，不代表这一帧一定写了 transform。
+static BOOL AevonVideoKnownApply(UIView *cell, const char *via) {
+    if (cell == nil || AevonVideoKnownCell != (void *)cell) return NO;
+    if (AevonVideoKnownCount <= 0) return NO;
+    CGFloat cellH = [cell bounds].size.height;
+    if (cellH < 200.0) return NO;
+    BOOL alive = NO;
+    for (int i = 0; i < AevonVideoKnownCount && i < 2; i++) {
+        UIView *band = (UIView *)AevonVideoKnownBand[i];
+        if (band == nil) continue;
+        if (![band isDescendantOfView:cell]) continue;
+        // 同一页里换视频时，旧那一块会被隐藏而新的那块浮上来；隐藏的一律当失效。
+        if ([band isHidden] || [band alpha] < 0.01) continue;
+        CGRect rb = [band convertRect:[band bounds] toView:cell];
+        if (rb.size.width < 40.0 || rb.size.height < 40.0) continue;
+        if (rb.size.height > cellH - 40.0) continue;
+        alive = YES;
+        AevonVideoWrite(band, cell, rb,
+                        class_getName([[band superview] class]), via);
+    }
+    if (!alive) {
+        AevonVideoKnownCell = NULL;
+        AevonVideoKnownCount = 0;
+        AevonVideoKnownBand[0] = NULL;
+        AevonVideoKnownBand[1] = NULL;
+    }
+    return alive;
+}
+
 static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
     if (cell == nil) return;
     CGFloat cellH = [cell bounds].size.height;
@@ -2408,7 +2610,7 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
     NSMutableArray *players = [NSMutableArray array];
     // 排版钩子里只扫被排版的那一层（视频区自己，几十个视图），不扫整页 ——
     // 钩子每帧都可能跑，整页扫一遍会把滚动拖卡。
-    AevonCollectPlayers(hint != nil ? hint : cell, players);
+    NSUInteger walked = AevonCollectPlayers(hint != nil ? hint : cell, players);
     if (players.count == 0) {
         // 钩子挂在「画面的直接父视图」上时，这一层可能只是个容器（类名里没有
         // Player / Video）。它本身也可能是视频区，就拿它当候选试一次 ——
@@ -2420,7 +2622,6 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
     UIView *pickBand[2] = {nil, nil};
     UIView *pickRegion[2] = {nil, nil};
     CGRect pickRect[2] = {CGRectZero, CGRectZero};
-    CGFloat pickGap[2] = {0.0, 0.0};
     int picked = 0;
 
     // 两轮：先只试「不是零件」的候选；全都不行再把零件也算进来（个别 App 的播放器
@@ -2457,8 +2658,10 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
             // 每个候选一行：在卡片里的矩形、目标、缺口。这一版能自查，下一版换判据
             // 也靠它（0.0.85 缺的就是「原点到底在哪」这一个数）。只在心跳那一路上写：
             // 排版钩子每帧都可能跑，把读数也写进去会把日志冲掉。
-            if (hint == nil && AevonVideoScanLeft > 0) {
+            if (hint == nil && AevonVideoScanLeft > 0
+                && CFAbsoluteTimeGetCurrent() - AevonVideoScanAt > 0.25) {
                 AevonVideoScanLeft -= 1;
+                AevonVideoScanAt = CFAbsoluteTimeGetCurrent();
                 char body[220];
                 snprintf(body, sizeof(body),
                          "video scan %.20s r=%.0f,%.0f,%.0fx%.0f want=%.0f gap=%.0f",
@@ -2476,7 +2679,6 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
             pickBand[picked] = band;
             pickRegion[picked] = candidate;
             pickRect[picked] = rb;
-            pickGap[picked] = gap;
             picked += 1;
         }
     }
@@ -2484,18 +2686,35 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
     if (picked == 0) {
         // 钩子那一路上只扫了一层，找不到画面是正常的（画面区可能在它上层），
         // 把「没找到」写成结论会误导下一轮 —— 所以只有心跳那一份才记这一行。
-        if (hint == nil && AevonVideoNone < 2) {
-            AevonVideoNone += 1;
+        //
+        // 0.0.89 — 限流按时间（每 2 s 最多一条），不再是次数。
+        // Aevon(79) 里这两行写了 58 次，而当时的门是「最多 2 次」：每次心跳都
+        // 走「换页清账」把计数清零，于是 45 秒写了 58 对。改按时间之后，清账
+        // 清不掉时间戳，同一段空白最多留一条。`walk=` 记下这一趟走了多少个视图
+        // —— 下一份日志里如果它一直顶在 4000，就是预算还不够，不是判据写错。
+        CFTimeInterval noneNow = CFAbsoluteTimeGetCurrent();
+        if (hint == nil && noneNow - AevonVideoNoneAt > 2.0) {
+            AevonVideoNoneAt = noneNow;
             UIView *first = [players objectAtIndex:0];
-            char body[170];
-            snprintf(body, sizeof(body), "video band none cls=%.24s h=%.0f box=%.0f",
+            char body[220];
+            snprintf(body, sizeof(body),
+                     "video band none cls=%.24s h=%.0f box=%.0f walk=%lu c=%04lx",
                      class_getName([first class]),
                      [first bounds].size.height,
-                     [first superview] != nil ? [[first superview] bounds].size.height : 0.0);
+                     [first superview] != nil ? [[first superview] bounds].size.height : 0.0,
+                     (unsigned long)walked,
+                     (unsigned long)(((uintptr_t)cell) & 0xffff));
             AevonPageWrite(body);
             AevonVideoTree(first);
         }
         return;
+    }
+
+    // 0.0.89 — 认出来就记下：这一页的 cell 与这两块画面，之后的排版只跟它们比指针。
+    AevonVideoKnownCell = (void *)cell;
+    AevonVideoKnownCount = picked;
+    for (int i = 0; i < 2; i++) {
+        AevonVideoKnownBand[i] = i < picked ? (void *)pickBand[i] : NULL;
     }
 
     // 0.0.88 — 钩子只在心跳那一路装（`via == "tick"`，0.6 s 一次）。
@@ -2514,61 +2733,8 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
     }
 
     for (int i = 0; i < picked; i++) {
-        UIView *band = pickBand[i];
-        CGRect rb = pickRect[i];
-        CGFloat want = (cellH - rb.size.height) / 2.0;
-        CGFloat gap = pickGap[i];
-        AevonVideoSlot *slot = AevonVideoSlotFor((void *)band);
-        if (fabs(gap) < 8.0) {          // 已经在卡片正中
-            slot->wrote = 0;
-            slot->bounces = 0;
-            slot->holdUntil = 0.0;
-            continue;
-        }
-        CGAffineTransform t = [band transform];
-        // 缩放 / 旋转 / 横向位移都不是我们写的：那是 App 自己的动画，别抢。
-        if (fabs(t.a - 1.0) > 0.01 || fabs(t.d - 1.0) > 0.01 || fabs(t.tx) > 0.5) continue;
-        CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-        if (now < slot->holdUntil) continue;
-        // App 把我们上次写进去的位移抹掉了（`ty` 和我们写的不一样）：这一次是「对打」。
-        // 连错 30 次（约 1 s 的密集排版）才歇 1 秒 —— 歇完自动再试，**不是永久放弃**。
-        // 0.0.84~0.0.87 的 `hits` 是终身配额，一次锁屏就能把这块画面判死。
-        if (slot->wrote && fabs(t.ty - slot->wroteTy) > 1.0) slot->bounces += 1;
-        if (slot->bounces >= 30) {
-            slot->bounces = 0;
-            slot->holdUntil = now + 1.0;
-            continue;
-        }
-        // 同一帧里连着的几次 `layoutSubviews`、两块候选各写一次：40 ms 内只写一次。
-        if (now - slot->wroteAt < 0.04) continue;
-        BOOL clip = AevonVideoClips(band, cell, &gap);
-        if (fabs(gap) < 8.0) continue;
-        slot->wrote = 1;
-        slot->writes += 1;
-        slot->wroteTy = t.ty + gap;
-        slot->wroteAt = now;
-        // 关掉隐式动画：App 的排版常常发生在动画块里，不关的话我们这一手会被它
-        // 做成一段滑动，看上去还是「跳一下」，只是慢镜头。
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        [band setTransform:CGAffineTransformMakeTranslation(0, slot->wroteTy)];
-        [CATransaction commit];
-        if (clip) {
-            char line[210];
-            snprintf(line, sizeof(line), "video clip %.20s moved=%.0f need=%.0f n=%d",
-                     class_getName([band class]), gap, want - rb.origin.y, slot->writes);
-            AevonPageWrite(line);
-        }
-        // 每块画面只记头两次：钩子那条路如果每帧都要补（App 每帧重置 transform），
-        // 写日志只会把真正有用的读数冲掉。
-        if (slot->writes <= 2) {
-            char body[280];
-            snprintf(body, sizeof(body),
-                     "video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s via=%.8s",
-                     class_getName([band class]), rb.size.height, rb.origin.y,
-                     want, gap, slot->writes, class_getName([pickRegion[i] class]), via);
-            AevonPageWrite(body);
-        }
+        AevonVideoWrite(pickBand[i], cell, pickRect[i],
+                        class_getName([pickRegion[i] class]), via);
     }
 }
 
@@ -2586,8 +2752,25 @@ static void AevonVideoCenter(void) {
         AevonVideoCell = (void *)cell;
         memset(AevonVideoSlots, 0, sizeof(AevonVideoSlots));
         AevonVideoScanLeft = 3;
-        AevonVideoNone = 0;
+            if ((void *)cell != AevonVideoKnownCell) {
+            AevonVideoKnownCell = NULL;
+            AevonVideoKnownCount = 0;
+            AevonVideoKnownBand[0] = NULL;
+            AevonVideoKnownBand[1] = NULL;
+        }
     }
+    // 0.0.89 — 认过的页心跳也只做几何，不再整页扫一遍。
+    // 画面被 App 摆回去时 `AevonVideoWrite` 会补一次（`via=tick`）；真要一直对打，
+    // `bounces` 会让我们先歇一秒，而不是每拍都扫。
+    AevonVideoKnownAge += 1;
+    if (AevonVideoKnownAge >= 32) {
+        AevonVideoKnownAge = 0;
+        AevonVideoKnownCell = NULL;
+        AevonVideoKnownCount = 0;
+        AevonVideoKnownBand[0] = NULL;
+        AevonVideoKnownBand[1] = NULL;
+    }
+    if (AevonVideoKnownApply(cell, "tick")) return;
     AevonVideoCenterFor(cell, nil, "tick");
 }
 

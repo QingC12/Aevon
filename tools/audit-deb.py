@@ -669,13 +669,18 @@ def main():
                       # 0.0.87 — `via=` 是这一版的判据：`layout` = 在 App 排完版、
                       # CoreAnimation 提交这一帧之前就摆好了（用户看不到跳）；`tick` =
                       # 心跳才追上（屏幕上会跳一下）。0.0.86 之前只有后者。
-                      b"video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s via=%.8s",
+                      # 0.0.89 — 行尾多了 `c=`/`b=`/`ty=`：cell 与画面指针的尾 4 位、
+                      # 写入前画面自己的位移。同一秒里 `c=` 相同而 `y=` 变回去
+                      # = App 把我们的位移抹掉（对打）；`c=` 变了 = 换页。
+                      b"video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s via=%.8s c=%04lx b=%04lx ty=%.0f",
                       # 迟到的原因是「摆得晚」，所以钩住 App 自己的排版那一层：
                       # 字符串在二进制里，说明这条安装路径没被编译掉。
                       b"layoutSubviews",
                       b"video scan %.20s r=%.0f,%.0f,%.0fx%.0f want=%.0f gap=%.0f",
                       b"video clip %.20s moved=%.0f need=%.0f n=%d",
-                      b"video band none cls=%.24s h=%.0f box=%.0f",
+                      # 0.0.89 — `walk=` 是这一趟走了多少个视图（预算 4000）：一直顶在
+                      # 4000 就是预算不够，不是判据写错。
+                      b"video band none cls=%.24s h=%.0f box=%.0f walk=%lu c=%04lx",
                       b"video tree b=%.0fx%.0f n=%lu",
                       # 0.0.88 — 两行新的刹车/复位读数，对应 Aevon(78) 的两个症状：
                       #   `video slow` = 某一次排版扫描贵过 8 ms，我们主动停 2 秒。
@@ -685,6 +690,11 @@ def main():
                       #   作废、重新开始。Aevon(78) 的「锁屏后居中失效、必须重开浮窗」
                       #   就是记账没作废（按次数计的配额早就用完了）。
                       b"video slow %.20s spent=%.0fms hold=2s",
+                      # 0.0.89 — 每 0.5 s 结算一次「排版钩子吃了多少主线程」：
+                      # `n` 次、`spent` 毫秒、`%` 占半秒的比例。低于 80 ms 不出声。
+                      # Aevon(79) 的 4.5 秒卡顿只能从「日志空白」反推，有这一行
+                      # 就能直接看是谁、多少次、多少毫秒。
+                      b"video load n=%d spent=%.0fms=%.0f%%",
                       b"video reset on foreground",
                       # 0.0.84 — 抬高从「呈现」这一声开始，不再等心跳相位。
                       b"presentViewController:animated:completion:",
