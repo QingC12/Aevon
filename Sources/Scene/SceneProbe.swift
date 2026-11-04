@@ -1333,6 +1333,10 @@ zStackParticipantDidChange:
                           + " beats=" + String(beat - dropped)
                           + " wakes=" + String(wakes))
                 dropped = 0
+                // 0.0.51 — 这一段黑结束了，额度还回去。配额若是整场会话共用，
+                // 切几十次 App 之后就用完了，那时候这段黑就又没人管 —— 一次
+                // 修复不应该自带保质期。
+                AevonWakeReset()
             }
             // Eight beats up front say how the first push went; after that one
             // line in four is enough to see the card settle or fail. Two lets,

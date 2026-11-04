@@ -105,6 +105,10 @@ double AevonSceneLevel(id _Nullable scene);
 NSInteger AevonWakeScene(id _Nullable scene);
 long AevonWakeCount(void);
 
+/// 0.0.51 — 画面回来的那一刻把这一段的额度还回去，下一段黑重新从满格起。
+/// 按整场会话计的额度会在几十次切换之后用完，那之后修好的东西自己就过期了。
+void AevonWakeReset(void);
+
 /// 0.0.28 — `- (void)name:(BOOL)`. 1 for "ran", 0 for "no such setter".
 NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL value);
 

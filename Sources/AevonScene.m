@@ -957,6 +957,17 @@ static CFAbsoluteTime AevonLastWake = 0;
 
 long AevonWakeCount(void) { return AevonWakeWrote; }
 
+/// 画面回来的那一刻把额度还回去。
+///
+/// 0.0.51 — 额度是「这一段黑」的闸门，不是整场会话的。按整场算的那一份在
+/// 真机上一会儿就烧完了：一台手机一天切几十次 App，而每一次掉画都会连打几拍。
+void AevonWakeReset(void) {
+    __sync_lock_test_and_set(&AevonWakeTried, 0);
+    // 同时把上一次的时间戳抹掉，否则新一段黑的头一拍会被上一段的 200 ms 挡住
+    // —— 那正是最需要写的一次。
+    AevonLastWake = 0;
+}
+
 /// 画面掉下去之后的唯一一件事：把 scene 重新说成「在前台」。
 ///
 /// 它和 `AevonPushForeground` 的差别只有两处，两处都必要：
@@ -972,9 +983,12 @@ NSInteger AevonWakeScene(id scene) {
     if (![NSThread isMainThread]) return 0;
     if (AevonHookDepth > 0) return 0;
     if (AevonInPush) return 0;
-    if (__sync_fetch_and_add(&AevonWakeTried, 1) > 60) return 0;
+    // 0.0.51 — 计数的位置挪到节流之后。原来它排在节流前面，掉画期间每 60 ms
+    // 一拍都会自增：一次真正的写入要吃掉四拍，60 次的额度三秒就烧完，此后这
+    // 一次会话里再也不会唤醒 —— 修好的东西自己会过期，这比不修更糟。
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - AevonLastWake < 0.2) return 0;
+    if (__sync_fetch_and_add(&AevonWakeTried, 1) > 60) return 0;
     AevonLastWake = now;
     AevonInPush = 1;
 
