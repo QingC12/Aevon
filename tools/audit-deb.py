@@ -653,9 +653,10 @@ def main():
                       b"sheet cut%s (below the window)",
                       # 0.0.82 — 面板「往上抬一截」。读到这一行，说明面板的底边确实
                       # 超出了窗口（`by=` 是超出的量），而且我们把它对齐回来了。
-                      # 反过来说：日志里没有这一行、也没有 `sheet` 行，才是「面板
-                      # 没出现」；只有 `sheet` 没有 `lift`，就是三条守卫之一没过。
-                      b"sheet lift by=%.0f h=%.0f box=%.0f n=%d",
+                      # 0.0.83 加了 `in=`：从**第一次看见面板**到真的抬上去用了多久。
+                      # Aevon(74) 那一版这 1 秒是节拍堆出来的，`in` 就是它的验收
+                      # —— 下一份日志里这一项在 0.2 s 以上，就说明节拍还没改对。
+                      b"sheet lift by=%.0f h=%.0f box=%.0f n=%d in=%.2fs",
                       b"settle gave up after 90s",
                       b"player b=%.0fx%.0f grav=%s src=%.0fx%.0f",
                       b"videoGravity",

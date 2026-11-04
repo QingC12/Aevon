@@ -1447,13 +1447,48 @@ static void AevonSheetReport(void) {
 /// 画布、别的窗口一个都不动。
 ///
 /// 三条守卫，任何一条不成立就什么都不做（最坏情况就是今天这样）：
-///   · 只有「底边真的超出窗口 8 pt 以上」才抬，超出 320 pt 说明这不是「差一截」；
-///   · 连续两拍底边没变（面板停稳）才动手，动画途中不碰；
+///   · 只有「本来就比窗口高」的面板才归我们管（矮面板本就该露在窗口里）；
+///   · 上一眼和这一眼底边一致（面板停稳）才动手，入场动画途中不碰；
 ///   · 一张浮层最多抬 4 次 —— App 自己把 frame 改回去时补一次，改不回来就算了。
+///
+/// 0.0.83 — 慢了一秒，是节拍问题，不是判据问题。
+///
+/// Aevon(74) 的读数是：
+///
+///   17:46:46  app: page sheet DUXSheetNavigationController h=932 top=0 box=717
+///   17:46:47  app: page sheet lift by=215 h=932 box=717 n=1
+///
+/// 中间那一秒，用户看见的是「只有联系人头像、没有发送按钮」的半截面板，然后它
+/// 自己往上跳一下。三个 0.6 叠出来的：心跳 0.15 s 但只在**每 4 拍**看一次浮层
+/// （0.6 s，0.0.82 写的），又要**连续两拍**底边一致（再 0.6 s）。0.6 + 0.6 ≈ 1 s，
+/// 和读数一模一样。
+///
+/// 这一版把那两个 0.6 都拿掉，换成「看一眼 → 隔 60 ms 再看一眼」：
+///   · 浮层扫描并入每一拍心跳（读一条 `presentedViewController` 链，便宜）；
+///   · 第一次看见只记录，60 ms 后补看一次（面板的真几何在这段时间里就定了），
+///     两眼底边一致立刻抬 —— 最坏 0.15 + 0.06 ≈ 0.2 s，通常 60~90 ms；
+///   · 抬完还复看：App 若把 frame 又改回去（或我们抬过头），按**残差**再抬/回落
+///     一次，所以「抬多少」不再是一次性下注，而是会收敛的。
+///
+/// 抬的时机仍在面板的入场动画之内，所以它落位时已经是正确的高度 —— 用户看到的
+/// 是「面板长出来就在对的位置」，而不是「长出来、停一下、再跳上去」。
 static int AevonLiftCount = 0;
 static void *AevonLiftSheet = NULL;
 static CGFloat AevonLiftSeen = 0.0;
-static int AevonLiftSame = 0;
+static double AevonLiftSight = 0.0;
+static int AevonLiftSoon = 0;
+
+static void AevonSheetLift(void);
+
+/// 60 ms 后的补看。只在「第一次看见这张浮层」时排一次，不递归堆积。
+static void AevonSheetLiftAgain(void) {
+    AevonLiftSoon = 1;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonLiftSoon = 0;
+        AevonSheetLift();
+    });
+}
 
 static void AevonSheetLift(void) {
     UIWindow *win = AevonKeyWindow();
@@ -1470,41 +1505,55 @@ static void AevonSheetLift(void) {
         AevonLiftSheet = NULL;
         AevonLiftCount = 0;
         AevonLiftSeen = 0.0;
-        AevonLiftSame = 0;
+        AevonLiftSight = 0.0;
         return;
     }
     UIView *sheet = [top view];
     if (sheet == nil) return;
-    if (AevonLiftSheet != (void *)sheet) {
+    BOOL fresh = (AevonLiftSheet != (void *)sheet);
+    if (fresh) {
         AevonLiftSheet = (void *)sheet;
         AevonLiftCount = 0;
         AevonLiftSeen = 0.0;
-        AevonLiftSame = 0;
+        AevonLiftSight = [NSProcessInfo processInfo].systemUptime;
+        // 抬之前先把原始位置量下来：0.0.82 那一行 `sheet cut` 是这一整套的唯一
+        // 证据，抬得越快它越容易被跳过，所以在「第一次看见」这一拍就记一次。
+        AevonSheetReport();
     }
     if (AevonLiftCount >= 4) return;
     CGRect r = [sheet convertRect:[sheet bounds] toView:win];
     CGFloat winH = [win bounds].size.height;
     if (winH < 200.0 || r.size.height < 200.0) return;
+    // 只认「本来就比窗口高」的面板。半高的活动面板底边本来就在窗口里，抬它是
+    // 替 App 排版，不是补差。
+    if (r.size.height < winH + 8.0) return;
     CGFloat over = CGRectGetMaxY(r) - winH;
-    if (over < 8.0) {
+    // 超过 320 pt 说明这不是「差一截」（真机读数是 215）。
+    if (fabs(over) > 320.0) return;
+    // 第一次只往上抬（下面被切掉了）；已经抬过的才允许按残差回落 —— 那是
+    // 「我们或 App 自己抬过了头」，同样要收敛，否则面板顶部会被切掉。
+    if (AevonLiftCount == 0 && over < 8.0) {
         AevonLiftSeen = over;
-        AevonLiftSame = 0;
         return;
     }
-    if (over > 320.0) return;
-    // 停稳：底边和上一拍一样（面板的入场动画大概 0.4 s，0.75 s 一拍，两拍足够）。
-    if (fabs(over - AevonLiftSeen) < 2.0) AevonLiftSame += 1;
-    else AevonLiftSame = 0;
+    if (!fresh && fabs(over - AevonLiftSeen) < 2.0) {
+        if (fabs(over) < 8.0) {           // 已经对齐了，收手
+            AevonLiftSeen = over;
+            return;
+        }
+        CGPoint center = [sheet center];
+        [sheet setCenter:CGPointMake(center.x, center.y - over)];
+        AevonLiftCount += 1;
+        AevonLiftSeen = over;
+        double spent = [NSProcessInfo processInfo].systemUptime - AevonLiftSight;
+        char body[180];
+        snprintf(body, sizeof(body), "sheet lift by=%.0f h=%.0f box=%.0f n=%d in=%.2fs",
+                 over, r.size.height, winH, AevonLiftCount, spent);
+        AevonPageWrite(body);
+        return;
+    }
     AevonLiftSeen = over;
-    if (AevonLiftSame < 1) return;
-    CGPoint center = [sheet center];
-    [sheet setCenter:CGPointMake(center.x, center.y - over)];
-    AevonLiftCount += 1;
-    AevonLiftSame = 0;
-    char body[160];
-    snprintf(body, sizeof(body), "sheet lift by=%.0f h=%.0f box=%.0f n=%d",
-             over, r.size.height, winH, AevonLiftCount);
-    AevonPageWrite(body);
+    if (fresh && !AevonLiftSoon) AevonSheetLiftAgain();
 }
 
 /// 把 offset 挪到最近的整页上。
@@ -2113,10 +2162,13 @@ static void AevonPagerWatchTick(void *context) {
     // 0.0.80 — 1.5 s 一拍看一次「有没有浮层」。只在卡片在屏时看：全屏时窗口就是
     // 932，浮层本来就装得下，量它是白跑。
     if (shrunk) {
-        if ((AevonWatchTicks % 10) == 0) AevonSheetReport();
-        // 0.0.82 — 抬浮层要快一点：「差 215 pt」在屏幕上就是「按钮不见了」，
-        // 用户等不了 1.5 s，0.6 s 一拍、要两拍一致（面板停稳）才动手。
-        if ((AevonWatchTicks % 4) == 0) AevonSheetLift();
+        // 0.0.83 — 抬浮层改成**每一拍都看**。0.0.82 是每 4 拍（0.6 s）看一次、
+        // 还要连续两拍底边一致，两个 0.6 叠起来正好是 Aevon(74) 里那 1 秒
+        // （`sheet` 在 17:46:46、`lift` 在 17:46:47）。扫描只是走一条
+        // `presentedViewController` 链 + 一次 `convertRect:`，比一帧便宜得多。
+        // `sheet` 那两行读数不再靠定期采样，改由「第一次看见这张浮层」触发
+        // （见 `AevonSheetLift` 的 fresh 分支）。
+        AevonSheetLift();
     }
 
     // 窗口高度变了（过渡钩子没响的那一类 App、或者系统自己去改的）：上一拍的
