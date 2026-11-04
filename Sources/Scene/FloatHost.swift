@@ -123,6 +123,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 画面，只是另一张图。这一版改成不画任何东西，等真画面自己到。
     private var awaitingFrame = false
     private var frameAt: CFTimeInterval = 0
+    /// 0.0.73 — `reapplyPlacement` 写过几行日志。抹一次写一行，稳定之后闭嘴。
+    private var placementLogs = 0
 
     private var pan: UIPanGestureRecognizer?
     private var press: UILongPressGestureRecognizer?
@@ -1430,6 +1432,57 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         //
         // 0.0.67 — 拖动的每一帧传 false：圆角在 `dragEnd` 里一次算准。
         if updateCorner { applyCorner() }
+    }
+
+    // MARK: - 0.0.73 承载面的位置看门狗
+
+    /// 「第一次打开内容尺寸不对，必须手动缩放一下」的真正成因。
+    ///
+    /// Aevon(63) 的两张截图（同一面卡，354x590 与 376x627，缩放比 0.823 / 0.874）
+    /// 把形状量出来了 —— 用卡内坐标对齐到 430x717 版式：
+    ///
+    ///   首开：顶栏文字在卡内 74.6 pt，文案首行 524.5 pt；
+    ///   缩放后：顶栏 63.4 pt，文案 463.3 pt，两者比值 1.13 ≈ 1/0.874。
+    ///
+    /// 74.6 / 524.5 与 430x717 版式里的 72.5 / 530 **一比一**吻合。也就是说首开那张
+    /// 不是「另一种排版」，而是**内容按 1:1 画、被卡片从右下裁掉**：右侧那一列图标
+    /// （内容 x 380..420）和整条底栏（y 634..717）都落在 354x590 的框外 —— 这正是
+    /// 截图里「没有右列、没有底栏、文案被切」的形状，也解释了为什么它在任何 App 上
+    /// 都一样：裁的是我们的承载面，不是别人的界面。
+    ///
+    /// 谁把 `transform` 抹掉的：`_UIScenePresentationView` 由 `_UIScenePresenter`
+    /// 托管，每次 scene 的 settings 被写（`AevonSceneFrameSet`、轻推、还原都是写它），
+    /// 系统就按 scene 的 frame 重设一次它的 `frame`：原点 (0,0)、尺寸 430x717、
+    /// transform 单位阵。`show` 里那两行写在 `presenter.activate` 之前，activate
+    /// 之后每一次 settings 写入都会再抹一次，而 `reassertCanvas` 只写 `bounds`
+    /// —— 于是最后一次轻推还原之后，卡片就停在 1:1 那一版上。
+    ///
+    /// 角拖动之所以能救回来：`followContent` 把这两个量又写了一遍。
+    ///
+    /// 所以修法不是再猜一个比例，而是让这两个量每次被抹掉之后自己回来。只碰我们
+    /// 自己的承载视图，不碰 App 的窗口，也不碰系统的任何测量。
+    @discardableResult
+    func reapplyPlacement(_ why: String) -> Bool {
+        guard let card = card, let content = content, visible.height > 16 else { return false }
+        let scale = card.bounds.height / visible.height
+        let center = CGPoint(x: card.bounds.midX,
+                             y: card.bounds.midY - cropTop * scale / 2)
+        let at = content.transform
+        let off = abs(at.a - scale) > 0.004 || abs(at.d - scale) > 0.004
+            || abs(content.center.x - center.x) > 0.5
+            || abs(content.center.y - center.y) > 0.5
+        guard off else { return false }
+        content.transform = CGAffineTransform(scaleX: scale, y: scale)
+        content.center = center
+        // 前 12 次各写一行：这一条如果真的每拍都要重写，说明还有别的东西在抹它，
+        // 日志会直接说出频率；稳定下来之后就不再占版面。
+        if placementLogs < 12 {
+            placementLogs += 1
+            Log.write("win: placement put back " + String(format: "%.3f", scale)
+                      + " was=" + String(format: "%.3f", at.a)
+                      + " (" + why + ")")
+        }
+        return true
     }
 
     /// `重启`, as much of it as a window can do by itself: back to the frame the

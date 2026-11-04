@@ -530,12 +530,27 @@ static CGFloat AevonLastPageHeight = 0.0;
 static int AevonTransLogs = 0;
 static int AevonAlignFixes = 0;
 static int AevonAcquireTries = 0;
+/// 0.0.73 — 窗口尺寸变化**之前**那一版页高，等归位用。
+///
+/// 它是这一版的核心：翻页器记的是 `N × 当时的窗口高`，尺寸一变，这个 N 就不再
+/// 对应同一条边界。0.0.72 把它寄存在 `AevonLastPageHeight` 里，可那个数会被
+/// `AevonPageHeightOf` 用单元格的高度盖掉 —— App 重排完之后单元格正好等于视口，
+/// 于是「页高 = 视口高」，`round(y / box) × box` 把 offset 挪到离当前最近的整页，
+/// 而当前这一页是错的。所以旧页高必须单独存、单独用，直到真的归位过一次。
+static CGFloat AevonOldPage = 0.0;
+/// 归位的机会还剩几拍。过渡钩子与「窗口高度变了」各续一次（90 拍 ≈ 13.5 s）：
+/// 从「我们还原尺寸」到「App 真的重排完」之间隔着一次挂起——用户点图标的那一刻
+/// 才继续，所以这里不能用固定毫秒数。
+static int AevonSettleTicks = 0;
 /// 停稳守卫与窗口高度守卫的几个数（定义在这里，因为过渡钩子也要清它们）。
 static CGFloat AevonGuardY = -1.0;
 static int AevonGuardHold = 0;
 static int AevonWatchTicks = 0;
 static CGFloat AevonWatchHeight = 0.0;
 static int AevonWatchArmed = 0;
+/// 心跳撞上 2400 拍上限之后置 1。过渡钩子可以把它重新叫起来 —— 否则一张用得久
+/// 一点的卡，守卫就会在用户还在用的时候自己先停了。
+static int AevonWatchDead = 0;
 
 static void AevonPagerKeep(UIScrollView *view) {
     if (view == nil) return;
@@ -556,6 +571,9 @@ static void AevonPagerForget(void) {
 #endif
     AevonPagerStore = nil;
     AevonLastPageHeight = 0.0;
+    // 认的翻页器都没了，「上一次尺寸变化」的账也该一起销掉。
+    AevonOldPage = 0.0;
+    AevonSettleTicks = 0;
 }
 
 /// 「一页多高」——从单元格读，不从窗口读。
@@ -593,29 +611,73 @@ static CGFloat AevonPageHeightOf(UIScrollView *view, CGFloat box) {
     return page;
 }
 
+/// 现在的窗口有多高。与心跳用的是同一把尺子（key window 优先），所以两处读数
+/// 不会互相打架。
+static CGFloat AevonWindowHeight(void) {
+    UIApplication *application = [UIApplication sharedApplication];
+    if (application == nil) return 0.0;
+    CGFloat height = 0.0;
+    for (UIScene *one in [application connectedScenes]) {
+        if (![one isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *win in [(UIWindowScene *)one windows]) {
+            CGFloat h = [win bounds].size.height;
+            if (h > 200.0 && (height < 200.0 || [win isKeyWindow])) height = h;
+        }
+    }
+    return height;
+}
+
 /// 把 offset 挪到最近的整页上：`round(y / 旧页高) × 新页高`。
 ///
 /// 用旧页高取整，不是新页高。932→717 时 offset 是 `3 × 932 = 2796`，按新页高
 /// 取整得到 `4 × 717 = 2868`（**甩到下一页**），按旧页高取整才是 `3 × 717 = 2151`
 /// （停在同一页）。用户的眼睛认的是「第几帖」，不是「第几个像素」。
 ///
-/// 返回 1 改了一个，0 已经在整页上，-1 没有可改的对象。
+/// 0.0.73 — 两条新判据，都是 Aevon(63) 的日志逼出来的：
+///
+///   ① **视口必须已经等于窗口**（±8 pt）。窗口已经是 932、滚动视图还是 717 的那
+///      几拍里，`round(y / 717) × 717` 算出来就是它自己，看着「已经对齐」，其实
+///      什么都没做 —— 0.0.72 的 `pager=0 fixed=0 raw=1` 就是这个形状。
+///   ② **页高优先用 `AevonOldPage`**，只要它还和当前视口不一样。App 重排完之后
+///      单元格必然跟着变成 932，再「从单元格读」就等于用新页高取整 —— 又回到
+///      第 1 段那个错。
+///
+/// 返回 1 改了一个，0 已经在整页上，-1 没有可改的对象（或还没到时候）。
 static NSInteger AevonAlignPager(const char *reason) {
     UIScrollView *view = AevonPagerGet();
     if (view == nil) return -1;
     if ([view window] == nil) return -1;
     CGFloat box = [view bounds].size.height;
+    CGFloat full = AevonWindowHeight();
+    // App 还没跟上这一次尺寸变化：先把机会留着，下一拍再说。
+    if (full > 200.0 && fabs(box - full) > 8.0) return -1;
     CGSize span = [view contentSize];
     CGFloat y = [view contentOffset].y;
     if (box < 200.0 || span.height < box * 1.2) return -1;
+    // ③ 先问一句：它已经站在**新**基准的整页上了吗？这一步让整条路变成幂等的。
+    //
+    // 过渡钩子里已经就地换算过一次时（`y = k × 932`），旧页高那一条会把它再换算
+    // 成下一页 —— `932 / 717 = 1.3`，`round` 之后就是 2。所以「已经对齐」必须
+    // 先判，而且判据只能用新的视口高度。
+    if (fabs(y - round(y / box) * box) <= 1.5) {
+        AevonOldPage = 0.0;
+        AevonSettleTicks = 0;
+        return 0;
+    }
     CGFloat page = AevonPageHeightOf(view, box);
+    if (AevonOldPage > 200.0 && fabs(AevonOldPage - box) > 8.0) page = AevonOldPage;
     if (page < 200.0) return -1;
     CGFloat target = round(y / page) * box;
     CGFloat cap = span.height - box;
     if (cap < 0.0) cap = 0.0;
     if (target < 0.0) target = 0.0;
     if (target > cap) target = cap;
-    if (fabs(target - y) <= 1.5) return 0;
+    if (fabs(target - y) <= 1.5) {
+        // 已经在整页上：这一次尺寸变化不需要我们做什么，申请作废。
+        AevonOldPage = 0.0;
+        AevonSettleTicks = 0;
+        return 0;
+    }
     // 60 次是「够用」与「别打架」的折中：一次使用里用户可能划上百下，错位都要
     // 能修；而如果 App 自己坚持把 offset 拉回去，再多的次数也只是互相推。
     if (AevonAlignFixes >= 60) return -1;
@@ -623,12 +685,53 @@ static NSInteger AevonAlignPager(const char *reason) {
     AevonAlignFixes += 1;
     // 挪完就是「按这个页高一步一页」，下一次核对的基准跟着换。
     AevonLastPageHeight = box;
-    char body[260];
+    AevonOldPage = 0.0;
+    AevonSettleTicks = 0;
+    char body[300];
     snprintf(body, sizeof(body),
              "%s scroll y=%.0f -> %.0f page=%.0f box=%.0f cell=%.0f span=%.0f",
              reason, y, target, page, box, AevonCellHeightOf(view, box), span.height);
     AevonPageWrite(body);
     return 1;
+}
+
+/// 0.0.73 — 尺寸刚变的那一拍就地换算，不等 App 重排。
+///
+/// 过渡钩子里视口还是旧的（717），新高度在 `size.height` 里（932），而翻页器的
+/// offset 是按旧页高算的 —— 这三件事在同一时刻都已知，所以**不需要**等 App 重排
+/// 就能写出正确的那一个数：`round(y / 旧页高) × 新高度`。
+///
+/// 为什么非要在这一拍做：关卡之后我们立刻 `AevonPushBackground` + `deactivate`，
+/// App 几十毫秒内就被挂起，挂在 `dispatch_after` 上的归位根本轮不到跑（0.0.71 /
+/// 0.0.72 两份日志里，关卡那一拍都只有一行 `transition`，一条 `scroll` 都没有）。
+/// 而这一行回调是在 App 进程里同步发生的 —— 写下去就已经生效。
+///
+/// 唯一的让步是内容还短：`contentSize` 此刻仍是 `8 × 717`，页码大的时候目标会
+/// 超出可滚范围，`setContentOffset:` 会被 UIKit 夹住。夹住也不丢：`AevonOldPage`
+/// 还留着，App 重排完之后心跳那一路会再补一次。
+static void AevonConvertForTransition(CGFloat oldPage, CGFloat newHeight) {
+    UIScrollView *view = AevonPagerGet();
+    if (view == nil || [view window] == nil) return;
+    if (oldPage < 200.0 || newHeight < 200.0) return;
+    if (fabs(oldPage - newHeight) < 8.0) return;
+    CGFloat y = [view contentOffset].y;
+    CGFloat target = round(y / oldPage) * newHeight;
+    if (fabs(target - y) <= 1.5) return;
+    if (AevonAlignFixes >= 60) return;
+    CGSize span = [view contentSize];
+    CGFloat box = [view bounds].size.height;
+    CGFloat cap = span.height - box;
+    if (cap < 0.0) cap = 0.0;
+    if (target < 0.0) target = 0.0;
+    BOOL pinched = (target > cap);
+    if (pinched) target = cap;
+    [view setContentOffset:CGPointMake([view contentOffset].x, target) animated:NO];
+    AevonAlignFixes += 1;
+    char body[280];
+    snprintf(body, sizeof(body),
+             "transition scroll y=%.0f -> %.0f page=%.0f box=%.0f next=%.0f%s",
+             y, target, oldPage, box, newHeight, pinched ? " pinched" : "");
+    AevonPageWrite(body);
 }
 
 /// 找出「整屏一页」的翻页器并记住它。只在还没认出来的时候跑（一次遍历，
@@ -825,7 +928,19 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
         AevonWatchTicks = 0;
     }
     if (!AevonEverHosted) return;
+    // 0.0.73 — 只有「真的换了屏」才算尺寸变化。开卡 / 关卡是 932↔717（215 pt），
+    // 而 `scene nudge` 是 17 pt、宿主那一手是 1 pt：后者是催 App 重排用的抖动，
+    // 拿它当页高基准会把 offset 换成 734 再换回来，白折腾一圈还可能攒出取整误差。
+    BOOL real = fabs(before - size.height) >= 40.0;
     AevonLastPageHeight = before;
+    if (real) {
+        AevonOldPage = before;
+        AevonSettleTicks = 90;
+        AevonWatchTicks = 0;
+        // 心跳撞过 2400 拍上限就自己停了，这里把它叫回来 —— 关卡之后要归位的那
+        // 一半，全靠这个心跳。
+        AevonPagerWatchArm();
+    }
     AevonGuardY = -1.0;
     AevonGuardHold = 0;
     AevonAcquireTries = 0;
@@ -837,6 +952,14 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
         snprintf(body, sizeof(body), "transition h=%.0f last=%.0f full=%.0f",
                  size.height, before, full);
         AevonPageWrite(body);
+    }
+    // 0.0.73 — 就在这一拍把 offset 换成新基准。关卡的几十毫秒之后 App 就被挂起，
+    // 挂在 dispatch_after 上的那些拍子根本轮不到跑（0.0.71/0.0.72 两份日志里关卡
+    // 那一拍只有 transition、一条 scroll 都没有），而这一句是在 App 进程里同步
+    // 发生的 —— 写下去就已经生效。
+    if (real) {
+        if (AevonPagerGet() == nil || [AevonPagerGet() window] == nil) AevonPagerAcquire();
+        AevonConvertForTransition(before, size.height);
     }
     for (int i = 0; i < 5; i++) {
         int64_t when = (int64_t)((0.05 + 0.22 * (double)i) * NSEC_PER_SEC);
@@ -867,23 +990,22 @@ static void AevonPagerWatchTick(void *context) {
     (void)context;
     AevonWatchTicks += 1;
     // 2400 拍 = 6 分钟。卡片有十分钟上限，这个守卫比它先停 —— 停在别人家里
-    // 的一个心跳，代价不该由这个 App 付。
-    if (AevonWatchTicks > 2400) return;
+    // 的一个心跳，代价不该由这个 App 付。停了之后过渡钩子可以把它叫回来
+    // （`AevonPagerWatchArm`），否则一张用得久一点的卡，守卫会在中途自己死掉，
+    // 而关卡之后要归位的那一半正好落在死掉之后。
+    if (AevonWatchTicks > 2400) {
+        AevonWatchDead = 1;
+        return;
+    }
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                      dispatch_get_main_queue(), NULL, AevonPagerWatchTick);
 
-    UIApplication *application = [UIApplication sharedApplication];
     UIScreen *screen = [UIScreen mainScreen];
     CGFloat full = screen != nil ? [screen bounds].size.height : 0.0;
-    if (application == nil || full < 200.0) return;
-    CGFloat height = 0.0;
-    for (UIScene *one in [application connectedScenes]) {
-        if (![one isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *win in [(UIWindowScene *)one windows]) {
-            CGFloat h = [win bounds].size.height;
-            if (h > 200.0 && (height < 200.0 || [win isKeyWindow])) height = h;
-        }
-    }
+    if (full < 200.0) return;
+    // 与 `AevonAlignPager` 用同一把尺子：两处各写一遍循环，迟早会出现「心跳
+    // 说还在卡里、归位说窗口已经对了」这种自相矛盾的读数。
+    CGFloat height = AevonWindowHeight();
     if (height < 200.0) return;
     BOOL shrunk = (height < full - 40.0);
     if (shrunk) AevonEverHosted = 1;
@@ -898,18 +1020,19 @@ static void AevonPagerWatchTick(void *context) {
         return;
     }
     if (fabs(height - AevonWatchHeight) > 24.0) {
+        // 0.0.73 — 旧页高单独存一份，而且续 90 拍机会。过渡钩子没响的那一类
+        // App（根控制器不是标准容器）与「挂起之后系统自己去改」都只走这条路。
+        AevonOldPage = AevonWatchHeight;
+        AevonSettleTicks = 90;
         AevonLastPageHeight = AevonWatchHeight;
         AevonWatchHeight = height;
+        AevonWatchTicks = 0;
         AevonGuardY = -1.0;
         AevonGuardHold = 0;
         if (AevonPagerGet() == nil) AevonPagerAcquire();
         AevonAlignPager("watch");
         return;
     }
-
-    // 卡片不在屏：只在上面「高度变了」那一拍动，停稳守卫不参与。否则这个 App
-    // 从此在桌面上被我们一直管着 offset —— 那不是这张卡该有的权限。
-    if (!shrunk) return;
 
     UIScrollView *view = AevonPagerGet();
     if (view == nil) {
@@ -932,6 +1055,19 @@ static void AevonPagerWatchTick(void *context) {
         AevonGuardHold = 0;
         return;
     }
+    // 0.0.73 — 归位窗口。卡片在屏 / 不在屏都要成立：关卡之后我们把窗口还回
+    // 932，App 会在几十毫秒内被 `AevonPushBackground` + `deactivate` 挂起，
+    // 过渡钩子里排的 6 拍根本轮不到跑；等用户点图标回来时，这里才是第一个
+    // 能干活的地方。90 拍是「机会」不是「时长」——挂起期间不消耗。
+    if (AevonSettleTicks > 0) {
+        AevonSettleTicks -= 1;
+        AevonAlignPager("settle");
+        if (AevonSettleTicks == 0) AevonOldPage = 0.0;
+        return;
+    }
+    // 停稳守卫只在卡片在屏时跑：否则这个 App 从此在桌面上被我们一直管着
+    // offset —— 那不是这张卡该有的权限。
+    if (!shrunk) return;
     CGFloat y = [view contentOffset].y;
     if (fabs(y - AevonGuardY) > 1.0) {
         AevonGuardY = y;
@@ -946,8 +1082,10 @@ static void AevonPagerWatchTick(void *context) {
 }
 
 static void AevonPagerWatchArm(void) {
-    if (AevonWatchArmed) return;
+    if (AevonWatchArmed && !AevonWatchDead) return;
     AevonWatchArmed = 1;
+    AevonWatchDead = 0;
+    AevonWatchTicks = 0;
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                      dispatch_get_main_queue(), NULL, AevonPagerWatchTick);
 }

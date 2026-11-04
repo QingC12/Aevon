@@ -566,6 +566,13 @@ def main():
                       b"inset=%.0f paging=%d pages=%.0f",
                       b"scroll y=%.0f -> %.0f page=%.0f",
                       b" box=%.0f cell=%.0f span=%.0f",
+                      # 0.0.73 — 尺寸刚变那一拍就地换算（不等 App 重排）。关卡之
+                      # 后 App 几十毫秒内被挂起，排在 dispatch_after 上的归位跑不
+                      # 到，所以这一行是「断层真的被改掉」的第一手证据；
+                      # `pinched` 表示那一刻内容还短、目标被 UIKit 夹住，需要
+                      # 等重排完再补一次。
+                      b"transition scroll y=%.0f -> %.0f page=%.0f",
+                      b"next=%.0f",
                       b"player b=%.0fx%.0f grav=%s src=%.0fx%.0f",
                       b"videoGravity",
                       # 兜底：不依赖谁的子类重写了过渡回调，每 0.15 s 看一眼窗口高。
@@ -876,6 +883,13 @@ def main():
                   # 承载面到底有没有被重新合成。
                   b"win: content jiggle ",
                   b"win: content jiggle restored",
+                  # 0.0.73 — 「第一次打开内容尺寸不对」的真正修法。承载面的
+                  # `transform` / `center` 会被系统的 presentation 重设抹掉（每次
+                  # scene settings 被写都会），卡片于是按 1:1 裁掉右侧与底栏。
+                  # 这一行只在**真的被抹掉之后重写**时出现：日志里第一次开卡出现
+                  # 一两行是正常的，每 200 ms 都出现就说明还有别的东西在抹它。
+                  b"win: placement put back ",
+                  b"after nudge",
                   b"aevon-app.log",
                   # 0.0.40 — 闪黑。这一行只在系统真的动过场景的休眠状态时出现，
                   # 它是「黑一下」来自场景被收走 还是 来自合成器 的唯一分界。

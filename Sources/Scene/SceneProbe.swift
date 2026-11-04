@@ -1433,6 +1433,13 @@ zStackParticipantDidChange:
             let live = value(of: scene, "settings")
             let fg = live.map { AevonBoolOf($0, "isForeground") } ?? -1
             let bg = live.map { AevonBoolOf($0, "isBackgrounded") } ?? -1
+            // 0.0.73 — 承载面的位置每拍看一次。系统每次写 scene settings 都会把
+            // `_UIScenePresentationView` 的 `frame` 重设成 scene 的 frame（原点 0,0、
+            // transform 单位阵），卡片于是按 1:1 裁掉右侧与底栏 —— Aevon(63) 的
+            // 「第一次打开内容尺寸不对、必须手动缩放一下」就是这一条。解释与量出来
+            // 的数在 `FloatHost.reapplyPlacement`。这里只是让它自己回来：稳态
+            // 200 ms 一拍，差 0.4% 就重写，值只在被抹掉的那几拍才写日志。
+            _ = host.reapplyPlacement("beat")
             // 0.0.63 — 逻辑尺寸的看门狗，稳态两秒一次（10 拍 × 200 ms）。目标值
             // 记在 FloatHost 里（开窗与换比例时更新），真实值当场从 scene 的
             // settings 读 —— 对不上就重写一次，前四次各记一行。
@@ -1798,6 +1805,19 @@ zStackParticipantDidChange:
                 Log.write(String(format: "win: scene nudge door=%ld amp=-17 height=%.0f",
                                  first, AevonSceneFrameOf(scene).height))
                 host.jiggleContent()
+                // 0.0.73 — 每一次 settings 写入之后都要把承载面的位置放回去。
+                //
+                // 上面这两推各自还有一次 0.15 s 的还原，还原本身又是一次 settings
+                // 写入 —— 也就是说这一秒里系统会把承载面的 `frame` 重设三四次。
+                // 交给 200 ms 的心跳也能补，但卡片正是在这一秒淡入，看得见。所以
+                // 按「轻推 + 还原」的节拍各补一次：0.02（第一推之后）、0.18（还原
+                // 之后）、0.55/0.75（第二推与还原）、1.2（geom 那一拍）。
+                for delay in [0.02, 0.18, 0.55, 0.75, 1.2] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak host] in
+                        guard let host = host, host.isUp else { return }
+                        _ = host.reapplyPlacement("after nudge")
+                    }
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak host] in
                     guard let host = host, host.isUp else { return }
                     let second = AevonNudgeSceneFrame(scene, 17)
