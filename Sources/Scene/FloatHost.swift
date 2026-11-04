@@ -42,6 +42,12 @@ import UIKit
 /// on the mini's picture brings the full card back. Two taps were always the
 /// wrong shape for this — the operator has to aim at a specific band twice, and
 /// the way *out* of the mini was a band, not the window it had just become.
+///
+/// 0.0.54 — 画面里不再有自己的控件。右上角那颗 ✕ 撤了：它压在 App 画面右上角，
+/// 和 App 自己的顶栏挤在一起，既挡内容又不好看；关窗仍有底边上滑与十分钟上限。
+/// 同时把 App 自己的顶栏（状态栏 + 导航栏）裁掉，只在卡片顶端留 `keepTop` 那么
+/// 一段画面 —— 裁干净会让内容贴着圆角开始，那是「不美观」的来源。裁切只改显示，
+/// 不改 scene 的坐标空间：视图整体上移，卡片上沿把它吃掉。
 final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     static let shared = FloatHost()
 
@@ -62,7 +68,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var bandInset: CGPoint = .zero
     private var card: UIView?
     private var content: UIView?
-    private var close: UIControl?
     private var grip: GripView?
     /// The transparent shield a docked card puts over its own picture. It exists
     /// for one reason: while the card is mini, a tap on the picture has to mean
@@ -71,7 +76,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var onClose: ((String) -> Void)?
     /// The scene's own size. Every resize is this shape, scaled — the card never
     /// gets an aspect the picture does not have.
+    ///
+    /// 0.0.54 — `natural` 仍然是 scene 的原始尺寸（画面自身的坐标空间不能动，
+    /// 见 `followContent`），`visible` 是**裁掉顶栏之后**可见的那一块，卡片与
+    /// 缩放比都按它算。两者分开，是因为裁切只影响显示，不影响坐标空间。
     private var natural: CGSize = .zero
+    private var visible: CGSize = .zero
+    /// 0.0.54 — 从画面顶部裁掉的源坐标高度（状态栏 + App 顶栏，见 `show`）。
+    private var cropTop: CGFloat = 0
 
     private var pan: UIPanGestureRecognizer?
     private var press: UILongPressGestureRecognizer?
@@ -111,6 +123,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 0.0.48 — 原来这里是 `edge = 2`，卡片那圈白描边。描边撤了（见 `show`），
     /// 常量一起撤，免得留一个没人读的 2。
     private let margin: CGFloat = 8
+    /// 0.0.54 — 顶栏。
+    ///
+    /// 卡片里显示的是 App 的真实画面，于是 App 自己的状态栏和导航栏也跟着进来
+    /// 了：时间、电量、标题、返回键，在 320 pt 宽的卡片上全是噪声（Aevon(51)
+    /// 的验收图上最显眼的就是这一条）。裁掉它，但**不裁干净**：留 `keepTop`
+    /// 那么高的一段画面在顶上，卡片的内容就不会贴着圆角开始 —— 那正是「顶栏
+    /// 留一些，不然不美观」的字面意思。
+    ///
+    /// `chrome` 是导航栏的标准高度（44 pt，所有系统导航栏都是这个数）。状态栏
+    /// 高度按设备问，见 `safeTop`。两者相加就是「App 顶栏」在源坐标里的高度，
+    /// 不同 App 会略有出入，裁多几 pt 只是少显示几行，不会伤到卡片。
+    private let keepTop: CGFloat = 14
+    private let chrome: CGFloat = 44
     /// 0.0.49 — 卡片下面那层柔光。跟着 card 的 frame 与圆角走。
     private var glow: UIView?
     /// 0.0.45 — 吸附 (docked) size, from the master's 「贴边缩小」.
@@ -126,7 +151,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private func miniHeight(in bounds: CGRect) -> CGFloat {
         return bounds.height * miniHeightFraction
     }
-    private let closeSize: CGFloat = 30
     /// `GestureBorderWidth` in her settings, described there as 减小浮窗手势宽度.
     /// The master's own edge band is 30 pt (`_edgeWidth`, legible in the same
     /// constant annotation that gave the height fractions); the *floating
@@ -190,9 +214,30 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 320x480 card is what put black bars at the sides).
         let natural = view.bounds.size
         let source = (natural.width > 16 && natural.height > 16) ? natural : window.bounds.size
-        let plan = host.plan(in: window.bounds, source: source)
 
-        let card = UIView(frame: plan.frame)
+        // 0.0.54 — 裁掉 App 顶栏，留一段过渡（见 `keepTop` / `chrome`）。
+        //
+        // 先把视图放回 1:1 再读 `safeAreaInsets`：那是源坐标里的安全区，转过
+        // 一次 scale 之后读到的就是缩放后的数了。
+        view.transform = .identity
+        view.autoresizingMask = []
+        view.bounds = CGRect(origin: .zero, size: source)
+
+        // 缩放比要先知道，才能把 `keepTop`（屏幕上的点）换成源坐标里的高度。
+        //
+        // 0.0.54 — 卡片宽度不跟着变：裁顶栏是「把上面那一截拿掉」，不是「换一
+        // 个宽高比的窗口」。所以照原比例布局，再把高度减掉 `crop * scale` ——
+        // 320 pt 的卡片还是 320 pt，只是矮了一条顶栏。
+        let plan = host.plan(in: window.bounds, source: source)
+        let keep = host.keepTop / Swift.max(plan.scale, 0.05)
+        let bar = FloatHost.safeTop(of: view, in: window) + host.chrome
+        let crop = Swift.min(Swift.max(0, bar - keep), source.height * 0.25)
+        let visible = CGSize(width: source.width,
+                             height: Swift.max(48, source.height - crop))
+        var frame = plan.frame
+        frame.size.height = Swift.max(80, plan.frame.height - crop * plan.scale)
+
+        let card = UIView(frame: frame)
         card.backgroundColor = .clear
         // 0.0.48 — 白色描边撤掉（Aevon(46) #2「边缘的白色线条太明显」）。
         //
@@ -205,15 +250,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         host.card = card
         host.content = view
         host.natural = source
+        host.visible = visible
+        host.cropTop = crop
         host.applyCorner(scale: plan.scale)
 
         // The scene view keeps the scene's own coordinate space and is scaled as
         // a whole — setting `frame` instead rewrites that space, which is what
         // 0.0.22 did when the card came up empty.
+        //
+        // 0.0.54 — 顶部裁掉 `crop` 源点：视图整体上移，被卡片的上沿吃掉；底部
+        // 仍然对齐，所以卡片就是「画面从 crop 开始的那一截」，宽度不变、不变形。
         view.transform = .identity
         view.autoresizingMask = []
         view.bounds = CGRect(origin: .zero, size: source)
-        view.center = CGPoint(x: card.bounds.midX, y: card.bounds.midY)
+        view.center = CGPoint(x: card.bounds.midX,
+                              y: card.bounds.midY - crop * plan.scale / 2)
         view.transform = CGAffineTransform(scaleX: plan.scale, y: plan.scale)
         card.addSubview(view)
         // 0.0.49 — 光晕在卡片**下面**。描边撤掉之后，深色壁纸上的卡片边界看不出来
@@ -234,7 +285,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         root.addSubview(card)
 
         host.window = window
-        host.installClose()
         // 0.0.47 — 手势环搬到 band 窗口（statusBar+1）。卡片留在这一层，所以
         // 里头的点击滑动照旧；伸手的那一圈在一个不会被任何 App 窗口盖住的层。
         host.installGrip(on: host.makeBand() ?? root)
@@ -243,10 +293,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         Log.write("win: card "
                   + String(format: "%.0fx%.0f", card.bounds.width, card.bounds.height)
                   + " at " + String(format: "%.0f,%.0f", card.frame.origin.x, card.frame.origin.y)
-                  + " natural=" + String(format: "%.0fx%.0f", source.width, source.height))
+                  + " natural=" + String(format: "%.0fx%.0f", source.width, source.height)
+                  + " topbar_cropped_src=" + String(format: "%.0f", crop)
+                  + " topbar_kept_pt=" + String(format: "%.0f", host.keepTop))
         Log.write("win: scale factor=" + String(format: "%.3f", plan.scale)
                   + " shown=" + String(format: "%.0fx%.0f",
-                                       source.width * plan.scale, source.height * plan.scale)
+                                       visible.width * plan.scale, visible.height * plan.scale)
                   + " fill=" + String(format: "%.0fx%.0f",
                                       card.bounds.width, card.bounds.height))
         // Where the ring is, so the next log can be read against the code instead
@@ -332,10 +384,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         glow = nil
         card?.removeFromSuperview()
         grip = nil
-        close = nil
         shield = nil
         card = nil
         content = nil
+        visible = .zero
+        cropTop = 0
         pan = nil
         press = nil
         tap = nil
@@ -467,47 +520,28 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     }
 
     // MARK: - close
-
-    /// A 30pt disc in the top-right corner. It is added after the scene view, so
-    /// hit testing reaches it first: a hosted scene view is a real UIView and
-    /// would otherwise swallow the touch and forward it to the app.
-    private func installClose() {
-        guard let card = card else { return }
-        let disc = UIControl(frame: CGRect(x: card.bounds.width - margin - closeSize,
-                                           y: margin,
-                                           width: closeSize,
-                                           height: closeSize))
-        disc.backgroundColor = UIColor.black.withAlphaComponent(0.45)
-        disc.layer.cornerRadius = closeSize / 2
-        disc.layer.borderWidth = 1
-        disc.layer.borderColor = UIColor.white.withAlphaComponent(0.75).cgColor
-        disc.autoresizingMask = [.flexibleLeftMargin]
-        disc.addTarget(self, action: #selector(tapClose), for: .touchUpInside)
-
-        let cross = UILabel(frame: disc.bounds)
-        cross.text = "✕"
-        cross.textColor = .white
-        cross.font = .systemFont(ofSize: 15, weight: .semibold)
-        cross.textAlignment = .center
-        cross.isUserInteractionEnabled = false
-        disc.addSubview(cross)
-
-        card.addSubview(disc)
-        close = disc
-    }
-
-    /// Called from inside a touch dispatch on the view being removed, so the
-    /// teardown runs on the next turn of the run loop rather than under UIKit's
-    /// own call stack.
-    @objc private func tapClose() {
-        requestClose("close button")
-    }
+    //
+    // 0.0.54 — 右上角那颗 ✕ 撤掉了（Aevon 的要求：它压在画面上，和 App 自己
+    // 的顶栏右下角凑在一起，又挡内容又不好看）。关窗的路没有变少，只是换成
+    // 手势：底边中段快速上滑仍然关闭（`dragEnd`），另外还有十分钟上限兜底。
+    // 这里留着 `requestClose` —— 它现在是**唯一**一条关窗入口的出口，把
+    // 「谁关的」写进日志，比从一个控件数组里猜要可靠。
 
     private func requestClose(_ reason: String) {
         let hook = onClose
         onClose = nil
         Log.write("win: close requested by " + reason)
         DispatchQueue.main.async { hook?(reason) }
+    }
+
+    /// 状态栏高度（源坐标）。先问画面自己，再问窗口，最后退回全面屏的 59：
+    /// 一个把 inset 报成 0 的 App 不代表这台手机没有状态栏。
+    private static func safeTop(of view: UIView, in window: UIWindow) -> CGFloat {
+        let own = view.safeAreaInsets.top
+        if own > 1 { return own }
+        let outer = window.safeAreaInsets.top
+        if outer > 1 { return outer }
+        return 59
     }
 
     // MARK: - ring
@@ -738,7 +772,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 边角拖动 = 缩放（0.0.43）。The finger's vertical travel is the
             // height; the width follows the picture's own aspect. Down grows,
             // up shrinks, and the opposite corner stays put.
-            let ratio = natural.width / Swift.max(natural.height, 1)
+            //
+            // 0.0.54 — 「画面自己的比例」现在是裁掉顶栏之后的那一块（`visible`），
+            // 不是 scene 的原始尺寸：卡片从来只显示可见区，比例也就该按可见区算。
+            let ratio = visible.width / Swift.max(visible.height, 1)
             var h = start.height + total.y
             var w = h * ratio
             let widest = window.bounds.width - margin * 2
@@ -879,7 +916,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // is the only free number (the picture decides the width), and the card
         // goes flush against the edge it was docked from — an inset mini is a
         // mini whose whole point (being out of the way) it fails at.
-        let ratio = natural.width / Swift.max(natural.height, 1)
+        // 0.0.54 — 比例取可见区（裁掉顶栏之后），见 `dragMove` 同一处。
+        let ratio = visible.width / Swift.max(visible.height, 1)
         let height = miniHeight(in: window.bounds)
         let width = height * ratio
         let side: CardLayout.Edge = landed == .left ? .left : .right
@@ -1014,20 +1052,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     /// The way out of 停靠小窗: a tap anywhere on its picture. The scene view
     /// would swallow that tap and forward it to the app, so a transparent shield
-    /// goes above it — the same reasoning as the ✕, which works because it is a
-    /// sibling drawn over the hosted view. It is inserted *below* the ✕ so the
-    /// close button keeps working while the card is docked.
+    /// goes above it — the same trick as the ✕ used to be, a sibling drawn over
+    /// the hosted view. 0.0.54 — there is no ✕ to stay below any more, so the
+    /// shield goes straight on top of the picture.
     private func installShield() {
         guard let card = card, shield == nil else { return }
         let view = UIControl(frame: card.bounds)
         view.backgroundColor = .clear
         view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addTarget(self, action: #selector(undock), for: .touchUpInside)
-        if let close = close {
-            card.insertSubview(view, belowSubview: close)
-        } else {
-            card.addSubview(view)
-        }
+        card.addSubview(view)
         shield = view
     }
 
@@ -1048,10 +1082,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// The content keeps the card's size for one reason only: it is the scene's
     /// own coordinate space, scaled. Re-centring without re-scaling is how a
     /// resize leaves the picture in the old corner.
+    ///
+    /// 0.0.54 — 顶部被裁掉 `cropTop` 源点，所以中心也要跟着上移半个裁切量，
+    /// 否则缩小一次之后顶部那一条又会滑回卡片里。
     private func followContent() {
-        guard let card = card, let content = content, natural.height > 16 else { return }
-        content.center = CGPoint(x: card.bounds.midX, y: card.bounds.midY)
-        let scale = card.bounds.height / natural.height
+        guard let card = card, let content = content, visible.height > 16 else { return }
+        let scale = card.bounds.height / visible.height
+        content.center = CGPoint(x: card.bounds.midX,
+                                 y: card.bounds.midY - cropTop * scale / 2)
         content.transform = CGAffineTransform(scaleX: scale, y: scale)
         // A resized card is the same device at another scale, so the corner is
         // the same screen corner at another scale. Leaving the old radius on a
@@ -1064,8 +1102,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private func resetToPlan(in bounds: CGRect) {
         guard let card = card, natural.height > 16, bounds.width > 64 else { return }
         CardLayout.reset()
-        let plan = self.plan(in: bounds, source: natural)
-        card.frame = plan.frame
+        // 0.0.54 — 复位要和 `show` 算同一件事：按原始比例布局，再把高度减掉
+        // 顶栏。直接用 `visible` 去 plan 会得到另一条比例（scale 变大、卡片变
+        // 宽），复位一次窗口就胖一圈 —— 这是最容易在真机上被当成「新 bug」的
+        // 那种不一致。
+        let base = self.plan(in: bounds, source: natural)
+        var frame = base.frame
+        frame.size.height = Swift.max(80, base.frame.height - cropTop * base.scale)
+        card.frame = clamped(frame, in: bounds)
         miniFrame = nil
         shield?.removeFromSuperview()
         shield = nil

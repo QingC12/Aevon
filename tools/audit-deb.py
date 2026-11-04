@@ -622,6 +622,14 @@ def main():
                   # attached to a view that owns its touches.
                   b"win: grip ring band=",
                   b"win: grip touch at ",
+                  # 0.0.54 — 顶栏裁剪。`topbar_cropped_src=` 是源坐标里被裁掉的
+                  # 高度，`topbar_kept_pt=` 是顶端留下的那一段（显示点数）。两个
+                  # 数都在同一行日志里，难看的时候能立刻分清是「裁多了」还是
+                  # 「留少了」；一行都不打，就只能靠看截图猜。✕ 撤掉之后
+                  # `close requested by` 仍在 —— 底边上滑照样走同一条出口，只是
+                  # 不再有 `close button` 这个理由。
+                  b" topbar_cropped_src=",
+                  b" topbar_kept_pt=",
                   # 0.0.47 — 手势面搬进自己的窗口（statusBar+1，见
                   # FloatHost.makeBand）。两条：`band window up level=` 证明那一
                   # 层真的建起来了，`band probe` 是该窗口收到的每一次命中提问（点
@@ -713,15 +721,12 @@ def main():
                   b"_setDeactivationReasons:onScene:withSettings:reason:",
                   b"_scene:interceptUpdateWithNewSettings:",
                   # 0.0.52 — 事前改参数。母本挂的是子类，0.0.29 挂的是父类，
-                  # 于是 intercept=0 两次。这三条字符串证明三个候选点都进了二进制：
-                  # 子类名、承载控制器的选择子、以及装钩子时那行形状回执。
+                  # 于是 intercept=0 两次。这两条字符串证明候选点与装钩子时的
+                  # 形状回执都进了二进制。0.0.54 删掉了第三个候选点
+                  # （SBDeviceApplicationSceneViewController）：0.0.53 真机日志里
+                  # `client=0` 走完全场，那条路一次都没响过。
                   b"SBMainDisplaySceneManager",
-                  b"client:didUpdateClientSettings:withDiff:transitionContext:",
                   b" shape cls=%@",
-                  # 0.0.53 — 那个选择子在这台系统上不存在，于是不再猜：装不上时
-                  # 把类自己实现的、名字带 Settings/Client/Scene 的方法全列出来。
-                  # 这一行是「下一版挂哪一份方法」的唯一来源。
-                  b"hook client methods n=",
                   b"presenter %@ -> %@",
                   b"/var/mobile/Library/Logs/Aevon/win.step"):
         if token not in dylib_early:

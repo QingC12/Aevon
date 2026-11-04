@@ -214,7 +214,9 @@ NSInteger AevonLaunchSuspended(id application, NSString *bundleID) {
 
 /// 0.0.52 — six became eight: the three intercept candidates join the
 /// deactivation hook, and two spare slots cost five words of static memory.
-#define AEVON_HOOK_SLOTS 8
+/// 0.0.54 — seven: one of the three candidates (the hosting view controller)
+/// was proved dead on the phone and is gone.
+#define AEVON_HOOK_SLOTS 7
 
 typedef struct {
     Class cls;
@@ -643,21 +645,22 @@ NSInteger AevonPushBackground(id scene) {
 // settings」交给这个方法，它在交给系统之前就把它改成自己要的样子 —— 没有「掉下去」
 // 这一步，也就没有要追的那一段。
 //
-// 0.0.29 装过它，实测 intercept=0（一次没被调用）。两个原因，这一版一起处理：
+// 0.0.29 装过它，实测 intercept=0（一次没被调用）。原因有两个，0.0.53 一起处理：
 //   · 装在了 `SBSceneManager`（父类）上，而母本的类表里是
 //     `_TtC6Stheno29SBMainDisplaySceneManagerHook`（**子类**）—— 子类自己的
 //     Method 被替换才轮得到，父类的 IMP 在子类重写之后根本不会执行。
-//   · 完全没有第二个落点。母本另有 `SBDeviceApplicationSceneViewControllerHook`，
-//     对应的选择子 `client:didUpdateClientSettings:withDiff:transitionContext:`
-//     就在她二进制里，那个类是「承载画面的那个控制器」，切 App 时它必然被调用。
+//   · 形状守卫把参数个数数错了（见下面的 `AevonObjectArgs`），两个类都没装上。
 //
-// 三个候选点全部装上，形状不合就**不装**并如实记一行 —— 一次参数错位的调用是
-// SpringBoard 的崩溃，不是一行日志。谁真正被调用、调用时 fg/level 是多少，由
-// 下一份日志回答。
+// 0.0.54 — 删掉第三个候选点 `SBDeviceApplicationSceneViewController`。0.0.53 的
+// 真机日志里 `client=0` 走完全场，而且那个类自己的 110 个方法里没有一个名字带
+// clientSettings —— 母本挂它是因为她还有别的用途，我们这里它一次都没被调用过。
+// 一个永远不响的钩子不是保险，是每次都多读一遍方法表、多占一个槽的空转。
+//
+// 现在装两个候选类，形状不合就**不装**并如实记一行 —— 一次参数错位的调用是
+// SpringBoard 的崩溃，不是一行日志。
 
 static long AevonInterceptCalls = 0;
 static long AevonInterceptRewrote = 0;
-static long AevonClientCalls = 0;
 
 /// 类型编码里的对象参数个数。`v32@0:8@16@24` → 2（三个 `@` 里第一个是 self）。
 /// -1 表示不是 void 返回或编码读不出来，调用方据此跳过，不做任何猜测。
@@ -997,77 +1000,6 @@ NSString *AevonHookInstall(void) {
         AevonAttachShaped(out, slot, mgr, @"_scene:interceptUpdateWithNewSettings:", 2, block);
     }
 
-    // 3. The controller that hosts the picture.
-    //
-    //    The mother ship has `SBDeviceApplicationSceneViewControllerHook` and
-    //    the selector is in her binary. This class is the one that receives
-    //    every client-settings delta, so it is called exactly when an app is
-    //    moving between foreground and background — the moment the black appears.
-    //    Read only in this version: the `diff` object describes a change that is
-    //    already being applied, and rewriting it without knowing its contract is
-    //    how a host view ends up with no picture at all. What this line buys is
-    //    the ordering: `client` before or after `picture dropped` tells the next
-    //    version whether amending there can ever be early enough.
-    Class hostVC = NSClassFromString(@"SBDeviceApplicationSceneViewController");
-    if (hostVC == Nil) {
-        [out appendString:@"hook client: no SBDeviceApplicationSceneViewController\n"];
-    } else {
-        // 0.0.53 — Aevon(50) 说这个类在、方法不在。母本的 hook 类名不能替我们
-        // 回答 iOS 17.3.1 上它到底叫什么，所以这里不再猜：把这个类自己实现的、
-        // 名字里带 settings / client / Scene 的方法名全部写进日志，一次拿够。
-        // 只列本类的方法（class_copyMethodList 不含父类），因为 override 才是
-        // 我们要挂的那一份。
-        {
-            unsigned int total = 0;
-            Method *list = class_copyMethodList(hostVC, &total);
-            NSMutableString *names = [NSMutableString string];
-            unsigned int shown = 0;
-            for (unsigned int i = 0; list != NULL && i < total && shown < 28; i++) {
-                const char *nm = sel_getName(method_getName(list[i]));
-                if (nm == NULL) continue;
-                if (strstr(nm, "ettings") == NULL && strstr(nm, "Client") == NULL
-                    && strstr(nm, "client") == NULL && strstr(nm, "Scene") == NULL) {
-                    continue;
-                }
-                [names appendFormat:@"%s ", nm];
-                shown += 1;
-            }
-            if (list != NULL) free(list);
-            [out appendFormat:@"hook client methods n=%u [%@]\n", total, names];
-        }
-        AevonHookSlot *slot = AevonReserve("client");
-        if (slot == NULL) {
-            [out appendString:@"hook client: no slot\n"];
-        } else {
-            __block AevonHookSlot *mine = slot;
-            id block = ^(id vc, id client, id settings, id diff, id context) {
-                long seen = __sync_fetch_and_add(&AevonClientCalls, 1);
-                id scene = vc;
-                SEL sceneSel = sel_registerName("scene");
-                if ([vc respondsToSelector:sceneSel]) {
-                    scene = ((id (*)(id, SEL))objc_msgSend)(vc, sceneSel);
-                }
-                BOOL ours = AevonSceneIsMine(scene);
-                if (seen < 6) {
-                    AevonRawTrace("client", "mine=%d fg=%d lvl=%.1f diff=%s scene=%s",
-                                  ours ? 1 : 0, AevonFlagOf(settings, "isForeground"),
-                                  AevonLevelOf(settings), object_getClassName(diff),
-                                  AevonSceneName(scene));
-                }
-                void (*original)(id, SEL, id, id, id, id) =
-                    (void (*)(id, SEL, id, id, id, id))mine->original;
-                __sync_fetch_and_add(&AevonHookDepth, 1);
-                if (original != NULL) {
-                    original(vc, mine->sel, client, settings, diff, context);
-                }
-                __sync_fetch_and_sub(&AevonHookDepth, 1);
-            };
-            AevonAttachShaped(out, slot, hostVC,
-                              @"client:didUpdateClientSettings:withDiff:transitionContext:",
-                              4, block);
-        }
-    }
-
     return out;
 }
 
@@ -1077,10 +1009,10 @@ NSString *AevonHookInstall(void) {
 NSString *AevonHookSummary(void) {
     NSMutableString *out = [NSMutableString string];
     [out appendFormat:@"hook: live=%d deact_set=%ld stripped=%ld"
-     " intercept=%ld/%ld client=%ld"
+     " intercept=%ld/%ld"
      " push=%ld/%ld door=%ld armed=%@\n",
      AevonSlotCount, AevonDeactSetCalls, AevonDeactStripped,
-     AevonInterceptRewrote, AevonInterceptCalls, AevonClientCalls,
+     AevonInterceptRewrote, AevonInterceptCalls,
      AevonPushWrote, AevonPushTried, AevonPushPath,
      AevonIsArmed() ? [NSString stringWithUTF8String:AevonArmed] : @"no"];
     long total = AevonTraceCount;
@@ -1093,15 +1025,13 @@ NSString *AevonHookSummary(void) {
     return out;
 }
 
-/// 0.0.52 — 拦截点的三个计数，给守护的节拍行用。
+/// 0.0.52 — 拦截点的两个计数，给守护的节拍行用。
 ///
-/// 这三个数比任何解释都直接：`ic` 是系统把 settings 交给拦截方法的次数（0 就是
-/// 「这个选择子在这台系统上不走」），`iw` 是其中真的被我们改成前台档的次数，
-/// `cc` 是承载控制器收到 client-settings 增量的次数。切一次 App，哪个数动了，
-/// 哪条路就是活的。
+/// 这两个数比任何解释都直接：`ic` 是系统把 settings 交给拦截方法的次数（0 就是
+/// 「这个选择子在这台系统上不走」），`iw` 是其中真的被我们改成前台档的次数。
+/// 切一次 App，哪个数动了，哪条路就是活的。
 long AevonInterceptCount(void) { return AevonInterceptCalls; }
 long AevonInterceptWrites(void) { return AevonInterceptRewrote; }
-long AevonClientCount(void) { return AevonClientCalls; }
 
 /// 0.0.40 — the count of deactivation attempts, for the card's clock. Exposed as
 /// a function rather than a global so Swift reads it the same way it reads
@@ -1249,8 +1179,14 @@ void AevonWakeReset(void) {
 ///     那条早退正是守护这四版一次都没动的原因（返回 4，零写入）。
 ///   · 一起写 `level = 1 / idleModeEnabled = NO`，母本那一组三件套。
 ///
-/// 只由 `contentState != 2` 触发，上限 60 次、间隔 200 ms：写得比这更勤就是
+/// 只由 `contentState != 2` 触发，上限 8 次、间隔 200 ms：写得比这更勤就是
 /// 0.0.40 之后被否掉的那种「定时重申」，每一次重申都是一次重提交。
+///
+/// 0.0.54 — 额度从 60 压到 8。0.0.53 的真机日志里 41 条节拍、`wake=0` 到底：
+/// 事前拦截装好之后，这条兜底一次都不该被用到。60 是给「还没修好」留的余量，
+/// 留着它只会在真出问题时把一次黑屏变成一段密集改写 —— 8 次（约 1.6 秒）足够
+/// 撑过一次真正的掉画，又不会在错误的方向上硬撑整场。
+static const long AevonWakeBudget = 8;
 NSInteger AevonWakeScene(id scene) {
     if (scene == nil || !AevonIsArmed()) return 0;
     if (AevonPushBanned) return 0;
@@ -1262,7 +1198,7 @@ NSInteger AevonWakeScene(id scene) {
     // 一次会话里再也不会唤醒 —— 修好的东西自己会过期，这比不修更糟。
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - AevonLastWake < 0.2) return 0;
-    if (__sync_fetch_and_add(&AevonWakeTried, 1) > 60) return 0;
+    if (__sync_fetch_and_add(&AevonWakeTried, 1) > AevonWakeBudget) return 0;
     AevonLastWake = now;
     AevonInPush = 1;
 

@@ -1372,13 +1372,12 @@ zStackParticipantDidChange:
                 let shape = " cs=" + String(content)
                     + " lvl=" + String(format: "%.1f", level)
                     + " wake=" + String(wakes)
-                // 0.0.52 — 三个拦截点的计数跟在后面。切一次 App，`ic` 动了说明
+                // 0.0.52 — 两个拦截点的计数跟在后面。切一次 App，`ic` 动了说明
                 // 系统真的把 settings 交给我们改；`iw` 动了说明那一笔已经被改成
-                // 前台档；`cc` 动了说明承载控制器收到了增量。三个都不动，就是
-                // 三个候选选择子在真机上一条都不走 —— 那是下一版的起点，不是猜测。
+                // 前台档。两个都不动，就是两个候选选择子在真机上一条都不走 ——
+                // 那是下一版的起点，不是猜测。
                 let gates = " ic=" + String(AevonInterceptCount())
                     + "/" + String(AevonInterceptWrites())
-                    + " cc=" + String(AevonClientCount())
                 Log.write("win: keepalive beat " + String(beat) + state
                           + " reasons=" + reasonsOf(scene)
                           + " sublayers=" + layers + shape + gates)

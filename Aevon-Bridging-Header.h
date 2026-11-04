@@ -96,21 +96,19 @@ NSInteger AevonPushBackground(id _Nullable scene);
 long AevonContentStateOf(id _Nullable scene);
 double AevonSceneLevel(id _Nullable scene);
 
-/// 0.0.52 — 三个拦截点的计数。`AevonInterceptCount` 是系统把 settings 交给
+/// 0.0.52 — 两个拦截点的计数。`AevonInterceptCount` 是系统把 settings 交给
 /// `_scene:interceptUpdateWithNewSettings:` 的次数（0 = 这个选择子在这台系统上
-/// 不走），`AevonInterceptWrites` 是其中真被改成前台档的次数，`AevonClientCount`
-/// 是承载控制器收到 client-settings 增量的次数。
+/// 不走），`AevonInterceptWrites` 是其中真被改成前台档的次数。
 ///
-/// 节拍行里的 `ic=/iw=/cc=` 就是它们：切一次 App 哪个数动了，哪条路就是活的。
+/// 节拍行里的 `ic=/iw=` 就是它们：切一次 App 哪个数动了，哪条路就是活的。
 long AevonInterceptCount(void);
 long AevonInterceptWrites(void);
-long AevonClientCount(void);
 
 /// 0.0.50 — 画面掉下去之后的唯一一件事：把 scene 重新说成前台，顺带写
 /// `level = 1 / idleModeEnabled = NO`（母本那一组三件套）。
 ///
 /// 不做「已经是前台就不写」的早退 —— 画面黑的时候 `fg` 恰恰还是 1，那条早退
-/// 正是守护四版一次都没动的原因。只由 `contentState != 2` 触发，上限 60 次、
+/// 正是守护四版一次都没动的原因。只由 `contentState != 2` 触发，上限 8 次、
 /// 间隔 200 ms。返回 1/2/3 表示走了哪条门，0 表示没门可走或被节流。
 NSInteger AevonWakeScene(id _Nullable scene);
 long AevonWakeCount(void);
