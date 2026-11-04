@@ -880,7 +880,7 @@ zStackParticipantDidChange:
                           + " running=" + flag(running)
                           + " visible=" + flag(visible)
                           + " fg=" + flag(foreground))
-                AevonHookDisarm(bundleID)
+                AevonHookDisarm(bundle)
                 unmark()
                 return
             }
@@ -899,7 +899,7 @@ zStackParticipantDidChange:
             // the only thing that disarms.
             DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
                 if cardUp { return }
-                AevonHookDisarm(bundleID)
+                AevonHookDisarm(bundle)
                 unmark()
                 emitNotes(AevonHookSummary())
             }

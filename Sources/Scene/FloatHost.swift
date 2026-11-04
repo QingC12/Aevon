@@ -1324,7 +1324,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// touch path lands here too, because a tap is a touch that never moved.
     private func dock(zone landed: Zone) {
         guard landed == .left || landed == .right else { return }
-        guard let card = card, let window = window else { return }
+        // `window` 不再在这里读：几何全部搬进 `applyMini` 了。留着这个判断是为了
+        // 「没有窗口就没有卡片」这条早退语义不变 —— 少了它，`undock` 会拿到半死状态。
+        guard let card = card, window != nil else { return }
         if miniFrame != nil {
             undock()
             return
