@@ -56,9 +56,12 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
+#include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <dispatch/dispatch.h>
@@ -156,6 +159,59 @@ static BOOL AevonHosted(void) {
     return NO;
 }
 
+// MARK: - 0.0.70 桥接日志的落点
+
+//
+// 这一段是本轮的前置条件，不是修饰。
+//
+// 在 0.0.70 之前，这个文件与 `AevonGeomWrite` 都写死 `/var/mobile/Aevon.log`。
+// 抖音、微信这类 App Store 应用跑在沙盒里，`fopen` 那个路径永远返回 NULL ——
+// 于是量尺照跑、读数照扔，一行都留不下。全量日志能作证：所有历史日志里 App 侧
+// 只出现过 Filza / Sileo / 设置三个进程，一个沙盒 App 都没有。抖音的「视频贴顶」
+// 量了三轮、改了两次都失败，根因不是量尺写得不对，是量尺的答案从来没到过我们手上。
+//
+// 现在按顺序试两处：宿主那份（未沙盒进程仍然一步到位），以及自己的
+// `tmp/aevon-app.log`（沙盒里唯一保证可写的位置，宿主在开卡与关卡时来取，
+// 见 AevonScene.m 的 `AevonDrainAppLog`）。
+//
+
+/// 选中的落点，进程内只算一次。全失败返回 NULL（那就什么都不写）。
+static const char *AevonAppLogPath(void) {
+    static char chosen[PATH_MAX];
+    static int ready = 0;
+    if (ready) return chosen[0] != '\0' ? chosen : NULL;
+    ready = 1;
+    NSString *tmp = NSTemporaryDirectory();
+    NSString *own = tmp.length > 0
+        ? [tmp stringByAppendingPathComponent:@"aevon-app.log"] : nil;
+    const char *candidates[2];
+    candidates[0] = "/var/mobile/Aevon.log";
+    candidates[1] = own != nil ? [own fileSystemRepresentation] : NULL;
+    for (int i = 0; i < 2; i++) {
+        if (candidates[i] == NULL) continue;
+        // 试开一次就关：能开说明这个路径在沙盒眼里是允许的。
+        int fd = open(candidates[i], O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd < 0) continue;
+        close(fd);
+        snprintf(chosen, sizeof(chosen), "%s", candidates[i]);
+        break;
+    }
+    return chosen[0] != '\0' ? chosen : NULL;
+}
+
+/// 追加一行。涨到 512 KB 就从头写 —— 这个上限只会在「宿主一直没来取」时触发，
+/// 一个 App 的 tmp 不该被诊断日志撑满。
+static void AevonAppLogWrite(const char *line) {
+    const char *path = AevonAppLogPath();
+    if (path == NULL || line == NULL) return;
+    struct stat info;
+    const char *mode = (stat(path, &info) == 0 && info.st_size > 512 * 1024) ? "w" : "a";
+    FILE *file = fopen(path, mode);
+    if (file == NULL) return;
+    fputs(line, file);
+    fclose(file);
+}
+
 /// One line per process, appended the same way every other Aevon line is
 /// written: plain text, one file, tail -f. Timestamped because this file is
 /// shared with SpringBoard and the interleaving is the interesting part.
@@ -173,11 +229,7 @@ static void AevonNote(const char *what) {
              stamp.tm_year + 1900, stamp.tm_mon + 1, stamp.tm_mday,
              stamp.tm_hour, stamp.tm_min, stamp.tm_sec,
              [bundle UTF8String] ?: "?", what);
-    FILE *file = fopen("/var/mobile/Aevon.log", "a");
-    if (file != NULL) {
-        fputs(line, file);
-        fclose(file);
-    }
+    AevonAppLogWrite(line);
 }
 
 // MARK: - 0.0.63 几何量尺（App 这一侧）
@@ -202,11 +254,7 @@ static void AevonGeomWrite(const char *body) {
     snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d app: geom %s\n",
              stamp.tm_year + 1900, stamp.tm_mon + 1, stamp.tm_mday,
              stamp.tm_hour, stamp.tm_min, stamp.tm_sec, body);
-    FILE *file = fopen("/var/mobile/Aevon.log", "a");
-    if (file != NULL) {
-        fputs(line, file);
-        fclose(file);
-    }
+    AevonAppLogWrite(line);
 }
 
 /// 一行汇总 + 两层视图。汇总回答「App 以为屏幕多大」，视图那几行回答「播放器

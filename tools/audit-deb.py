@@ -545,7 +545,11 @@ def main():
                       # 才有页码可指。
                       b"phys=%.0fx%.0f scene=",
                       b"spine%d %s",
-                      b"peers%d n=%lu"):
+                      b"peers%d n=%lu",
+                      # 0.0.70 — 桥接自己的落点。没有它，这个文件里所有读数在沙盒
+                      # App 中都写不出去（`fopen("/var/mobile/Aevon.log")` 在沙盒
+                      # 里必然失败），量尺等于白跑。
+                      b"aevon-app.log"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")
         # 0.0.68 — 反向断言，比上面那组重要得多。这一栏里的每一条都对应一次真机
@@ -833,6 +837,15 @@ def main():
                   b"win: long press corner, already default ",
                   b"win: canvas re-asserted ",
                   b"win: frame restore again door=",
+                  # 0.0.70 — 沙盒 App 的读数取回。这三条是「量尺终于能到手」的证据：
+                  # 桥接退到自己的 tmp（`aevon-app.log`），宿主开卡/关卡时取回并
+                  # 以 `applog[<bundle>]: ` 前缀并进主日志，首帧之后还会补一次真实
+                  # 的窗口尺寸变化（`scene nudge`）。缺任何一条，抖音那一侧就还是
+                  # 「量了也看不见」。
+                  b"win: app log lines=",
+                  b"applog[%@]: ",
+                  b"win: scene nudge door=",
+                  b"aevon-app.log",
                   # 0.0.40 — 闪黑。这一行只在系统真的动过场景的休眠状态时出现，
                   # 它是「黑一下」来自场景被收走 还是 来自合成器 的唯一分界。
                   b"win: scene deactivation #",

@@ -109,6 +109,25 @@ long AevonFrameWriteCount(void);
 /// scene 现在的逻辑尺寸。读不到返回全零（日志里和「真的失败了」不会混）。
 CGRect AevonSceneFrameOf(id _Nullable scene);
 
+/// 0.0.70 — 卡里那个 App 自己写下的读数，取回来。
+///
+/// 桥接在 App 进程里量几何，但 App Store 应用跑在沙盒里，`/var/mobile/Aevon.log`
+/// 对它们不可写（全量日志里 App 侧只出现过 Filza / Sileo / 设置三个进程就是证据）。
+/// 桥接现在退到自己的 `tmp/aevon-app.log`，这两条负责把那份取回来并进主日志。
+///
+/// 返回并入的行数：-2 找不到容器、-3 内容不是 UTF-8、0 没有新内容。
+NSInteger AevonDrainAppLog(NSString *_Nullable bundleID, long cap);
+
+/// 那份文件在哪。取不到容器返回 nil —— 日志里要能区分「没写」和「没找到」。
+NSString *_Nullable AevonAppLogPathOf(NSString *_Nullable bundleID);
+
+/// 0.0.70 — 首帧之后把 scene 的尺寸真正动一下再还回去（717 → 716 → 717）。
+///
+/// 只改承载视图的 bounds 不会让 App 重排：视图变了、scene 没变。冷启的抖音
+/// （`icon scene up after 1085ms`）内容贴顶、同进程第二次开（`0ms`）正常，
+/// 差别就是「有没有走完一次真正的窗口尺寸变化」。返回门编号，0 = 没有可推的目标。
+NSInteger AevonNudgeSceneFrame(id _Nullable scene);
+
 /// 0.0.50 — 画面到底在不在。`AevonContentStateOf` 读的是 `FBScene.contentState`
 /// （2 = ready 有画，0 = 没准备好 ⇒ 黑，-1 = 没有这个方法），`AevonSceneLevel`
 /// 读 `settings.level`（1 前台档 / 0 后台档 / -1 读不到）。

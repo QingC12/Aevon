@@ -15,6 +15,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <math.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1581,4 +1582,120 @@ NSInteger AevonIdleTimerEnd(void) {
     }
     gAevonIdleSavedKnown = NO;
     return mask;
+}
+
+
+// MARK: - 0.0.70 沙盒 App 的读数取回
+
+//
+// 桥接在 App 进程里写日志，但 App Store 应用跑在沙盒里，`/var/mobile/Aevon.log`
+// 对它们不可写 —— `fopen` 返回 NULL，量尺照跑、读数照扔。全量日志能作证：所有
+// 历史日志里 App 侧只出现过 Filza / Sileo / 设置三个进程。抖音的「视频贴顶」
+// 因此量了三轮、一份读数都没到手。
+//
+// 桥接现在退到自己的 `tmp/aevon-app.log`，这里负责取回来并进主日志。取不到不算
+// 错（宿主未必有读别人容器的权限），但会把路径写进日志 —— 那份文件用户可以从
+// Filza 里直接拿出来。
+//
+
+/// App 的数据容器。`LSApplicationProxy` 在 SpringBoard 里是现成的；取不到就扫
+/// 容器目录的元数据（每份都记着 bundle id）。两条路都失败返回 nil。
+static NSString *AevonAppContainer(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+    Class proxyClass = NSClassFromString(@"LSApplicationProxy");
+    if (proxyClass != Nil) {
+        SEL factory = NSSelectorFromString(@"applicationProxyForIdentifier:");
+        if ([proxyClass respondsToSelector:factory]) {
+            id proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyClass, factory, bundleID);
+            if (proxy != nil) {
+                SEL getter = NSSelectorFromString(@"dataContainerURL");
+                if ([proxy respondsToSelector:getter]) {
+                    id url = ((id (*)(id, SEL))objc_msgSend)(proxy, getter);
+                    if ([url isKindOfClass:[NSURL class]]) return [(NSURL *)url path];
+                }
+            }
+        }
+    }
+    NSString *root = @"/var/mobile/Containers/Data/Application";
+    NSFileManager *manager = [NSFileManager defaultManager];
+    for (NSString *name in [manager contentsOfDirectoryAtPath:root error:NULL]) {
+        NSString *dir = [root stringByAppendingPathComponent:name];
+        NSString *meta = [dir stringByAppendingPathComponent:
+                          @".com.apple.mobile_container_manager.metadata.plist"];
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:meta];
+        if ([info isKindOfClass:[NSDictionary class]]
+            && [[info objectForKey:@"MCMMetadataIdentifier"] isEqualToString:bundleID]) {
+            return dir;
+        }
+    }
+    return nil;
+}
+
+/// 桥接那份日志的路径。取不到容器返回 nil —— 日志里要能区分「没写」和「没找到」。
+NSString *AevonAppLogPathOf(NSString *bundleID) {
+    NSString *dir = AevonAppContainer(bundleID);
+    if (dir == nil) return nil;
+    return [dir stringByAppendingPathComponent:@"tmp/aevon-app.log"];
+}
+
+/// 把 App 侧写下的读数并进主日志。返回并入的行数：
+/// -2 = 找不到容器，-3 = 内容不是 UTF-8，0 = 没有新内容（正常情形）。
+/// 取完就清空，下一次开卡不会把旧的再并一遍。
+NSInteger AevonDrainAppLog(NSString *bundleID, long cap) {
+    NSString *path = AevonAppLogPathOf(bundleID);
+    if (path == nil) return -2;
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (data.length == 0) return 0;
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (text == nil) return -3;
+    NSString *prefix = [NSString stringWithFormat:@"applog[%@]: ", bundleID];
+    NSMutableString *out = [NSMutableString string];
+    NSInteger lines = 0;
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        if (line.length == 0) continue;
+        if (cap > 0 && lines >= cap) break;
+        [out appendString:prefix];
+        [out appendString:line];
+        [out appendString:@"\n"];
+        lines += 1;
+    }
+    if (lines == 0) return 0;
+    NSData *payload = [out dataUsingEncoding:NSUTF8StringEncoding];
+    int fd = open("/var/mobile/Aevon.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        const char *bytes = (const char *)payload.bytes;
+        size_t left = payload.length;
+        while (left > 0) {
+            ssize_t done = write(fd, bytes, left);
+            if (done <= 0) break;
+            bytes += done;
+            left -= (size_t)done;
+        }
+        close(fd);
+    }
+    [@"" writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+    return lines;
+}
+
+/// 0.0.70 — 首帧之后把 scene 的尺寸真正动一下再还回去（717 → 716 → 717）。
+///
+/// 0.0.69 的 `canvas re-asserted` 动的是承载视图的 bounds：视图变了、scene 没变，
+/// App 没有理由重排。Aevon(60) 里抖音第一次开（冷启，`icon scene up after
+/// 1085ms`）内容贴顶、第二次开（同进程，`0ms`）正常 —— 差别正是「有没有走完一次
+/// 真正的窗口尺寸变化」。幅度 1 pt，0.83 缩放下不到 1 px。
+NSInteger AevonNudgeSceneFrame(id scene) {
+    if (scene == nil || !AevonFrameArmed) return 0;
+    CGRect target = AevonFrameTarget;
+    if (target.size.height < 120.0) return 0;
+    AevonFrameTarget = CGRectMake(target.origin.x, target.origin.y,
+                                  target.size.width, target.size.height - 1.0);
+    NSInteger door = AevonPushSceneFrame(scene);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        // 0.15 s 内关卡了：`AevonSceneFrameClear` 已经把目标抹掉，这里不该再写。
+        if (!AevonFrameArmed) return;
+        AevonFrameTarget = target;
+        AevonPushSceneFrame(scene);
+    });
+    return door;
 }

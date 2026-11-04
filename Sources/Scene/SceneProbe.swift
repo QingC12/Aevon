@@ -1001,6 +1001,17 @@ zStackParticipantDidChange:
         Log.write("win: hosted mark " + bundleID + (ok ? "" : " (write failed)"))
     }
 
+    /// 0.0.70 — 把卡里那个 App 自己写下的读数取回来，并进主日志。
+    ///
+    /// 这一步之前不存在，所以抖音的量尺跑了三轮、改了两次都没成：`fopen`
+    /// `/var/mobile/Aevon.log` 在沙盒里必然失败，读数被我们自己丢掉了。
+    private static func drainAppLog(_ tag: String) {
+        guard let bundle = hostedBundle else { return }
+        let lines = AevonDrainAppLog(bundle, 400)
+        Log.write("win: app log lines=" + String(lines) + " from " + tag
+                  + " file=" + (AevonAppLogPathOf(bundle) ?? "none"))
+    }
+
     private static func clearHosted() {
         guard let bundleID = hostedBundle else { return }
         hostedBundle = nil
@@ -1232,6 +1243,9 @@ zStackParticipantDidChange:
             // 复位已经删了（见 `FloatHost.teardown`），提前的唯一理由也就不在了，
             // 而「在系统对象还活着的时候动那棵树」正是这一版要撤的东西。
             FloatHost.hide()
+            // 0.0.70 — 关卡这一拍把 App 写的读数取回来。必须在 `clearHosted()`
+            // 之前：那个函数会把 `hostedBundle` 清空，之后就不知道去哪个容器里取了。
+            drainAppLog("on close")
             // 0.0.69 — presenter 拆掉之后再交一次整屏尺寸。
             //
             // 上面那次 `AevonPushSceneFrame` 发生在承载面还在的时候，那时 App 的
@@ -1770,6 +1784,18 @@ zStackParticipantDidChange:
                 Log.write(String(format: "win: first frame watch beats=%ld cs=%ld layers=%ld waited_ms=%ld",
                                  beats, content, layers, ms))
                 host.revealContent("first frame")
+                // 0.0.70 — 画已经上屏，补一次真正的窗口尺寸变化。
+                //
+                // 0.0.69 的 `canvas re-asserted` 只动承载视图的 bounds；scene 没
+                // 变，App 没有理由重排。Aevon(60) 里抖音冷启（`icon scene up after
+                // 1085ms`）内容贴顶、同进程第二次开（`0ms`）正常，差别就是这一次。
+                let door = AevonNudgeSceneFrame(scene)
+                Log.write("win: scene nudge door=" + String(door)
+                          + " height=" + String(format: "%.0f", AevonSceneFrameOf(scene).height))
+                // 桥接的读数在 App 进程里写，1.2 s / 3.2 s 各一次 —— 4 s 后来取。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                    drainAppLog("after first frame")
+                }
                 return
             }
             // 3.2 s 与 `FloatHost.show` 里的 3 s 兜底错开 0.2 s：谁先到都行，
