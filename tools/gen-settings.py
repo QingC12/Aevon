@@ -42,7 +42,15 @@ VERSION = control_version()
 # 0.0.42 起圆盘本体换成旧版插件的实现（几何内定 64 / 46 / 40，见
 # AevonRingMenu.swift），Ring 面板里不再有「写一个数值、桌面立刻变」的母本键
 # —— 圆盘的增删排序走编辑器，几何不走滑条。接通口径改为按面板逐项核对。
-WIRED_KEYS = set()
+#
+# 0.0.64 — 「接通」是可以核对的，不是口径：窗口侧真的在读这两个键
+# （CardLayout.preferredHeight / FloatHost.geometryScale），所以它们在这里点名。
+WIRED_KEYS = {"HeightFraction", "GeometryScale"}
+
+# 0.0.64 — 本项目自有的键（母本没有），不参与「81 键对账」。
+# 对账的意义是「母本 81 个键一个不多一个不少」，把自己新加的开关算进去
+# 只会让那个数失去意义。
+OWN_KEYS = {"GeometryScale"}
 
 # 0.0.41 明确放弃的母本键。界面里没有它们，代码里也没有读取它们的地方 ——
 # 但 81 键的对账必须继续成立，所以放弃本身要记账，而不是让总数悄悄少五位。
@@ -83,6 +91,12 @@ PANELS = [
         dict(k="HeightFraction", cn="高度系数", cell="slider", d=0.62, rng=(0.30, 0.80),
              note="浮窗第一次打开时的高度（占屏幕高度的比例），宽度按画面比例跟随。"
                   "拖动或缩放过的浮窗以它自己的记忆为准；长按底角可复位到这个值。"),
+        # 0.0.64 — 本项目自己的键（母本没有这一项）：「边角拖动」到底改什么。
+        dict(k="GeometryScale", cn="几何缩放", cell="switch", d=False,
+             note="关闭（默认）：右下角拖动只把画面等比例放大缩小，窗口形状不变，"
+                  "App 不会重排。开启：拖动改的是窗口比例，松手后换一块画布让 App "
+                  "按新形状重排一版（顶栏、底栏、贴边工具栏会跟着重新布局，代价是"
+                  "每松一次手多一次布局）。拖动中重读本项，改完不必重开浮窗。"),
         dict(k="Size", cn="尺寸", cell="slider", d=0.60, rng=(0.40, 1.00),
              note="基准尺寸，圆盘展开时按此推导各图标位置。"),
         dict(k="BallparkFigure", cn="近似取值", cell="switch", d=False,
@@ -435,9 +449,11 @@ def build_root(panel_items, wired):
                   "action": "respring:", "defaults": DOMAIN})
 
     items.append({"cell": "PSGroupCell", "label": "功能设置",
-                  "footerText": f"下面 8 个面板共 {total} 项，键名与母本一一对应"
+                  "footerText": f"下面 8 个面板共 {total} 项，母本键与母本一一对应"
                                 f"（母本 81 键中有 {len(DROPPED)} 项已明确放弃，"
-                                f"名单见交付说明）。点任一项进入该面板；承载形状已整体换成旧版实现，"
+                                f"名单见交付说明），另有 {len(OWN_KEYS)} 项是本项目自有"
+                                f"（窗口与场景 → 几何缩放）。点任一项进入该面板；"
+                                f"承载形状已整体换成旧版实现，"
                                 f"其余面板的开关会写入 com.aevon 域，等对应功能落地后即生效。"})
     for pid, title, _intro in [(p[0], p[1], p[2]) for p in PANELS]:
         # PSButtonCell + 显式 action：0.0.5 用 PSChildPaneSpecifier，这一版 iOS
@@ -567,9 +583,11 @@ def main():
     with open(os.path.join(OUTDIR, "settings-manifest.json"), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, ensure_ascii=False, indent=2)
 
-    print("设置项:", n, "| 文案键:", len(TEXT_KEYS),
-          "| 明确放弃:", len(DROPPED), "| 合计:", n + len(TEXT_KEYS) + len(DROPPED))
-    assert n + len(TEXT_KEYS) + len(DROPPED) == 81, "与母本 81 键对不上"
+    own = len(OWN_KEYS & {it["k"] for p in PANELS for it in p[3]})
+    print("设置项:", n, "（其中自有键:", own, "）| 文案键:", len(TEXT_KEYS),
+          "| 明确放弃:", len(DROPPED),
+          "| 母本口径合计:", n - own + len(TEXT_KEYS) + len(DROPPED))
+    assert n - own + len(TEXT_KEYS) + len(DROPPED) == 81, "与母本 81 键对不上"
     print("plist:", ", ".join(written))
 
 

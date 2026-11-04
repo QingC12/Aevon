@@ -364,6 +364,26 @@ def main():
         ok(f"panels: {len(signatures)} panels all different, "
            f"{min(counts)}–{max(counts)} rows each")
 
+    # -- 5c. 几何缩放开关（0.0.64）-----------------------------------------
+    # 这个开关不是「写进域里等以后接线」的那一类：窗口侧每次按角都读它。
+    # 所以包里必须真有一行，而且默认值必须是关 —— 操作者要的是「默认关闭」，
+    # 一个默认开着的开关等于告诉他没得选。
+    window_plist = files.get(f"{BUNDLE_DIR}/Window.plist")
+    if window_plist is None:
+        bad("window: Window.plist missing")
+    else:
+        window_items = plistlib.loads(window_plist).get("items", [])
+        geom = [row for row in window_items if row.get("key") == "GeometryScale"]
+        if not geom:
+            bad("window: 几何缩放 这一行不在 Window.plist 里 —— "
+                "等比例缩放模式没有入口")
+        elif geom[0].get("default") is not False:
+            bad("window: 几何缩放 的默认值不是关 —— 要的是「默认关闭」")
+        elif geom[0].get("cell") != "PSSwitchCell":
+            bad("window: 几何缩放 不是开关")
+        else:
+            ok("window: 几何缩放 switch present, default off")
+
     # -- 5c. carrier shape (0.0.5, wired to the desktop in 0.0.6) -----------
     # The ring is the first real rendering code in this project, and its
     # regressions are all silent: a lost preview row, a lost shape switch, a
@@ -659,6 +679,12 @@ def main():
                   b"win: canvas reshaped to=",
                   b"win: canvas reshape push door=",
                   b"win: frame drift now=",
+                  # 0.0.64 — 「几何缩放」开关（设置 → 窗口与场景，默认关）与圆角的
+                  # 新算法。三处（开窗 / 按下角 / 抬手）都写同一行：
+                  # `mode=0` 等比例（画布不动）、`mode=1` 改窗口比例（App 重排）；
+                  # `corner=` 是按**卡宽**算出来的圆角 —— 0.0.63 按「卡高 / 画布高」
+                  # 算，往下压扁时它会掉到 4 %（看着就是直角），这一行能当场读出。
+                  b"win: resize mode=",
                   # 0.0.54 的顶栏裁剪在 0.0.60 撤掉了（`topbar_cropped_src=` /
                   # `topbar_kept_pt=` 随实现一起删）：留着一条断言源码里已经不存在
                   # 的字符串，CI 会当场失败。✕ 撤掉之后 `close requested by` 仍在

@@ -184,9 +184,14 @@ public enum CardLayout {
                                   y: number("rightHeightPecent", placement.right.y))
         // Height gets its own clamp: 0.3 is a card, 0.99 is a second screen
         // with no way to reach the close button behind it.
+        //
+        // 0.0.64 — 下界从 0.35 改回 0.30。边角拖动的最小高度是屏幕的 30 %
+        // （`FloatHost.miniHeight`），设置里的「高度系数」滑条也是 0.30 起；
+        // 读回来卡在 0.35 等于「拖到最小 → 存 30 % → 重开变 35 %」，一次缩小
+        // 记不住。三个数现在说的是同一件事。
         let height = (dict["HeightFraction"] as? NSNumber).map { CGFloat($0.doubleValue) }
             ?? placement.heightFraction
-        placement.heightFraction = Swift.min(0.92, Swift.max(0.35, height))
+        placement.heightFraction = Swift.min(0.92, Swift.max(0.30, height))
         // 0.0.63 — 画布高度。0（或文件里没有这一项）= 没调过形状，用默认比例。
         // 只收 240…1600 这一段：更矮的窗口装不下一行字，更高的不是窗口。
         if let canvas = (dict["CanvasHeight"] as? NSNumber).map({ CGFloat($0.doubleValue) }),
