@@ -538,24 +538,30 @@ def main():
                       # 是 430x717），剩下唯一没量的是 App 自己怎么看这块屏幕。
                       # 这一串不在二进制里，就等于这一轮没有任何新证据。
                       b"app: geom ",
-                      # 0.0.65 — 屏幕补丁与名片。Aevon(57) 的量尺把问题摊成
-                      # 两行：同一个进程里 `screen=430x932` 而 `scene=win=root=
-                      # 430x717` —— App 里有两块屏幕，按 UIScreen 布局的那一半
-                      # （抖音的整页与翻页步长）全都比窗口高 215 pt。补丁把
-                      # `bounds` / `_referenceBounds` / `_boundsForInterfaceOrientation:`
-                      # 换成 scene 的尺寸，只在「这块卡里演我」的那几秒生效。
-                      b"screen %.0fx%.0f -> %.0fx%.0f (hosted scene)",
-                      # 量尺本身也要更狠：`spine` 是从根视图往下挑最大子视图的
-                      # 那条主脊，`peers` 是每一层的兄弟；只有走到播放器那一层，
-                      # 「视频偏上」才有页码可指。
+                      # 量尺走「主脊」：`spine` 从根视图往下挑面积最大的子视图，
+                      # `peers` 是每一层的兄弟；只有走到播放器那一层，「视频偏上」
+                      # 才有页码可指。
                       b"phys=%.0fx%.0f scene=",
                       b"spine%d %s",
-                      b"peers%d n=%lu",
-                      # 名片目录。宿主靠它判断「这个进程有没有这一版代码」，
-                      # 两边必须是同一个路径，否则冷启动永远不会触发。
-                      b"/var/mobile/Library/Logs/Aevon/bridge"):
+                      b"peers%d n=%lu"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")
+        # 0.0.66 — 反向断言，比上面那组更重要。0.0.65 的「改屏幕尺寸」把
+        # `UIScreen.bounds` / `_referenceBounds` / `_boundsForInterfaceOrientation:`
+        # 换成了小胖屏的尺寸，装进每一个加载 UIKit 的进程，真机后果是大量 App
+        # 黑屏、桌面小组件空白、点图标都没反应。这条路不许回来：下面任何一个串
+        # 出现在 AevonApp.dylib 里，就是又有人在 App 进程里动屏幕。
+        # 每行末尾的 `# gone` 是给 tools/push-gate.py 看的：反向断言故意不在
+        # 源码里，闸门否则会把它当成「漏改的断言」拦下。
+        for token in (b"screen %.0fx%.0f -> %.0fx%.0f (hosted scene)",   # gone
+                      b"_referenceBounds",                                 # gone
+                      b"_boundsForInterfaceOrientation:",                  # gone
+                      # 名片 + 冷启动那对组合：名片写不进去时判据永远不成立，
+                      # 每次开窗都会先杀掉那个 App。
+                      b"/var/mobile/Library/Logs/Aevon/bridge"):           # gone
+            if token in bridge:
+                bad(f"bridge: {token.decode()} 又出现了 —— 0.0.66 已经把"
+                    f"「在 App 进程里改屏幕」整条撤掉，不要再装回去")
         # 96 KB, not 64: ObjC exception handling (@try around every KVC read on a
         # private key) pulls in the unwind tables and the personality routine,
         # and that is ~45 KB of the 69. Paying it once per process is the price
@@ -692,10 +698,9 @@ def main():
                   # —— 0.0.63 按「卡高 / 画布高」算，往下压扁时会掉到 4 %，
                   # 看着就是直角，这一行能当场读出来。
                   b"win: resize canvas=",
-                  # 0.0.65 — 旧进程换成新进程。抖音那一次既没有 `app: promoted`
-                  # 也没有 `app: geom`：它的进程在 dylib 落到磁盘之前就起来了。
-                  # 这一行出现 = 宿主认出了旧进程并结束了它；没出现 = 名片对得上。
-                  b"win: icon cold start ",
+                  # 0.0.66 — 「旧进程就先杀掉」那条路撤了（它靠一张名片文件判断
+                  # 进程新旧，名片写不进去时判据永远不成立，于是每次开窗都先结束
+                  # 那个 App）。`win: icon cold start ` 改成反向断言，见本函数末尾。
                   # 0.0.54 的顶栏裁剪在 0.0.60 撤掉了（`topbar_cropped_src=` /
                   # `topbar_kept_pt=` 随实现一起删）：留着一条断言源码里已经不存在
                   # 的字符串，CI 会当场失败。✕ 撤掉之后 `close requested by` 仍在
@@ -848,6 +853,16 @@ def main():
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
                 "the probe would never reach SpringBoard")
+
+    # 0.0.66 — 「旧进程就先杀掉」这条路不许回来。它要读一张名片文件判断进程
+    # 新旧，而那一步依赖沙箱里的写盘；写不进去时判据永远不成立，于是每次开窗
+    # 都先 SIGKILL 那个 App —— 一次写失败换来「App 打不开」。旧进程的唯一坏处
+    # 只是这一版的改动没生效，那是可以容忍的。
+    for token in (b"win: icon cold start ",                          # gone
+                  b"AevonColdStartReady",                            # gone
+                  b"/var/mobile/Library/Logs/Aevon/bridge"):          # gone
+        if token in dylib_early:
+            bad(f"probe: {token.decode()} 又出现了 —— 0.0.66 已撤掉换进程那条路")
 
     # The surface dump was retired in 0.0.11 to pay for the call table. What
     # must stay in the binary is the retirement line itself: the button is still

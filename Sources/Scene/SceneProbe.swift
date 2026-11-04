@@ -955,16 +955,10 @@ zStackParticipantDidChange:
         // 启动失败就撤回，免得留一个没有浮窗的「保活名单」。
         AevonHookArm(bundleID)
 
-        // 0.0.65 — 先确认这个 App 的进程里有没有这一版代码。
-        //
-        // 挂起启动对「已经在跑的 App」只是把 scene 交回来，进程一个字节都不换；
-        // 而 App 侧的一切（状态提升、屏幕尺寸补丁、量尺）都只在启动那一刻加载
-        // 了 dylib 的进程里。旧进程的表现是「改了没效果」，且宿主侧看不出来。
-        // 所以这里用名片核对，只在旧进程时结束它 —— 详见 AevonScene.m。
-        let cold = AevonColdStartReady(bundleID)
-        if cold != 0 {
-            Log.write("win: icon cold start " + bundleID + " code=" + String(cold))
-        }
+        // 0.0.66 — 「旧进程就先杀掉它」那条路撤了（随 0.0.65 的屏幕补丁一起）。
+        // 它要读一张名片文件才知道进程新旧，而名片写不进去时判据永远不成立，
+        // 后果是**每次开窗先结束那个 App**。旧进程最大的坏处只是这一版的改动
+        // 没生效，那是可以容忍的；把 App 弄成打不开是不可容忍的。
 
         let door = AevonLaunchSuspended(sharedApplication(), bundleID)
         Log.write("win: icon launch " + bundleID + " suspended door=" + String(door))
@@ -984,9 +978,7 @@ zStackParticipantDidChange:
         // reach a window. This is the one signal that does not depend on the
         // scene settings crossing into the app's own copy.
         markHosted(bundleID)
-        // 冷启动那一次要重新走完一个进程的启动，4 秒不够宽：给它 7 秒。
-        pollForScene(bundleID, ticks: 0, start: Date(),
-                     limit: cold == 0 ? 4.0 : 7.0, fallback: fallback)
+        pollForScene(bundleID, ticks: 0, start: Date(), fallback: fallback)
     }
 
     // MARK: - 0.0.44 hosted mark
@@ -1027,7 +1019,6 @@ zStackParticipantDidChange:
     /// 1.8 秒之后退回 250 ms：那时候还没 scene，就是真没起来，没必要每秒查
     /// 十七次到第四秒。
     private static func pollForScene(_ bundleID: String, ticks: Int, start: Date,
-                                     limit: Double = 4.0,
                                      fallback: @escaping (String) -> Void) {
         if let scene = sceneFor(bundleID) {
             unmark()
@@ -1045,19 +1036,18 @@ zStackParticipantDidChange:
             }
             return
         }
-        guard Date().timeIntervalSince(start) < limit else {
+        guard Date().timeIntervalSince(start) < 4.0 else {
             unmark()
             AevonHookDisarm()
             Log.write("win: icon " + bundleID + " produced no scene")
-            fallback("no scene in limit")
+            fallback("no scene in 4s")
             return
         }
         // 0.0.59 — 60 → 40 ms。枚举一次 scene manager 只有几个对象，成本远小于
         // 这一拍白等的时间；前 30 拍（1.2 s）覆盖了「scene 该出现」的全部窗口。
         let gap: Double = ticks < 30 ? 0.04 : 0.25
         DispatchQueue.main.asyncAfter(deadline: .now() + gap) {
-            pollForScene(bundleID, ticks: ticks + 1, start: start,
-                         limit: limit, fallback: fallback)
+            pollForScene(bundleID, ticks: ticks + 1, start: start, fallback: fallback)
         }
     }
 

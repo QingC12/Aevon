@@ -451,16 +451,25 @@ def check_audit_tokens():
     tokens = set()
     # 前一个字符不能是标识符的一部分：否则 `bad(f"..."` 里那个 b 会被当成
     # 字节串前缀，把整段代码吞进 token 里。
-    for literal in re.findall(r'(?<![A-Za-z0-9_])b"((?:[^"\\\n]|\\.)*)"', audit):
-        try:
-            token = literal.encode().decode("unicode_escape")
-        except UnicodeDecodeError:
-            token = literal
-        if len(token) < 5:
+    #
+    # 0.0.66 — 逐行扫，跳过带 `# gone` 的行。审计里现在有两类断言：
+    #   · 「这个串必须在二进制里」（功能自证，源码里必须有）；
+    #   · 「这个串不许再出现」（撤掉一条危险路径之后的反向锁）。
+    # 反向锁的串**故意**不在源码里，原来那种「整段 grep 一遍」会把它当成
+    # 漏改的断言直接拦下 —— 这条规则把两个方向分开写清楚。
+    for line in audit.splitlines():
+        if "# gone" in line:
             continue
-        if token.startswith(("Library/", "DEBIAN/", "usr/", "var/jb", "!<")):
-            continue
-        tokens.add(token)
+        for literal in re.findall(r'(?<![A-Za-z0-9_])b"((?:[^"\\\n]|\\.)*)"', line):
+            try:
+                token = literal.encode().decode("unicode_escape")
+            except UnicodeDecodeError:
+                token = literal
+            if len(token) < 5:
+                continue
+            if token.startswith(("Library/", "DEBIAN/", "usr/", "var/jb", "!<")):
+                continue
+            tokens.add(token)
 
     missing = sorted(t for t in tokens if t not in blob)
     if missing:

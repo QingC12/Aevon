@@ -27,7 +27,17 @@
 //
 //    · Nothing runs before the pref allows it ("!ring.appHook", default on).
 //    · SpringBoard itself is skipped — the first injection point already covers
-//      that process and must not be double-hooked.
+//      that process and must not be double-hooked. 0.0.66 made that test three
+//      conditions instead of one, and made "no name" count as SpringBoard: a
+//      single nil bundle identifier used to be enough to get hooks into the
+//      process that draws the home screen.
+//    · **This file never rewrites a system measurement.** 0.0.65 hooked
+//      `UIScreen.bounds` / `_referenceBounds` / `_boundsForInterfaceOrientation:`
+//      to make one app's video sit centred; the damage was a phone where apps
+//      would not open, the home screen went black and every widget came up
+//      blank, because those three getters were replaced in every process that
+//      loads UIKit — including the ones that are not apps. The measured cost of
+//      that idea is one whole release; it is not coming back.
 //    · Both getters chain to the original. If the hosted pair is not detected,
 //      behaviour is exactly the system's own.
 //    · One log line per process, and only when a promotion actually happened.
@@ -184,155 +194,6 @@ static void AevonNote(const char *what) {
     }
 }
 
-// MARK: - 0.0.65 「这一版代码在这个进程里吗」
-//
-// Aevon(57) 里有一个只靠读日志就能下的结论：`app: promoted` 对设置和 Sileo
-// 都出现过，对抖音一次都没有 —— 那两次进程是刚启动的，抖音那一个是**旧进程**，
-// 它是在这份 dylib 落到磁盘之前起来的，所以本文件根本不在它里面。宿主侧看
-// 不出来（scene 照样出现、画面照样有），于是「改了没效果」会被记成 bug。
-//
-// 这里让每个进程启动时留一张名片（bundle + pid），宿主在开窗前核对一次：
-// 名片在、pid 还活着 ⇒ 这个进程有这一版代码；否则说明它是旧进程，宿主先把
-// 它结束掉，再用挂起启动重新拉起一个干净的 —— 只有新进程才会带上这里的一切
-// （包括下面的屏幕补丁）。
-//
-// 代价是一行文件写入，发生在进程启动那一下。收益是「有没有装上」不再是猜的。
-
-static NSString *const AevonBridgeDir = @"/var/mobile/Library/Logs/Aevon/bridge";
-
-static void AevonBridgeMark(void) {
-    NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
-    if (bundle.length == 0) return;
-    NSFileManager *files = [NSFileManager defaultManager];
-    [files createDirectoryAtPath:AevonBridgeDir withIntermediateDirectories:YES
-                      attributes:nil error:NULL];
-    NSDictionary *mark = @{ @"pid": @(getpid()),
-                            @"ts": @([[NSDate date] timeIntervalSince1970]) };
-    NSString *path = [AevonBridgeDir stringByAppendingPathComponent:
-                      [bundle stringByAppendingPathExtension:@"plist"]];
-    [mark writeToFile:path atomically:YES];
-}
-
-// MARK: - 0.0.65 屏幕尺寸（App 这一侧）
-//
-// Aevon(57) 的量尺把问题摊成两行，同一个进程、同一时刻：
-//
-//   app: geom early screen=430x932@3 scene=430x717 win=430x717 root=430x717
-//
-// 窗口、根视图、scene 的坐标空间都是 717，而 `UIScreen` 还是 932。也就是说
-// **App 里有两块屏幕**：按 scene/window 布局的代码拿到 717（所以顶栏、底栏都
-// 排好了），按 `UIScreen` 布局的代码拿到 932（所以抖音的整页、翻页步长、播放器
-// 那一层都按 932 算）。一块 932 高的页面塞进 717 的窗口里，必然「视频偏上、
-// 下面一截是它自己的底色」，翻页步长又比窗口高 215 pt，于是能看到两段视频。
-//
-// 母本同一个位置也有一手：她的 App 侧 dylib（SthenoKeyboard，过滤 com.apple.UIKit）
-// 的选择子里同时有 `mainScreen` / `bounds` / `_boundsForInterfaceOrientation:` /
-// `setBounds:` / `setFrame:` / `setTransform:` —— 她同样在 App 进程里改屏幕。
-//
-// 做法：只在这块卡里演我时（scene 自己的 settings 说 foreground），把主屏的
-// `bounds` / `_referenceBounds` / `_boundsForInterfaceOrientation:` 换成 scene
-// 坐标空间的那块尺寸。别的进程、别的时刻，一个字节都不改。
-//
-// 只改「读」：`nativeBounds`、`scale`、`brightness` 都不动 —— 那些是硬件量，
-// 改了只会让画面分辨率对不上。
-
-static IMP AevonOriginalScreenBounds = NULL;
-static IMP AevonOriginalScreenRef = NULL;
-static IMP AevonOriginalScreenOriented = NULL;
-static void AevonGeomWrite(const char *body);   // 定义在下面量尺那一段
-static int AevonScreenHits = 0;
-static int AevonScreenLogged = 0;
-static int AevonScreenBusy = 0;
-static CGRect AevonScreenTarget = { { 0, 0 }, { 0, 0 } };
-static CFAbsoluteTime AevonScreenStamp = 0;
-
-/// 这块卡里正在演我的那块屏幕有多大。0.4 秒一次缓存：`bounds` 是 App 里被
-/// 调用最频繁的 getter 之一，每一帧都去翻 connectedScenes 是不行的。
-static CGRect AevonHostedScreenSize(void) {
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (AevonScreenStamp > 0 && now - AevonScreenStamp < 0.4) return AevonScreenTarget;
-    AevonScreenStamp = now;
-    AevonScreenTarget = CGRectZero;
-    if (AevonScreenBusy) return AevonScreenTarget;   // 递归自保
-    AevonScreenBusy = 1;
-    UIApplication *application = [UIApplication sharedApplication];
-    if (application != nil) {
-        for (UIScene *scene in [application connectedScenes]) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            id settings = AevonSceneSettings(scene);
-            if (settings == nil) continue;
-            if (!(AevonFlag(settings, @"isForeground") && !AevonFlag(settings, @"isBackgrounded"))) continue;
-            id value = AevonTryValue(AevonTryValue(scene, @"coordinateSpace"), @"bounds");
-            if (![value isKindOfClass:[NSValue class]]) continue;
-            CGRect box = CGRectZero;
-            [value getValue:&box size:sizeof(box)];
-            if (box.size.width > 100 && box.size.height > 200) {
-                box.origin = CGPointZero;
-                AevonScreenTarget = box;
-            }
-            break;
-        }
-    }
-    AevonScreenBusy = 0;
-    return AevonScreenTarget;
-}
-
-/// 主屏 + 宿主尺寸都成立时，把答案换掉。`got` 是系统给的原值，用来判断
-/// 「本来就一样」—— 一样的场合一个字节都不改，真前台的 App 因此完全不受影响。
-///
-/// `depth` 是自保：`[UIScreen mainScreen]` 与读 scene 的坐标空间都可能绕回
-/// `bounds`，而这一层一旦递归就是启动即死循环。进一次、答一次，再问就直接用
-/// 系统的原值。
-static int AevonScreenDepth = 0;
-
-static BOOL AevonScreenRewrite(id screen, CGRect got, CGRect *out) {
-    if (AevonScreenDepth > 0) return NO;
-    if (!AevonAppHookAllowed()) return NO;
-    AevonScreenDepth = 1;
-    BOOL answer = NO;
-    if (screen == [UIScreen mainScreen]) {
-        CGRect want = AevonHostedScreenSize();
-        if (want.size.width > 100 && want.size.height > 200
-            && (fabs(want.size.width - got.size.width) > 2
-                || fabs(want.size.height - got.size.height) > 2)) {
-            *out = want;
-            answer = YES;
-        }
-    }
-    AevonScreenDepth = 0;
-    if (!answer) return NO;
-    AevonScreenHits++;
-    if (!AevonScreenLogged) {
-        AevonScreenLogged = 1;
-        char body[160];
-        snprintf(body, sizeof(body), "screen %.0fx%.0f -> %.0fx%.0f (hosted scene)",
-                 got.size.width, got.size.height, out->size.width, out->size.height);
-        AevonGeomWrite(body);
-    }
-    return YES;
-}
-
-static CGRect AevonScreenBounds(id self, SEL _cmd) {
-    CGRect got = ((CGRect (*)(id, SEL))AevonOriginalScreenBounds)(self, _cmd);
-    CGRect want;
-    if (AevonScreenRewrite(self, got, &want)) return want;
-    return got;
-}
-
-static CGRect AevonScreenRefBounds(id self, SEL _cmd) {
-    CGRect got = ((CGRect (*)(id, SEL))AevonOriginalScreenRef)(self, _cmd);
-    CGRect want;
-    if (AevonScreenRewrite(self, got, &want)) return want;
-    return got;
-}
-
-static CGRect AevonScreenOriented(id self, SEL _cmd, NSInteger orientation) {
-    CGRect got = ((CGRect (*)(id, SEL, NSInteger))AevonOriginalScreenOriented)(self, _cmd, orientation);
-    CGRect want;
-    if (AevonScreenRewrite(self, got, &want)) return want;
-    return got;
-}
-
 // MARK: - 0.0.63 几何量尺（App 这一侧）
 
 //
@@ -396,22 +257,22 @@ static void AevonDumpGeometry(const char *tag) {
             break;
         }
     }
-    // 硬件那一半单独给：`[screen bounds]` 现在可能已经是补丁后的值，
-    // `nativeBounds / scale` 才是这台机器真实的点数尺寸。两列并排，「补丁生效
-    // 了没有」就不需要再推导。
+    // 硬件那一半单独给：`nativeBounds / scale` 是这台机器真实的点数尺寸。
+    // 0.0.66 起 `bounds` 不再被改写，两列相同只说明「这次没有别人在改它」，
+    // 不同则说明这块屏和设备不是一回事 —— 两种情形下这一行都是有用的对照。
     CGRect native = screen != nil ? [screen nativeBounds] : CGRectZero;
     CGFloat scale = screen != nil ? [screen scale] : 0.0;
     char body[400];
     snprintf(body, sizeof(body),
              "%s screen=%.0fx%.0f@%.0f phys=%.0fx%.0f scene=%.0fx%.0f win=%.0fx%.0f "
-             "root=%.0fx%.0f safe=%.0f/%.0f hits=%d",
+             "root=%.0fx%.0f safe=%.0f/%.0f",
              tag, box.size.width, box.size.height, scale,
              scale > 0 ? native.size.width / scale : 0.0,
              scale > 0 ? native.size.height / scale : 0.0,
              space.size.width, space.size.height,
              win.size.width, win.size.height,
              view.size.width, view.size.height,
-             safe.top, safe.bottom, AevonScreenHits);
+             safe.top, safe.bottom);
     AevonGeomWrite(body);
     if (rootView == nil) return;
     // 0.0.65 — 只量两层不够。上一版停在 `UITransitionView / UIDropShadowView`，
@@ -503,12 +364,37 @@ static NSInteger AevonActivationState(id self, SEL _cmd) {
     return state;
 }
 
+/// 0.0.66 — 这个进程能不能装桥。**宁可不装，也不能装错。**
+///
+/// 0.0.65 的写法是一行 `[bundle isEqualToString:@"com.apple.springboard"]`，
+/// 那行保护有一个致命的空档：`bundle` 是 nil 时（mainBundle 在某些注入环境下
+/// 返回 nil，或 roothide 把它指到 .jbroot 里的另一份）消息发出去返回 NO，
+/// 于是 SpringBoard 被当成普通 App，装上「把 UIScreen.bounds 换成 scene 尺寸」
+/// 那套补丁 —— 桌面按错的屏幕尺寸排版、图标网格与小组件全部作废。一次
+/// nil 就够毁掉整个桌面，而这种判据的失效在宿主侧完全看不出来。
+///
+/// 所以现在是三条并列，任一条命中就退出，且**取不到名字也算命中**：
+///   1. bundle id 为 nil / 空   → 无法证明它不是 SpringBoard；
+///   2. bundle id 是 springboard；
+///   3. 可执行路径或进程名里带 SpringBoard（id 被改名也能挡住）。
+static BOOL AevonWorthInjecting(void) {
+    NSBundle *main = [NSBundle mainBundle];
+    NSString *bundle = [main bundleIdentifier];
+    if (bundle.length == 0) return NO;
+    if ([bundle isEqualToString:@"com.apple.springboard"]) return NO;
+    NSString *path = [main executablePath];
+    if (path != nil && [path rangeOfString:@"SpringBoard"].location != NSNotFound) return NO;
+    NSString *name = [[NSProcessInfo processInfo] processName];
+    if (name != nil && [name isEqualToString:@"SpringBoard"]) return NO;
+    return YES;
+}
+
 __attribute__((constructor))
 static void AevonAppBoot(void) {
-    // SpringBoard has the first injection point, which owns this process. Two
-    // hooks on one getter is one hook too many.
-    NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
-    if ([bundle isEqualToString:@"com.apple.springboard"]) return;
+    // 第一个注入点已经拥有 SpringBoard 这个进程。两条 reason 都要看：一是
+    // 「一个 getter 上挂两个钩子多了一个」，二是 0.0.65 证明装错进程的代价
+    // 不是抖动，是整个桌面。
+    if (!AevonWorthInjecting()) return;
 
     // Both getters, both chained: a process that is not hosted keeps the
     // system's answers byte for byte.
@@ -525,28 +411,21 @@ static void AevonAppBoot(void) {
         method_setImplementation(activation, (IMP)AevonActivationState);
     }
 
-    // 0.0.65 — 名片（宿主靠它判断「这个进程有没有这一版代码」）。
-    if (AevonAppHookAllowed()) AevonBridgeMark();
-
-    // 0.0.65 — 屏幕补丁。三个都是私有/半私有 getter：`bounds` 是 App 最常用的
-    // 那个，`_referenceBounds` 与 `_boundsForInterfaceOrientation:` 是它下面的两层
-    // （有的代码绕开 `bounds` 直接问这两层，母本的选择子表里也正好有第三个）。
-    // 有哪个不存在就跳哪个，不写死「一定有」。
-    Method bounds = class_getInstanceMethod([UIScreen class], sel_registerName("bounds"));
-    if (bounds != NULL) {
-        AevonOriginalScreenBounds = method_getImplementation(bounds);
-        method_setImplementation(bounds, (IMP)AevonScreenBounds);
-    }
-    Method reference = class_getInstanceMethod([UIScreen class],
-                                               sel_registerName("_referenceBounds"));
-    if (reference != NULL) {
-        AevonOriginalScreenRef = method_getImplementation(reference);
-        method_setImplementation(reference, (IMP)AevonScreenRefBounds);
-    }
-    Method oriented = class_getInstanceMethod([UIScreen class],
-                                              sel_registerName("_boundsForInterfaceOrientation:"));
-    if (oriented != NULL) {
-        AevonOriginalScreenOriented = method_getImplementation(oriented);
-        method_setImplementation(oriented, (IMP)AevonScreenOriented);
-    }
+    // 0.0.66 — 「改屏幕尺寸」那一整段（`UIScreen.bounds` / `_referenceBounds` /
+    // `_boundsForInterfaceOrientation:`）与「名片」一起删掉了。
+    //
+    // 它们想解决的是抖音偏上：那个 App 里有两块屏幕，`UIScreen` 说 932、窗口
+    // 说 717。但 0.0.65 的真机反馈是**全局性故障** —— 大量 App 打不开/黑屏、
+    // 桌面小组件空白、点图标都没反应。这条路的能力边界根本不是「只在卡里演我
+    // 时改」，它被装进了每一个加载 UIKit 的进程：
+    //   · 判据用的是 scene settings 的 `isForeground`，而**真前台 App 也是 1**，
+    //     系统渲染守护进程（小组件、墙纸）同样是。它们各有一套自己的坐标空间，
+    //     一旦被换成「不是屏幕的尺寸」，渲染就没有可用的画布 —— 小组件空白正是
+    //     这个形状；
+    //   · `_boundsForInterfaceOrientation:` 收方向参数，而实现无视它：一个请求
+    //     横屏的 App（相机、视频、游戏）会拿到竖的小胖屏尺寸，布局当场散架；
+    //   · `_referenceBounds` 是 UIKit 算键盘、状态栏、分屏的基准，改它等于改
+    //     整个 UIKit 的世界观。
+    // 收益是「一个 App 的视频居中」，代价是全系统的屏幕尺寸 —— 这笔账不该做。
+    // 宁愿不居中，也不能让别人的手机用不了。
 }

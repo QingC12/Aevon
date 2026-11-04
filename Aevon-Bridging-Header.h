@@ -170,12 +170,11 @@ NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL v
 ///   0  no such method on UIApplication or LSApplicationWorkspace
 NSInteger AevonLaunchSuspended(id _Nullable application, NSString *_Nullable bundleID);
 
-/// 0.0.65 — 开窗前的「这个进程有没有这一版代码」核对。
-///
-/// 返回 0 什么都不做（没在跑，或者名片对得上）；1 结束了一个旧进程并等到它
-/// 退出；2 结束了但没等到；3 查不到 pid，什么都没做。只有 1/2 之后才值得写一行
-/// 日志，因为只有那时候「冷启动」这个词是真的。
-NSInteger AevonColdStartReady(NSString *_Nullable bundleID);
+// 0.0.65 的 `AevonColdStartReady` 已随该功能一起删除（0.0.66）：它靠「名片文件
+// 写上 pid」判断进程新旧，而名片写不进去时（沙箱、目录权限、装包顺序）判据就永远
+// 不成立 —— 于是每次开窗都先结束那个 App 再拉起来。一次写失败换来「App 打不开」，
+// 这个代价与收益完全不成比例，整条路撤掉。旧进程只会让这一版的改动不生效，
+// 不会让 App 坏掉，那是一种可以被容忍的失败。
 
 /// 0.0.28 — the accessor names come from the runtime instead of this source
 
