@@ -2056,6 +2056,13 @@ typedef struct {
 static AevonVideoSlot AevonVideoSlots[3];
 static void *AevonVideoCell = NULL;
 static int AevonVideoScanLeft = 0;
+/// 0.0.89 — 指针尾 4 位。日志里只用来分辨「同一块对象还是换了对象」。
+/// 直接对 ObjC 指针做位运算是 `-Wdeprecated-objc-pointer-introspection` 的靶子
+/// （CI 用 `-Werror`，run 41819208583 就是挂在这里），先落到 `void *` 再取整数。
+static unsigned long AevonPtrTag(const void *p) {
+    return (unsigned long)(((uintptr_t)p) & 0xffffUL);
+}
+
 /// 0.0.89 — 读数限流改成**按时间**。
 ///
 /// Aevon(79) 里 `video band none` 出现 58 次 + `video tree` 58 次，而源码里那两行
@@ -2561,8 +2568,8 @@ static void AevonVideoWrite(UIView *band, UIView *cell, CGRect rb,
                  "video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s via=%.8s c=%04lx b=%04lx ty=%.0f",
                  class_getName([band class]), rb.size.height, rb.origin.y,
                  want, gap, slot->writes, rname != NULL ? rname : "?", via,
-                 (unsigned long)(((uintptr_t)cell) & 0xffff),
-                 (unsigned long)(((uintptr_t)band) & 0xffff), t.ty);
+                 AevonPtrTag(cell),
+                 AevonPtrTag(band), t.ty);
         AevonPageWrite(body);
     }
 }
@@ -2703,7 +2710,7 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
                      [first bounds].size.height,
                      [first superview] != nil ? [[first superview] bounds].size.height : 0.0,
                      (unsigned long)walked,
-                     (unsigned long)(((uintptr_t)cell) & 0xffff));
+                     AevonPtrTag(cell));
             AevonPageWrite(body);
             AevonVideoTree(first);
         }
