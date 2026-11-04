@@ -715,9 +715,6 @@ def main():
                       # 进程若被系统 SIGKILL，它就停在某一秒上，下一次 `boot` 就是
                       # 死亡时刻 —— 这种杀法谁都拦不住，只能靠「最后一秒」定位。
                       b"app: crash sig=%d step=%d",
-                      # 0.0.92 — 手指进来多少、被我们吞掉多少（宿主侧每秒一行）。
-                      # `in>0 eat=0` ⇒ 卡屏不在我们这一侧；`eat>0` ⇒ 是我们吞的。
-                      b"win: touch in=%d eat=%d",
                       b"app: crash exc %s: %s step=%d",
                       b"alive t=%d",
                       b"video reset on foreground",
@@ -1080,6 +1077,11 @@ def main():
                   b"win: revive bundle=",
                   b"win: revive suppressed, last one ",
                   b"win: revive gave up ",
+                  # 0.0.92 — 手指进来多少、被我们吞掉多少（宿主侧每秒一行）。
+                  # `in>0 eat=0` ⇒ 卡屏不在我们这一侧（手指进到场景里了，我们
+                  # 一条都没吞）；`eat>0` ⇒ 是我们吞的。Aevon(82) 的「页面滑不动、
+                  # 点不动」当时只能靠 `touch seen` 的前 12 条去推测，分不出这两种。
+                  b"win: touch in=%d eat=%d",
                   b"applog[%@]: ",
                   # 0.0.74 — 轻推与「替操作者缩放一下」都撤了：Aevon(64) 的原话
                   # 是「内容会自己跳动」，而那两次 17 pt 正是跳动的来源。反过来
