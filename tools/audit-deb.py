@@ -666,7 +666,13 @@ def main():
                       # 目标、缺口。0.0.85 在视频区自己的坐标系里算，原点偏移漏进结果，
                       # 屏幕上就永远差那么一截；这一行就是那个偏移的证据。
                       # 另有 `video clip`：祖先会裁时把位移夹回来，宁可少挪不留黑块。
-                      b"video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s",
+                      # 0.0.87 — `via=` 是这一版的判据：`layout` = 在 App 排完版、
+                      # CoreAnimation 提交这一帧之前就摆好了（用户看不到跳）；`tick` =
+                      # 心跳才追上（屏幕上会跳一下）。0.0.86 之前只有后者。
+                      b"video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s via=%.8s",
+                      # 迟到的原因是「摆得晚」，所以钩住 App 自己的排版那一层：
+                      # 字符串在二进制里，说明这条安装路径没被编译掉。
+                      b"layoutSubviews",
                       b"video scan %.20s r=%.0f,%.0f,%.0fx%.0f want=%.0f gap=%.0f",
                       b"video clip %.20s moved=%.0f need=%.0f n=%d",
                       b"video band none cls=%.24s h=%.0f box=%.0f",

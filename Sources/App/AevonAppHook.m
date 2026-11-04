@@ -2174,26 +2174,132 @@ static void AevonVideoTree(UIView *root) {
     AevonPageWrite(body);
 }
 
-static void AevonVideoCenter(void) {
+/// 0.0.87 — 居中的**时刻**也是判据的一部分。
+///
+/// Aevon(77) 把「跳动」这件事说得非常清楚：翻到那一页时 App 自己先把画面摆在
+/// `y=94`，我们的心跳那一拍才把它挪到 `y=238` —— 同一秒里 `video scan … gap=143`
+/// 紧跟着 `video band … dy=143`，一进一出。屏幕上看到的就是「先按 App 的位置显示，
+/// 再跳一下」。摆得对，但摆得晚。
+///
+/// 所以这一版不只问「摆得对不对」，还问「什么时候摆」。App 要挪画面一定要走
+/// `-layoutSubviews`，那就钩住**视频区那一层**的 `layoutSubviews`：在原实现返回之后、
+/// CoreAnimation 提交这一帧之前把 transform 写进去，第一帧画出来就是居中的。
+/// 心跳那一份留着兜底（钩子没覆盖到的层级、或 App 换了版式），它慢一点但不缺席。
+///
+/// 两个坑都写在安装函数里：
+///   · `class_getInstanceMethod` 可能拿到**父类**的方法。直接 `method_setImplementation`
+///     会改掉 UIView 自己的 `layoutSubviews` —— 那是整台机器每一层视图。所以先确认
+///     这个方法属于这个类；不属于就先 `class_addMethod` 把继承来的实现钉在它自己
+///     身上，再改那一条。
+///   · 写 transform 时套一层 `CATransaction` + `setDisableActions:YES`：App 的排版
+///     常常发生在动画块里，不关掉隐式动画，我们这一手会被它做成一段滑动 ——
+///     那就还是「跳一下」，只是慢镜头。
+typedef struct {
+    Class cls;
+    IMP orig;
+} AevonLayoutHookSlot;
+
+static AevonLayoutHookSlot AevonLayoutHookSlots[6];
+static int AevonLayoutHookCount = 0;
+static int AevonVideoBusy = 0;
+
+static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via);
+static void AevonLayoutHook(id self, SEL _cmd);
+
+/// 这个方法是不是**这个类自己**实现的。`class_getInstanceMethod` 会把父类的实现
+/// 借给你，改它等于改父类（对 `layoutSubviews` 来说就是改 UIView，整台机器每一层）。
+/// 判法只用 `class_addMethod`：它只查这个类自己的方法表，成功就说明「原来只有父类
+/// 有」—— 那一次添加正好把继承来的实现钉在了它自己身上。
+static void AevonHookLayout(Class cls) {
+    if (cls == Nil || cls == [UIView class] || cls == [NSObject class]) return;
+    for (int i = 0; i < AevonLayoutHookCount; i++) {
+        if (AevonLayoutHookSlots[i].cls == cls) return;
+    }
+    if (AevonLayoutHookCount >= 6) return;
+    SEL sel = sel_registerName("layoutSubviews");
+    Method m = class_getInstanceMethod(cls, sel);
+    if (m == NULL) return;
+    const char *types = method_getTypeEncoding(m);
+    if (types == NULL) return;
+    IMP inherited = method_getImplementation(m);
+    if (class_addMethod(cls, sel, inherited, types)) {
+        // 类自己没有实现：刚钉上去的那一条就是「原实现」。
+        m = class_getInstanceMethod(cls, sel);
+        if (m == NULL) return;
+    }
+    AevonLayoutHookSlots[AevonLayoutHookCount].cls = cls;
+    AevonLayoutHookSlots[AevonLayoutHookCount].orig = method_getImplementation(m);
+    AevonLayoutHookCount += 1;
+    method_setImplementation(m, (IMP)AevonLayoutHook);
+}
+
+/// 从 `cls` 往上找我们记过的原实现。子类继承过去的实现也要能找到，否则
+/// 钩子里调不到 App 自己的排版代码，等于把这一层排版吞了。
+static IMP AevonLayoutOriginalFor(Class cls) {
+    for (Class c = cls; c != Nil; c = class_getSuperclass(c)) {
+        for (int i = 0; i < AevonLayoutHookCount; i++) {
+            if (AevonLayoutHookSlots[i].cls == c) return AevonLayoutHookSlots[i].orig;
+        }
+    }
+    return NULL;
+}
+
+/// 要不要管这一次排版：只有「卡片在屏」时管。全屏时窗口就是整屏，画面本来
+/// 就装得下，插手只是白花 CPU。
+static BOOL AevonCardIsUp(void) {
+    UIScreen *screen = [UIScreen mainScreen];
+    CGFloat full = screen != nil ? [screen bounds].size.height : 0.0;
+    if (full < 200.0) return NO;
+    CGFloat height = AevonWindowHeight();
+    return (height > 200.0 && height < full - 40.0);
+}
+
+/// 这个视图属于哪一页：`view` 的直接子视图里、包含它的那一个。
+static UIView *AevonPageCellOf(UIView *node, UIScrollView *view) {
+    UIView *p = node;
+    int steps = 0;
+    while (p != nil && steps < 16) {
+        if ([p superview] == view) return p;
+        if (p == (UIView *)view) return nil;
+        p = [p superview];
+        steps += 1;
+    }
+    return nil;
+}
+
+static void AevonLayoutHook(id self, SEL _cmd) {
+    IMP orig = AevonLayoutOriginalFor(object_getClass(self));
+    if (orig != NULL) ((void (*)(id, SEL))orig)(self, _cmd);
+    if (AevonVideoBusy) return;
+    if (![self isKindOfClass:[UIView class]]) return;
+    if (!AevonAppHookAllowed()) return;
     UIScrollView *view = AevonPagerGet();
+    // 没有翻页器（还没认出来）就什么都不做：这里每帧都在跑，不能自己去认。
     if (view == nil || [view window] == nil) return;
-    CGRect page = [view bounds];
-    if (page.size.height < 200.0) return;
-    UIView *cell = AevonPageKidAt(view, page.size.height, [view contentOffset].y);
+    UIView *cell = AevonPageCellOf((UIView *)self, view);
+    if (cell == nil) return;
+    if (!AevonCardIsUp()) return;
+    AevonVideoBusy = 1;
+    AevonVideoCenterFor(cell, (UIView *)self, "layout");
+    AevonVideoBusy = 0;
+}
+
+static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
     if (cell == nil) return;
     CGFloat cellH = [cell bounds].size.height;
     if (cellH < 200.0) return;
-    // 换了一页：上一页的记账（挪过几次、扫过几行）全部作废 —— 画面对象本来就是新的。
-    if (AevonVideoCell != (void *)cell) {
-        AevonVideoCell = (void *)cell;
-        memset(AevonVideoSlots, 0, sizeof(AevonVideoSlots));
-        AevonVideoScanLeft = 3;
-        AevonVideoNone = 0;
-    }
 
     NSMutableArray *players = [NSMutableArray array];
-    AevonCollectPlayers(cell, players);
-    if (players.count == 0) return;
+    // 排版钩子里只扫被排版的那一层（视频区自己，几十个视图），不扫整页 ——
+    // 钩子每帧都可能跑，整页扫一遍会把滚动拖卡。
+    AevonCollectPlayers(hint != nil ? hint : cell, players);
+    if (players.count == 0) {
+        // 钩子挂在「画面的直接父视图」上时，这一层可能只是个容器（类名里没有
+        // Player / Video）。它本身也可能是视频区，就拿它当候选试一次 ——
+        // `AevonBandUnder` 的门槛（120×200）会挡住真正的小容器。
+        if (hint == nil) return;
+        [players addObject:hint];
+    }
 
     UIView *pickBand[2] = {nil, nil};
     UIView *pickRegion[2] = {nil, nil};
@@ -2233,8 +2339,9 @@ static void AevonVideoCenter(void) {
             CGFloat gap = want - rb.origin.y;
 
             // 每个候选一行：在卡片里的矩形、目标、缺口。这一版能自查，下一版换判据
-            // 也靠它（0.0.85 缺的就是「原点到底在哪」这一个数）。
-            if (AevonVideoScanLeft > 0) {
+            // 也靠它（0.0.85 缺的就是「原点到底在哪」这一个数）。只在心跳那一路上写：
+            // 排版钩子每帧都可能跑，把读数也写进去会把日志冲掉。
+            if (hint == nil && AevonVideoScanLeft > 0) {
                 AevonVideoScanLeft -= 1;
                 char body[220];
                 snprintf(body, sizeof(body),
@@ -2259,7 +2366,9 @@ static void AevonVideoCenter(void) {
     }
 
     if (picked == 0) {
-        if (AevonVideoNone < 2) {
+        // 钩子那一路上只扫了一层，找不到画面是正常的（画面区可能在它上层），
+        // 把「没找到」写成结论会误导下一轮 —— 所以只有心跳那一份才记这一行。
+        if (hint == nil && AevonVideoNone < 2) {
             AevonVideoNone += 1;
             UIView *first = [players objectAtIndex:0];
             char body[170];
@@ -2273,11 +2382,20 @@ static void AevonVideoCenter(void) {
         return;
     }
 
+    // 整页自己重排时也要赶在同一帧里改（开卡/关卡、复用、旋转都会走到这里）。
+    // 这条比另外两条贵（要扫整页），但单元格的 `layoutSubviews` 不是每帧都来。
+    AevonHookLayout([cell class]);
+
     for (int i = 0; i < picked; i++) {
         UIView *band = pickBand[i];
         CGRect rb = pickRect[i];
         CGFloat want = (cellH - rb.size.height) / 2.0;
         CGFloat gap = pickGap[i];
+        // 认出来就把这一族钩上：下一次 App 摆这块画面时，我们在同一帧里改，
+        // 用户看到的第一帧就是居中的（见 `AevonLayoutHook`）。已经居中的也要钩
+        // —— 这一页摆对了不代表下一页摆得对。
+        AevonHookLayout([[band superview] class]);
+        AevonHookLayout([pickRegion[i] class]);
         AevonVideoSlot *slot = AevonVideoSlotFor((void *)band);
         if (fabs(gap) < 8.0) {          // 已经在卡片正中
             slot->hits = 0;
@@ -2286,24 +2404,56 @@ static void AevonVideoCenter(void) {
         CGAffineTransform t = [band transform];
         // 缩放 / 旋转 / 横向位移都不是我们写的：那是 App 自己的动画，别抢。
         if (fabs(t.a - 1.0) > 0.01 || fabs(t.d - 1.0) > 0.01 || fabs(t.tx) > 0.5) continue;
-        if (slot->hits >= 3) continue;
+        // 次数上限：心跳那条路是「背着 App 改」，改三次还不对就说明它在跟我们对打，
+        // 再改只会让画面来回跳；排版那条路本来就发生在 App 自己摆完之后，重复几次
+        // 是正常的（先按封面高摆、再按视频高摆），上限放宽。
+        int cap = (hint != nil) ? 8 : 3;
+        if (slot->hits >= cap) continue;
         BOOL clip = AevonVideoClips(band, cell, &gap);
         if (fabs(gap) < 8.0) continue;
         slot->hits += 1;
+        // 关掉隐式动画：App 的排版常常发生在动画块里，不关的话我们这一手会被它
+        // 做成一段滑动，看上去还是「跳一下」，只是慢镜头。
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
         [band setTransform:CGAffineTransformMakeTranslation(0, t.ty + gap)];
+        [CATransaction commit];
         if (clip) {
             char line[210];
             snprintf(line, sizeof(line), "video clip %.20s moved=%.0f need=%.0f n=%d",
                      class_getName([band class]), gap, want - rb.origin.y, slot->hits);
             AevonPageWrite(line);
         }
-        char body[250];
-        snprintf(body, sizeof(body),
-                 "video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s",
-                 class_getName([band class]), rb.size.height, rb.origin.y,
-                 want, gap, slot->hits, class_getName([pickRegion[i] class]));
-        AevonPageWrite(body);
+        // 只在第一次写。钩子那条路如果每帧都要补（App 每帧重置 transform），
+        // 写日志只会把真正有用的读数冲掉。
+        if (slot->hits <= 1) {
+            char body[280];
+            snprintf(body, sizeof(body),
+                     "video band v=%.24s h=%.0f y=%.0f want=%.0f dy=%.0f n=%d r=%.24s via=%.8s",
+                     class_getName([band class]), rb.size.height, rb.origin.y,
+                     want, gap, slot->hits, class_getName([pickRegion[i] class]), via);
+            AevonPageWrite(body);
+        }
     }
+}
+
+/// 心跳那一份：找「用户正看着的那一页」，交给 `AevonVideoCenterFor`。
+/// `via=tick` 在这份日志里意味着**没赶上排版的时刻** —— 屏幕上会跳一下。
+static void AevonVideoCenter(void) {
+    UIScrollView *view = AevonPagerGet();
+    if (view == nil || [view window] == nil) return;
+    CGRect page = [view bounds];
+    if (page.size.height < 200.0) return;
+    UIView *cell = AevonPageKidAt(view, page.size.height, [view contentOffset].y);
+    if (cell == nil) return;
+    // 换了一页：上一页的记账（挪过几次、扫过几行）全部作废 —— 画面对象本来就是新的。
+    if (AevonVideoCell != (void *)cell) {
+        AevonVideoCell = (void *)cell;
+        memset(AevonVideoSlots, 0, sizeof(AevonVideoSlots));
+        AevonVideoScanLeft = 3;
+        AevonVideoNone = 0;
+    }
+    AevonVideoCenterFor(cell, nil, "tick");
 }
 
 /// 0.0.74 — 状态读数的一次性节拍。0.4 / 1.5 / 2.6 s 各一次：App 的重排、内容
