@@ -1005,11 +1005,41 @@ zStackParticipantDidChange:
     ///
     /// 这一步之前不存在，所以抖音的量尺跑了三轮、改了两次都没成：`fopen`
     /// `/var/mobile/Aevon.log` 在沙盒里必然失败，读数被我们自己丢掉了。
-    private static func drainAppLog(_ tag: String) {
+    private static func drainAppLog(_ tag: String, quiet: Bool = false) {
         guard let bundle = hostedBundle else { return }
         let lines = AevonDrainAppLog(bundle, 400)
+        // 0.0.91 — 每 2 秒那一趟是常态，没有新行就不出声，否则日志会被
+        // 一分钟 30 行「lines=0」灌满。
+        if quiet && lines <= 0 { return }
         Log.write("win: app log lines=" + String(lines) + " from " + tag
                   + " file=" + (AevonAppLogPathOf(bundle) ?? "none"))
+    }
+
+    /// 0.0.91 — 被托管的 App 进程死了，卡片只剩外壳（Aevon(80) 与 Aevon(81) 的
+    /// 「白色光晕」）。关掉它，0.6 秒后用同一个 bundle 重开一张。
+    ///
+    /// 120 秒内只允许一次：死因若是内存，重开只会在同一个坑里再死一遍；而
+    /// 「每 0.6 秒重开一次」会让整台手机变成幻灯片。宁可让用户手动重开，
+    /// 也不能自己变成一个循环。
+    private static var lastReviveAt = Date.distantPast
+
+    static func reviveCard(_ bundleID: String) {
+        let gap = Date().timeIntervalSince(lastReviveAt)
+        guard gap > 120 else {
+            Log.write("win: revive suppressed, last one " + String(Int(gap)) + "s ago")
+            return
+        }
+        lastReviveAt = Date()
+        Log.write("win: revive bundle=" + bundleID + " after 0.6s")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            guard !cardUp else {
+                Log.write("win: revive skipped, a card is already up")
+                return
+            }
+            openCard(bundleID) { why in
+                Log.write("win: revive gave up " + why)
+            }
+        }
     }
 
     private static func clearHosted() {
@@ -1432,6 +1462,9 @@ zStackParticipantDidChange:
         var dropped = 0
         var droppedAt = Date()
         var wakes = 0
+        // 0.0.91 — 「画面掉了、而且再也没回来」连续几拍。两拍就够：一拍可能是
+        // 切换的中间态，两拍（稳态 0.2 s 一拍）就是真的没了。
+        var deadBeats = 0
         // 0.0.40 — Aevon(38): the picture goes black for a moment whenever the
         // screen changes owner (desktop → app, app → desktop). Two candidates,
         // and they need different fixes: the scene really is being taken away
@@ -1502,6 +1535,9 @@ zStackParticipantDidChange:
             // 从来不是这条时钟看见的。
             let content = AevonContentStateOf(scene)
             let level = AevonSceneLevel(scene)
+            // 0.0.91 — 每拍都要这个数（不只是写日志那一拍）：`cs=0 且
+            // sublayers=0` 是「进程不在了」的形状 —— 只剩外壳、里面没有层。
+            let sublayers = view.layer.sublayers?.count ?? 0
             // 0.0.59 — 首帧不在这里露。原来这一行是 `if content == 2 { reveal }`，
             // 而它是 200 ms 一拍 —— 冷启动的「先出现再闪」有一半时长就是这一拍
             // 攒出来的。现在交给 `watchFirstFrame`（50 ms 一拍、连续两拍确认）。
@@ -1567,6 +1603,26 @@ zStackParticipantDidChange:
                 // 修复不应该自带保质期。
                 AevonWakeReset()
             }
+            // 0.0.91 — 「掉下去之后**再也没回来**」和「掉一下又回来」是两件事。
+            //
+            // 前者在 Aevon(80)/Aevon(81) 里都是同一个形状：`cs=0`、`sublayers=0`、
+            // App 侧日志停在某一秒，而卡片窗口、圆角、投影全在 —— 用户看到的就是
+            // 「浮窗消失，只留一圈白色光晕」。掉画的兜底（写 settings）救不回它：
+            // settings 管的是「这个场景该不该睡」，管不了「进程还在不在」。
+            //
+            // 于是：连续两拍确认，然后关卡、0.6 秒后用同一个 bundle 重开。
+            if beat >= 6, content == 0, sublayers == 0, dropped != 0 {
+                deadBeats += 1
+            } else {
+                deadBeats = 0
+            }
+            if deadBeats >= 2, let deadBundle = bundleID {
+                Log.write("win: scene dead cs=0 layers=0 beats=" + String(deadBeats)
+                          + " bundle=" + deadBundle)
+                closeCard("scene dead")
+                reviveCard(deadBundle)
+                return
+            }
             // Eight beats up front say how the first push went; after that one
             // line in four is enough to see the card settle or fail. Two lets,
             // because one long concatenation is a type-checker timeout (0.0.30
@@ -1590,7 +1646,7 @@ zStackParticipantDidChange:
                     + " door=" + String(door)
                     + " wrote=" + String(wrote)
                     + " misses=" + String(misses)
-                let layers = String(view.layer.sublayers?.count ?? 0)
+                let layers = String(sublayers)
                 let shape = " cs=" + String(content)
                     + " lvl=" + String(format: "%.1f", level)
                     + " wake=" + String(wakes)
@@ -1603,6 +1659,14 @@ zStackParticipantDidChange:
                 Log.write("win: keepalive beat " + String(beat) + state
                           + " reasons=" + reasonsOf(scene)
                           + " sublayers=" + layers + shape + gates)
+            }
+            // 0.0.91 — 每 2 秒把 App 侧日志取回来一次。
+            //
+            // 0.0.90 只在「开卡 +4 秒」与「关卡」两个时刻取，所以进程一死，
+            // 死前那几行必然留在它自己的 tmp 里、下一次开卡才被读走 ——
+            // 三轮都指不出死因，一半原因在这里。稳态 0.2 s 一拍 ⇒ 10 拍 = 2 s。
+            if beat % 10 == 0 {
+                drainAppLog("beat", quiet: true)
             }
             // The clock runs for the life of the card, not for eight seconds.
             // `stopped` is the only exit, and `closeCard` is the only thing that

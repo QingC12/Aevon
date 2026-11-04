@@ -704,6 +704,14 @@ def main():
                       #   有几行就知道这中间死过几次，不用再靠 `geom` 出没出两对去猜。
                       b"video known n=%d d=%d c=%04lx",
                       b"app: boot pid=%d",
+                      # 0.0.91 — 死因证词。signal handler 只做 open/write/close
+                      # （崩溃现场不能碰 NSString/stdio），`step=` 说死在哪个函数里；
+                      # 异常那一路带名字与原因。`alive t=` 是被托管期间每秒一行：
+                      # 进程若被系统 SIGKILL，它就停在某一秒上，下一次 `boot` 就是
+                      # 死亡时刻 —— 这种杀法谁都拦不住，只能靠「最后一秒」定位。
+                      b"app: crash sig=%d step=%d",
+                      b"app: crash exc %s: %s step=%d",
+                      b"alive t=%d",
                       b"video reset on foreground",
                       # 0.0.84 — 抬高从「呈现」这一声开始，不再等心跳相位。
                       b"presentViewController:animated:completion:",
@@ -1055,6 +1063,15 @@ def main():
                   # 都没取回来（关卡那一拍只取到 3 行，之后 12 s 的 `state` 全在
                   # 文件里没被读）。字面量给到 22 字节，躲开「≤15 字节编成立即数」。
                   b" from after card closed",
+                  # 0.0.91 — 死场景的证词与接回。Aevon(80)/Aevon(81) 的
+                  # 「浮窗消失、只剩一圈白色光晕」= 被托管的进程没了：
+                  # `cs=0` 且 `sublayers=0` 连续两拍。第一行是判定，
+                  # 后三行是动作（关卡 + 0.6 s 后用同一个 bundle 重开）
+                  # 与它的三道闸（120 s 上限、已有卡、重开失败）。
+                  b"win: scene dead cs=0 layers=0 beats=",
+                  b"win: revive bundle=",
+                  b"win: revive suppressed, last one ",
+                  b"win: revive gave up ",
                   b"applog[%@]: ",
                   # 0.0.74 — 轻推与「替操作者缩放一下」都撤了：Aevon(64) 的原话
                   # 是「内容会自己跳动」，而那两次 17 pt 正是跳动的来源。反过来

@@ -88,6 +88,16 @@ static int AevonLogged = 0;
 /// 这个进程被我们演过（或正在被演）。置上就不再清 —— 关卡之后那一次「交还整屏」
 /// 同样需要把翻页器对回去，那正是全屏截图里偏下的来源。定义在这里是因为
 /// `AevonCanvasIsShrunk`（几何判据）也要用它。
+/// 0.0.91 — 「死在哪一步」。signal handler 里只能读一个整数，所以每个可能死人的
+/// 函数入口先写一次；崩溃之后日志里的 `step=` 就是「死在哪一行附近」。
+/// 声明放在这里（而不是证词那一段），是因为下面的视频/浮层代码都要写它。
+static volatile sig_atomic_t AevonStep = 0;
+#define AEVON_STEP_NONE   0
+#define AEVON_STEP_SCAN   2
+#define AEVON_STEP_WRITE  3
+#define AEVON_STEP_HOOK   4
+#define AEVON_STEP_SHEET  5
+
 static int AevonEverHosted = 0;
 
 /// The switch in Settings. Absent means on: the feature is the reason the card
@@ -1495,6 +1505,7 @@ static void AevonSheetLiftAgain(void) {
 }
 
 static void AevonSheetLift(void) {
+    AevonStep = AEVON_STEP_SHEET;
     UIWindow *win = AevonKeyWindow();
     if (win == nil) return;
     UIViewController *top = [win rootViewController];
@@ -2102,19 +2113,51 @@ typedef struct {
     char cls[28];                         // 末层类名，取出后再核一次
 } AevonVideoPath;
 
-/// 页指针只做比较，**永不 cast、永不发消息**（它同样是裸指针）。
-static uintptr_t AevonVideoKnownCell = 0;
-static AevonVideoPath AevonVideoKnownPath[2];
-static int AevonVideoKnownCount = 0;
-/// 记账的年龄（心跳拍数）。到点就作废重认一次：App 会在同一页里换版式/换层，
-/// 只认一次会永久指着旧的那块画面。32 拍 ≈ 6 s，代价是每 6 秒一次整页扫描。
-static int AevonVideoKnownAge = 0;
+/// 0.0.91 — 记账**每页一格**。
+///
+/// 0.0.90 只有一格，而翻页器稳态会留着**两格 cell**（Aevon(81) 的日志里
+/// `c=e400` 与 `c=3000` 每两秒互相顶掉一次）：A 页认完、心跳落到 B 页就把记账清了，
+/// 再回 A 页又要整页重扫 —— 于是 `video scan` / `video known` 每两秒重来一次，
+/// 每一次都从 `gap=143` 把画面推回正中，屏幕上就是「视频从顶部慢慢居中」。
+///
+/// 两格按 cell 指针各记一条路径即可。页指针只做比较，**永不 cast、永不发消息**
+/// （它同样是裸指针）。
+#define AEVON_PAGE_SLOTS 2
+#define AEVON_PATH_SLOTS 2
+typedef struct {
+    uintptr_t cell;                        // 0 = 空槽
+    AevonVideoPath path[AEVON_PATH_SLOTS];
+    int count;
+    /// 记账的年龄（心跳拍数）。到点就作废重认一次：App 会在同一页里换版式/换层，
+    /// 只认一次会永久指着旧的那块画面。32 拍 ≈ 6 s，代价是每 6 秒一次整页扫描。
+    int age;
+} AevonVideoPage;
+
+static AevonVideoPage AevonVideoPages[AEVON_PAGE_SLOTS];
+static int AevonVideoPageNext = 0;
+
+static AevonVideoPage *AevonVideoPageFind(uintptr_t cell) {
+    if (cell == 0) return NULL;
+    for (int i = 0; i < AEVON_PAGE_SLOTS; i++) {
+        if (AevonVideoPages[i].cell == cell) return &AevonVideoPages[i];
+    }
+    return NULL;
+}
+
+/// 给这一页占一格。两格都满时按轮转顶掉一个 —— 不按指针大小挑，那等于随机。
+static AevonVideoPage *AevonVideoPageTake(uintptr_t cell) {
+    AevonVideoPage *hit = AevonVideoPageFind(cell);
+    if (hit != NULL) return hit;
+    AevonVideoPage *slot = &AevonVideoPages[AevonVideoPageNext];
+    AevonVideoPageNext = (AevonVideoPageNext + 1) % AEVON_PAGE_SLOTS;
+    memset(slot, 0, sizeof(*slot));
+    slot->cell = cell;
+    return slot;
+}
 
 static void AevonVideoKnownForget(void) {
-    AevonVideoKnownCell = 0;
-    AevonVideoKnownCount = 0;
-    AevonVideoKnownAge = 0;
-    memset(AevonVideoKnownPath, 0, sizeof(AevonVideoKnownPath));
+    memset(AevonVideoPages, 0, sizeof(AevonVideoPages));
+    AevonVideoPageNext = 0;
 }
 
 /// 0.0.89 — 「这一阵子我们吃了主线程多少」。
@@ -2456,6 +2499,7 @@ static UIView *AevonPageCellOf(UIView *node, UIScrollView *view) {
 }
 
 static void AevonLayoutHook(id self, SEL _cmd) {
+    AevonStep = AEVON_STEP_HOOK;
     IMP orig = AevonLayoutOriginalFor(object_getClass(self));
     if (orig != NULL) ((void (*)(id, SEL))orig)(self, _cmd);
     if (AevonVideoBusy) return;
@@ -2482,27 +2526,30 @@ static void AevonLayoutHook(id self, SEL _cmd) {
     if ([node bounds].size.width < [cell bounds].size.width * 0.8) return;
     if (!AevonAppHookAllowed()) return;
     if (!AevonCardIsUp()) return;
-    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (now - AevonVideoLayoutAt < 0.008) return;      // 同一帧只做一次
-    if (now < AevonVideoPause) return;                 // 上一次太贵，歇一下
-    AevonVideoLayoutAt = now;
-    // 0.0.89 — 认过的页只做几何。
+    // 0.0.91 — 认过的页**先写，而且不受 8 ms 门限制**。
     //
-    // Aevon(79) 的 4.5 秒卡顿不是单次贵（`video slow spent=25ms` 只有一条），
-    // 是次数：这个钩子每 8 ms 就放行一次，而每次都要把页面扫一遍。一页的画面
-    // 只需要认一次 —— 认出来之后，`cell` 还是那一页、`band` 还挂在它下面，
-    // 就只做 `convertRect:` 加写 transform，扫零个视图。快路径也照样算进
-    // `video load`，真出问题时能看到它到底还占多少。
+    // Aevon(81) 里 `video band` 几乎都是 `via=tick`、每次 `gap` 都是 142/143：
+    // 纠正落在心跳上（0.6 s 一拍），而 App 早在自己那一帧里把画面摆在了 y=94 ——
+    // 于是这 143 pt 的位移每次都被看见，用户说的「从顶部居中」就是它。
+    //
+    // 8 ms 门本来是给「整页扫描」用的（一帧只放行一个视图，防止同帧几个视图
+    // 各扫一遍整页）。认过的页只做几次取下标 + 一次 convertRect，微秒级；
+    // 同帧七个视图各自走一次也仍然免费。让它们全部通过，画面层才能在**它自己
+    // 那一拍**里、在 CoreAnimation 提交之前就被摆好 —— 用户看不到它动。
     AevonVideoBusy = 1;
     CFTimeInterval began = CFAbsoluteTimeGetCurrent();
     BOOL known = AevonVideoKnownApply(cell, "layout");
-    if (known) {
-        AevonVideoBusy = 0;
-        AevonVideoLoadN += 1;
-        AevonVideoLoadSpent += CFAbsoluteTimeGetCurrent() - began;
-        AevonVideoLoadReport();
-        return;
-    }
+    AevonVideoBusy = 0;
+    AevonVideoLoadN += 1;
+    AevonVideoLoadSpent += CFAbsoluteTimeGetCurrent() - began;
+    AevonVideoLoadReport();
+    if (known) return;
+
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - AevonVideoLayoutAt < 0.008) return;      // 同一帧只扫一次
+    if (now < AevonVideoPause) return;                 // 上一次太贵，歇一下
+    AevonVideoLayoutAt = now;
+    AevonVideoBusy = 1;
     AevonVideoCenterFor(cell, videoLayer ? node : nil, "layout");
     AevonVideoBusy = 0;
     AevonVideoLoadN += 1;
@@ -2513,7 +2560,8 @@ static void AevonLayoutHook(id self, SEL _cmd) {
     // 这一条是给「这一页真的没有横版画面」留的：不加的话，每 8 ms 一次完整扫描
     // 会一直失败、一直重扫 —— 一页上千个视图 × 每秒 125 次，主线程就没了。
     // 认出来了就不用管，接下来走的是快路径。
-    if (AevonVideoKnownCount == 0) AevonVideoLayoutAt = now + 0.292;
+    AevonVideoPage *fresh = AevonVideoPageFind((uintptr_t)cell);
+    if (fresh == NULL || fresh->count == 0) AevonVideoLayoutAt = now + 0.292;
     // 自伤保护：一次扫描贵过 8 ms 就不是「一帧内的判断」了，停 2 秒再试。
     // 卡住主线程的代价比画面偏上大得多 —— 这一条是给下一次意外留的刹车，
     // 不是给已知场景用的。
@@ -2532,6 +2580,7 @@ static void AevonLayoutHook(id self, SEL _cmd) {
 /// （排版钩子每帧都能撞上，只做几何，不遍历）。
 static void AevonVideoWrite(UIView *band, UIView *cell, CGRect rb,
                             const char *rname, const char *via) {
+    AevonStep = AEVON_STEP_WRITE;
     if (band == nil || cell == nil) return;
     CGFloat cellH = [cell bounds].size.height;
     CGFloat want = (cellH - rb.size.height) / 2.0;
@@ -2650,14 +2699,15 @@ static UIView *AevonVideoPathResolve(UIView *cell, const AevonVideoPath *path) {
 ///   · 不隐藏、不透明为 0（同一页里换视频时旧那块会被隐藏）。
 /// 返回值只表示「记账还能用」，不代表这一帧一定写了 transform。
 static BOOL AevonVideoKnownApply(UIView *cell, const char *via) {
-    if (cell == nil || AevonVideoKnownCell != (uintptr_t)cell) return NO;
-    if (AevonVideoKnownCount <= 0) return NO;
+    if (cell == nil) return NO;
+    AevonVideoPage *page = AevonVideoPageFind((uintptr_t)cell);
+    if (page == NULL || page->count <= 0) return NO;
     CGFloat cellH = [cell bounds].size.height;
     CGFloat cellW = [cell bounds].size.width;
     if (cellH < 200.0) return NO;
     BOOL alive = NO;
-    for (int i = 0; i < AevonVideoKnownCount && i < 2; i++) {
-        UIView *band = AevonVideoPathResolve(cell, &AevonVideoKnownPath[i]);
+    for (int i = 0; i < page->count && i < AEVON_PATH_SLOTS; i++) {
+        UIView *band = AevonVideoPathResolve(cell, &page->path[i]);
         if (band == nil) continue;
         if ([band isHidden] || [band alpha] < 0.01) continue;
         CGRect rb = [band convertRect:[band bounds] toView:cell];
@@ -2667,11 +2717,16 @@ static BOOL AevonVideoKnownApply(UIView *cell, const char *via) {
         AevonVideoWrite(band, cell, rb,
                         class_getName([[band superview] class]), via);
     }
-    if (!alive) AevonVideoKnownForget();
+    if (!alive) {
+        // 只作废这一页：另一页的账与它无关，一起清掉就又回到「每两秒重扫」。
+        page->count = 0;
+        memset(page->path, 0, sizeof(page->path));
+    }
     return alive;
 }
 
 static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
+    AevonStep = AEVON_STEP_SCAN;
     if (cell == nil) return;
     CGFloat cellH = [cell bounds].size.height;
     if (cellH < 200.0) return;
@@ -2779,22 +2834,26 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
         return;
     }
 
-    // 0.0.90 — 认出来就记下**路径**（不是对象）：这一页的 cell 地址 + 两块画面
-    // 各自的下标链。之后的排版从这里走下来现取，永远不碰上一帧的指针。
-    AevonVideoKnownForget();
-    AevonVideoKnownCell = (uintptr_t)cell;
+    // 0.0.91 — 认出来就记下**路径**（不是对象），写进**这一页自己的格子**。
+    // 翻页器留着两格 cell，两页各记各的，谁也不会把谁顶掉。
+    AevonVideoPage *page = AevonVideoPageTake((uintptr_t)cell);
     int kept = 0;
-    for (int i = 0; i < picked; i++) {
-        if (!AevonVideoPathOf(cell, pickBand[i], &AevonVideoKnownPath[kept])) continue;
-        kept += 1;
+    if (page != NULL) {
+        page->count = 0;
+        page->age = 0;
+        memset(page->path, 0, sizeof(page->path));
+        for (int i = 0; i < picked && kept < AEVON_PATH_SLOTS; i++) {
+            if (!AevonVideoPathOf(cell, pickBand[i], &page->path[kept])) continue;
+            kept += 1;
+        }
+        page->count = kept;
     }
-    AevonVideoKnownCount = kept;
     // 认一次一行：`d=` 是链的层数，`n=` 是记住几块。链建不起来时 `n=0`，
     // 那一页就继续走「每次重扫」的老路 —— 不会崩，只会慢。
     if (hint == nil) {
         char body[120];
         snprintf(body, sizeof(body), "video known n=%d d=%d c=%04lx",
-                 kept, kept > 0 ? (int)AevonVideoKnownPath[0].depth : 0,
+                 kept, kept > 0 ? (int)page->path[0].depth : 0,
                  AevonPtrTag(cell));
         AevonPageWrite(body);
     }
@@ -2809,6 +2868,10 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
     if (hint == nil && strcmp(via, "tick") == 0) {
         AevonHookLayout([cell class], 0);
         for (int i = 0; i < picked; i++) {
+            // 0.0.91 — 画面**自己**的类也挂上。0.0.90 只挂父视图（TTPlayerView）
+            // 与视频区（TTPlayerView），而画面层（TTMetalViewVP）常在自己的
+            // `layoutSubviews` 里定位置：只挂父层就会晚一拍，晚一拍就是可见的位移。
+            AevonHookLayout([pickBand[i] class], 1);
             AevonHookLayout([[pickBand[i] superview] class], 1);
             AevonHookLayout([pickRegion[i] class], 1);
         }
@@ -2834,13 +2897,16 @@ static void AevonVideoCenter(void) {
         AevonVideoCell = (void *)cell;
         memset(AevonVideoSlots, 0, sizeof(AevonVideoSlots));
         AevonVideoScanLeft = 3;
-        if ((uintptr_t)cell != AevonVideoKnownCell) AevonVideoKnownForget();
+    }
+    // 0.0.91 — 年龄按页算：只用得着的那两页各自 +1，到 32 拍各自作废。
+    for (int i = 0; i < AEVON_PAGE_SLOTS; i++) {
+        if (AevonVideoPages[i].cell == 0) continue;
+        AevonVideoPages[i].age += 1;
+        if (AevonVideoPages[i].age >= 32) memset(&AevonVideoPages[i], 0, sizeof(AevonVideoPages[i]));
     }
     // 0.0.89 — 认过的页心跳也只做几何，不再整页扫一遍。
     // 画面被 App 摆回去时 `AevonVideoWrite` 会补一次（`via=tick`）；真要一直对打，
     // `bounces` 会让我们先歇一秒，而不是每拍都扫。
-    AevonVideoKnownAge += 1;
-    if (AevonVideoKnownAge >= 32) AevonVideoKnownForget();
     if (AevonVideoKnownApply(cell, "tick")) return;
     AevonVideoCenterFor(cell, nil, "tick");
 }
@@ -3030,6 +3096,9 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
 // 这一条同时覆盖 0.0.71 漏掉的两个场景：关卡之后（App 回到 932，offset 还是
 // `N × 717`）与开卡之后（offset 还是 `N × 932`）。两者都是「停稳了，但不是整页」。
 
+/// 0.0.91 — `app: alive` 已经写了几行（上限 600 ≈ 10 分钟）。
+static int AevonAliveLines = 0;
+
 static void AevonPagerWatchTick(void *context) {
     (void)context;
     AevonWatchTicks += 1;
@@ -3054,6 +3123,19 @@ static void AevonPagerWatchTick(void *context) {
     BOOL shrunk = (height < full - 40.0);
     if (shrunk) AevonEverHosted = 1;
     if (!AevonEverHosted) return;
+    // 0.0.91 — 每秒一行「我还活着」。
+    //
+    // 0.0.90 的日志里抖音三分钟换了三个 pid，而 App 侧除了 `app: boot` 一行
+    // 什么都没有 —— 死亡时刻只能靠「上一行读数」去猜。被托管期间每秒写一行，
+    // 进程若是被系统 SIGKILL（内存/看门狗，这种杀法谁都拦不住、也写不下证词），
+    // 这一行就会停在某一秒上，下一次 `app: boot` 就是它的死亡时刻。
+    // 上限 600 行 ≈ 10 分钟，正好是一张卡的最长寿命。
+    if (shrunk && (AevonWatchTicks % 7) == 0 && AevonAliveLines < 600) {
+        AevonAliveLines += 1;
+        char beatLine[64];
+        snprintf(beatLine, sizeof(beatLine), "alive t=%d", AevonAliveLines);
+        AevonPageWrite(beatLine);
+    }
     // 0.0.80 — 1.5 s 一拍看一次「有没有浮层」。只在卡片在屏时看：全屏时窗口就是
     // 932，浮层本来就装得下，量它是白跑。
     if (shrunk) {
@@ -3304,6 +3386,65 @@ static BOOL AevonWorthInjecting(void) {
     return YES;
 }
 
+// MARK: - 0.0.91 进程死亡的证词
+
+/// 落盘用的路径，构造函数里定一次。之后崩溃时只走 open/write/close：
+/// signal handler 里不能碰 NSString、stdio、malloc —— 那些正是崩溃现场最不可靠
+/// 的东西，用它们写日志的结果往往是「什么都没写出来」。
+static char AevonCrashPath[PATH_MAX];
+
+static void AevonRawNote(const char *line) {
+    if (AevonCrashPath[0] == '\0' || line == NULL) return;
+    int fd = open(AevonCrashPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    ssize_t wrote = write(fd, line, strlen(line));
+    (void)wrote;
+    close(fd);
+}
+
+/// `app: crash sig=<n>` —— 段错误/abort/bus/ill/fpe 都走这里。
+///
+/// 写完把信号还原成默认再重新抛：这是**证词**，不是兜底。吞掉异常会让 App 带着
+/// 坏状态继续跑，比死一次更糟。
+static void AevonSignalNote(int sig) {
+    char line[160];
+    snprintf(line, sizeof(line), "%ld app: crash sig=%d step=%d\n",
+             (long)time(NULL), sig, (int)AevonStep);
+    AevonRawNote(line);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+/// `app: crash exc <名字>: <原因>` —— Objective-C 异常。
+/// 这一路不在 signal 上下文里，取字符串是安全的。
+static void AevonExceptionNote(NSException *e) {
+    if (e == nil) return;
+    char line[320];
+    const char *name = [[e name] UTF8String];
+    const char *why = [[e reason] UTF8String];
+    snprintf(line, sizeof(line), "%ld app: crash exc %s: %s step=%d\n",
+             (long)time(NULL), name != NULL ? name : "?",
+             why != NULL ? why : "?", (int)AevonStep);
+    AevonRawNote(line);
+}
+
+static void AevonInstallCrashNotes(void) {
+    const char *path = AevonAppLogPath();
+    if (path != NULL) snprintf(AevonCrashPath, sizeof(AevonCrashPath), "%s", path);
+    NSSetUncaughtExceptionHandler(&AevonExceptionNote);
+    int sigs[5] = {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE};
+    for (int i = 0; i < 5; i++) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = AevonSignalNote;
+        sigemptyset(&sa.sa_mask);
+        // 交付前先把处理器还原成默认：`raise` 之后仍然按系统的规矩死，
+        // 不改变任何人（包括系统的崩溃报告）看到的结局。
+        sa.sa_flags = SA_RESETHAND;
+        sigaction(sigs[i], &sa, NULL);
+    }
+}
+
 /// 0.0.90 — 每个进程一行证词。
 ///
 /// Aevon(80) 两次「只剩白色光晕」只能靠 `geom early/late` 出现两对来反推
@@ -3327,6 +3468,9 @@ static void AevonAppBoot(void) {
     // 不是抖动，是整个桌面。
     if (!AevonWorthInjecting()) return;
     AevonBootNote();
+    // 0.0.91 — 死亡证词。Aevon(81) 里抖音 3 分钟换了三个 pid，而日志里除了
+    // `app: boot` 一行什么都没有：进程死得太快，我们连「它怎么死的」都答不出。
+    AevonInstallCrashNotes();
 
     // Both getters, both chained: a process that is not hosted keeps the
     // system's answers byte for byte.
