@@ -701,14 +701,16 @@ def main():
                   b"AevonRingMultiRing",
                   b"win: icon launch ",
                   b"win: icon scene up after ",
-                  # 0.0.58 — 冷启动不再盖图标，改成卡片按住不显示。三条缺一不可：
-                  # `cold start cs=` 是判据命中（contentState != 2，热启动不会打），
-                  # `card waiting for first frame` 是卡片真的被按住，
-                  # `first frame shown after` 是它真的露出来了（带毫秒数，能直接
-                  # 读出这段空窗多长）。缺第一条说明判据把冷启动当成了热启动；
-                  # 缺第三条说明卡片永远不显示 —— 那是比闪黑更糟的一版。
-                  b"win: cold start cs=",
-                  b"win: card waiting for first frame",
+                  # 0.0.59 — 冷启动首帧。三条缺一不可：
+                  # `launch state cs=` 是建卡那一刻的判据读数（contentState、
+                  # layerManager.layers、是否前台可见、是否按住），
+                  # `held=1` 写在同一条行的末尾，说明卡片真的被按住了（拼在这一行
+                  # 里是为了少一次 activate 之前的写盘 —— 那一笔直接排在首帧前面），
+                  # `first frame watch beats=` 是观察器真的等到并放行（带毫秒数，
+                  # 能直接读出这段空窗多长）。缺第一条说明判据没跑；缺第三条说明
+                  # 卡片永远不显示 —— 那是比闪黑更糟的一版。
+                  b"win: launch state cs=",
+                  b"first frame watch beats=",
                   b"win: first frame shown after ",
                   # 0.0.42 — 多圈几何随旧版圆盘移交：布局规则（外圈一定比内圈多、
                   # 相邻圈错开半格）在 AevonRingMenu.distribution / radii 里，

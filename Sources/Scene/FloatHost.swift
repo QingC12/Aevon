@@ -301,7 +301,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             host.awaitingFrame = true
             host.frameAt = CACurrentMediaTime()
             card.alpha = 0
-            Log.write("win: card waiting for first frame")
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak host] in
                 host?.revealContent("timeout")
             }
@@ -319,6 +318,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         glow.isUserInteractionEnabled = false
         glow.layer.shadowOffset = .zero
         glow.layer.shadowOpacity = 1
+        // 0.0.59 — 光晕必须与卡片同进同出。
+        //
+        // 0.0.58 只把 `card.alpha` 置 0，漏了这一个兄弟层：卡片透明的一两秒里，
+        // 屏幕上仍然有一圈阴影在，形状和位置都与卡片一样。Aevon(58) 说的
+        // 「悬浮窗先出现」就是它 —— 不是窗口，是窗口的影子。然后卡片淡入、
+        // 画面跳进来，第二下就是「闪」。
+        if host.awaitingFrame { glow.alpha = 0 }
         root.addSubview(glow)
         host.glow = glow
         root.addSubview(card)
@@ -334,7 +340,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                   + " at " + String(format: "%.0f,%.0f", card.frame.origin.x, card.frame.origin.y)
                   + " natural=" + String(format: "%.0fx%.0f", source.width, source.height)
                   + " topbar_cropped_src=" + String(format: "%.0f", crop)
-                  + " topbar_kept_pt=" + String(format: "%.0f", host.keepTop))
+                  + " topbar_kept_pt=" + String(format: "%.0f", host.keepTop)
+                  + (host.awaitingFrame ? " held=1" : " held=0"))
         Log.write("win: scale factor=" + String(format: "%.3f", plan.scale)
                   + " shown=" + String(format: "%.0fx%.0f",
                                        visible.width * plan.scale, visible.height * plan.scale)
@@ -1102,6 +1109,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     ///
     /// 淡入而不是直接置 1。画面自己浮现像系统在放大图标；卡片弹出来像被塞了
     /// 一个窗口 —— 同一个 0.16 秒，两种观感。
+    ///
+    /// 0.0.59 —— 「闪」这一条修在这里。
+    ///
+    /// 0.0.58 的 0.16 秒淡入是**没有前提**的：它跟着保活时钟（稳态 200 ms 一拍）
+    /// 判断 `contentState == 2`，而那是「scene 认为有内容」，比「这一帧真的上了
+    /// 屏」早。于是淡入的前半段画面还是黑的，后半段画面才来 —— 一次渐变里夹着
+    /// 一次跳变，眼睛看到的就是闪。
+    ///
+    /// 现在两件事一起改：谁来 reveal 交给 `SceneProbe` 的 50 ms 观察器（连续两拍
+    /// 满足才动手，见 `watchFirstFrame`），这里只管「已经能画了，所以浮现」。
+    /// 光晕同步，否则卡片透明而影子还在。
     func revealContent(_ why: String) {
         guard awaitingFrame else { return }
         awaitingFrame = false
@@ -1109,12 +1127,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         Log.write(String(format: "win: first frame shown after %.0fms (%@)",
                          ms, why as NSString))
         guard let card = card else { return }
-        UIView.animate(withDuration: 0.16,
+        let glow = self.glow
+        UIView.animate(withDuration: 0.12,
                        delay: 0,
                        options: [.curveEaseOut, .beginFromCurrentState],
-                       animations: { card.alpha = 1 },
+                       animations: {
+                           card.alpha = 1
+                           glow?.alpha = 1
+                       },
                        completion: nil)
     }
+
+    /// 首帧观察器问的那一个问题。`revealContent` 有 guard，这里只负责回答
+    /// 「还有没有人在等」—— 观察器每 50 ms 醒一次，卡片露出来之后就该停。
+    var waitingForFrame: Bool { awaitingFrame }
 
     /// The way out of 停靠小窗: a tap anywhere on its picture. The scene view
     /// would swallow that tap and forward it to the app, so a transparent shield

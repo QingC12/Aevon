@@ -24,8 +24,6 @@ public enum Log {
     }()
 
     public static func write(_ message: String) {
-        NSLog("[Aevon] %@", message)
-
         let manager = FileManager.default
         // stat(2) rather than FileManager attributes: no Swift-Foundation
         // overlay symbol needed, and this file has to stay linkable with
@@ -37,7 +35,17 @@ public enum Log {
         if !manager.fileExists(atPath: Aevon.logPath) {
             manager.createFile(atPath: Aevon.logPath, contents: nil)
         }
-        guard let handle = FileHandle(forWritingAtPath: Aevon.logPath) else { return }
+        // 0.0.59 — `NSLog` 从这里挪到失败兜底。
+        //
+        // 它是同步的 syslog 写，在 SpringBoard 主线程上一次 1~3 ms。建卡那条路
+        // 上 activate 之前有七次日志，全在首帧前面排着队 —— 七次 NSLog 就是
+        // 十到二十毫秒的「点下去还没动」。文件日志一直是最有用的那一份（操作者
+        // 拿到的都是 /var/mobile/Aevon.log），syslog 只是它的副本；副本不该比
+        // 正文更贵。写不进文件的时候再退回 NSLog，那才是它唯一有价值的场合。
+        guard let handle = FileHandle(forWritingAtPath: Aevon.logPath) else {
+            NSLog("[Aevon] %@", message)
+            return
+        }
         defer { try? handle.close() }
 
         _ = try? handle.seekToEnd()

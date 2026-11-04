@@ -1038,7 +1038,9 @@ zStackParticipantDidChange:
             fallback("no scene in 4s")
             return
         }
-        let gap: Double = ticks < 30 ? 0.06 : 0.25
+        // 0.0.59 — 60 → 40 ms。枚举一次 scene manager 只有几个对象，成本远小于
+        // 这一拍白等的时间；前 30 拍（1.2 s）覆盖了「scene 该出现」的全部窗口。
+        let gap: Double = ticks < 30 ? 0.04 : 0.25
         DispatchQueue.main.asyncAfter(deadline: .now() + gap) {
             pollForScene(bundleID, ticks: ticks + 1, start: start, fallback: fallback)
         }
@@ -1237,19 +1239,26 @@ zStackParticipantDidChange:
             }
         }
 
-        // 0.0.58 — 冷启动不再画任何东西，只把卡片按住不显示。
+        // 0.0.59 — 「要不要等第一帧」改成两条判据，不再只看 contentState。
         //
-        // 0.0.57 在这里造过一版「图标 + 名字」的封面，被否了。留下的判据没有
-        // 变，因为它是对的：只有 `contentState != 2`（真没画）才需要等；热启
-        // 动回来的 App 带着画面，把卡片藏 0.16 秒是自己造的一次闪。
+        // `contentState` 是 scene 对「我有内容」的自答，它比「这一帧到了屏幕上」
+        // 早：Aevon(58) 的那一闪，就是卡片照着它露出来、画面却还在路上。
+        //
+        //   ① contentState == 2 —— 必要，不充分；
+        //   ② scene.layerManager.layers —— 这个 scene 递交了几个层。挂起启动的
+        //      冷 scene 是 0，此时 contentState 说什么都不算数。-1 是探针读不到，
+        //      不能当成「没有层」，否则卡片永远不出来。
+        //
+        // `seen` 只是读数，不参与判断：热启动回来的 App 同样 seen=0（它在后台），
+        // 若拿它当条件，快速通道永远不会被走到，热启动也要白等 100 ms。
         var awaiting = false
         if bundleID != nil {
             let state = AevonContentStateOf(scene)
-            awaiting = (state != 2)
-            if awaiting {
-                Log.write(String(format: "win: cold start cs=%d, card held until first frame",
-                                 Int(state)))
-            }
+            let layers = count(of: value(of: scene, "layerManager"), "layers")
+            let seen = AevonBoolOf(scene, "accessibilitySceneIsForegroundVisible")
+            awaiting = (state != 2) || (layers == 0)
+            Log.write(String(format: "win: launch state cs=%ld layers=%ld seen=%ld held=%ld",
+                             state, layers, seen, awaiting ? 1 : 0))
         }
 
         // Window first, activate second. This is the whole difference from
@@ -1278,6 +1287,14 @@ zStackParticipantDidChange:
         Log.write("win: state hosting=" + flag(AevonBoolOf(presenter, "isHosting"))
                   + " active=" + flag(AevonBoolOf(presenter, "isActive")))
         Log.write("win: view sublayers=" + String(view.layer.sublayers?.count ?? 0))
+
+        // 0.0.59 — 首帧交给自己的观察器，不再等保活时钟。
+        //
+        // 保活时钟稳态 200 ms 一拍（掉画才收紧到 60 ms），而冷启动时 fg 是我们
+        // 自己写的 1、content 又是 2，`calm` 成立 —— 于是首帧判定平均晚 100 ms、
+        // 最坏 200 ms。这段时间卡片是透明的，操作者看到的就是「点了没反应，然后
+        // 突然闪一下」。
+        if awaiting { watchFirstFrame(host, scene: scene) }
 
         // 0.0.31 — the push moves off the hook and onto a clock.
         //
@@ -1341,9 +1358,9 @@ zStackParticipantDidChange:
             // 从来不是这条时钟看见的。
             let content = AevonContentStateOf(scene)
             let level = AevonSceneLevel(scene)
-            // 0.0.58 — 首帧到了就把卡片露出来（0.0.57 这里是揭开封面）。
-            // 判据只看 contentState：卡片藏着的时候画面还没到，早露就是黑。
-            if content == 2 { host.revealContent("first frame") }
+            // 0.0.59 — 首帧不在这里露。原来这一行是 `if content == 2 { reveal }`，
+            // 而它是 200 ms 一拍 —— 冷启动的「先出现再闪」有一半时长就是这一拍
+            // 攒出来的。现在交给 `watchFirstFrame`（50 ms 一拍、连续两拍确认）。
             // Read before the push, so the line below describes what the system
             // did rather than what this turn did.
             let attempts = AevonDeactCount()
@@ -1635,6 +1652,48 @@ zStackParticipantDidChange:
         for entry in poison.sorted() { text += entry + "\n" }
         try? text.write(toFile: Aevon.callSkipPath, atomically: true, encoding: .utf8)
         Log.write("calls: skip list now holds " + String(poison.count) + " classes")
+    }
+
+    // MARK: - 0.0.59 首帧观察器
+
+    /// 首帧什么时候到，由这个 50 ms 的心跳回答，不再等保活时钟。
+    ///
+    /// 三条判据，缺一条都不 reveal：
+    ///   ① `contentState == 2` —— scene 自答「有内容」；
+    ///   ② `layerManager.layers != 0` —— 层真的递交了（0 = 一个都没有；-1 = 探针
+    ///      读不到，不能当成没有，否则卡片永远不出来）；
+    ///   ③ 连续两拍都成立 —— 多出来的那一拍就是「这一帧已经上屏」的余量。
+    ///      0.0.58 缺的正是这个余量：它照着 contentState 立刻淡入，淡入的前半
+    ///      段画面还是黑的，后半段画面才来，一次渐变里夹一次跳变成了一闪。
+    ///
+    /// 观察器在 reveal、超时或卡片消失时自己停 —— SpringBoard 的主线程上不该
+    /// 留一个永久心跳。
+    private static func watchFirstFrame(_ host: FloatHost, scene: NSObject) {
+        let started = Date()
+        var beats = 0
+        var ready = 0
+        func tick() {
+            if !host.waitingForFrame { return }
+            beats += 1
+            let content = AevonContentStateOf(scene)
+            let layers = count(of: value(of: scene, "layerManager"), "layers")
+            let drawn = (content == 2) && (layers != 0)
+            ready = drawn ? ready + 1 : 0
+            if ready >= 2 {
+                let ms = Int(Date().timeIntervalSince(started) * 1000)
+                Log.write(String(format: "win: first frame watch beats=%ld cs=%ld layers=%ld waited_ms=%ld",
+                                 beats, content, layers, ms))
+                host.revealContent("first frame")
+                return
+            }
+            // 3.2 s 与 `FloatHost.show` 里的 3 s 兜底错开 0.2 s：谁先到都行，
+            // 但两边都不要在已经露出之后继续跑。
+            if Date().timeIntervalSince(started) > 3.2 { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { tick() }
+        }
+        // 第一拍也要让出去：`activate` 刚发完，同一 runloop 里读到的 layers 一定
+        // 还是旧值。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { tick() }
     }
 
     // MARK: - Runtime helpers
