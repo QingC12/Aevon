@@ -733,20 +733,18 @@ static int AevonPlayerScan(UIView *root, int *pausedOut, id *firstOut) {
     Class layerClass = NSClassFromString(@"AVPlayerLayer");
     if (layerClass == Nil) return -1;
     int playing = 0;
-    NSMutableArray *todo = [NSMutableArray arrayWithObject:root];
-    NSUInteger walked = 0;
-    while (todo.count > 0 && walked < 700) {
-        UIView *node = [todo lastObject];
+    // 只走**图层树**，不走视图树：视图树的每一层在图层树里都有对应的一份，走两遍
+    // 只会把同一个播放器数两次。预算 3000 个层 —— 一次开卡只跑三拍，而一个 feed
+    // 页的层数是几千的量级，这个上限刚好翻得完又不会为它卡一帧。
+    CALayer *start = [root layer];
+    if (start == nil) return 0;
+    NSMutableArray *todo = [NSMutableArray arrayWithObject:start];
+    int budget = 3000;
+    while (todo.count > 0 && budget > 0) {
+        CALayer *layer = [todo lastObject];
         [todo removeLastObject];
-        walked += 1;
-        CALayer *own = [node layer];
-        // 播放器有两种摆法：整层就是 AVPlayerLayer（`+layerClass`），或者挂在某个
-        // 普通层的子层里。两种都收，深度只到一层 —— 再往下没有播放器，只有几何。
-        for (int pass = 0; pass < 2; pass++) {
-            CALayer *layer = pass == 0
-                ? own : (own != nil && own.sublayers.count > 0
-                         ? [own.sublayers objectAtIndex:0] : nil);
-            if (layer == nil || ![layer isKindOfClass:layerClass]) continue;
+        budget -= 1;
+        if ([layer isKindOfClass:layerClass]) {
             id player = nil;
             NSNumber *rate = nil;
             @try {
@@ -755,15 +753,16 @@ static int AevonPlayerScan(UIView *root, int *pausedOut, id *firstOut) {
             } @catch (NSException *exception) {
                 (void)exception;
             }
-            if (player == nil) continue;
-            if ([rate isKindOfClass:[NSNumber class]] && [rate doubleValue] > 0.01) {
-                playing += 1;
-            } else {
-                if (pausedOut != NULL) *pausedOut += 1;
-                if (firstOut != NULL && *firstOut == nil) *firstOut = player;
+            if (player != nil) {
+                if ([rate isKindOfClass:[NSNumber class]] && [rate doubleValue] > 0.01) {
+                    playing += 1;
+                } else {
+                    if (pausedOut != NULL) *pausedOut += 1;
+                    if (firstOut != NULL && *firstOut == nil) *firstOut = player;
+                }
             }
         }
-        NSArray *kids = [node subviews];
+        NSArray *kids = [layer sublayers];
         if (kids.count > 0) [todo addObjectsFromArray:kids];
     }
     return playing;
