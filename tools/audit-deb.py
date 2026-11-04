@@ -677,6 +677,15 @@ def main():
                       b"video clip %.20s moved=%.0f need=%.0f n=%d",
                       b"video band none cls=%.24s h=%.0f box=%.0f",
                       b"video tree b=%.0fx%.0f n=%lu",
+                      # 0.0.88 — 两行新的刹车/复位读数，对应 Aevon(78) 的两个症状：
+                      #   `video slow` = 某一次排版扫描贵过 8 ms，我们主动停 2 秒。
+                      #   Aevon(78) 的「滑着滑着卡住、声音还在放」是主线程被吃掉的
+                      #   形状；有这一行就说明刹车真的踩过，没有就说明卡点在别处。
+                      #   `video reset on foreground` = 从后台/锁屏回来，画面记账整个
+                      #   作废、重新开始。Aevon(78) 的「锁屏后居中失效、必须重开浮窗」
+                      #   就是记账没作废（按次数计的配额早就用完了）。
+                      b"video slow %.20s spent=%.0fms hold=2s",
+                      b"video reset on foreground",
                       # 0.0.84 — 抬高从「呈现」这一声开始，不再等心跳相位。
                       b"presentViewController:animated:completion:",
                       b"settle gave up after 90s",
