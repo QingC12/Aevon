@@ -1225,15 +1225,13 @@ zStackParticipantDidChange:
             Log.write("win: scene frame restored door=" + String(restoreDoor)
                       + " wrote=" + String(AevonFrameWriteCount()))
             let door = AevonPushBackground(scene)
-            // 0.0.67 — 先拆卡片，再拆 presenter。
-            //
-            // `FloatHost.hide()` 这一版多了一件事：把承载视图的 `bounds` 与
-            // `transform` 复位（见那边的注释 —— 不复位就是「关掉浮窗后抖音整体
-            // 偏下」）。复位必须发生在 presenter 还有效的时候，否则那个视图已经
-            // 不归我们管，写进去也没人听。所以这一步提到 `deactivate` 之前。
-            FloatHost.hide()
             _ = AevonCallVoid(presenter, "deactivate")
             _ = AevonCallVoid(presenter, "invalidate")
+            // 0.0.68 — 顺序回到「先拆 presenter，再摘卡片」。0.0.67 把它提到
+            // `deactivate` 之前，理由是 `FloatHost.hide()` 要复位承载视图；那个
+            // 复位已经删了（见 `FloatHost.teardown`），提前的唯一理由也就不在了，
+            // 而「在系统对象还活着的时候动那棵树」正是这一版要撤的东西。
+            FloatHost.hide()
             // 0.0.55 — 卡片没了，右缘带重新接触摸。
             AevonRingGrip.cardUp = false
             RingHost.shared.setEdgeActive(true)

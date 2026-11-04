@@ -528,21 +528,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             onClose = nil
             return
         }
-        // 0.0.67 — 交还给系统之前必须把承载面复位。
+        // 0.0.68 — 收窗时**不碰**承载视图。
         //
-        // Aevon(58) 第三条：关掉浮窗、再从桌面点开抖音，整体页面偏下、顶部露出
-        // 上一个视频的底部。承载视图是系统的对象（`_UIScenePresentationView`），
-        // 我们把它 `bounds` 改成 430x717、又乘了一个 0.86 的 transform，收窗时
-        // 只是 `removeFromSuperview` —— 尺寸和变换都留在对象身上。系统下一次把它
-        // 拿去全屏显示，拿到的是一个又小又缩、以卡片中心对齐的视图，于是画面整体
-        // 下沉，而抖音自己的分页还按 932 算 —— 顶上那条就是上一页的底。
+        // 0.0.67 在这里写过 `content.bounds = UIScreen.main.bounds.size` 与
+        // `transform = .identity`，想复位 Aevon(58) 的「关掉浮窗后全屏打开抖音整体
+        // 偏下」。那两个属性确实是我们改过的，但 `content` 不是我们的对象 ——
+        // `_UIScenePresentationView` 下面挂着 `_UIContextLayerHostView` 和那个 App
+        // 的 scene。在 presenter 还活着的时候替它写 bounds，是让系统按「整屏」去
+        // 重排一个逻辑尺寸仍是 717 的场景；真机结果是应用打不开、桌面黑屏，与
+        // 0.0.65 那次同形。
         //
-        // 复位成 `UIScreen.main.bounds`（这台机器真正的屏幕）与 identity 变换，
-        // 这两样正是我们自己改掉的那两样，其余一概不碰。
-        if let content = content {
-            content.transform = .identity
-            content.bounds = CGRect(origin: .zero, size: UIScreen.main.bounds.size)
-        }
+        // 我们现在做的只有「把它从卡片上摘下来」，剩下的交给 `deactivate` /
+        // `invalidate`。代价是那条「退出后偏下」还没修（本轮明确不修），收益是
+        // 不再有任何一行代码去写别人的视图。
         for sub in card?.subviews ?? [] { sub.removeFromSuperview() }
         grip?.removeFromSuperview()
         glow?.removeFromSuperview()

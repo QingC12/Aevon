@@ -504,13 +504,16 @@ def main():
     if b"ring: bar position " not in dylib_early:
         bad("host: the summon bar never reports its position — the slider would "
             "move a bar this file cannot prove exists")
-    # 0.0.44 — the hosted mark is the half of the bridge that does not travel
-    # through FrontBoard, so both sides must agree on the path or the app never
-    # learns it is on screen.
+    # 0.0.68 — the hosted mark is **diagnostic only** now. 0.0.67 made it the
+    # sole hosted test on the app side and handed it a "re-layout every window"
+    # job; the mark is a cross-process file read that a sandboxed app may not be
+    # allowed to do at all, so the test was both slow and unreliable. What is
+    # left is the log line that says which app the card is showing — worth
+    # keeping, worth checking, but nothing depends on it any more.
     hosted_path = b"/var/mobile/Library/Logs/Aevon/hosted.plist"
     if hosted_path not in dylib_early:
-        bad("host: hosted.plist path missing from the tweak — nothing would tell "
-            "the card's app that it is being shown")
+        bad("host: hosted.plist path missing from the tweak — the log line that "
+            "says who the card is showing would have nothing to point at")
     if b"win: hosted mark " not in dylib_early:
         bad("host: the hosted mark is never logged — a mark nobody can see is a "
             "mark nobody can debug")
@@ -532,7 +535,6 @@ def main():
     else:
         for token in (b"hosted scene claims foreground", b"applicationState",
                       b"activationState", b"com.apple.springboard",
-                      b"/var/mobile/Library/Logs/Aevon/hosted.plist",
                       # 0.0.63 — App 这一侧的几何量尺。Aevon(55) 的抖音「视频在中
                       # 上、下面是纯 #333」在宿主侧三个读数里全都对得上（窗口确实
                       # 是 430x717），剩下唯一没量的是 App 自己怎么看这块屏幕。
@@ -543,40 +545,45 @@ def main():
                       # 才有页码可指。
                       b"phys=%.0fx%.0f scene=",
                       b"spine%d %s",
-                      b"peers%d n=%lu",
-                      # 0.0.67 — 「名片翻了就重排一次」。这两个串不在二进制里，
-                      # 就等于 App 侧没有任何一次主动重排：首次打开仍会按上一块
-                      # 画布排（Aevon(58) 第二条），关卡后仍停在卡片尺寸上
-                      # （同一份日志第三条）。
-                      b"hosted, relayout for the card canvas",
-                      b"released, relayout for the real screen"):
+                      b"peers%d n=%lu"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")
-        # 0.0.66 — 反向断言，比上面那组更重要。0.0.65 的「改屏幕尺寸」把
-        # `UIScreen.bounds` / `_referenceBounds` / `_boundsForInterfaceOrientation:`
-        # 换成了小胖屏的尺寸，装进每一个加载 UIKit 的进程，真机后果是大量 App
-        # 黑屏、桌面小组件空白、点图标都没反应。
+        # 0.0.68 — 反向断言，比上面那组重要得多。这一栏里的每一条都对应一次真机
+        # 事故，而不是一次代码风格意见：
         #
-        # 0.0.67 — `bounds` 这一个**回来了**（抖音按它摆视频和分页，不改就是
-        # 「视频贴在 932 的坐标里、退出后整体偏下」），但另外两个永远不许回来：
+        #   · 0.0.65 在 App 进程里换了 `UIScreen.bounds` / `_referenceBounds` /
+        #     `_boundsForInterfaceOrientation:`，于是整台机器打不开应用、桌面黑屏、
+        #     小组件空白；
+        #   · 0.0.67 只把 `bounds` 换回来、并且加了「名片一翻就给每个窗口补一次
+        #     layoutIfNeeded」，真机反馈与原样一字不差。
         #
-        #   · `_referenceBounds` 是 UIKit 算键盘、状态栏、分屏的全局基准，改它
-        #     不是改一个 App 的屏幕，是改整个 UIKit 的世界观；
-        #   · `_boundsForInterfaceOrientation:` 收方向参数而实现无视它，任何请求
-        #     横屏的 App 会拿到竖的小胖屏尺寸。
+        # 两个版本、同一种故障 —— 结论不是「判据还要再收窄」，而是**这件事本身
+        # 不能做**：屏幕尺寸是系统的世界观，替任何一个进程改写它，代价都是整台
+        # 机器。所以后面任何一个串重新出现在 AevonApp.dylib 里，都是这条路又回来
+        # 了，直接 FAIL，不给「这次判据更严」留余地。
         #
-        # 判据也从 `isForeground`（真前台 App 也为 1）换成了名片，见 AevonHosted。
-        # 每行末尾的 `# gone` 是给 tools/push-gate.py 看的：反向断言故意不在
-        # 源码里，闸门否则会把它当成「漏改的断言」拦下。
-        for token in (b"screen %.0fx%.0f -> %.0fx%.0f (hosted scene)",   # gone
-                      b"_referenceBounds",                                 # gone
-                      b"_boundsForInterfaceOrientation:",                  # gone
+        # 每行末尾的 `# gone` 是给 tools/push-gate.py 看的：反向断言故意不在源码
+        # 里，闸门否则会把它当成「漏改的断言」拦下。
+        for token in (b"_referenceBounds",                                  # gone
+                      b"_boundsForInterfaceOrientation:",                   # gone
+                      # 名片：0.0.67 拿它当唯一判据。它是一次跨进程文件读，沙箱里
+                      # 未必读得到；读不到就是「卡里的 App 永远不是前台」，触摸直
+                      # 接失效。判据回到 scene settings（见 AevonHosted）。
+                      b"hosted.plist",                                      # gone
+                      # 强制重排：`layoutIfNeeded` / `setFrame:` 在这个文件里只剩
+                      # 一种用法 —— 替别人的 window 排一次版，而那正是 0.0.67 的
+                      # 第二个动作。
+                      b"layoutIfNeeded",                                    # gone
+                      b"setFrame:",                                         # gone
+                      b"hosted, relayout",                                  # gone
+                      b"released, relayout",                                # gone
                       # 名片 + 冷启动那对组合：名片写不进去时判据永远不成立，
                       # 每次开窗都会先杀掉那个 App。
-                      b"/var/mobile/Library/Logs/Aevon/bridge"):           # gone
+                      b"/var/mobile/Library/Logs/Aevon/bridge"):            # gone
             if token in bridge:
-                bad(f"bridge: {token.decode()} 又出现了 —— `_referenceBounds` / "
-                    f"方向版本 / 杀进程那三条都不许回来")
+                bad(f"bridge: {token.decode()} 又出现了 —— 在 App 进程里改屏幕、"
+                    f"或者替别人的窗口强制重排，这两件事已经各自毁过一个版本，"
+                    f"不许第三次")
         # 96 KB, not 64: ObjC exception handling (@try around every KVC read on a
         # private key) pulls in the unwind tables and the personality routine,
         # and that is ~45 KB of the 69. Paying it once per process is the price
