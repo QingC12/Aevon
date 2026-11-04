@@ -700,7 +700,12 @@ def main():
                       # 就能直接看是谁、多少次、多少毫秒。0.0.93 把门槛从 80 降到
                       # 40：Aevon(83) 一条都没有，而「每次 1~2 ms × 几十次」正好
                       # 卡在 80 的线下 —— 那是滚动被拖垮的典型形态。
-                      b"video load n=%d spent=%.0fms=%.0f%%",
+                      # 0.0.97 — 全段耗时与三个出口。
+                      # `all` = 钩子从进到出（含 bounds / PagerGet / PageCellOf /
+                      # CardIsUp 这些从来没被量过的固定开销）；`spent` 只是
+                      # KnownApply 那一段。`fast`/`scan` 分开「快路径命中」与
+                      # 「真扫一趟」—— all 大而 fast 占绝大多数就是**次数**问题。
+                      b"video load n=%d spent=%.0fms all=%.0fms fast=%d scan=%d",
                       # 0.0.90 — 两行证词，对应 Aevon(80) 的「悬浮窗只剩一圈白色光晕」：
                       #   `video known n= d= c=` = 这一页认出来的画面**路径**（几块、
                       #   几层下来、哪一页）。0.0.89 这里存的是对象指针，快路径每帧
@@ -727,13 +732,27 @@ def main():
                       # 末尾，并且每秒结算一次钩子频率：>200 留一行 `video hook`，
                       # >2500 判风暴、停写停扫 3 秒。判据：正常滑动应当 <200 不出现；
                       # 出现了说明这一页本来就重，那 3 秒的静默是买保险。
-                      b"video hook n=%d/s",
+                      # 0.0.97 — `top=` 是「这段窗口里最烫的槽位:次数」，与
+                      # `video hook slot` 那张表配对就能把「是哪个类在爆」对上号。
+                      # Aevon(86) 只有 5,500 次/秒这个总数：既可能是「一个类在一帧
+                      # 里被排 90 次」（布局不收敛），也可能是「90 个实例各排 1 次」
+                      # （正常）—— 这两种修法完全相反。
+                      b"video hook n=%d/s top=%d:%d",
+                      b"video hook slot i=%d v=%d %.28s",
                       b"video storm n=%d/s hold=3s",
                       # 0.0.96 — 提前装钩子（B 路）每张卡一行：`n` = 这次新挂上的
                       # 类数（页 + 画面区，最多 AEVON_HOOK_SLOTS=12）。
                       # 判据：n>0 说明 B 路真的执行了；整份日志一条都没有 ⇒
                       # 开卡那一拍翻页器还没建出页，或者候选全被尺寸筛掉了。
                       b"video hook pre n=%d",
+                      # 0.0.97 — 「预居中每拍处理了几页、成了几页」。Aevon(86) 说
+                      # 「过程更清晰了」，而 A 路的目的就是让它不可见：
+                      # `pages=1` ⇒ 根本没拿到相邻页；`ok` 有但仍跳 ⇒ 写进去又被抹了。
+                      b"video tick pages=%d ok=%d",
+                      # 0.0.97 — App 把我们写进去的位移抹掉的次数。
+                      # `video band` 只记前两次写入，之后对打多少次都是静默的；
+                      # 这一行让「一直在和它对着干」第一次有读数。
+                      b"video bounce n=%d",
                       b"app: boot pid=%d",
                       # 0.0.91 — 死因证词。signal handler 只做 open/write/close
                       # （崩溃现场不能碰 NSString/stdio），`step=` 说死在哪个函数里；
@@ -753,7 +772,12 @@ def main():
                       #   `hook` 上千且 `d` 很大 ⇒ 又一次自我递归。
                       #   `app: hang pc=` 是主线程 PC + 9 层返回地址，配合
                       #   `app: base=` 就能算出哪些帧落在我们自己这个 dylib 里。
-                      b"app: hang step=%d sub=%d d=%d hook=%d c=%04lx b=%04lx",
+                      # 0.0.97 — 加了三段：`cost=` 是这 2 秒里钩子吃了多少毫秒
+                      # （以前只有次数，没有时间）；`w=` 是距最后一次真正写入多久
+                      # （Aevon(86) 那次是 116 秒 ⇒ 不能说「写入点着了风暴」）；
+                      # `where=` 是主线程此刻所在模块的 basename（dladdr 得到）——
+                      # UIKitCore 与 AwemeCore 意味着完全相反的结论。
+                      b"app: hang step=%d sub=%d d=%d hook=%d cost=%.0fms w=%.0fs top=%d:%d where=%.20s c=%04lx b=%04lx",
                       b"app: hang pc=%lx",
                       b"app: base=%lx",
                       b"video reset on foreground",

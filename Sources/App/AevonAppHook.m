@@ -2561,6 +2561,37 @@ typedef struct {
 #define AEVON_HOOK_SLOTS 12
 static AevonLayoutHookSlot AevonLayoutHookSlots[AEVON_HOOK_SLOTS];
 static int AevonLayoutHookCount = 0;
+/// 0.0.97 — **每个槽位各自的调用次数**。
+///
+/// Aevon(86) 只告诉我们「钩子 5,500 次/秒」，没告诉我们「是哪一个类在爆」。
+/// 5500 次/秒既可能是「一个类在一帧里被排 90 次」（布局不收敛），也可能是
+/// 「90 个实例各排 1 次」（正常），这两种修法完全相反。槽位计数是唯一能把
+/// 它们分开的读数，代价是每次钩子多一次指针比较。
+static volatile int AevonHookSlotN[AEVON_HOOK_SLOTS];
+/// 0.0.97 — 钩子**全段**耗时（含 bounds / PagerGet / PageCellOf / CardIsUp）。
+///
+/// 0.0.95 的 `video load` 只量了 `AevonVideoKnownApply` 那一段，前半段的固定
+/// 开销一点没算 —— 于是「video load 一条都没有」被当成了「我们不贵」。
+/// 5500 次/秒 × 哪怕 3 µs 也是 1.6% 的一秒，而这几句里有两次 `[view window]`
+/// 与一次沿 superview 上溯，远不止 3 µs。
+static double AevonHookSpentAll = 0.0;
+static double AevonLoadAll = 0.0;
+/// 0.0.97 — 最后一次真正写进 App 的时刻。卡死时 `w=` 就是「距上次写入多久」：
+/// Aevon(86) 里那次是 116 秒，若下一份日志仍是几十秒以上，就再也不能说
+/// 「我们的写入点着了风暴」。
+static CFTimeInterval AevonLastWriteAt = 0.0;
+/// 0.0.97 — App 把我们写进去的位移抹掉的累计次数。`video band` 只在写的前两次
+/// 打日志，之后对打多少次都是静默的；这一行让「一直对打」第一次有读数。
+static int AevonBounceN = 0;
+static CFTimeInterval AevonBounceAt = 0.0;
+/// 0.0.97 — 预居中每拍处理了几页、几页真的成了。Aevon(86) 说「过程更清晰了」，
+/// 这一行判的是 A 路到底有没有跑、跑了几页。
+static CFTimeInterval AevonPreAt = 0.0;
+/// 0.0.97 — 钩子槽位表只打一次。
+static int AevonHookTableDone = 0;
+/// 0.0.97 — 这一轮 0.5 s 里各出口的次数：快路径 / 真扫。
+static int AevonVideoFastN = 0;
+static int AevonVideoScanN = 0;
 static int AevonVideoBusy = 0;
 /// 0.0.93 — 扫描的「两条车道 + 一道退避」。
 ///
@@ -2626,13 +2657,34 @@ static void AevonVideoLoadReport(void) {
     if (now - AevonVideoLoadAt < 0.5) return;
     int n = AevonVideoLoadN;
     double spent = AevonVideoLoadSpent;
+    double all = AevonLoadAll;
+    int fast = AevonVideoFastN;
+    int scan = AevonVideoScanN;
     AevonVideoLoadAt = now;
     AevonVideoLoadN = 0;
     AevonVideoLoadSpent = 0.0;
-    if (spent < 40.0) return;
-    char line[160];
-    snprintf(line, sizeof(line), "video load n=%d spent=%.0fms=%.0f%%",
-             n, spent, spent / 5.0);
+    AevonLoadAll = 0.0;
+    AevonVideoFastN = 0;
+    AevonVideoScanN = 0;
+    // 0.0.97 — 对打单独出声，且**不受 40 ms 门槛限制**。
+    //
+    // `video band` 只在写的前两次打日志；App 把位移抹掉、我们再写第 37 次的时候，
+    // 日志里本来什么都没有 —— 于是「我们一直在和它对着干」这件事从来不可见。
+    if (AevonBounceN > 0 && now - AevonBounceAt > 2.0) {
+        AevonBounceAt = now;
+        char bl[96];
+        snprintf(bl, sizeof(bl), "video bounce n=%d", AevonBounceN);
+        AevonPageWrite(bl);
+        AevonBounceN = 0;
+    }
+    if (spent < 40.0 && all < 40.0) return;
+    // 0.0.97 — `all` 是钩子全段（含前半段固定开销），`spent` 只是 KnownApply。
+    // `fast`/`scan` 把「快路径命中」与「真扫一趟」分开：如果 all 大而 fast 占绝大多数，
+    // 那就是**次数**的问题而不是**单次**的问题，修法完全不同。
+    char line[192];
+    snprintf(line, sizeof(line),
+             "video load n=%d spent=%.0fms all=%.0fms fast=%d scan=%d",
+             n, spent, all, fast, scan);
     AevonPageWrite(line);
 }
 
@@ -2789,7 +2841,10 @@ static void AevonLayoutHookBody(id self, SEL _cmd) {
     AevonVideoLoadN += 1;
     AevonVideoLoadSpent += CFAbsoluteTimeGetCurrent() - began;
     AevonVideoLoadReport();
-    if (known) return;
+    if (known) {
+        AevonVideoFastN += 1;
+        return;
+    }
     // 0.0.93 — 记账还在、只是这一帧对不上：**不扫**，下一帧再 resolve。
     //
     // 这是这一版最关键的一句。`AevonVideoKnownApply` 返回 NO 有两种情况：
@@ -2815,6 +2870,7 @@ static void AevonLayoutHookBody(id self, SEL _cmd) {
     if (now - AevonVideoLaneAt[lane] < 0.008) return;
     AevonVideoLaneAt[lane] = now;
     AevonVideoBusy = 1;
+    AevonVideoScanN += 1;
     AevonVideoCenterFor(cell, videoLayer ? node : nil, "layout");
     AevonVideoBusy = 0;
     AevonVideoLoadN += 1;
@@ -2859,8 +2915,24 @@ static void AevonHookGuard(void) {
     AevonHookBurst = 0;
     AevonHookBurstAt = now;
     if (n < AEVON_HOOK_WARN) return;
-    char line[96];
-    snprintf(line, sizeof(line), "video hook n=%d/s", n);
+    // 0.0.97 — 槽位表只打一次，与 `top=` 配对就能把「哪个类」对上号。
+    if (!AevonHookTableDone) {
+        AevonHookTableDone = 1;
+        for (int i = 0; i < AevonLayoutHookCount; i++) {
+            char tbl[128];
+            snprintf(tbl, sizeof(tbl), "video hook slot i=%d v=%d %.28s",
+                     i, AevonLayoutHookSlots[i].video,
+                     class_getName(AevonLayoutHookSlots[i].cls));
+            AevonPageWrite(tbl);
+        }
+    }
+    int topI = -1;
+    int topN = 0;
+    for (int i = 0; i < AevonLayoutHookCount && i < AEVON_HOOK_SLOTS; i++) {
+        if (AevonHookSlotN[i] > topN) { topN = AevonHookSlotN[i]; topI = i; }
+    }
+    char line[128];
+    snprintf(line, sizeof(line), "video hook n=%d/s top=%d:%d", n, topI, topN);
     AevonPageWrite(line);
     if (n < AEVON_HOOK_STORM) return;
     // 已经是风暴：停写、停扫、跳过整段处理 3 秒。这个上限只按**频率**，
@@ -2879,12 +2951,30 @@ static void AevonHookGuard(void) {
     });
 }
 
+/// 0.0.97 — 这个对象属于哪一个槽位（-1 = 不在表里）。
+static int AevonHookSlotOf(Class cls) {
+    for (int i = 0; i < AevonLayoutHookCount; i++) {
+        if (AevonLayoutHookSlots[i].cls == cls) return i;
+    }
+    return -1;
+}
+
 static void AevonLayoutHook(id self, SEL _cmd) {
     AevonDepth += 1;
     AevonHookCalls += 1;
+    // 0.0.97 — 「爆的是哪一个槽位」：一次指针比较，换掉「5,500 次/秒但不知道
+    // 是谁」的空白。
+    int slot = AevonHookSlotOf(object_getClass(self));
+    if (slot >= 0) AevonHookSlotN[slot] += 1;
     if ((int)AevonDepthMax < AevonDepth) AevonDepthMax = AevonDepth;
     AevonHookGuard();
+    // 0.0.97 — 全段计时。旧读数只量了 `AevonVideoKnownApply`，前半段的
+    // `[view window]` 与 superview 上溯从来没被算进过任何一行。
+    CFTimeInterval hookBegan = CFAbsoluteTimeGetCurrent();
     AevonLayoutHookBody(self, _cmd);
+    double hookCost = CFAbsoluteTimeGetCurrent() - hookBegan;
+    AevonHookSpentAll += hookCost;
+    AevonLoadAll += hookCost;
     AevonDepth -= 1;
 }
 
@@ -2933,7 +3023,10 @@ static void AevonVideoWrite(UIView *band, UIView *cell, CGRect rb,
     // App 把我们上次写进去的位移抹掉了（`ty` 和我们写的不一样）：这一次是「对打」。
     // 连错 30 次（约 1 s 的密集排版）才歇 1 秒 —— 歇完自动再试，**不是永久放弃**。
     // 0.0.84~0.0.87 的 `hits` 是终身配额，一次锁屏就能把这块画面判死。
-    if (slot->wrote && fabs(t.ty - slot->wroteTy) > 1.0) slot->bounces += 1;
+    if (slot->wrote && fabs(t.ty - slot->wroteTy) > 1.0) {
+        slot->bounces += 1;
+        AevonBounceN += 1;
+    }
     if (slot->bounces >= 30) {
         slot->bounces = 0;
         slot->holdUntil = now + 1.0;
@@ -2957,6 +3050,7 @@ static void AevonVideoWrite(UIView *band, UIView *cell, CGRect rb,
     // 一步」留在全局里，主线程不回来时看门狗能替它念出来。
     AevonHangCell = (uintptr_t)cell;
     AevonHangBand = (uintptr_t)band;
+    AevonLastWriteAt = now;
     // 关掉隐式动画：App 的排版常常发生在动画块里，不关的话我们这一手会被它
     // 做成一段滑动，看上去还是「跳一下」，只是慢镜头。
     AevonSub = AEVON_SUB_TX_BEGIN;
@@ -3347,18 +3441,21 @@ static BOOL AevonTryAllowed(uintptr_t cell, CFTimeInterval now) {
 /// `tick` = 用户正在看的这一页（写进去就会被看见），`pre` = 视口外的相邻页
 /// （写进去时没人看得见）。这样下一份日志能一眼分出「预居中生效」和
 /// 「还是靠心跳补正」—— 不用再靠猜。
-static void AevonVideoCenterOne(UIView *cell, const char *via) {
-    if (cell == nil) return;
-    if ([cell bounds].size.height < 200.0) return;
+static BOOL AevonVideoCenterOne(UIView *cell, const char *via) {
+    if (cell == nil) return NO;
+    if ([cell bounds].size.height < 200.0) return NO;
     // 0.0.89 — 认过的页只做几何，不再整页扫一遍。画面被 App 摆回去时
     // `AevonVideoWrite` 会补一次（`via=tick`）；真要一直对打，`bounces` 会让我们
     // 先歇一秒，而不是每拍都扫。
-    if (AevonVideoKnownApply(cell, via)) return;
+    if (AevonVideoKnownApply(cell, via)) return YES;
     // 0.0.93 — 记账还在、只是这一拍没对上：等下一拍，不整页重扫。
     AevonVideoPage *held = AevonVideoPageFind((uintptr_t)cell);
-    if (held != NULL && held->count > 0) return;
-    if (!AevonTryAllowed((uintptr_t)cell, CFAbsoluteTimeGetCurrent())) return;
+    if (held != NULL && held->count > 0) return NO;
+    if (!AevonTryAllowed((uintptr_t)cell, CFAbsoluteTimeGetCurrent())) return NO;
     AevonVideoCenterFor(cell, nil, via);
+    // 0.0.97 — 扫完到底有没有认出来，返给心跳去记 `ok=`。
+    AevonVideoPage *fresh = AevonVideoPageFind((uintptr_t)cell);
+    return (fresh != NULL && fresh->count > 0);
 }
 
 /// 0.0.96 — **B 路**：提前装钩子。卡片起来后的第一拍，把翻页器里每一页的类先挂上。
@@ -3448,9 +3545,22 @@ static void AevonVideoCenter(void) {
     // 0.0.96 — A 路：当前页 + 相邻页，当前页天然排第一。
     UIView *near[3] = {nil, nil, nil};
     int n = AevonPageKidsNear(view, page.size.height, y, near, 3);
+    int okn = 0;
     for (int i = 0; i < n; i++) {
         if (near[i] == nil) break;
-        AevonVideoCenterOne(near[i], i == 0 ? "tick" : "pre");
+        if (AevonVideoCenterOne(near[i], i == 0 ? "tick" : "pre")) okn += 1;
+    }
+    // 0.0.97 — 「预居中到底有没有跑、跑了几页、成了几页」。
+    //
+    // Aevon(86) 说「心跳那个过程现在更清晰了」，而 A 路加进来就是为了让它不可见。
+    // 要么预居中根本没拿到相邻页（`pages=1`），要么写进去又被 App 抹了（`ok` 有、
+    // 但滑出来还是跳）。这一行是唯一能分开这两种情况的读数。
+    CFTimeInterval tickNow = CFAbsoluteTimeGetCurrent();
+    if (n > 0 && tickNow - AevonPreAt > 4.0) {
+        AevonPreAt = tickNow;
+        char body[96];
+        snprintf(body, sizeof(body), "video tick pages=%d ok=%d", n, okn);
+        AevonPageWrite(body);
     }
 }
 
@@ -4076,6 +4186,25 @@ static void AevonHangStack(void) {
     AevonRawNote(line);
 }
 
+/// 0.0.97 — 主线程**此刻**停在哪一个模块里。
+///
+/// Aevon(86) 的 `app: hang pc=` 全是 `291e6…` 这种裸地址，我只知道「不是我们」
+/// （我们 base 是 `0x100490000`），分不出是 UIKitCore 还是抖音自己的
+/// AwemeCore —— 而这两者意味着完全相反的结论：前者是系统布局不收敛，后者是
+/// 抖音自己在循环。`dladdr` 在看门狗线程（不是信号上下文）里调是安全的。
+static const char *AevonHangWhere(void) {
+    if (AevonMainMach == MACH_PORT_NULL) return "?";
+    arm_thread_state64_t st;
+    mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(AevonMainMach, ARM_THREAD_STATE64,
+                         (thread_state_t)&st, &cnt) != KERN_SUCCESS) return "?";
+    void *pc = (void *)__darwin_arm_thread_state64_get_pc(st);
+    Dl_info info;
+    if (dladdr(pc, &info) == 0 || info.dli_fname == NULL) return "?";
+    const char *slash = strrchr(info.dli_fname, '/');
+    return slash != NULL ? slash + 1 : info.dli_fname;
+}
+
 static void AevonHangWatchFire(void) {
     int beat = (int)AevonMainBeat;
     if (beat != (int)AevonMainSeen) {
@@ -4090,16 +4219,27 @@ static void AevonHangWatchFire(void) {
     if (AevonHangStale < 4) return;       // 4 × 0.5 s 不动才算卡住
     if (AevonHangLines >= 8) return;      // 一张卡最多留 8 行，够看趋势，不够撑满日志
     AevonHangLines += 1;
-    char line[240];
+    int topI = -1;
+    int topN = 0;
+    for (int i = 0; i < AevonLayoutHookCount && i < AEVON_HOOK_SLOTS; i++) {
+        if (AevonHookSlotN[i] > topN) { topN = AevonHookSlotN[i]; topI = i; }
+    }
+    double sinceWrite = AevonLastWriteAt > 0.0
+                        ? (CFAbsoluteTimeGetCurrent() - AevonLastWriteAt) : -1.0;
+    char line[320];
     snprintf(line, sizeof(line),
-             "%ld app: hang step=%d sub=%d d=%d hook=%d c=%04lx b=%04lx\n",
+             "%ld app: hang step=%d sub=%d d=%d hook=%d cost=%.0fms w=%.0fs top=%d:%d where=%.20s c=%04lx b=%04lx\n",
              (long)time(NULL), (int)AevonStep, (int)AevonSub, (int)AevonDepthMax,
-             (int)AevonHookCalls, (unsigned long)(AevonHangCell & 0xffffUL),
+             (int)AevonHookCalls, AevonHookSpentAll, sinceWrite, topI, topN,
+             AevonHangWhere(),
+             (unsigned long)(AevonHangCell & 0xffffUL),
              (unsigned long)(AevonHangBand & 0xffffUL));
     AevonRawNote(line);
     AevonHangStack();
     // 这一段 2 秒已经结算：下一行数的是新的 2 秒。
     AevonHangStale = 0;
+    for (int i = 0; i < AEVON_HOOK_SLOTS; i++) AevonHookSlotN[i] = 0;
+    AevonHookSpentAll = 0.0;
 }
 
 static void *AevonHangWatchLoop(void *arg) {
