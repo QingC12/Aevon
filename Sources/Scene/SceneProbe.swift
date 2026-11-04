@@ -1325,8 +1325,15 @@ zStackParticipantDidChange:
                     Log.write("win: picture dropped cs=" + String(content)
                               + " lvl=" + one + " fg=" + flag(fg))
                 }
-                wake = AevonWakeScene(scene)
-                if wake != 0 { wakes += 1 }
+                // 0.0.52 — 唤醒从「掉画期间每拍都写」降成**兜底**：一段黑最多
+                // 三次，其余拍只读数。母本的做法是事前改参数（AevonScene.m 的
+                // intercept 段），它成功的时候这里一次都不该被走到；它没成功的
+                // 时候，反复重申也只是在重提交同一个值 —— 0.0.49 的日志里三次
+                // 掉画各写了一笔，黑还是 60/63/313 ms，多写的那几拍并不会更早。
+                if wakes < 3 {
+                    wake = AevonWakeScene(scene)
+                    if wake != 0 { wakes += 1 }
+                }
             } else if dropped != 0 {
                 let ms = Int(Date().timeIntervalSince(droppedAt) * 1000)
                 Log.write("win: picture back after " + String(ms) + "ms"
@@ -1365,9 +1372,16 @@ zStackParticipantDidChange:
                 let shape = " cs=" + String(content)
                     + " lvl=" + String(format: "%.1f", level)
                     + " wake=" + String(wakes)
+                // 0.0.52 — 三个拦截点的计数跟在后面。切一次 App，`ic` 动了说明
+                // 系统真的把 settings 交给我们改；`iw` 动了说明那一笔已经被改成
+                // 前台档；`cc` 动了说明承载控制器收到了增量。三个都不动，就是
+                // 三个候选选择子在真机上一条都不走 —— 那是下一版的起点，不是猜测。
+                let gates = " ic=" + String(AevonInterceptCount())
+                    + "/" + String(AevonInterceptWrites())
+                    + " cc=" + String(AevonClientCount())
                 Log.write("win: keepalive beat " + String(beat) + state
                           + " reasons=" + reasonsOf(scene)
-                          + " sublayers=" + layers + shape)
+                          + " sublayers=" + layers + shape + gates)
             }
             // The clock runs for the life of the card, not for eight seconds.
             // `stopped` is the only exit, and `closeCard` is the only thing that

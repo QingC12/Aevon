@@ -712,6 +712,12 @@ def main():
                   b"hook: selftest got=%ld want=102",
                   b"_setDeactivationReasons:onScene:withSettings:reason:",
                   b"_scene:interceptUpdateWithNewSettings:",
+                  # 0.0.52 — 事前改参数。母本挂的是子类，0.0.29 挂的是父类，
+                  # 于是 intercept=0 两次。这三条字符串证明三个候选点都进了二进制：
+                  # 子类名、承载控制器的选择子、以及装钩子时那行形状回执。
+                  b"SBMainDisplaySceneManager",
+                  b"client:didUpdateClientSettings:withDiff:transitionContext:",
+                  b" shape cls=%@",
                   b"presenter %@ -> %@",
                   b"/var/mobile/Library/Logs/Aevon/win.step"):
         if token not in dylib_early:

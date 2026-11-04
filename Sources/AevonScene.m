@@ -212,7 +212,9 @@ NSInteger AevonLaunchSuspended(id application, NSString *bundleID) {
 //      and never called is the same thing as no hook, and only the counter can
 //      tell them apart.
 
-#define AEVON_HOOK_SLOTS 6
+/// 0.0.52 — six became eight: the three intercept candidates join the
+/// deactivation hook, and two spare slots cost five words of static memory.
+#define AEVON_HOOK_SLOTS 8
 
 typedef struct {
     Class cls;
@@ -240,7 +242,7 @@ static long AevonDeactStripped = 0;
 /// Sixteen became twenty-four in 0.0.30: the deactivation hook alone still fills
 /// the first eight (four `deact-set`, four `stripped`), and the push traces are
 /// the ones this version is read from.
-static char AevonTrace[24][192];
+static char AevonTrace[32][192];
 static long AevonTraceCount = 0;
 
 static void AevonRawTrace(const char *tag, const char *format, ...) {
@@ -630,6 +632,90 @@ NSInteger AevonPushBackground(id scene) {
 }
 
 
+// MARK: - 事前改参数（0.0.52）
+
+// 0.0.51 之前所有防黑闪的努力都是「事后补写」：轮询发现画面掉了，再把 settings
+// 写回前台。Aevon(49) 的日志把这条路的结构下限摊得很清楚 —— 掉画 60 / 63 / 313
+// 毫秒，而 60 与 63 正好等于守护自己的检测周期：黑的起点永远在「我们看见」之前。
+// 换更短的周期没用，那只会让日志更密，不会让黑变短。
+//
+// 母本的路线相反：`_scene:interceptUpdateWithNewSettings:`。系统把「即将生效的
+// settings」交给这个方法，它在交给系统之前就把它改成自己要的样子 —— 没有「掉下去」
+// 这一步，也就没有要追的那一段。
+//
+// 0.0.29 装过它，实测 intercept=0（一次没被调用）。两个原因，这一版一起处理：
+//   · 装在了 `SBSceneManager`（父类）上，而母本的类表里是
+//     `_TtC6Stheno29SBMainDisplaySceneManagerHook`（**子类**）—— 子类自己的
+//     Method 被替换才轮得到，父类的 IMP 在子类重写之后根本不会执行。
+//   · 完全没有第二个落点。母本另有 `SBDeviceApplicationSceneViewControllerHook`，
+//     对应的选择子 `client:didUpdateClientSettings:withDiff:transitionContext:`
+//     就在她二进制里，那个类是「承载画面的那个控制器」，切 App 时它必然被调用。
+//
+// 三个候选点全部装上，形状不合就**不装**并如实记一行 —— 一次参数错位的调用是
+// SpringBoard 的崩溃，不是一行日志。谁真正被调用、调用时 fg/level 是多少，由
+// 下一份日志回答。
+
+static long AevonInterceptCalls = 0;
+static long AevonInterceptRewrote = 0;
+static long AevonClientCalls = 0;
+
+/// 类型编码里的对象参数个数。`v32@0:8@16@24` → 2（头两个 `@` 是 self 与 _cmd）。
+/// -1 表示不是 void 返回或编码读不出来，调用方据此跳过，不做任何猜测。
+static int AevonObjectArgs(const char *encoding) {
+    if (encoding == NULL || encoding[0] != 'v') return -1;
+    int count = 0;
+    for (const char *p = encoding; *p != '\0'; p++) {
+        if (*p == '@') count += 1;
+    }
+    return count >= 2 ? count - 2 : -1;
+}
+
+/// `settings.level` 读在 settings 对象上（不是 scene 上）。读不到回 -1。
+static double AevonLevelOf(id settings) {
+    if (settings == nil) return -1;
+    SEL getter = sel_registerName("level");
+    if (![settings respondsToSelector:getter]) return -1;
+    return ((double (*)(id, SEL))objc_msgSend)(settings, getter);
+}
+
+/// 把「即将生效的 settings」改成前台档，在系统用它之前。
+///
+/// 返回位掩码：1 写了 foreground、2 写了 level、4 写了 idle，0 没有要改的，
+/// -1 这个对象不可变（`FBSMutableSceneSettings` 才可写，别的类一律不碰）。
+///
+/// 不可变就返回而不是硬写：对一个不可变 settings 调 setter 在系统里是抛异常，
+/// 而这里的异常没有人接 —— 那就是 SpringBoard 的一次自杀。
+static int AevonAmendSettings(id settings) {
+    if (settings == nil) return 0;
+    const char *className = object_getClassName(settings);
+    if (className == NULL || strstr(className, "Mutable") == NULL) return -1;
+
+    int wrote = 0;
+    if (AevonFlagOf(settings, "isForeground") == 0 && AevonWriteFront(settings, YES)) {
+        wrote |= 1;
+    }
+    double level = AevonLevelOf(settings);
+    if (level >= 0.0 && level <= 2.0 && level != 1.0) {
+        SEL setter = sel_registerName("setLevel:");
+        if ([settings respondsToSelector:setter]) {
+            ((void (*)(id, SEL, double))objc_msgSend)(settings, setter, 1.0);
+            wrote |= 2;
+            // 写过的 level 要有人收回去：关窗时 `AevonRestoreLevel` 只在这个
+            // 标记立着的时候才动手，不立就是留给 scene 一个永久的前台档。
+            AevonLevelForced = 1;
+        }
+    }
+    if (AevonFlagOf(settings, "idleModeEnabled") == 1) {
+        SEL setter = sel_registerName("setIdleModeEnabled:");
+        if ([settings respondsToSelector:setter]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(settings, setter, NO);
+            wrote |= 4;
+        }
+    }
+    return wrote;
+}
+
+
 static AevonHookSlot *AevonReserve(const char *label) {
     if (AevonSlotCount >= AEVON_HOOK_SLOTS) return NULL;
     AevonHookSlot *slot = &AevonSlots[AevonSlotCount++];
@@ -686,6 +772,56 @@ static BOOL AevonAttach(NSMutableString *out, AevonHookSlot *slot,
      slot->label, NSStringFromClass(cls), wrote ? @"yes" : @"no",
      (void *)back, (void *)replacement,
      back == replacement ? @"exact" : @"signed-or-trampolined"];
+    return wrote;
+}
+
+/// A candidate that was never installed must not be counted as live: `hook: live=N`
+/// is the one number that says how many replacements the process is running, and
+/// a skipped candidate is not one of them. Only the slot reserved last is ever
+/// handed back, which is why this is a pop and not a splice.
+static void AevonRelease(AevonHookSlot *slot) {
+    if (slot == NULL) return;
+    if (AevonSlotCount > 0 && &AevonSlots[AevonSlotCount - 1] == slot) {
+        AevonSlotCount -= 1;
+    }
+}
+
+/// Same install, but only when the method really takes `wantArgs` objects.
+///
+/// The encoding is read off the running system rather than assumed: the whole
+/// 0.0.29 intercept sat in this file for two versions without ever being called
+/// because the *class* was wrong, and calling a private method with the wrong
+/// arity is a worse failure than not calling it. A shape that does not match is
+/// reported with the characters it actually has, so the next version can write
+/// the branch against a reading instead of a guess.
+static BOOL AevonAttachShaped(NSMutableString *out, AevonHookSlot *slot,
+                              Class cls, NSString *selName, int wantArgs,
+                              id block) {
+    if (out == nil || slot == NULL || selName == nil) return NO;
+    if (cls == Nil) {
+        [out appendFormat:@"hook %s: no class %@\n", slot->label, selName];
+        AevonRelease(slot);
+        return NO;
+    }
+    Method method = class_getInstanceMethod(cls, NSSelectorFromString(selName));
+    if (method == NULL) {
+        [out appendFormat:@"hook %s: no method on %@\n", slot->label, NSStringFromClass(cls)];
+        AevonRelease(slot);
+        return NO;
+    }
+    const char *encoding = method_getTypeEncoding(method);
+    int args = AevonObjectArgs(encoding);
+    if (args != wantArgs) {
+        [out appendFormat:@"hook %s cls=%@ skipped types=%s args=%d want=%d\n",
+         slot->label, NSStringFromClass(cls),
+         encoding != NULL ? encoding : "?", args, wantArgs];
+        AevonRelease(slot);
+        return NO;
+    }
+    [out appendFormat:@"hook %s shape cls=%@ types=%s args=%d\n",
+     slot->label, NSStringFromClass(cls), encoding, args];
+    BOOL wrote = AevonAttach(out, slot, cls, selName, block);
+    if (!wrote) AevonRelease(slot);
     return wrote;
 }
 
@@ -806,6 +942,103 @@ NSString *AevonHookInstall(void) {
         }
     }
 
+    // 2. The mother ship's real door, on the class she actually hooked.
+    //
+    //    `SBMainDisplaySceneManager` is a subclass of `SBSceneManager`, and
+    //    0.0.29 patched the parent: `intercept=0` for eight seconds, twice. A
+    //    subclass that overrides a method never runs the parent's IMP, so a
+    //    patch on the parent is a patch on a method nothing calls. Both classes
+    //    are tried here, and the log says which one owns a method with the right
+    //    shape — that single line is the whole question 0.0.29 could not answer.
+    //
+    //    The amendment happens *before* the original runs: whatever the original
+    //    does with the settings — apply them itself, or hand them back to its
+    //    caller to apply — it does it to the version we changed.
+    for (NSString *className in @[@"SBMainDisplaySceneManager", @"SBSceneManager"]) {
+        Class mgr = NSClassFromString(className);
+        if (mgr == Nil) {
+            [out appendFormat:@"hook intercept: no %@\n", className];
+            continue;
+        }
+        AevonHookSlot *slot = AevonReserve("intercept");
+        if (slot == NULL) {
+            [out appendString:@"hook intercept: no slot\n"];
+            break;
+        }
+        __block AevonHookSlot *mine = slot;
+        id block = ^(id manager, id scene, id settings) {
+            long seen = __sync_fetch_and_add(&AevonInterceptCalls, 1);
+            BOOL ours = AevonSceneIsMine(scene);
+            int wasFront = AevonFlagOf(settings, "isForeground");
+            int amended = 0;
+            if (ours && !AevonPushBanned) {
+                amended = AevonAmendSettings(settings);
+                if (amended > 0) __sync_fetch_and_add(&AevonInterceptRewrote, 1);
+            }
+            if (seen < 6) {
+                AevonRawTrace("intercept", "mine=%d fg=%d amend=%d cls=%s scene=%s",
+                              ours ? 1 : 0, wasFront, amended,
+                              object_getClassName(settings), AevonSceneName(scene));
+            }
+            void (*original)(id, SEL, id, id) =
+                (void (*)(id, SEL, id, id))mine->original;
+            // 这里只改对象、不调 `updateSettings`，所以没有 0.0.31 那个重入；
+            // 深度计数照旧抬一下，好让守护在这一次调用期间什么都不写。
+            __sync_fetch_and_add(&AevonHookDepth, 1);
+            if (original != NULL) original(manager, mine->sel, scene, settings);
+            __sync_fetch_and_sub(&AevonHookDepth, 1);
+        };
+        AevonAttachShaped(out, slot, mgr, @"_scene:interceptUpdateWithNewSettings:", 2, block);
+    }
+
+    // 3. The controller that hosts the picture.
+    //
+    //    The mother ship has `SBDeviceApplicationSceneViewControllerHook` and
+    //    the selector is in her binary. This class is the one that receives
+    //    every client-settings delta, so it is called exactly when an app is
+    //    moving between foreground and background — the moment the black appears.
+    //    Read only in this version: the `diff` object describes a change that is
+    //    already being applied, and rewriting it without knowing its contract is
+    //    how a host view ends up with no picture at all. What this line buys is
+    //    the ordering: `client` before or after `picture dropped` tells the next
+    //    version whether amending there can ever be early enough.
+    Class hostVC = NSClassFromString(@"SBDeviceApplicationSceneViewController");
+    if (hostVC == Nil) {
+        [out appendString:@"hook client: no SBDeviceApplicationSceneViewController\n"];
+    } else {
+        AevonHookSlot *slot = AevonReserve("client");
+        if (slot == NULL) {
+            [out appendString:@"hook client: no slot\n"];
+        } else {
+            __block AevonHookSlot *mine = slot;
+            id block = ^(id vc, id client, id settings, id diff, id context) {
+                long seen = __sync_fetch_and_add(&AevonClientCalls, 1);
+                id scene = vc;
+                SEL sceneSel = sel_registerName("scene");
+                if ([vc respondsToSelector:sceneSel]) {
+                    scene = ((id (*)(id, SEL))objc_msgSend)(vc, sceneSel);
+                }
+                BOOL ours = AevonSceneIsMine(scene);
+                if (seen < 6) {
+                    AevonRawTrace("client", "mine=%d fg=%d lvl=%.1f diff=%s scene=%s",
+                                  ours ? 1 : 0, AevonFlagOf(settings, "isForeground"),
+                                  AevonLevelOf(settings), object_getClassName(diff),
+                                  AevonSceneName(scene));
+                }
+                void (*original)(id, SEL, id, id, id, id) =
+                    (void (*)(id, SEL, id, id, id, id))mine->original;
+                __sync_fetch_and_add(&AevonHookDepth, 1);
+                if (original != NULL) {
+                    original(vc, mine->sel, client, settings, diff, context);
+                }
+                __sync_fetch_and_sub(&AevonHookDepth, 1);
+            };
+            AevonAttachShaped(out, slot, hostVC,
+                              @"client:didUpdateClientSettings:withDiff:transitionContext:",
+                              4, block);
+        }
+    }
+
     return out;
 }
 
@@ -815,8 +1048,10 @@ NSString *AevonHookInstall(void) {
 NSString *AevonHookSummary(void) {
     NSMutableString *out = [NSMutableString string];
     [out appendFormat:@"hook: live=%d deact_set=%ld stripped=%ld"
+     " intercept=%ld/%ld client=%ld"
      " push=%ld/%ld door=%ld armed=%@\n",
      AevonSlotCount, AevonDeactSetCalls, AevonDeactStripped,
+     AevonInterceptRewrote, AevonInterceptCalls, AevonClientCalls,
      AevonPushWrote, AevonPushTried, AevonPushPath,
      AevonIsArmed() ? [NSString stringWithUTF8String:AevonArmed] : @"no"];
     long total = AevonTraceCount;
@@ -828,6 +1063,16 @@ NSString *AevonHookSummary(void) {
     }
     return out;
 }
+
+/// 0.0.52 — 拦截点的三个计数，给守护的节拍行用。
+///
+/// 这三个数比任何解释都直接：`ic` 是系统把 settings 交给拦截方法的次数（0 就是
+/// 「这个选择子在这台系统上不走」），`iw` 是其中真的被我们改成前台档的次数，
+/// `cc` 是承载控制器收到 client-settings 增量的次数。切一次 App，哪个数动了，
+/// 哪条路就是活的。
+long AevonInterceptCount(void) { return AevonInterceptCalls; }
+long AevonInterceptWrites(void) { return AevonInterceptRewrote; }
+long AevonClientCount(void) { return AevonClientCalls; }
 
 /// 0.0.40 — the count of deactivation attempts, for the card's clock. Exposed as
 /// a function rather than a global so Swift reads it the same way it reads

@@ -613,6 +613,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                                             cornerRadius: radius).cgPath
     }
 
+
+
     /// The bottom band's middle third — the cell that closes on a flick and
     /// moves otherwise. The rest of the bottom band is 边角. The top band is its
     /// own zone: the master's caption puts the whole perimeter under gestures
