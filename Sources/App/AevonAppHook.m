@@ -1556,6 +1556,44 @@ static void AevonSheetLift(void) {
     if (fresh && !AevonLiftSoon) AevonSheetLiftAgain();
 }
 
+/// 0.0.84 — 抬得再早一点：不等心跳，从「要呈现了」这一声开始看。
+///
+/// 0.0.83 把节拍从 1 s 压到 0.06~0.2 s，靠的是心跳（0.15 s 一拍）。但心跳的相位
+/// 是随机的：面板可能在第 0.14 s 才被第一拍撞见，那一次抬就落在动画的后半段，
+/// 看上去仍然是「先出来、再抬一下」。把「呈现」自己接过来，就能从 t=0 起看 ——
+/// 面板的入场动画大约 0.35 s，下面这四拍全在它里面，所以抬的动作发生在用户看见
+/// 完整面板之前。心跳那一份继续留着当兜底（这一声没接住时它仍然会补齐）。
+static void (*AevonOriginalPresent)(UIViewController *, SEL, UIViewController *, BOOL,
+                                    void (^)(void));
+static int AevonBurstLeft = 0;
+
+static void AevonSheetBurstTick(void *context) {
+    (void)context;
+    if (AevonBurstLeft > 0) AevonBurstLeft -= 1;
+    AevonSheetLift();
+}
+
+static void AevonSheetBurst(void) {
+    if (AevonBurstLeft > 0) return;          // 一轮没跑完就不再排第二轮
+    AevonBurstLeft = 4;
+    static const double steps[4] = {0.0, 0.016, 0.033, 0.055};
+    for (int i = 0; i < 4; i++) {
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,
+                                       (int64_t)(steps[i] * NSEC_PER_SEC)),
+                         dispatch_get_main_queue(), NULL, AevonSheetBurstTick);
+    }
+}
+
+static void AevonPresentHook(UIViewController *self, SEL _cmd, UIViewController *vc,
+                             BOOL animated, void (^completion)(void)) {
+    if (AevonOriginalPresent != NULL) {
+        AevonOriginalPresent(self, _cmd, vc, animated, completion);
+    }
+    if (vc == nil) return;
+    if (!AevonAppHookAllowed()) return;
+    AevonSheetBurst();
+}
+
 /// 把 offset 挪到最近的整页上。
 ///
 /// 0.0.73 的写法是 `round(y / 旧页高) × 新页高`：先用「变化前的窗口高」取整，
@@ -1950,6 +1988,131 @@ static void AevonPagerReport(const char *reason) {
     AevonPagerInside(reason);
 }
 
+/// 0.0.84 — 「只有部分视频贴在卡片顶边」。
+///
+/// Aevon(75) 的两张截图把形状定死了：横过来的画面（游戏实况、车内视角）在卡片里
+/// 贴着**顶边**显示，下面是一大片纯黑，而说明文字、进度条、标签栏都在原位。竖版
+/// 视频没有这个现象 —— 它铺满整个视频区，压不压顶根本看不出来。所以这不是「排版
+/// 坏了」，而是：**画面这块矩形按「宽度装得下」算出高度之后，被钉在了容器顶上**。
+///
+/// 数字对得上：卡片里视频区 430×634（日志 `vid=DDanmakuPlayerView:0,0,430x634`），
+/// 一个 16:9 的画面装进 430 宽只有 242 高，剩下的 392 pt 全在黑里；居中的话上下
+/// 应各留 196。所以修法只有一个动作：把**那块矩形**在它自己的容器里挪到正中。
+/// 不动卡片、不动画布、不动屏幕，也不动说明文字 —— 它们本来就在正确的位置上。
+///
+/// 四条守卫：
+///   · 只认「宽度占满、高度比容器矮 40 pt 以上」的矩形；铺满的那些一律不碰
+///     （竖版视频就是这一类，碰它等于把画面裁掉一块）；
+///   · 平移用 `transform` 而不是 `center`：App 重新布局会重写 `center`/`frame`，
+///     一般不会碰 transform，所以它排一次版也弹不回去；
+///   · 原本带缩放/旋转的（`a`、`d` 不是 1）一律不动 —— 那是 App 自己在做动画；
+///   · 一块画面最多挪 3 次，残差小于 12 pt 就当已经在位。找不到「那块矩形」时
+///     只记一行 `video band none`（下一轮靠它换判据），不动任何东西。
+static void *AevonVideoNode = NULL;
+static int AevonVideoHits = 0;
+static int AevonVideoNotes = 0;
+
+/// 页里面积最大的那个「类名带 Player / Video」的视图。与 `AevonFindPlayer` 同一个
+/// 口径，区别是要拿回**指针**（那条只需要名字和矩形）。
+static UIView *AevonBiggestPlayerIn(UIView *root) {
+    if (root == nil) return nil;
+    NSMutableArray *todo = [NSMutableArray arrayWithObject:root];
+    UIView *best = nil;
+    CGFloat area = -1.0;
+    NSUInteger walked = 0;
+    while (todo.count > 0 && walked < 400) {
+        UIView *node = [todo lastObject];
+        [todo removeLastObject];
+        walked += 1;
+        const char *name = class_getName([node class]);
+        if (name != NULL
+            && (strstr(name, "Player") != NULL || strstr(name, "Video") != NULL)) {
+            CGRect b = [node bounds];
+            CGFloat a = b.size.width * b.size.height;
+            if (b.size.height > 100.0 && a > area) { area = a; best = node; }
+        }
+        NSArray *kids = [node subviews];
+        if (kids.count > 0) [todo addObjectsFromArray:kids];
+    }
+    return best;
+}
+
+/// 容器里那块「宽度占满、高度小一截」的矩形。横版画面就是它。
+static UIView *AevonBandIn(UIView *box) {
+    UIView *best = nil;
+    CGFloat bestH = 0.0;
+    CGFloat boxW = [box bounds].size.width;
+    CGFloat boxH = [box bounds].size.height;
+    for (UIView *kid in [box subviews]) {
+        CGRect b = [kid bounds];
+        if (b.size.width < boxW * 0.9) continue;
+        if (b.size.height < 60.0) continue;
+        if (b.size.height > boxH - 40.0) continue;
+        if (best == nil || b.size.height > bestH) { best = kid; bestH = b.size.height; }
+    }
+    return best;
+}
+
+static void AevonVideoCenter(void) {
+    UIScrollView *view = AevonPagerGet();
+    if (view == nil || [view window] == nil) return;
+    CGRect box = [view bounds];
+    if (box.size.height < 200.0) return;
+    UIView *cell = AevonPageKidAt(view, box.size.height, [view contentOffset].y);
+    if (cell == nil) return;
+    UIView *player = AevonBiggestPlayerIn(cell);
+    if (player == nil) return;
+    UIView *host = [player superview];
+    if (host == nil) return;
+    CGFloat hostH = [host bounds].size.height;
+    CGFloat playerH = [player bounds].size.height;
+    if (hostH < 200.0 || playerH < 60.0) return;
+
+    UIView *band = nil;
+    UIView *holder = nil;
+    if (playerH <= hostH - 40.0) {
+        // 播放器自己就是那一块：它被钉在容器（单元格内容视图）顶上。
+        band = player;
+        holder = host;
+    } else {
+        UIView *inner = AevonBandIn(player);
+        if (inner != nil) { band = inner; holder = player; }
+    }
+    if (band == nil || holder == nil) {
+        if (AevonVideoNode != (void *)player && AevonVideoNotes < 6) {
+            AevonVideoNotes += 1;
+            AevonVideoNode = (void *)player;
+            AevonVideoHits = 0;
+            char body[170];
+            snprintf(body, sizeof(body), "video band none cls=%.24s h=%.0f box=%.0f",
+                     class_getName([player class]), playerH, hostH);
+            AevonPageWrite(body);
+        }
+        return;
+    }
+    if (AevonVideoNode != (void *)band) {
+        AevonVideoNode = (void *)band;
+        AevonVideoHits = 0;
+    }
+    CGAffineTransform t = [band transform];
+    // 缩放 / 旋转 / 横向位移都不是我们写的：那是 App 自己的动画，别抢。
+    if (fabs(t.a - 1.0) > 0.01 || fabs(t.d - 1.0) > 0.01 || fabs(t.tx) > 0.5) return;
+    CGFloat holderH = [holder bounds].size.height;
+    CGFloat bandH = [band bounds].size.height;
+    CGFloat want = (holderH - bandH) / 2.0;
+    // `frame` 含我们加过的那一段位移，减掉才是 App 排出来的原点。
+    CGFloat base = [band frame].origin.y - t.ty;
+    CGFloat gap = want - base;
+    if (fabs(gap) < 12.0) return;
+    if (AevonVideoHits >= 3) return;
+    AevonVideoHits += 1;
+    [band setTransform:CGAffineTransformMakeTranslation(0, t.ty + gap)];
+    char body[210];
+    snprintf(body, sizeof(body), "video band v=%.24s h=%.0f box=%.0f dy=%.0f n=%d",
+             class_getName([band class]), bandH, holderH, gap, AevonVideoHits);
+    AevonPageWrite(body);
+}
+
 /// 0.0.74 — 状态读数的一次性节拍。0.4 / 1.5 / 2.6 s 各一次：App 的重排、内容
 /// 重载、翻页器重新吸附各在不同的一拍上，只记一张必然撞在中间态上。
 static char AevonStateLate[] = "after change";
@@ -2169,6 +2332,9 @@ static void AevonPagerWatchTick(void *context) {
         // `sheet` 那两行读数不再靠定期采样，改由「第一次看见这张浮层」触发
         // （见 `AevonSheetLift` 的 fresh 分支）。
         AevonSheetLift();
+        // 0.0.84 — 横版画面贴顶：每 0.6 s 看一眼「那块矩形在不在容器正中」。
+        // 它只在卡片里、只在「高度明显小于容器」时动手，铺满的竖版视频一律不碰。
+        if ((AevonWatchTicks % 4) == 0) AevonVideoCenter();
     }
 
     // 窗口高度变了（过渡钩子没响的那一类 App、或者系统自己去改的）：上一拍的
@@ -2415,6 +2581,21 @@ static void AevonAppBoot(void) {
     if (transition != NULL) {
         AevonOriginalViewTransition = method_getImplementation(transition);
         method_setImplementation(transition, (IMP)AevonViewTransition);
+    }
+
+    // 0.0.84 — 「有东西要盖上来」这一声。分享面板抬高要发生在用户看见它之前，
+    // 而心跳的相位是随机的（最坏 0.15 s 后才撞见，再加一次确认），所以直接接住
+    // 呈现本身。装不上不算错：心跳那一份仍然会把面板抬好，只是慢一点。
+    SEL presentSel = sel_registerName("presentViewController:animated:completion:");
+    Method present = class_getInstanceMethod([UIViewController class], presentSel);
+    if (present != NULL) {
+        const char *encoding = method_getTypeEncoding(present);
+        // 最后一个参数必须是 block（`@?`）。签名对不上就宁可不装 —— 这个钩子
+        // 装错一次就是「所有弹出的控制器都少一个 completion」，不是抖动。
+        if (encoding != NULL && strstr(encoding, "@?") != NULL) {
+            AevonOriginalPresent = method_getImplementation(present);
+            method_setImplementation(present, (IMP)AevonPresentHook);
+        }
     }
 
     // 0.0.68 — 这里曾经又一次装上 `UIScreen.bounds`（0.0.67），真机反馈和 0.0.65

@@ -657,6 +657,13 @@ def main():
                       # Aevon(74) 那一版这 1 秒是节拍堆出来的，`in` 就是它的验收
                       # —— 下一份日志里这一项在 0.2 s 以上，就说明节拍还没改对。
                       b"sheet lift by=%.0f h=%.0f box=%.0f n=%d in=%.2fs",
+                      # 0.0.84 — 横版画面贴顶：`video band` 是「把那一块挪到容器正中」
+                      # 的回执（`dy` 是挪了多少），`video band none` 是「找不到那块
+                      # 矩形」的证据行 —— 有它、没有前者，说明判据要换，而不是没生效。
+                      b"video band v=%.24s h=%.0f box=%.0f dy=%.0f n=%d",
+                      b"video band none cls=%.24s h=%.0f box=%.0f",
+                      # 0.0.84 — 抬高从「呈现」这一声开始，不再等心跳相位。
+                      b"presentViewController:animated:completion:",
                       b"settle gave up after 90s",
                       b"player b=%.0fx%.0f grav=%s src=%.0fx%.0f",
                       b"videoGravity",
