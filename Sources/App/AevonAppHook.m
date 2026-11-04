@@ -2083,6 +2083,8 @@ static unsigned long AevonPtrTag(const void *p) {
 /// 燃料有一半在这里。限流按时间走（每 2 s 最多一条）就不再受清账影响。
 static CFTimeInterval AevonVideoNoneAt = 0.0;
 static CFTimeInterval AevonVideoScanAt = 0.0;
+/// 0.0.93 — `video miss` 的限流（每 2 s 最多一条）。
+static CFTimeInterval AevonVideoMissAt = 0.0;
 
 /// 0.0.89 — 「认一次就记住」。
 ///
@@ -2131,6 +2133,14 @@ typedef struct {
     /// 记账的年龄（心跳拍数）。到点就作废重认一次：App 会在同一页里换版式/换层，
     /// 只认一次会永久指着旧的那块画面。32 拍 ≈ 6 s，代价是每 6 秒一次整页扫描。
     int age;
+    /// 0.0.93 — 连续「这一帧对不上」的次数。
+    ///
+    /// 0.0.92 只要有**一次** `AevonVideoKnownApply` 返回 NO 就把整页记账清掉
+    /// （`page->count = 0`）。而抖音每换一个视频就重建 Metal 渲染层，重建的那几帧里
+    /// 下标链会短暂指不到东西 —— 于是一次抖动就换来一次整页重扫（4000 视图 BFS ×
+    /// 候选数），换 10 个视频就是十场这样的风暴，主线程直接被吃干净（Aevon(83)）。
+    /// 现在：连续 3 次对不上才认「这条链真的废了」，前两次只当这一帧没赶上。
+    int miss;
 } AevonVideoPage;
 
 static AevonVideoPage AevonVideoPages[AEVON_PAGE_SLOTS];
@@ -2444,9 +2454,15 @@ typedef struct {
 static AevonLayoutHookSlot AevonLayoutHookSlots[6];
 static int AevonLayoutHookCount = 0;
 static int AevonVideoBusy = 0;
-/// 0.0.88 — 上一次真正处理排版时刻的墙钟。同一帧里连着的几次
-/// `layoutSubviews` 只值一次扫描（见 `AevonLayoutHook`）。
-static CFTimeInterval AevonVideoLayoutAt = 0.0;
+/// 0.0.93 — 扫描的「两条车道 + 一道退避」。
+///
+/// `AevonVideoLaneAt[0]` 是整页那一层（`cell` 自己排版），`[1]` 是视频区那一层。
+/// 拆开是因为 0.0.91 的单一门让整页先到的那一拍把视频区挡在外面，每个视频第一帧
+/// 都停在顶部（Aevon(82)）。`AevonVideoScanNext` 是**失败退避**：真扫了一趟、扫不出
+/// 东西，0.3 s 内任何车道都不再扫 —— 否则「这一页真没有横版画面」会变成每帧一次
+/// 整页 BFS，比不修还狠。
+static CFTimeInterval AevonVideoLaneAt[2] = {0.0, 0.0};
+static CFTimeInterval AevonVideoScanNext = 0.0;
 /// 0.0.88 — 自伤保护：某一次扫描如果贵到会拖帧（> 8 ms），停 2 秒再试。
 /// Aevon(78) 那次卡住是主线程被我们吃掉的形状，宁可少居中两秒，也不能卡住手机。
 static CFTimeInterval AevonVideoPause = 0.0;
@@ -2458,7 +2474,12 @@ static BOOL AevonVideoKnownApply(UIView *cell, const char *via);
 /// 0.0.89 — 每 0.5 s 结算一次「我们吃了主线程多少」。
 /// Aevon(79) 的卡屏只能从「App 侧日志空白 4.5 秒」反推，太绕了。这一行直接把
 /// 次数与毫秒写在日志里：`n` 是这段时间排版钩子真正干活（含快路径）的次数，
-/// `spent` 是累计毫秒，`%` 是占这半秒的比例。低于 80 ms 不出声，免得把日志冲掉。
+/// `spent` 是累计毫秒，`%` 是占这半秒的比例。
+///
+/// 0.0.93 — 门槛 80 ms → 40 ms（8% 的一秒）。Aevon(83) 从头到尾一条 `video load`
+/// 都没有，于是「卡屏到底是不是我们吃的」只能靠猜 —— 每次 layout 只花 1~2 ms、
+/// 半秒里几十次、合计 60 ms，刚好被 80 的线漏掉，而 60 ms/0.5 s 已经够把滚动拖垮。
+/// 门槛降到 40 之后，这种「单次便宜、次数多」的形态会第一次被记下来。
 static void AevonVideoLoadReport(void) {
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (now - AevonVideoLoadAt < 0.5) return;
@@ -2467,7 +2488,7 @@ static void AevonVideoLoadReport(void) {
     AevonVideoLoadAt = now;
     AevonVideoLoadN = 0;
     AevonVideoLoadSpent = 0.0;
-    if (spent < 80.0) return;
+    if (spent < 40.0) return;
     char line[160];
     snprintf(line, sizeof(line), "video load n=%d spent=%.0fms=%.0f%%",
              n, spent, spent / 5.0);
@@ -2622,23 +2643,30 @@ static void AevonLayoutHook(id self, SEL _cmd) {
     AevonVideoLoadSpent += CFAbsoluteTimeGetCurrent() - began;
     AevonVideoLoadReport();
     if (known) return;
+    // 0.0.93 — 记账还在、只是这一帧对不上：**不扫**，下一帧再 resolve。
+    //
+    // 这是这一版最关键的一句。`AevonVideoKnownApply` 返回 NO 有两种情况：
+    //   · 这一页从来没认过（`count == 0`）—— 该扫；
+    //   · 认过，只是这一帧的下标链指不到东西 —— **不该扫**。
+    // 抖音每换一个视频就重建 Metal 渲染层，重建的那几帧正好落进第二种。0.0.92
+    // 不分这两种，一律往下走进整页扫描：滑动一秒钟能对不上几十帧，每帧一次
+    // 4000 视图 BFS + 候选 × 3000 —— Aevon(83) 的「连滑 10 个视频必定卡死」
+    // 就是这些扫描叠出来的。`miss` 容错负责把「真废了」和「这一帧没赶上」分开。
+    AevonVideoPage *resolved = AevonVideoPageFind((uintptr_t)cell);
+    if (resolved != NULL && resolved->count > 0) return;
 
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (now < AevonVideoPause) return;                 // 上一次太贵，歇一下
-    // 0.0.92 — 这道 8 ms 门**只该拦「整页扫描」**。
+    // 0.0.93 — 两条车道各一个 8 ms 门，互不阻挡。
     //
-    // Aevon(82) 里 `video known` 27 条全是心跳建立的（`via=tick` 19 条对
-    // `via=layout` 7 条，且没有一条是首次识别），于是每个视频第一次露出时都先
-    // 停在 `y=94`，0.2 秒后才被心跳推到 238 —— 用户看到的「从顶部跳到中间」。
-    //
-    // 成因就是这道门挂错了位置：同一帧里整页 cell 先排版、把门占掉，紧接着
-    // 视频区（TTPlayerView）自己的排版就被挡住了。而「只扫视频区那一层」是
-    // 二十来个视图，比整页扫描便宜一个数量级，不需要这道门。
-    // 现在：整页那一层（`videoLayer == 0`）走门；视频区那一层每次都能当场认。
-    if (!videoLayer) {
-        if (now - AevonVideoLayoutAt < 0.008) return;   // 同一帧只整页扫一次
-        AevonVideoLayoutAt = now;
-    }
+    // 0.0.92 只有整页那一路走门、视频区每次都扫，方向是对的（视频区那层要先认），
+    // 但没给失败留退避 —— 于是「每一帧把视频区 130 个视图走一遍」变成了常态。
+    // 现在：视频区自己那一次照旧优先（8 ms ≈ 半帧，够它每帧来一次），
+    // 真扫空之后统一歇 0.3 s。
+    int lane = videoLayer ? 1 : 0;
+    if (now < AevonVideoScanNext) return;
+    if (now - AevonVideoLaneAt[lane] < 0.008) return;
+    AevonVideoLaneAt[lane] = now;
     AevonVideoBusy = 1;
     AevonVideoCenterFor(cell, videoLayer ? node : nil, "layout");
     AevonVideoBusy = 0;
@@ -2646,12 +2674,10 @@ static void AevonLayoutHook(id self, SEL _cmd) {
     AevonVideoLoadSpent += CFAbsoluteTimeGetCurrent() - began;
     AevonVideoLoadReport();
     // 0.0.89 — 扫完没认出来，就把下一次扫排到 0.3 s 之后。
-    //
-    // 这一条是给「这一页真的没有横版画面」留的：不加的话，每 8 ms 一次完整扫描
-    // 会一直失败、一直重扫 —— 一页上千个视图 × 每秒 125 次，主线程就没了。
-    // 认出来了就不用管，接下来走的是快路径。
+    // 0.0.93 — 这条退避现在对**所有**车道生效（0.0.92 只挂在整页那一路，
+    // 视频区那条不受限，于是空页的每一次排版都要把视频区走一遍）。
     AevonVideoPage *fresh = AevonVideoPageFind((uintptr_t)cell);
-    if (fresh == NULL || fresh->count == 0) AevonVideoLayoutAt = now + 0.292;
+    if (fresh == NULL || fresh->count == 0) AevonVideoScanNext = now + 0.292;
     // 自伤保护：一次扫描贵过 8 ms 就不是「一帧内的判断」了，停 2 秒再试。
     // 卡住主线程的代价比画面偏上大得多 —— 这一条是给下一次意外留的刹车，
     // 不是给已知场景用的。
@@ -2819,12 +2845,34 @@ static BOOL AevonVideoKnownApply(UIView *cell, const char *via) {
         AevonVideoWrite(band, cell, rb,
                         class_getName([[band superview] class]), via);
     }
-    if (!alive) {
-        // 只作废这一页：另一页的账与它无关，一起清掉就又回到「每两秒重扫」。
-        page->count = 0;
-        memset(page->path, 0, sizeof(page->path));
+    if (alive) {
+        page->miss = 0;
+        return YES;
     }
-    return alive;
+    // 0.0.93 — 连续 3 次对不上才清账。
+    //
+    // 一次失败就 `page->count = 0` 是 Aevon(83) 卡屏的扳机：抖音换视频时画面层
+    // 会重建，重建的那几帧下标链指不到东西，于是「清账 → 整页 BFS → 重认 →
+    // 下一帧又对不上 → 再清账」每换一个视频都要跑几十轮。滑到第 10 个视频，
+    // 主线程就再也缓不过来。
+    page->miss += 1;
+    if (page->miss < 3) return NO;
+    int misses = page->miss;
+    page->miss = 0;
+    // 只作废这一页：另一页的账与它无关，一起清掉就又回到「每两秒重扫」。
+    page->count = 0;
+    memset(page->path, 0, sizeof(page->path));
+    // 判据：真清账才留一行（每 2 s 最多一条）。卡屏时靠它区分
+    // 「我们一直在重扫」和「我们其实什么都没干」。
+    CFTimeInterval missNow = CFAbsoluteTimeGetCurrent();
+    if (missNow - AevonVideoMissAt > 2.0) {
+        AevonVideoMissAt = missNow;
+        char body[120];
+        snprintf(body, sizeof(body), "video miss n=%d c=%04lx",
+                 misses, AevonPtrTag(cell));
+        AevonPageWrite(body);
+    }
+    return NO;
 }
 
 static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
@@ -3014,6 +3062,10 @@ static void AevonVideoCenter(void) {
     // 画面被 App 摆回去时 `AevonVideoWrite` 会补一次（`via=tick`）；真要一直对打，
     // `bounces` 会让我们先歇一秒，而不是每拍都扫。
     if (AevonVideoKnownApply(cell, "tick")) return;
+    // 0.0.93 — 记账还在、只是这一拍没对上：等下一拍，不整页重扫。
+    // 与排版钩子里那条同一理由（换视频重建画面层的那几帧链会短暂指不到东西）。
+    AevonVideoPage *held = AevonVideoPageFind((uintptr_t)cell);
+    if (held != NULL && held->count > 0) return;
     AevonVideoCenterFor(cell, nil, "tick");
 }
 
@@ -3435,7 +3487,9 @@ static NSInteger AevonApplicationState(id self, SEL _cmd) {
         if (state == 0 && AevonStateSeen != 0) {
             BOOL had = (AevonVideoCell != NULL);
             AevonVideoForget();
-            AevonVideoLayoutAt = 0.0;
+            AevonVideoLaneAt[0] = 0.0;
+            AevonVideoLaneAt[1] = 0.0;
+            AevonVideoScanNext = 0.0;
             AevonVideoPause = 0.0;
             if (AevonWatchDead) AevonPagerWatchArm();
             if (had) AevonPageWrite("video reset on foreground");
