@@ -703,6 +703,11 @@ def main():
                       #   `app: boot pid=` = 每个进程一行。下一份日志数 `app: boot`
                       #   有几行就知道这中间死过几次，不用再靠 `geom` 出没出两对去猜。
                       b"video known n=%d d=%d c=%04lx",
+                      # 0.0.92 — 「一秒写了几次」。Aevon(82) 的卡屏（页面滑不动、
+                      # 点不动）里 `video load` 一条都没有 ⇒ 不是单次慢，是次数多；
+                      # 而「次数」这个数当时没有读数。峰值 < 20 不写，所以正常时
+                      # 日志里看不到这一行。
+                      b"video rate n=%d/s",
                       b"app: boot pid=%d",
                       # 0.0.91 — 死因证词。signal handler 只做 open/write/close
                       # （崩溃现场不能碰 NSString/stdio），`step=` 说死在哪个函数里；
@@ -710,6 +715,9 @@ def main():
                       # 进程若被系统 SIGKILL，它就停在某一秒上，下一次 `boot` 就是
                       # 死亡时刻 —— 这种杀法谁都拦不住，只能靠「最后一秒」定位。
                       b"app: crash sig=%d step=%d",
+                      # 0.0.92 — 手指进来多少、被我们吞掉多少（宿主侧每秒一行）。
+                      # `in>0 eat=0` ⇒ 卡屏不在我们这一侧；`eat>0` ⇒ 是我们吞的。
+                      b"win: touch in=%d eat=%d",
                       b"app: crash exc %s: %s step=%d",
                       b"alive t=%d",
                       b"video reset on foreground",

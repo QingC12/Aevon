@@ -2168,6 +2168,83 @@ static int AevonVideoLoadN = 0;
 static double AevonVideoLoadSpent = 0.0;
 static CFTimeInterval AevonVideoLoadAt = 0.0;
 
+/// 0.0.92 — 按**页**限流，而不是按画面指针。
+///
+/// 0.0.89~0.0.91 的去重键是画面指针（`AevonVideoSlot.band`）：抖音每换一个视频
+/// 就重建画面层，`b=` 每次都是新对象，于是「40 ms 内只写一次」每次都被重置 ——
+/// 同一页一秒钟能被写上百次。Aevon(82) 的卡屏（页面滑不动、点不动）与这条在
+/// 时间上重合，而 `video load` 一条都没有（单次都没超过 80 ms）：卡的不是单次，
+/// 就是次数。
+///
+/// 现在三件事一起兜：
+///   · 同一页 40 ms 内只写一次 —— 键是 cell 地址，画面重建不影响；
+///   · 同一页一秒内写满 40 次就停 0.5 秒（`hold`），自动恢复，**不是永久放弃**；
+///   · `video rate n=/s` 每秒一行读数，只在峰值 ≥ 20 时写。
+/// 这样即使下一次还卡，日志里也有「一秒写了多少次」这个数，不用再靠猜。
+#define AEVON_RATE_SLOTS 3
+typedef struct {
+    void *cell;
+    CFTimeInterval lastAt;
+    CFTimeInterval winAt;
+    CFTimeInterval hold;
+    int winN;
+} AevonWriteRate;
+
+static AevonWriteRate AevonWriteRates[AEVON_RATE_SLOTS];
+static int AevonWriteN = 0;
+static int AevonWritePeak = 0;
+static CFTimeInterval AevonWriteAt = 0.0;
+
+/// 这一页现在允许写一次位移吗。返回 NO 时调用方**不要**写，也不要记 slot。
+static BOOL AevonWriteAllowed(UIView *cell) {
+    if (cell == nil) return NO;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    AevonWriteRate *rate = NULL;
+    for (int i = 0; i < AEVON_RATE_SLOTS; i++) {
+        if (AevonWriteRates[i].cell == (void *)cell) { rate = &AevonWriteRates[i]; break; }
+    }
+    if (rate == NULL) {
+        for (int i = 0; i < AEVON_RATE_SLOTS; i++) {
+            if (AevonWriteRates[i].cell == NULL) { rate = &AevonWriteRates[i]; break; }
+        }
+    }
+    if (rate == NULL) rate = &AevonWriteRates[0];
+    if (rate->cell != (void *)cell) {
+        memset(rate, 0, sizeof(*rate));
+        rate->cell = (void *)cell;
+        rate->winAt = now;
+    }
+    if (now < rate->hold) return NO;
+    if (now - rate->lastAt < 0.04) return NO;
+    if (now - rate->winAt >= 1.0) { rate->winAt = now; rate->winN = 0; }
+    if (rate->winN >= 40) {
+        rate->hold = now + 0.5;
+        rate->winN = 0;
+        rate->winAt = now;
+        return NO;
+    }
+    rate->winN += 1;
+    rate->lastAt = now;
+    return YES;
+}
+
+/// 记一次「真的写了」。每秒结算一次，峰值 ≥ 20 才写一行 ——
+/// 这是「卡在次数上还是卡在单次上」的唯一直接读数。
+static void AevonWriteCounted(void) {
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    AevonWriteN += 1;
+    if (AevonWriteN > AevonWritePeak) AevonWritePeak = AevonWriteN;
+    if (now - AevonWriteAt < 1.0) return;
+    int peak = AevonWritePeak;
+    AevonWriteAt = now;
+    AevonWriteN = 0;
+    AevonWritePeak = 0;
+    if (peak < 20) return;
+    char line[120];
+    snprintf(line, sizeof(line), "video rate n=%d/s", peak);
+    AevonPageWrite(line);
+}
+
 /// 一块画面在这张卡里的记账。按指针认；认不出来就占一个空槽，槽满了顶掉 [0]
 /// （画面在翻页后本来就是新对象，旧记录留着只会挡住新手）。
 static AevonVideoSlot *AevonVideoSlotFor(void *band) {
@@ -2190,6 +2267,7 @@ static AevonVideoSlot *AevonVideoSlotFor(void *band) {
 /// 与当前毫无关系的状态继续生效。
 static void AevonVideoForget(void) {
     memset(AevonVideoSlots, 0, sizeof(AevonVideoSlots));
+    memset(AevonWriteRates, 0, sizeof(AevonWriteRates));
     AevonVideoCell = NULL;
     AevonVideoScanLeft = 3;
     AevonVideoKnownForget();
@@ -2546,9 +2624,21 @@ static void AevonLayoutHook(id self, SEL _cmd) {
     if (known) return;
 
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    if (now - AevonVideoLayoutAt < 0.008) return;      // 同一帧只扫一次
     if (now < AevonVideoPause) return;                 // 上一次太贵，歇一下
-    AevonVideoLayoutAt = now;
+    // 0.0.92 — 这道 8 ms 门**只该拦「整页扫描」**。
+    //
+    // Aevon(82) 里 `video known` 27 条全是心跳建立的（`via=tick` 19 条对
+    // `via=layout` 7 条，且没有一条是首次识别），于是每个视频第一次露出时都先
+    // 停在 `y=94`，0.2 秒后才被心跳推到 238 —— 用户看到的「从顶部跳到中间」。
+    //
+    // 成因就是这道门挂错了位置：同一帧里整页 cell 先排版、把门占掉，紧接着
+    // 视频区（TTPlayerView）自己的排版就被挡住了。而「只扫视频区那一层」是
+    // 二十来个视图，比整页扫描便宜一个数量级，不需要这道门。
+    // 现在：整页那一层（`videoLayer == 0`）走门；视频区那一层每次都能当场认。
+    if (!videoLayer) {
+        if (now - AevonVideoLayoutAt < 0.008) return;   // 同一帧只整页扫一次
+        AevonVideoLayoutAt = now;
+    }
     AevonVideoBusy = 1;
     AevonVideoCenterFor(cell, videoLayer ? node : nil, "layout");
     AevonVideoBusy = 0;
@@ -2582,6 +2672,14 @@ static void AevonVideoWrite(UIView *band, UIView *cell, CGRect rb,
                             const char *rname, const char *via) {
     AevonStep = AEVON_STEP_WRITE;
     if (band == nil || cell == nil) return;
+    // 0.0.92 — 只在主线程写。
+    //
+    // `CATransaction begin/commit` 是**线程私有**的：在子线程开一个、在主线程提交
+    // 另一个，事务栈就错位了。`layoutSubviews` 按说只在主线程，但抖音有几层是
+    // 自己的渲染容器，一旦有一条从别处进来，错位的事务会让整个 App 的 UI 更新
+    // 停住 —— 而进程还活着（Aevon(82) 的「页面点不动、日志每秒还在写」正是这个形状）。
+    // 这一句的代价是一次 TLS 读；收益是这条路不可能再把事务栈弄坏。
+    if (![NSThread isMainThread]) return;
     CGFloat cellH = [cell bounds].size.height;
     CGFloat want = (cellH - rb.size.height) / 2.0;
     CGFloat gap = want - rb.origin.y;
@@ -2610,6 +2708,9 @@ static void AevonVideoWrite(UIView *band, UIView *cell, CGRect rb,
     if (now - slot->wroteAt < 0.04) return;
     BOOL clip = AevonVideoClips(band, cell, &gap);
     if (fabs(gap) < 8.0) return;
+    // 0.0.92 — 按**页**限流（上面那道是按画面指针的，画面一重建就重置了）。
+    // 放在几何检查之后：白算的这一次不该占配额。
+    if (!AevonWriteAllowed(cell)) return;
     slot->wrote = 1;
     slot->writes += 1;
     slot->wroteTy = t.ty + gap;
@@ -2620,6 +2721,7 @@ static void AevonVideoWrite(UIView *band, UIView *cell, CGRect rb,
     [CATransaction setDisableActions:YES];
     [band setTransform:CGAffineTransformMakeTranslation(0, slot->wroteTy)];
     [CATransaction commit];
+    AevonWriteCounted();
     if (clip) {
         char line[210];
         snprintf(line, sizeof(line), "video clip %.20s moved=%.0f need=%.0f n=%d",
@@ -2868,10 +2970,14 @@ static void AevonVideoCenterFor(UIView *cell, UIView *hint, const char *via) {
     if (hint == nil && strcmp(via, "tick") == 0) {
         AevonHookLayout([cell class], 0);
         for (int i = 0; i < picked; i++) {
-            // 0.0.91 — 画面**自己**的类也挂上。0.0.90 只挂父视图（TTPlayerView）
-            // 与视频区（TTPlayerView），而画面层（TTMetalViewVP）常在自己的
-            // `layoutSubviews` 里定位置：只挂父层就会晚一拍，晚一拍就是可见的位移。
-            AevonHookLayout([pickBand[i] class], 1);
+            // 0.0.92 — 画面**自己**的类不再挂（0.0.91 加的，已撤）。
+            //
+            // 挂它的理由是「画面层常在自己的 layoutSubviews 里定位置」，但代价是
+            // 一个 Metal 渲染层每帧都会响，而它下面根本没有可找的矩形（
+            // `AevonBandUnder` 在 Metal 层里恒为 nil）。Aevon(82) 的卡屏
+            // （页面滑不动、点不动）与这一条新增的入口在时间上重合，先撤掉。
+            // 真正需要的是「视频区那一层不再被 8 ms 门挡住」—— 那一条已经改好，
+            // 一盏灯照一个房间就够。
             AevonHookLayout([[pickBand[i] superview] class], 1);
             AevonHookLayout([pickRegion[i] class], 1);
         }

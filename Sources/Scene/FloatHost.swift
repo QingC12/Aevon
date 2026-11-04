@@ -1271,8 +1271,40 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         lastTouchPhase = phase
         let eaten = rawTouch(phase: phase, at: screen, stamp: stamp)
         lastTouchEaten = eaten
+        FloatHost.touchIn += 1
+        if eaten { FloatHost.touchEaten += 1 }
+        // 0.0.92 — 每秒结算一行：「手指进来了多少、被我们吞掉了多少」。
+        //
+        // Aevon(82) 的卡屏（页面滑不动、点不动）只有两种可能：要么我们吞了触摸，
+        // 要么 App 自己不吃。原来的 `win: touch seen` 只记前 12 条按下事件，
+        // 之后一片空白 —— 分不出这两种。这一行把两个数放在一起：
+        //   `in=8 eat=0` ⇒ 手指进来了、我们一条都没吞 ⇒ 问题在 App 侧（或场景）；
+        //   `in=8 eat=7` ⇒ 是我们吞的，接下来只要看 zone 就够了。
+        FloatHost.settleTouchCounter(at: stamp)
         return eaten
     }
+
+    /// 每秒一次。`stamp` 是 `UITouch.timestamp`（系统时钟），和日志时间轴同源，
+    /// 所以不用再取一次 Date —— 两次取时间在这条路径上是白花。
+    private static func settleTouchCounter(at stamp: TimeInterval) {
+        if touchAt == 0 { touchAt = stamp; return }
+        if stamp - touchAt < 1.0 { return }
+        let n = touchIn
+        let e = touchEaten
+        touchIn = 0
+        touchEaten = 0
+        touchAt = stamp
+        // 没手指、也没吞过：这一秒什么都不用说。
+        guard n > 0 || e > 0 else { return }
+        // 一整条字面量（不是拼接）：交付前的审计要在二进制里 grep 到它，
+        // 相邻字面量拼出来的串在源码里根本搜不到 —— 这个坑记在项目纪律里。
+        Log.write(String(format: "win: touch in=%d eat=%d", n, e))
+    }
+
+    /// 0.0.92 — 这一秒进来的触摸数 / 被我们吞掉的数（见 `settleTouchCounter`）。
+    private static var touchIn = 0
+    private static var touchEaten = 0
+    private static var touchAt: TimeInterval = 0
 
     /// 环上的原始触摸。`phase` 用 UITouchPhase 的数值：0 began / 1 moved /
     /// 3 ended / 4 cancelled。返回 true 表示这条事件被浮窗吃掉。
