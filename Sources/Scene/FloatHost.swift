@@ -97,9 +97,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 让开。`isHidden` 而不是 alpha：窗口一旦隐藏就退出合成，也退出命中测试，
     /// 那两件事都是「用户看不见它却还在吃触摸」的来源。
     ///
-    /// 恢复时补一次 `reassertCanvas()`：锁屏期间远程场景的内容会被系统回收，
-    /// 解锁后窗口还在、画面是黑的（用户第 5 条「必须重新打开悬浮窗才会显示内容」）。
-    /// 那一次「改 1 pt 再改回来」正是他手动缩放一下就能救回来的那个动作。
+    /// 0.1.34 — 解锁后**重新接上画面**。
+    ///
+    /// 0.1.31 在这里只补了一次 `reassertCanvas()`（改 1 pt 再改回来）。V110 的
+    /// 日志证明那不够：`win: system cover show windows=11` 之后
+    /// `win: canvas re-asserted 430x717 after activate` 打了，而紧接着每一拍
+    /// 都是 `keepalive beat … cs=0`，一直到日志结束 —— 窗口在、承载视图在、
+    /// 里面没有画面。用户的原话是「必须重新打开悬浮窗才会显示内容」。
+    ///
+    /// 重开卡与「画面回来」之间差的是什么：一次 presenter 重新接管。所以这里
+    /// 把承载面摘下来再挂回去，让系统按新挂上的视图重新接一次远程层；真正的
+    /// 时机与重推前台由保活时钟做（见 `reviveTick`）。
     static func setSystemCovered(_ covered: Bool) {
         guard covered != systemCovered else { return }
         systemCovered = covered
@@ -111,8 +119,28 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                   + " windows=" + String(slots.count))
         guard !covered else { return }
         for host in slots {
-            host.reassertCanvas()
+            // 0.1.34 — 解锁后画面还是黑的（用户第三次报同一条）：`reassertCanvas`
+            // 只改承载视图的 bounds，救不回已经被系统拆掉的远程层。真正等价于
+            // 「手动关掉再打开悬浮窗」的动作是把承载面摘下来重新挂 —— 用户说
+            // 「必须重新打开悬浮窗才会显示内容」，那就替他把这一步做掉。
+            //
+            // 交给保活时钟而不是就地做：解锁这一拍系统还在往回恢复 scene，早
+            // 半步的重挂会被紧接着的那次写入抹掉。
+            host.reviveTick += 1
         }
+    }
+
+    /// 0.1.34 — 重挂承载面。只碰我们自己的视图，不碰 App 的窗口。
+    func reviveCanvas() {
+        guard let card = card, let content = content else { return }
+        content.removeFromSuperview()
+        card.insertSubview(content, at: 0)
+        // 重挂会把系统的 `transform` / `frame` 重置成 scene 自己那一版，所以
+        // 摆正必须在之后 —— 与 `reapplyPlacement` 里那段注释同一个原因。
+        followContent()
+        reapplyPlacement("revive")
+        reassertCanvas()
+        Log.write("win: canvas revived " + size(card.bounds.size))
     }
 
     /// 0.1.7 — **「上一个主悬浮窗」的几何**，升窗时唯一的落点来源。
@@ -696,6 +724,25 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var card: UIView?
     private var content: UIView?
     private var grip: GripView?
+    /// 0.1.34 — 拖动 / 缩放期间的**目标几何**，`nil` = 静止。
+    ///
+    /// 这一版之前，拖动的每一帧都写 `card.frame`：`bounds` 一变，卡片里那层远程
+    /// scene 承载视图就跟着布局一次（它是别的进程的画面，一次布局＝一次跨进程
+    /// 合成重排），再加上 `syncGrip` 往**另一个窗口**写 `frame`、`applyGlow` 每帧
+    /// 重建阴影路径。手指在动，主线程在排队 —— 用户的原话是「依旧感觉不流畅」。
+    ///
+    /// 现在每帧只写 `transform` 与 `center`（纯合成属性，UIKit 不会调 layout），
+    /// 真几何留到抬手那一拍一次落地（`settleLive`）。画布尺寸在整场手势里不变，
+    /// App 从头到尾不知道窗口被搬过 —— 这也正是 0.0.65 给缩放定的口径。
+    private var liveFrame: CGRect?
+
+    /// 0.1.34 — 「解锁了，给这张卡一次重来的机会」。
+    ///
+    /// `setSystemCovered(false)` 每解锁一次加一，保活时钟看到数字变了就重置
+    /// 自己那套退避计数并调一次 `reviveCanvas()`。为什么不直接在
+    /// `setSystemCovered` 里做：那一刻系统刚撤掉锁屏，App 的 scene 还在往回
+    /// 恢复的路上，早半秒的重挂会被紧接着的一次系统写入抹掉。
+    var reviveTick = 0
     /// The transparent shield a docked card puts over its own picture. It exists
     /// for one reason: while the card is mini, a tap on the picture has to mean
     /// "give me the window back" instead of reaching the app.
@@ -2005,6 +2052,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.1.28 — 入场弹跳里 `card.frame` 是缩过的派生值（0.74 倍时只剩七成）。
         // 下面 `resizeStart = card.frame` 会把它当锚点，于是第一次移动跳一下。
         settleEnter()
+        liveFrame = nil
         zone = zoneFor(start)
         panStep = .zero
         // 0.0.99 — 闸门不在这里归零：长按有可能比这一拍晚成立。清点在
@@ -2026,6 +2074,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         } else {
             resizeStart = nil
         }
+        // 0.1.34 — 这一根从此刻起归宿主。App 那份 `touchesBegan` 已经落地了，
+        // 通知到得再快也在它之后，所以对面收到锁先擦一次高亮，再吞掉剩下的
+        // `moved` / `ended` —— 用户看到的是「拖动时 App 不再跟着亮」。
+        if !bundle.isEmpty { AevonAppBandLock(bundle, true) }
     }
 
     /// 0.0.65 — 一行说清这次缩放用的是哪块画布。0.0.64 的 `mode=` 撤了：
@@ -2088,11 +2140,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 圆角同理：拖大拖小时 `side = min(w, h)` 每帧都变，`cornerRadius`
             // 每帧都写一次等于每帧重建一次裁剪路径，而卡片底下是远程 scene 层 ——
             // 观感就是边缘在抖。拖动中不动圆角，抬手时一次算准（`dragEnd`）。
-            card.frame = frame
-            followContent(updateCorner: false)
-            syncGrip()
-            // 0.1.31 — 拖动途中不再跨进程上报（见 `reportBand`）。抬手那一次由
-            // `dragEnd` 的 `defer` 保证。
+            // 0.1.34 — 只写变换（见 `liveFrame`）：一整场缩放里 `bounds` 不动，
+            // 承载视图一次都不重排，画面是被 `transform` 放大缩小的。
+            // 圆角同理不动：它按 `bounds` 算，却会被变换一起拉伸；抬手那一拍
+            // `settleLive` 才把尺寸、圆角、画面三者一次算准。
+            liveFrame = frame
+            liveTransform(frame)
         } else {
             // All four cells move. 0.0.40 removed the two that resized, so a
             // drag on the band is a drag on the band, wherever it started;
@@ -2126,12 +2179,54 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             if zone == .top {
                 return
             }
-            var frame = card.frame
+            // 0.1.34 — 基准取 `liveFrame`（这一场手势的目标），不读 `card.frame`：
+            // 后者在有变换时是派生值，累加 `dx`/`dy` 会一帧一帧地缩水。
+            var frame = liveFrame ?? card.frame
             frame.origin.x += dx
             frame.origin.y += dy
-            card.frame = clamped(frame, in: window.bounds)
-            syncGrip()
+            frame = clamped(frame, in: window.bounds)
+            liveFrame = frame
+            liveTransform(frame)
         }
+    }
+
+    /// 0.1.34 — 每帧唯一要做的事：把目标几何写成变换。
+    ///
+    /// 两个 `transform` + 两个 `center`，都是 CALayer 的合成属性 —— 不进
+    /// `layoutSubviews`、不碰远程 scene、不跨窗口。这就是「跟手」的全部开销。
+    private func liveTransform(_ target: CGRect) {
+        guard let card = card else { return }
+        let base = card.bounds.size
+        let scale = CGAffineTransform(scaleX: target.width / Swift.max(base.width, 1),
+                                      y: target.height / Swift.max(base.height, 1))
+        card.transform = scale
+        card.center = CGPoint(x: target.midX, y: target.midY)
+        guard let glow = glow else { return }
+        // 光晕与卡片同尺寸（`applyGlow` 一直按 `card.frame` 摆），所以同一组
+        // `center` + `transform` 就对齐，不必每帧重算外扩量。
+        glow.transform = scale
+        glow.center = card.center
+    }
+
+    /// 0.1.34 — 抬手那一拍把变换落回真几何。
+    ///
+    /// `card.frame` 在读之前必须先摘掉变换：`frame` 是 `bounds`/`center`/`transform`
+    /// 三者算出来的派生量，带着一条 0.3 倍的缩放去读，读到的是缩过的值 ——
+    /// 0.1.28 的「吸附时翻转一下」和 0.1.31 的「第一次移动跳一下」都是这个形状。
+    private func settleLive() {
+        guard let target = liveFrame, let card = card else { return }
+        liveFrame = nil
+        card.transform = .identity
+        card.bounds = CGRect(origin: .zero, size: target.size)
+        card.center = CGPoint(x: target.midX, y: target.midY)
+        if let glow = glow {
+            glow.transform = .identity
+            glow.bounds = CGRect(origin: .zero, size: target.size)
+            glow.center = card.center
+        }
+        // 尺寸、圆角、画面三件事一次收口；`syncGrip` 再把热区写回另一个窗口。
+        followContent()
+        syncGrip()
     }
 
     private func dragEnd(total: CGPoint, velocity: CGPoint) {
@@ -2140,6 +2235,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // `defer` 是有意的：这个函数有六条 return，逐个加只会漏掉一条 ——
         // 而漏掉的那一条，就是「拖动之后再操作四边手势，App 也跟着动」。
         defer { reportBand() }
+        // 0.1.34 — 抬手就解开 App 那把锁。这里同样是 `defer`：下面有六条
+        // return，逐个加只会漏掉一条，而漏掉的那一条会让 App 一直吞触摸
+        // （对面还有 3 秒租约兜底，但那是保险，不是常态）。
+        defer { if !bundle.isEmpty { AevonAppBandLock(bundle, false) } }
+        // 0.1.34 — 先把这一场手势的变换落回真几何，后面每一处 `card.frame`
+        // 才读到的是落点而不是派生值。（没动过就什么都不做。）
+        settleLive()
         // 0.0.99 — 两侧轻滑：闸门没开就什么都没发生。不做 `remember`，也不写
         // 「moved」—— 那张卡片根本一动没动，写一行只会让下一份日志看起来像
         // 「移动了但没生效」。

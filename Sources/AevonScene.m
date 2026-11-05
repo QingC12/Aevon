@@ -1941,44 +1941,79 @@ BOOL AevonSystemCovered(void) {
 /// 文件名 `aevon-band`，内容 8 个整数：band 的 x/y/w/h，然后是卡片的 x/y/w/h。
 /// 传 `CGRectNull` 删除它 —— 卡片没了而 App 还被扣着一片区域，就是「这个 App
 /// 有一块点不动」，这是这条通道唯一会伤到用户的失败模式。
-void AevonAppBandSet(NSString *bundleID, CGRect band, CGRect hole) {
+static CGRect AevonBandShown = {{0, 0}, {0, 0}};
+static CGRect AevonBandHoleShown = {{0, 0}, {0, 0}};
+static NSString *AevonBandOwner = nil;
+static BOOL AevonBandLocked = NO;
+
+/// 0.1.34 — 数据走 `CFPreferences`，通知只当铃铛（名字**固定**）。
+///
+/// 前两版各押了一条路，都被真机日志压住了：
+///
+///   · 0.1.29 用容器里的文件。V109/V110 的 `win: mini flag armed … notify only,
+///     no file` 说明 `AevonAppContainer` 在目标 App 上取不到容器 —— 文件从来
+///     没写进去，App 侧读到的永远是空。
+///   · 0.1.31 把 8 个数编进通知名，绕开容器。但那就要求 App 侧注册 `NULL`
+///     收下所有 Darwin 通知，而这条路通不通，两份日志**都分不开**（App 侧
+///     读到空值就已经能让 `app: band touch at` 一条都不出现）。
+///
+/// 所以这一版不赌：值走偏好域（系统为跨进程传值准备的那条，不依赖容器），
+/// 名字固定成 `com.aevon.band.<bundle>`（两端精确匹配，不依赖通配）。文件那条
+/// 留着当兜底。App 侧新增两行证词把「通知到没到」和「值读到没」分开。
+static void AevonBandPublish(NSString *bundleID) {
     if (bundleID.length == 0) return;
+    BOOL off = CGRectIsNull(AevonBandShown) || AevonBandShown.size.width < 1
+               || AevonBandShown.size.height < 1;
+    // 9 个数：8 个矩形量 + 1 个「这根手指归宿主」的锁。锁只加不减一行代码，
+    // 因为拖动一开始 App 那份 `touchesBegan` 已经落地了，晚了就只剩清高亮。
+    NSString *body = off
+        ? @"none"
+        : [NSString stringWithFormat:@"%.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f %d",
+           AevonBandShown.origin.x, AevonBandShown.origin.y,
+           AevonBandShown.size.width, AevonBandShown.size.height,
+           AevonBandHoleShown.origin.x, AevonBandHoleShown.origin.y,
+           AevonBandHoleShown.size.width, AevonBandHoleShown.size.height,
+           AevonBandLocked ? 1 : 0];
+    CFStringRef app = (__bridge CFStringRef)bundleID;
+    CFPreferencesSetAppValue(CFSTR("AevonBand"), (__bridge CFStringRef)body, app);
+    CFPreferencesSynchronize(app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
     NSString *dir = AevonAppContainer(bundleID);
     if (dir != nil) {
         NSString *path = [dir stringByAppendingPathComponent:@"tmp/aevon-band"];
-        if (CGRectIsNull(band) || band.size.width < 1 || band.size.height < 1) {
+        if (off) {
             [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
         } else {
-            NSString *body = [NSString stringWithFormat:@"%.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f\n",
-                              band.origin.x, band.origin.y, band.size.width, band.size.height,
-                              hole.origin.x, hole.origin.y, hole.size.width, hole.size.height];
             [body writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         }
     }
-    // 0.1.31 — 数据不再只靠文件，**同时编进通知名**。
-    //
-    // V109 的日志把这条通道判了：`win: band report` 50 条、`app: band touch at`
-    // 0 条，而同一份日志里 `win: mini flag armed … notify only, no file` 反复
-    // 出现 —— `AevonAppContainer` 在目标 App 上取不到容器，文件根本没写进去，
-    // App 侧读到的永远是空，`AevonBandOn` 恒为 0，四边手势于是 100 % 透传。
-    //
-    // 文件那条留着（未沙盒进程仍是一步到位），但名字这一条才是保命的：Darwin
-    // 通知不需要任何沙盒权限，名字长度也没有实际限制。格式：
-    //   com.aevon.band.<bundle>.<x>_<y>_<w>_<h>_<hx>_<hy>_<hw>_<hh>
-    //   com.aevon.band.<bundle>.null                     ← 撤掉这一片
-    NSString *name;
-    if (CGRectIsNull(band) || band.size.width < 1 || band.size.height < 1) {
-        name = [NSString stringWithFormat:@"com.aevon.band.%@.null", bundleID];
-    } else {
-        name = [NSString stringWithFormat:
-                @"com.aevon.band.%@.%.0f_%.0f_%.0f_%.0f_%.0f_%.0f_%.0f_%.0f",
-                bundleID,
-                band.origin.x, band.origin.y, band.size.width, band.size.height,
-                hole.origin.x, hole.origin.y, hole.size.width, hole.size.height];
-    }
+    NSString *name = [NSString stringWithFormat:@"com.aevon.band.%@", bundleID];
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                         (__bridge CFStringRef)name,
-                                         NULL, NULL, true);
+                                         (__bridge CFStringRef)name, NULL, NULL, true);
+}
+
+void AevonAppBandSet(NSString *bundleID, CGRect band, CGRect hole) {
+    if (bundleID.length == 0) return;
+    AevonBandOwner = [bundleID copy];
+    AevonBandShown = band;
+    AevonBandHoleShown = hole;
+    AevonBandLocked = NO;
+    AevonBandPublish(bundleID);
+}
+
+/// 0.1.34 — 「这根手指归宿主管辖」。
+///
+/// 用户第 2 条的后半句：「移动悬浮窗时也会触发 APP 内的触摸操作（APP 内的选项
+/// 出现选中影响，但是不会触发选中功能）」。那正是 App 收到了 `touchesBegan`
+/// （高亮），而后续的 `moved` / `ended` 被宿主的拖动吃掉 —— 高亮再也等不到
+/// 抬手，于是留在屏幕上。
+///
+/// 宿主一开拖就打开这把锁：App 侧收到即清一次高亮、并且整根吞到抬手为止。
+void AevonAppBandLock(NSString *bundleID, BOOL locked) {
+    if (bundleID.length == 0) return;
+    if (AevonBandOwner != nil && ![AevonBandOwner isEqualToString:bundleID]) return;
+    if (AevonBandLocked == locked) return;
+    AevonBandLocked = locked;
+    AevonBandPublish(bundleID);
 }
 
 // MARK: - 0.1.29 深浅色 → 应用侧

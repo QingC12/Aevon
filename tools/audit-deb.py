@@ -592,7 +592,12 @@ def main():
                   b"win: style follow ",
                   # 0.1.31 — 锁屏 / 通知中心 / 控制中心盖上来时整层让开，
                   # 以及恢复显示后那一次「把承载面动一下」。
-                  b"win: system cover "):
+                  # 0.1.34 — 解锁后重挂承载面：`canvas revived` 是动作本身，
+                  # `revive after unlock` 是保活时钟接住那一次的信号。两条都
+                  # 必须在内核里 —— 前两版黑屏就是「窗口回来了、画面没回来」。
+                  b"win: system cover ",
+                  b"win: canvas revived ",
+                  b"win: revive after unlock tick="):
         if token not in dylib_early:
             bad(f"host: {token.decode(errors='replace')} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")
@@ -949,6 +954,13 @@ def main():
                       # 全屏 app 也向下滑动」）。这条字符串缺了，就说明那条通道
                       # 没编进去 —— 宿主会照旧发通知，但 App 里没人接。
                       b"app: band touch at ",
+                      # 0.1.34 — 通道换了来源之后的两条判据：
+                      #   `band note`  ⇒ 固定名通知真的到了（上一版注册 NULL 收不到）
+                      #   `band prefs` ⇒ 值真的读到了（V109/V110 都死在「文件读空」）
+                      # 只出现前者说明取值那一步错，两条都不出现说明通知没到 ——
+                      # 下一份日志能直接分开，不用再猜。
+                      b"app: band note from host",
+                      b"app: band prefs on=",
                       # 0.1.29 — 深浅色的应用侧观察者。
                       b"com.aevon.style.",
                       b"setContentOffset:"):

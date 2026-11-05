@@ -1659,6 +1659,8 @@ zStackParticipantDidChange:
         var keep: (() -> Void)!
         var beat = 0
         var misses = 0
+        // 0.1.34 — 上一次见到的解锁计数。变了解锁了一次，退避计数要归零。
+        var seenRevive = host.reviveTick
         var wrote = 0
         var marked = false
         // 0.0.50 — 掉画的记账。`dropped` 是画面开始黑的那一拍，0 = 现在有画；
@@ -1703,6 +1705,26 @@ zStackParticipantDidChange:
                     Log.write("win: idle timer kick mask=" + String(idleMask)
                               + " n=" + String(AevonIdleTimerCount()))
                 }
+            }
+            // 0.1.34 — 解锁了一次：退避计数归零 + 重挂承载面。
+            //
+            // V110 的日志死在这里：锁屏前 `misses` 已经攒到 3、`wakes` 也用完了，
+            // 解锁后 `cs` 一直是 0（`keepalive beat … cs=0` 一直到日志末），
+            // 时钟照常一拍一拍地写，但一次都没有再试过推前台 —— 用户看到的就是
+            // 「必须重新打开悬浮窗」。这三个计数是为「系统暂时不给」设计的，
+            // 解锁是一次全新的开始，不该继承锁屏期间那三次失败。
+            if host.reviveTick != seenRevive {
+                seenRevive = host.reviveTick
+                misses = 0
+                wakes = 0
+                dropped = 0
+                deadBeats = 0
+                // 不等下面那套「fg 不等于 1 才推」的存量判断：解锁后我们要的是
+                // 一次**主动**的重新接上，而不是再等一拍看系统脸色。
+                _ = AevonPushForeground(scene)
+                _ = AevonWakeScene(scene)
+                host.reviveCanvas()
+                Log.write("win: revive after unlock tick=" + String(seenRevive))
             }
             let live = value(of: scene, "settings")
             let fg = live.map { AevonBoolOf($0, "isForeground") } ?? -1

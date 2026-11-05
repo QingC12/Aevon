@@ -236,8 +236,18 @@ enum AevonMotion {
     /// 1.06；升窗起点约 0.32（行程 68 %），同样 0.42 会冲到 1.16 —— 卡片比目标
     /// 大 16 %，那就不是「弹一下」而是「胀一下」。0.62 的过冲约 8 %，峰值 1.05，
     /// 在屏幕上刚好是一次可见的收尾。
-    static let liftDuration: TimeInterval = 0.38
-    static let liftDamping: CGFloat = 0.62
+    ///
+    /// 0.1.34 — 0.38 s / ζ0.62 被用户判成「太快了，是飞入吗」。
+    ///
+    /// 这一条与入场弹跳**不是同一个动作**：入场是从 0.74 在**原地**长到 1，
+    /// 升窗还要同时把小窗那一点（通常贴着右缘）搬到主窗落点，位移常在两三百 pt。
+    /// 缩放 + 长位移叠在同一条 0.38 s 的欠阻尼曲线上，前 0.1 s 就把七成路程
+    /// 走完 —— 眼睛读到的不是「长大」，是「一个小方块飞过去然后撑开」。
+    ///
+    /// 两个数一起改：时长 0.55 s 让位移那一段有地方落脚，阻尼 0.72 把过冲从
+    /// 8 % 压到约 4 %（峰值 1.04）。仍然是一次可见的收尾，但不再像撞上去。
+    static let liftDuration: TimeInterval = 0.55
+    static let liftDamping: CGFloat = 0.72
 
     @discardableResult
     static func lift(_ views: [UIView], from scale: CGFloat, center: CGPoint?,

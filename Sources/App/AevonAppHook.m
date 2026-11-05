@@ -4934,27 +4934,102 @@ static CGRect AevonBandHole  = {{0, 0}, {0, 0}};
 static volatile int AevonBandOn = 0;
 static BOOL AevonBandWatching = NO;
 static int AevonBandNotes = 0;
-/// 0.1.31 — 自己那一串通知名的前缀（`com.aevon.band.<bundle>.`），构造时算一次。
-static NSString *AevonBandHead = nil;
+static int AevonBandProof = 0;
+/// 0.1.34 — 「这根手指归宿主」。拖动 / 缩放期间为 1（见 `AevonAppBandLock`）。
+static volatile int AevonBandLock = 0;
+/// 上面那把锁是什么时候打开的（3 秒租约，见 `AevonBandHeld`）。
+static CFAbsoluteTime AevonBandLockAt = 0;
+/// 自己那一格偏好域，构造函数里算一次。
+static CFStringRef AevonBandApp = NULL;
 
-/// 读一次文件。找不到 / 内容不完整 ⇒ 关掉（宁可不吞，也不能让一块区域死掉）。
+/// 读一次值。
+///
+/// 0.1.34 — 换了来源：`CFPreferences`（宿主写我们的域，我们读自己的域）。
+///
+/// 前两版都没通，但**原因不同**：0.1.29 读容器里的文件，而宿主取不到容器
+/// （V109/V110 的 `win: mini flag armed … no file`），文件从来没写进去；
+/// 0.1.31 把数字编进通知名，却要求我们注册 `NULL` 收全系统的 Darwin 通知 ——
+/// 那条通不通，日志分不开（值读空就足以让 `app: band touch at` 一条都不出现）。
+/// 这一版值走偏好域、名字固定，并且分别留了 `app: band note` 与
+/// `app: band prefs` 两行证词：下一份日志能直接回答是哪一段断的。
+///
+/// 找不到 / 内容不完整 ⇒ 关掉（宁可不吞，也不能让一块区域死掉）。
 static void AevonBandReload(void) {
-    NSString *tmp = NSTemporaryDirectory();
-    if (tmp.length == 0) { AevonBandOn = 0; return; }
-    NSString *text = [NSString stringWithContentsOfFile:
-                      [tmp stringByAppendingPathComponent:@"aevon-band"]
-                                               encoding:NSUTF8StringEncoding
-                                                  error:NULL];
-    if (text.length == 0) { AevonBandOn = 0; return; }
-    // 8 个数直接扫，不建数组：`sendEvent:` 每次手势都要走这条判定，回调里也
+    if (AevonBandApp == NULL) { AevonBandOn = 0; return; }
+    CFPreferencesSynchronize(AevonBandApp, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    // 这个文件是 MRC（Theos 默认不开 ARC），所以不碰 `CFBridgingRelease`：
+    // 取出来的 CF 值自己释放，中间只用一块栈上的 C 字符串。
+    CFStringRef value = CFPreferencesCopyAppValue(CFSTR("AevonBand"), AevonBandApp);
+    char text[128] = {0};
+    Boolean read = NO;
+    if (value != NULL) {
+        read = CFStringGetCString(value, text, sizeof(text) - 1, kCFStringEncodingUTF8);
+        CFRelease(value);
+    }
+    if (!read || text[0] == 0) {
+        // 兜底：容器里那份文件（宿主取得到容器时两条路会各写一份）。偏好域这条
+        // 是主路 —— 它不依赖容器，而 V109/V110 两次失败的共同点正是取不到容器。
+        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"aevon-band"];
+        NSString *body = [NSString stringWithContentsOfFile:path
+                                                   encoding:NSUTF8StringEncoding
+                                                      error:NULL];
+        if (body.length == 0) {
+            AevonBandOn = 0;
+            AevonBandLock = 0;
+            return;
+        }
+        snprintf(text, sizeof(text), "%s", body.UTF8String);
+    }
+    if (text[0] == 0 || strcmp(text, "none") == 0) {
+        AevonBandOn = 0;
+        AevonBandLock = 0;
+        return;
+    }
+    // 9 个数直接扫，不建数组：`sendEvent:` 每次手势都要走这条判定，回调里也
     // 不该留下 autoreleased 容器（构造函数那一拍没有 pool）。
-    double v[8] = {0};
-    int got = sscanf(text.UTF8String, "%lf %lf %lf %lf %lf %lf %lf %lf",
-                     &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
-    if (got != 8) { AevonBandOn = 0; return; }
+    double v[9] = {0};
+    int got = sscanf(text, "%lf %lf %lf %lf %lf %lf %lf %lf %lf",
+                     &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8]);
+    if (got < 8) { AevonBandOn = 0; AevonBandLock = 0; return; }
     AevonBandOuter = CGRectMake((CGFloat)v[0], (CGFloat)v[1], (CGFloat)v[2], (CGFloat)v[3]);
     AevonBandHole = CGRectMake((CGFloat)v[4], (CGFloat)v[5], (CGFloat)v[6], (CGFloat)v[7]);
     AevonBandOn = (AevonBandOuter.size.width >= 1 && AevonBandOuter.size.height >= 1);
+    BOOL locked = (got >= 9 && v[8] >= 0.5);
+    if (locked && !AevonBandLock) AevonBandLockAt = CFAbsoluteTimeGetCurrent();
+    AevonBandLock = locked ? 1 : 0;
+    // 判据：这一行出现 ⇒ 通道真的通了（值、来源、锁都在里面）。没有它而用户
+    // 还被透传，问题就不在这条通道上，别再改这里。
+    if (AevonBandProof < 12) {
+        AevonBandProof += 1;
+        char line[192];
+        snprintf(line, sizeof(line),
+                 "app: band prefs on=%d band=%.0fx%.0f at %.0f,%.0f lock=%d\n",
+                 (int)AevonBandOn, AevonBandOuter.size.width, AevonBandOuter.size.height,
+                 AevonBandOuter.origin.x, AevonBandOuter.origin.y, (int)AevonBandLock);
+        AevonAppLogWrite(line);
+    }
+}
+
+/// 0.1.34 — 把 App 里已经亮起来的那一项擦掉。
+///
+/// 时序上不可避免：`touchesBegan` 在同一批事件里已经送进 App 了，通知到得再快
+/// 也在它之后。所以「锁」不是拦住那一拍，而是擦掉它的后果，再把后面的
+/// `moved` / `ended` 全部收走 —— App 从此等不到抬手，也就不会真的触发功能。
+static void AevonBandDropHighlights(UIView *view) {
+    if ([view isKindOfClass:[UIControl class]]) {
+        UIControl *control = (UIControl *)view;
+        if (control.isHighlighted) control.highlighted = NO;
+    }
+    for (UIView *child in view.subviews) AevonBandDropHighlights(child);
+}
+
+static void AevonBandDropAllHighlights(void) {
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            AevonBandDropHighlights(window);
+        }
+    }
 }
 
 static void AevonBandNote(CFNotificationCenterRef __unused center,
@@ -4962,58 +5037,48 @@ static void AevonBandNote(CFNotificationCenterRef __unused center,
                           CFStringRef name,
                           const void *__unused object,
                           CFDictionaryRef __unused userInfo) {
-    // 0.1.31 — 这一条现在要看名字，因为矩形已经编进名字里了。
-    //
-    // 为什么要走名字：V109 的日志里 `win: band report` 有 50 条，`app: band
-    // touch at` 一条都没有。同一份日志里 `win: mini flag armed … notify only,
-    // no file` 反复出现 —— 宿主**取不到 App 容器**，数据文件根本没写进去，App
-    // 那边 `AevonBandReload` 每次都读空，`AevonBandOn` 恒为 0，于是四边手势
-    // 100 % 透传。文件这条路在目标 App 上就是不通的。
-    if (name == NULL || AevonBandHead == nil) return;
-    // 注册的 name 是 NULL（收下全系统的 Darwin 通知），所以先比前 16 个字符。
-    // 用 UTF-16 直接比，不建 NSString、不做 C 字符串转换 —— 这个回调会被系统里
-    // 每一条通知叫醒，第一条判断必须便宜。
-    CFIndex length = CFStringGetLength(name);
-    if (length < 16) return;
-    UniChar head[16];
-    CFStringGetCharacters(name, CFRangeMake(0, 16), head);
-    static const char *prefix = "com.aevon.band.";
-    size_t cut = strlen(prefix);
-    for (size_t i = 0; i < cut; i++) {
-        if (head[i] != (UniChar)prefix[i]) return;
+    if (name == NULL) return;
+    // 精确注册之后这里只会被我们自己那一格叫醒，不必再比前缀。
+    if (AevonBandNotes < 12) {
+        AevonBandNotes += 1;
+        AevonAppLogWrite("app: band note from host\n");
     }
-    NSString *raw = (__bridge NSString *)name;
-    if (![raw hasPrefix:AevonBandHead]) return;
-    NSString *tail = [raw substringFromIndex:AevonBandHead.length];
-    if ([tail isEqualToString:@"null"]) {
-        AevonBandOn = 0;
-        return;
-    }
-    double v[8] = {0};
-    int got = sscanf(tail.UTF8String, "%lf_%lf_%lf_%lf_%lf_%lf_%lf_%lf",
-                     &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
-    if (got != 8) {
-        // 老格式（名字不带数据）：退回读文件。
-        AevonBandReload();
-        return;
-    }
-    AevonBandOuter = CGRectMake((CGFloat)v[0], (CGFloat)v[1], (CGFloat)v[2], (CGFloat)v[3]);
-    AevonBandHole = CGRectMake((CGFloat)v[4], (CGFloat)v[5], (CGFloat)v[6], (CGFloat)v[7]);
-    AevonBandOn = (AevonBandOuter.size.width >= 1 && AevonBandOuter.size.height >= 1);
+    BOOL wasLocked = AevonBandLock != 0;
+    AevonBandReload();
+    if (wasLocked || !AevonBandLock) return;
+    // Darwin 通知的回调**不保证在主线程**，而下面要动 UIView：必须跳回主队列。
+    // 跳一拍不损失什么 —— 这一行本来就是在 `touchesBegan` 之后才可能执行到，
+    // 目的只是把那一拍点亮的高亮擦掉。
+    dispatch_async(dispatch_get_main_queue(), ^{
+        AevonBandDropAllHighlights();
+    });
 }
 
 static void AevonBandObserve(void) {
     NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
     if (bundle.length == 0) return;
-    // 0.1.31 — 名字精确匹配这条路走不通了：矩形是运行时才知道的数字，App 侧
-    // 预知不到。注册 NULL = 收下所有 Darwin 通知，回调里用前 16 个字符筛掉
-    // 别人家的。代价是每条系统通知都叫醒一次，所以那个判断必须是几个整数比较。
-    AevonBandHead = [NSString stringWithFormat:@"com.aevon.band.%@.", bundle];
+    // 0.1.34 — 名字**固定**，两端精确匹配。上一版注册 `NULL` 想收全系统的
+    // Darwin 通知，但那条路在两份日志里都分不出通没通；精确名不需要赌。
+    AevonBandApp = CFStringCreateCopy(kCFAllocatorDefault, (__bridge CFStringRef)bundle);
+    NSString *name = [NSString stringWithFormat:@"com.aevon.band.%@", bundle];
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
-                                    NULL, AevonBandNote, NULL, NULL,
+                                    NULL, AevonBandNote,
+                                    (__bridge CFStringRef)name, NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
     // 构造函数可能晚于第一份数据（宿主先开卡、App 进程后起），先读一次。
     AevonBandReload();
+}
+
+/// 0.1.34 — 锁带 3 秒租约。
+///
+/// 跨进程的状态位必须能自己收回：宿主崩了、手势被系统抢走、`dragEnd` 没走到，
+/// 任何一次漏解都会让这个 App **永久**吃掉所有单指触摸 —— 那比透传严重得多，
+/// 用户只能重启那个 App。三秒 ≈ 一次拖动的最长合理时长。
+static BOOL AevonBandHeld(void) {
+    if (!AevonBandLock) return NO;
+    if (CFAbsoluteTimeGetCurrent() - AevonBandLockAt < 3.0) return YES;
+    AevonBandLock = 0;
+    return NO;
 }
 
 /// 这一点归宿主吗。卡片内部不算（那是 App 的画面），右缘那 18 pt 也不算
@@ -5031,6 +5096,12 @@ static BOOL AevonBandTake(UIEvent *event) {
     if (touches.count != 1) { AevonBandWatching = NO; return NO; }
     UITouch *touch = [touches anyObject];
     if (touch.phase == UITouchPhaseBegan) {
+        // 0.1.34 — 宿主正在拖 / 缩放这张卡：这一根从落指起就归它，连卡片内部
+        // 也算（那块在拖的时候不是「App 的画面」，是被搬着的一张图）。
+        if (AevonBandHeld()) {
+            AevonBandWatching = YES;
+            return YES;
+        }
         CGPoint p = [touch locationInView:nil];
         if (!AevonBandHolds(p)) { AevonBandWatching = NO; return NO; }
         AevonBandWatching = YES;

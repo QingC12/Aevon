@@ -200,7 +200,17 @@ int AevonAppMiniFlagsClearAll(void);
 /// `com.aevon.band.<bundle>.<x>_<y>_<w>_<h>_<hx>_<hy>_<hw>_<hh>`（整数点数），
 /// 传 `CGRectNull` 表示「没有主窗，撤掉」。调用点是每一次手势结束 / 布局落定，
 /// 不是每帧 —— 拖动的中间帧不发，那时手指已经归宿主了。
+/// 0.1.34 — 数据改走 `CFPreferences`（宿主写目标 App 的域，App 读自己的域），
+/// 通知名固定成 `com.aevon.band.<bundle>`，两端精确匹配。传 `CGRectNull` 表示
+/// 「没有主窗，撤掉」。调用点是每一次手势结束 / 布局落定，不是每帧。
 void AevonAppBandSet(NSString *_Nullable bundleID, CGRect band, CGRect hole);
+
+/// 0.1.34 — 「这根手指归宿主」：拖动 / 缩放开始时打开，抬手关掉。
+///
+/// 用户报的是「移动悬浮窗时 App 内的选项出现选中态，但不触发功能」——
+/// `touchesBegan` 已经进了 App（高亮），后续被宿主吃掉，`ended` 永远等不到。
+/// App 侧收到锁就擦一次高亮，并整根吞到抬手（自带 3 秒租约，宿主没了也能自愈）。
+void AevonAppBandLock(NSString *_Nullable bundleID, BOOL locked);
 
 /// 0.1.29 — 系统换了深浅色。
 ///
