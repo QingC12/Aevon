@@ -164,6 +164,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return host.bundle
     }
 
+    /// 0.1.29 — 按 bundle 找一张**停靠着**的卡。
+    ///
+    /// 圆盘选中一个已经被停靠成小窗的图标时，要把它升回主窗而不是再开一张
+    /// （见 `SceneProbe.openCard`）。判据是 `onMini` 而不是「不是主窗」：
+    /// `mainIndex` 不随降级更新，指着小窗是常态。
+    static func dockedHost(of bundle: String) -> FloatHost? {
+        ensureSlots()
+        return slots.first { $0.window != nil && $0.onMini && $0.bundle == bundle }
+    }
+
     /// 0.1.6 — 屏幕上还有没有任何一块卡（大卡或停靠小窗都算）。
     ///
     /// 圆盘的右缘带（`RingHost.edgePad`）要和「卡片在屏」这件事对齐：卡片贴右缘
@@ -423,6 +433,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 量出来是旧环。落地（`landDock`）里按小窗尺寸再量一次。
         if !resized { syncGrip() }
         grip?.isHidden = true
+        // 0.1.29 — 停靠之后四边热区不存在了（小窗那条路是 App 侧**全屏**吞，
+        // 见 `AevonMiniDocked`）。主窗那条矩形必须撤掉，否则 App 里那一片会一直
+        // 归宿主 —— 用户点它没反应，而屏幕上根本没有卡片在那儿。
+        bandReported = .null
+        if !bundle.isEmpty { AevonAppBandSet(bundle, .null, .zero) }
     }
 
     // MARK: - 0.1.27 停靠收缩（整层 transform，不逐帧改画面）
@@ -696,6 +711,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// （约 0.81 倍），谁读它当起点谁就会跳一下，所以读之前必须 `settleEnter`。
     private var bouncePending = false
     private var entering = false
+
+    /// 0.1.29 — 圆角档位只在第一次算的时候写一行。它现在是两个常数，
+    /// 写一次就够证明「按档位固定」这条真的在跑。
+    private var cornerAnnounced = false
     /// 0.0.73 — `reapplyPlacement` 写过几行日志。抹一次写一行，稳定之后闭嘴。
     private var placementLogs = 0
 
@@ -1002,7 +1021,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.1.4 — 新开的窗一律按主窗起档（见 `mainLevel` / `miniLevel`）。
         // 这里是**唯一**建窗的地方，所以两档不会出现第三个数。
         window.windowLevel = FloatHost.mainLevel
-        window.rootViewController = UIViewController()
+        // 0.1.29 — 带 trait 回调的控制器：系统换深浅色时由它接住（见 `TraitBridge`）。
+        let bridge = TraitBridge()
+        bridge.onStyle = { [weak host] style in host?.applyStyle(style) }
+        window.rootViewController = bridge
         window.rootViewController?.view.backgroundColor = .clear
         window.isHidden = false
         guard let root = window.rootViewController?.view else {
@@ -1247,6 +1269,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 host?.entering = false
             })
         }
+        // 0.1.29 — 开卡这一拍就把四边热区告诉 App 进程：用户下一步很可能就是
+        // 拖这张卡，而起手判据要用它。
+        host.reportBand()
         return window.isHidden ? nil : host
     }
 
@@ -1356,6 +1381,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         card?.removeFromSuperview()
         // 0.1.8 — 拆窗也要撤标记：留在 App 容器里等于那个 App 以后再也收不到触摸。
         setMiniFlag(false)
+        // 0.1.29 — 四边热区的矩形也要撤。卡片没了而 App 还被扣着一片区域，
+        // 就是「这个 App 有一块点不动」—— 这条通道唯一会伤到用户的失败模式。
+        bandReported = .null
+        if !bundle.isEmpty { AevonAppBandSet(bundle, .null, .zero) }
         grip = nil
         shield = nil
         awaitingFrame = false
@@ -1649,14 +1678,33 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 宽度算：`屏幕圆角 × (卡宽 / 屏宽) × tune`，卡宽不变圆角就不变。竖着压扁
     /// 一张卡不再改变它的圆角。几何缩放关掉之后这条更关键：画布从此不动，
     /// 若还按 `cardH / 画布高` 算，圆角会随着卡片变矮一路缩水并且再也不回来。
+    /// 0.1.29 — 圆角**按档位固定**，不再按卡片尺寸的比例算。
+    ///
+    /// 用户原话：「所有悬浮窗的四角圆弧（圆角化）都应该时同一圆弧，而不是随着
+    /// 悬浮窗的尺寸大小而改变（因为现在不同尺寸大小的圆弧看起来不一样），并且
+    /// 悬浮窗和停靠小窗各自按照自己的圆角化统一，没有关联。」
+    ///
+    /// 旧写法是 `min(卡宽, 卡高) × 11.5 %`：主窗 306 宽落 35、小窗 98 宽落 11。
+    /// 相对曲率一样，**绝对半径差三倍** —— 人眼读的是绝对半径，于是「同一套
+    /// 形状」在小窗上看起来更方。现在两档各钉一个数，拖大拖小都不动。
+    ///
+    /// 34 是 306 宽卡片按旧比例算出来的那个值（35），取 34 让它在整数上稳定；
+    /// 13 比旧值 11 略大 —— 小窗只有 98 宽，11 的绝对曲率在这么小的面积上读不出
+    /// 「圆角」，13 才和主窗观感是一族。
+    static let mainCorner: CGFloat = 34
+    static let miniCorner: CGFloat = 13
+
     private func applyCorner() {
         guard let card = card, natural.width > 1 else { return }
-        let corner = screenCorner > 1 ? screenCorner : FloatHost.deviceCorner()
-        let share = corner / natural.width * cornerTune
-        // 短边：竖着的卡片是宽度（和 0.0.62 同一个数），压扁的卡片是高度，
-        // 两者都不会超过半张卡 —— 再大就是胶囊，不是圆角。
+        let wanted = miniFrame != nil ? FloatHost.miniCorner : FloatHost.mainCorner
+        // 再圆的角也不能超过半张卡（超过就是胶囊）。只在卡片被拖到极小时生效。
         let side = Swift.min(card.bounds.width, card.bounds.height)
-        let radius = Swift.max(6, Swift.min(side * share, side / 2))
+        let radius = Swift.max(4, Swift.min(wanted, side / 2))
+        if !cornerAnnounced {
+            cornerAnnounced = true
+            Log.write(String(format: "win: corner fixed main=%.0f mini=%.0f",
+                             FloatHost.mainCorner, FloatHost.miniCorner))
+        }
         // 0.1.26 — 圆角跟着尺寸一起走。
         //
         // `cornerRadius` 不是 UIView 的动画属性：在 `UIView.animate` 块里改它是
@@ -1694,32 +1742,73 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private func syncGrip() {
         guard let card = card, let grip = grip else { return }
         let shape = bandRect(for: card)
-        grip.frame = shape.frame
-        grip.hole = shape.hole
+        // 0.1.29 — 只在真的动了才写这个视图。
+        //
+        // `syncGrip` 在拖动里是每帧调用的，而 `grip` 住在**另一个窗口**（band）。
+        // 给它 `setFrame:` 会让那个窗口重算一块合成区域；`bandRect` 每次重算都带
+        // 亚像素误差，于是「值几乎没变」也照样每次都写一遍。容差 1 pt —— 这块
+        // 热区不画像素（竖条 0.1.24 已整条删掉），1 pt 的判定误差看不见也摸不出。
+        if gripDrawn.isNull
+            || abs(shape.frame.minX - gripDrawn.minX) > 1
+            || abs(shape.frame.minY - gripDrawn.minY) > 1
+            || abs(shape.frame.width - gripDrawn.width) > 1
+            || abs(shape.frame.height - gripDrawn.height) > 1
+            || shape.hole != gripHoleDrawn {
+            gripDrawn = shape.frame
+            gripHoleDrawn = shape.hole
+            grip.frame = shape.frame
+            grip.hole = shape.hole
+        }
         bandInset = shape.inset
         // 光晕、圆角、环三者必须同一次事件里一起走。慢一帧就是「卡片动了、光圈
         // 还留在原地」。
         applyGlow()
     }
 
+    private var gripDrawn: CGRect = .null
+    private var gripHoleDrawn: CGRect = .null
+
     /// 0.0.49 — 卡片边缘的柔光。
     ///
     /// 深色模式给白、浅色模式给黑，两者都只在很低的透明度上：目的是让卡片从
-    /// 和它一样深的背景里分出来，而不是给卡片画一圈灯。半径取圆角的六成左右，
-    /// 这样光从圆角里透出来的形状和卡片本身的连续曲率一致。
+    /// 和它一样深的背景里分出来，而不是给卡片画一圈灯。
+    ///
+    /// 0.1.29 — 面收窄。旧公式是 `max(10, min(圆角 × 0.7, 22))`，主窗 34 圆角
+    /// 直接顶到 22 —— 22 pt 的模糊半径在四面各铺一层，看着像给卡片加了一圈
+    /// 边框而不是托起它。用户原话「现在的光晕四面看起来很宽」。改成圆角 × 0.40
+    /// 且封顶 14：主窗落 13.6，小窗落 5.2（下限 8）。模糊窄了要把浓度补回来
+    /// 一点，否则深色壁纸上边界会糊掉：0.22/0.16 → 0.26/0.20。
+    ///
+    /// 0.1.29 — 两个缓存。`sendEvent`/拖动是每帧热路径，而这里每帧重设
+    /// `shadowPath` 会让 CoreAnimation 重新栅格化整块阴影（GPU 上很贵）——
+    /// 拖动「前几秒卡顿」有一份是它。拖动只改 origin，`bounds` 与圆角都不变，
+    /// 所以路径可以整个跳过；只有尺寸或档位真的变了才重建。
     private func applyGlow() {
         guard let card = card, let glow = glow else { return }
         glow.frame = card.frame
         let radius = card.layer.cornerRadius
         let dark = card.traitCollection.userInterfaceStyle == .dark
-        // 0.22 / 0.16 — 两次真机反馈之间的取值：0.35 已经能看出「发光」，0.10 在
-        // 深色壁纸上又看不出来。深色的白稍强，因为白色比黑色更需要靠亮度争边界。
-        glow.layer.shadowColor = (dark ? UIColor.white : UIColor.black).cgColor
-        glow.layer.shadowOpacity = dark ? 0.22 : 0.16
-        glow.layer.shadowRadius = Swift.max(10, Swift.min(radius * 0.7, 22))
-        glow.layer.shadowPath = UIBezierPath(roundedRect: glow.bounds,
-                                            cornerRadius: radius).cgPath
+        let blur = Swift.max(8, Swift.min(radius * 0.40, 14))
+        if glowBlur != blur || glowDark != dark {
+            glowBlur = blur
+            glowDark = dark
+            glow.layer.shadowColor = (dark ? UIColor.white : UIColor.black).cgColor
+            glow.layer.shadowOpacity = dark ? 0.26 : 0.20
+            glow.layer.shadowRadius = blur
+        }
+        if glowPathBounds != glow.bounds || abs(glowPathRadius - radius) > 0.01 {
+            glowPathBounds = glow.bounds
+            glowPathRadius = radius
+            glow.layer.shadowPath = UIBezierPath(roundedRect: glow.bounds,
+                                                 cornerRadius: radius).cgPath
+        }
     }
+
+    /// `applyGlow` 的三份记忆。见上面那段「路径可以整个跳过」。
+    private var glowBlur: CGFloat = -1
+    private var glowDark = false
+    private var glowPathBounds: CGRect = .null
+    private var glowPathRadius: CGFloat = -1
 
 
 
@@ -1948,6 +2037,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             card.frame = frame
             followContent(updateCorner: false)
             syncGrip()
+            reportBandMoving()
         } else {
             // All four cells move. 0.0.40 removed the two that resized, so a
             // drag on the band is a drag on the band, wherever it started;
@@ -1986,11 +2076,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             frame.origin.y += dy
             card.frame = clamped(frame, in: window.bounds)
             syncGrip()
+            reportBandMoving()
         }
     }
 
     private func dragEnd(total: CGPoint, velocity: CGPoint) {
         guard let card = card, let window = window else { return }
+        // 0.1.29 — 不管从哪个分支出去，落定后都把环的矩形重发一次。
+        // `defer` 是有意的：这个函数有六条 return，逐个加只会漏掉一条 ——
+        // 而漏掉的那一条，就是「拖动之后再操作四边手势，App 也跟着动」。
+        defer { reportBand() }
         // 0.0.99 — 两侧轻滑：闸门没开就什么都没发生。不做 `remember`，也不写
         // 「moved」—— 那张卡片根本一动没动，写一行只会让下一份日志看起来像
         // 「移动了但没生效」。
@@ -2759,6 +2854,69 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 「还有没有人在等」—— 观察器每 50 ms 醒一次，卡片露出来之后就该停。
     var waitingForFrame: Bool { awaitingFrame }
 
+    // MARK: - 0.1.29 深浅色 / 热区上报
+
+    /// 系统换了深浅色。
+    ///
+    /// 两件事：① 自己这一侧的窗口跟上（光晕明暗在 `applyGlow` 里读 trait）；
+    /// ② 通知 App 进程 —— 那才是用户看到的画面（见 `AevonAppStyleNotify`）。
+    ///
+    /// 为什么 App 自己不会跟着变：它是**另一个进程的 scene**，而且还走的是
+    /// 「挂起启动 + 宿主缩放摆放」这条路。系统广播的 trait 变化到得了 App 进程，
+    /// 但我们的承载方式没让它的窗口重新读一次样式，于是画面停在启动那一刻的
+    /// 配色。通知是唯一跨进程还不用容器的通道。
+    func applyStyle(_ style: UIUserInterfaceStyle) {
+        window?.overrideUserInterfaceStyle = style
+        applyGlow()
+        AevonAppStyleNotify(bundle, style == .dark)
+        Log.write("win: style follow " + (style == .dark ? "dark " : "light ") + bundle)
+    }
+
+    /// 0.1.29 — 把主窗手势环的矩形告诉 App 进程（见 `AevonAppBandSet`）。
+    ///
+    /// 落定后一定发一次；拖动途中按 200 ms 节流重发（见 `reportBandMoving`）。
+    ///
+    /// 为什么途中也要发：用户报的是「有概率触发全屏 app 的操作」，概率就来自
+    /// 这里 —— 只在 `dragEnd` 发，那么手指在拖动途中就已经落在卡片的新位置上了，
+    /// 而 App 那边还拿着上一次落定的矩形。落点在新矩形内、旧矩形外，判定就是
+    /// 「不归宿主」⇒ 不吞 ⇒ 透传。卡刚被拖过一段、立刻去四边操作，正好踩进去。
+    ///
+    /// 停靠 / 拆窗时发 `CGRectNull`：不清的话那一片会一直归宿主，用户在 App 上
+    /// 点它就没了反应 —— 这是这条通道唯一的破坏性失败模式。
+    ///
+    /// `quiet` 只压日志，不压上报：拖动途中每 200 ms 写一行会把日志本身变成掉帧
+    /// 的来源（用户第 7 条报的就是拖动前几秒卡）。
+    func reportBand(quiet: Bool = false) {
+        guard let card = card, window != nil, miniFrame == nil, !bundle.isEmpty else {
+            bandReported = .null
+            if !bundle.isEmpty { AevonAppBandSet(bundle, .null, .zero) }
+            return
+        }
+        let shape = bandRect(for: card)
+        if !bandReported.isNull && shape.frame == bandReported { return }
+        bandReported = shape.frame
+        AevonAppBandSet(bundle, shape.frame, card.frame)
+        if quiet { return }
+        Log.write("win: band report " + size(shape.frame.size)
+                  + " at " + point(shape.frame.origin))
+    }
+
+    /// 0.1.29 — 拖动途中的节流上报，专治「有概率」。
+    ///
+    /// 200 ms 约合每 12 帧一次；写成文件 + 一条 Darwin 通知，代价远小于一次
+    /// 栅格化，但也不该每帧做。间隔从**上一次真的写出去**那一拍算，所以手指停住
+    /// 时不会攒出一堆无用的通知（`reportBand` 自己还有矩形判重）。
+    private func reportBandMoving() {
+        guard miniFrame == nil, window != nil, !bundle.isEmpty else { return }
+        let now = CACurrentMediaTime()
+        guard now - bandStamp >= 0.2 else { return }
+        bandStamp = now
+        reportBand(quiet: true)
+    }
+
+    private var bandReported: CGRect = .null
+    private var bandStamp: CFTimeInterval = 0
+
     /// The way out of 停靠小窗: a tap anywhere on its picture. The scene view
     /// would swallow that tap and forward it to the app, so a transparent shield
     /// goes above it — the same trick as the ✕ used to be, a sibling drawn over
@@ -2799,6 +2957,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
+    /// 0.1.29 — 圆盘那一条路的入口。
+    ///
+    /// 和点小窗走同一个 `undock`：它已经处理了「下一拍再动」「`liftPending` 闩」
+    /// 「先把还在飞的收缩落地」三件事，另写一条只会漏掉其中一件。
+    func promoteFromRing() {
+        undock()
+    }
+
     /// 0.1.5 — 「已经排了一次升降」的闩。没有它，同一拍里两条路（识别器 +
     /// 原始触摸）各排一次，第二遍会在一张已经是主窗的卡上再跑一次手术。
     private var liftPending = false
@@ -2833,7 +2999,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 状态下登记的，露出来之后会跳一帧。
         grip?.isHidden = false
         var replaced = "none"
-        AevonMotion.spring {
+        AevonMotion.spring({
             // 0.0.99 — 走了就得让位：后面的小窗要顶上来，档位也可能跨回去。
             FloatHost.releaseDock(self)
             // 0.0.99 — 取消停靠 = 升为主窗。多窗之后「还原来那张大卡片」不再是
@@ -2874,7 +3040,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             self.syncGrip()
             // 0.1.10 — 补位要看得见。
             FloatHost.relayoutDocked(animated: true)
-        }
+        }, completion: { [weak self] _ in
+            // 0.1.29 — 长完再弹（见 `bounceAfterLift`）。
+            self?.bounceAfterLift()
+        })
         Log.write("win: undock read last main frame "
                   + point(card.frame.origin) + " " + size(card.frame.size))
         shield?.removeFromSuperview()
@@ -2889,6 +3058,28 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                   + " col=" + (column == nil ? "none" : (column! ? "L" : "R"))
                   + " replaced=" + replaced
                   + String(format: " mem=%.0f%%", CardLayout.loadRuntime().heightFraction * 100))
+        // 0.1.29 — 升回主窗，四边热区重新归宿主（停靠时它是清掉的）。
+        reportBand()
+    }
+
+    /// 0.1.29 — 小窗升主窗也弹一下。
+    ///
+    /// 用户原话：「将它添加到停靠小窗变成主悬浮窗时也会出现这个Q弹动画」。
+    ///
+    /// 时机选在 spring 收尾之后、而不是同一拍：几何正在从 98×163 长到 306×508
+    /// 的那 0.27 s 里再叠一层缩放，就是「一边长大一边缩小」；等它长完再弹，
+    /// 眼睛读到的是「它长出来了，还带点弹性」。
+    ///
+    /// 起点 0.74 × 306 = 226，仍比小窗的 98 宽一倍多 —— 不会读成「又缩回去」。
+    private func bounceAfterLift() {
+        guard let card = card, miniFrame == nil, window != nil else { return }
+        entering = true
+        var views: [UIView] = [card]
+        if let glow = glow { views.append(glow) }
+        AevonMotion.bounce(views, completion: { [weak self] in
+            self?.entering = false
+        })
+        Log.write("win: lift bounce 0.74->1.00 zeta=0.42")
     }
 
     // MARK: - geometry
@@ -3164,6 +3355,38 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 ///
 /// 0.0.47 — 这一圈住进了自己的窗口（`FloatHost.makeBand`），所以它不再和卡片
 /// 抢同一个窗口的命中，也不再有「被某个兄弟视图挡在前面」这种可能。
+/// 0.1.29 — 深浅色的桥。
+///
+/// 悬浮窗里的 App 是另一个进程的 scene，它自己收不到我们这侧窗口的
+/// `traitCollection` 变化；而这个窗口的根控制器就在我们手上。所以由它盯住
+/// trait，变了就交给 `FloatHost.applyStyle`。
+///
+/// 为什么不用 `NSNotification`：UIKit 没有公开「系统外观变了」的通知，而
+/// `traitCollectionDidChange` 是文档里唯一有保证的那条。窗口归属这个控制器，
+/// 所以它一定收得到。
+final class TraitBridge: UIViewController {
+
+    var onStyle: ((UIUserInterfaceStyle) -> Void)?
+
+    private var seen: UIUserInterfaceStyle = .unspecified
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .clear
+        seen = traitCollection.userInterfaceStyle
+    }
+
+    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
+        super.traitCollectionDidChange(previous)
+        let style = traitCollection.userInterfaceStyle
+        // `.unspecified` 不是一种外观，是「还没定」—— 这时候通知出去只会让
+        // App 把样式设成一个它自己也解释不了的数。
+        guard style != .unspecified, style != seen else { return }
+        seen = style
+        onStyle?(style)
+    }
+}
+
 final class GripView: UIView {
     /// The card's rect in this view's own coordinates.
     var hole: CGRect = .zero

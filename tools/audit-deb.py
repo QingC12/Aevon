@@ -579,7 +579,16 @@ def main():
                   # 「函数真的被调到」的证词：`-dead_strip` 会把没人调的代码整段
                   # 剥掉，所以二进制里有没有这两个串，等于「这条路还在不在」。
                   b"win: enter bounce ",
-                  b"win: exit shrink "):
+                  b"win: exit shrink ",
+                  # 0.1.29 — 四条新证词，各对应一条用户要求：
+                  #   `corner fixed`   圆角按档位固定（不再随尺寸比例）
+                  #   `lift bounce`    小窗升主窗也弹
+                  #   `band report`    主窗四边热区交给 App 进程
+                  #   `style `         系统深浅色变了（桌面侧接住并转发）
+                  b"win: corner fixed main=",
+                  b"win: lift bounce ",
+                  b"win: band report ",
+                  b"win: style follow "):
         if token not in dylib_early:
             bad(f"host: {token.decode(errors='replace')} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")
@@ -932,6 +941,12 @@ def main():
                       # 应用内的滑动操作」）。SpringBoard 吞掉的是它自己那一份，
                       # App 一份不少 —— 这一行证明 App 侧的闸门真的装上了。
                       b"app: edge touch at ",
+                      # 0.1.29 — 主窗四边热区的应用侧闸门（「上滑关闭悬浮窗时
+                      # 全屏 app 也向下滑动」）。这条字符串缺了，就说明那条通道
+                      # 没编进去 —— 宿主会照旧发通知，但 App 里没人接。
+                      b"app: band touch at ",
+                      # 0.1.29 — 深浅色的应用侧观察者。
+                      b"com.aevon.style.",
                       b"setContentOffset:"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")

@@ -1876,8 +1876,7 @@ int AevonAppMiniFlagSet(NSString *bundleID, BOOL mini) {
 }
 
 /// 0.1.8 — 启动时把上一次留下的标记全撤掉。返回清掉的个数（写进启动日志）。
-int AevonAppMiniFlagsClearAll(void) {
-    NSString *armed = AevonMiniArmedPath();
+int AevonAppMiniFlagsClearAll(void) {    NSString *armed = AevonMiniArmedPath();
     NSString *text = [NSString stringWithContentsOfFile:armed
                                                encoding:NSUTF8StringEncoding
                                                   error:NULL];
@@ -1888,6 +1887,60 @@ int AevonAppMiniFlagsClearAll(void) {
     }
     if (armed != nil) [[NSFileManager defaultManager] removeItemAtPath:armed error:NULL];
     return count;
+}
+
+// MARK: - 0.1.29 主窗四边热区 → 应用侧
+
+/// 0.1.29 — 主窗手势环的矩形，交给 App 进程做「同一根手指也收走」。
+///
+/// 用户原话：「在全屏应用中操作主悬浮窗的四边手势时有概率触发全屏 app 的操作
+/// （例如上滑关闭悬浮窗手势，上滑后，悬浮窗关闭，全屏 app 会向下滑动）」。
+///
+/// 原因和右缘呼盘（0.1.24）完全一样：backboardd 把同一根手指**分别**投递给
+/// SpringBoard 和前台 App，宿主侧吞掉自己那份不影响 App 那份。
+///
+/// 通道照抄停靠标记那一套（`AevonAppMiniFlagSet`）：**文件存数据 + 固定名通知**。
+/// 为什么不能把矩形编进通知名 —— `CFNotificationCenterAddObserver` 的 name 是
+/// 精确匹配，App 侧预知不到那串数字，只能注册 `NULL`（收下系统所有 Darwin 通知）
+/// 再自己过滤，那个代价不值得。文件那一条的唯一缺口是「取不到容器」，此时退化为
+/// 旧行为（会透传），不会把 App 弄坏。
+///
+/// 文件名 `aevon-band`，内容 8 个整数：band 的 x/y/w/h，然后是卡片的 x/y/w/h。
+/// 传 `CGRectNull` 删除它 —— 卡片没了而 App 还被扣着一片区域，就是「这个 App
+/// 有一块点不动」，这是这条通道唯一会伤到用户的失败模式。
+void AevonAppBandSet(NSString *bundleID, CGRect band, CGRect hole) {
+    if (bundleID.length == 0) return;
+    NSString *dir = AevonAppContainer(bundleID);
+    if (dir != nil) {
+        NSString *path = [dir stringByAppendingPathComponent:@"tmp/aevon-band"];
+        if (CGRectIsNull(band) || band.size.width < 1 || band.size.height < 1) {
+            [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+        } else {
+            NSString *body = [NSString stringWithFormat:@"%.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f\n",
+                              band.origin.x, band.origin.y, band.size.width, band.size.height,
+                              hole.origin.x, hole.origin.y, hole.size.width, hole.size.height];
+            [body writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        }
+    }
+    // 通知只当「去读那个文件」的铃铛，不带数据。
+    NSString *name = [NSString stringWithFormat:@"com.aevon.band.%@", bundleID];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         (__bridge CFStringRef)name,
+                                         NULL, NULL, true);
+}
+
+// MARK: - 0.1.29 深浅色 → 应用侧
+
+/// 系统换了深浅色时通知 App 进程重设窗口样式。
+///
+/// 只传一个方向（dark / light），不传具体数值：App 侧只需要知道「现在该是哪个」。
+void AevonAppStyleNotify(NSString *bundleID, BOOL dark) {
+    if (bundleID.length == 0) return;
+    NSString *name = [NSString stringWithFormat:@"com.aevon.style.%@.%@",
+                      dark ? @"dark" : @"light", bundleID];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         (__bridge CFStringRef)name,
+                                         NULL, NULL, true);
 }
 
 /// 0.1.2 — 同一趟读取，但把原文交还给调用者。

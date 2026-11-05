@@ -4580,6 +4580,53 @@ static void AevonMiniObserve(void) {
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
 }
 
+// MARK: - 0.1.29 深浅色（桌面发，应用收）
+
+/// 把自己所有窗口的样式重设一遍。
+///
+/// 只改 `overrideUserInterfaceStyle`：它是**样式**，不是几何，也不会让 App
+/// 重新排一遍界面；重设之后 UIKit 会把受影响的视图重绘成新的配色。
+///
+/// 为什么需要别人来推一把：悬浮窗里的 App 走的是「挂起启动 + 宿主缩放摆放」，
+/// 系统广播的 trait 变化到得了这个进程，但承载方式让它的窗口不再主动重读一次
+/// 样式，于是画面停在启动那一刻的配色（用户原话：「悬浮窗打开的应用不会同步
+/// 系统的深色和浅色切换」）。
+static void AevonStyleApply(BOOL dark) {
+    UIUserInterfaceStyle style = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
+    for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        if (window.overrideUserInterfaceStyle != style) {
+            window.overrideUserInterfaceStyle = style;
+        }
+    }
+}
+
+static void AevonStyleNote(CFNotificationCenterRef __unused center,
+                           void *__unused observer,
+                           CFStringRef name,
+                           const void *__unused object,
+                           CFDictionaryRef __unused userInfo) {
+    NSString *raw = (__bridge NSString *)name;
+    AevonStyleApply([raw containsString:@".dark."]);
+}
+
+/// 构造函数里调一次，注册 dark / light 两个观察者。
+///
+/// 两条分开注册而不是遍历一个数组：这个文件在非 ARC 下编译，构造那一拍没有
+/// autorelease pool，少造一个临时容器就少一处悬空的机会。
+static void AevonStyleObserve(void) {
+    NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
+    if (bundle.length == 0) return;
+    CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
+    NSString *dark = [NSString stringWithFormat:@"com.aevon.style.dark.%@", bundle];
+    NSString *light = [NSString stringWithFormat:@"com.aevon.style.light.%@", bundle];
+    CFNotificationCenterAddObserver(center, NULL, AevonStyleNote,
+                                    (__bridge CFStringRef)dark, NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(center, NULL, AevonStyleNote,
+                                    (__bridge CFStringRef)light, NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+}
+
 // MARK: - 0.1.17 键盘在屏（应用侧发送，桌面侧接收）
 //
 // 软键盘在 iOS 15+ 由前台应用这一侧承载：SpringBoard 的进程里既没有键盘窗口，
@@ -4861,6 +4908,100 @@ static BOOL AevonEdgeTake(UIEvent *event, BOOL *replay) {
     return NO;
 }
 
+// MARK: - 0.1.29 主窗四边热区（应用侧扣住）
+//
+// 用户原话：「在全屏应用中操作主悬浮窗的四边手势时有概率触发全屏 app 的操作
+// （例如上滑关闭悬浮窗手势，上滑后，悬浮窗关闭，全屏 app 会向下滑动）」。
+//
+// 和右缘呼盘（0.1.24）是同一个物理事实：backboardd 把同一根手指**分别**投递给
+// SpringBoard 和前台 App。宿主侧把手势识别器吃掉，只解决了自己那一份。
+//
+// 数据来自桌面写进本进程容器 `tmp/aevon-band` 的 8 个整数（外框 + 卡片的
+// x/y/w/h），通知 `com.aevon.band.<bundle>` 只是「去读那个文件」的铃铛。
+//
+// **不做方向判定**：带内起手 = 整根归宿主。那一片在屏幕上本来就是卡片外侧的
+// 热区，App 在它下面；而且宿主的动作（吸附 / 拖动 / 上滑关）已经执行了，App 再
+// 收到一份就是一次重复响应。
+
+static CGRect AevonBandOuter = {{0, 0}, {0, 0}};
+static CGRect AevonBandHole  = {{0, 0}, {0, 0}};
+static volatile int AevonBandOn = 0;
+static BOOL AevonBandWatching = NO;
+static int AevonBandNotes = 0;
+
+/// 读一次文件。找不到 / 内容不完整 ⇒ 关掉（宁可不吞，也不能让一块区域死掉）。
+static void AevonBandReload(void) {
+    NSString *tmp = NSTemporaryDirectory();
+    if (tmp.length == 0) { AevonBandOn = 0; return; }
+    NSString *text = [NSString stringWithContentsOfFile:
+                      [tmp stringByAppendingPathComponent:@"aevon-band"]
+                                               encoding:NSUTF8StringEncoding
+                                                  error:NULL];
+    if (text.length == 0) { AevonBandOn = 0; return; }
+    // 8 个数直接扫，不建数组：`sendEvent:` 每次手势都要走这条判定，回调里也
+    // 不该留下 autoreleased 容器（构造函数那一拍没有 pool）。
+    double v[8] = {0};
+    int got = sscanf(text.UTF8String, "%lf %lf %lf %lf %lf %lf %lf %lf",
+                     &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
+    if (got != 8) { AevonBandOn = 0; return; }
+    AevonBandOuter = CGRectMake((CGFloat)v[0], (CGFloat)v[1], (CGFloat)v[2], (CGFloat)v[3]);
+    AevonBandHole = CGRectMake((CGFloat)v[4], (CGFloat)v[5], (CGFloat)v[6], (CGFloat)v[7]);
+    AevonBandOn = (AevonBandOuter.size.width >= 1 && AevonBandOuter.size.height >= 1);
+}
+
+static void AevonBandNote(CFNotificationCenterRef __unused center,
+                          void *__unused observer,
+                          CFStringRef __unused name,
+                          const void *__unused object,
+                          CFDictionaryRef __unused userInfo) {
+    AevonBandReload();
+}
+
+static void AevonBandObserve(void) {
+    NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
+    if (bundle.length == 0) return;
+    NSString *name = [NSString stringWithFormat:@"com.aevon.band.%@", bundle];
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                    NULL, AevonBandNote,
+                                    (__bridge CFStringRef)name, NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+    // 构造函数可能晚于第一份数据（宿主先开卡、App 进程后起），先读一次。
+    AevonBandReload();
+}
+
+/// 这一点归宿主吗。卡片内部不算（那是 App 的画面），右缘那 18 pt 也不算
+/// —— 那块归呼圆盘（0.1.24），两个闸门抢同一根手指时先出声的赢。
+static BOOL AevonBandHolds(CGPoint p) {
+    if (!AevonBandOn) return NO;
+    if (!CGRectContainsPoint(AevonBandOuter, p)) return NO;
+    if (CGRectContainsPoint(AevonBandHole, p)) return NO;
+    if (AevonEdgeInBand(p)) return NO;
+    return YES;
+}
+
+static BOOL AevonBandTake(UIEvent *event) {
+    NSSet *touches = [event allTouches];
+    if (touches.count != 1) { AevonBandWatching = NO; return NO; }
+    UITouch *touch = [touches anyObject];
+    if (touch.phase == UITouchPhaseBegan) {
+        CGPoint p = [touch locationInView:nil];
+        if (!AevonBandHolds(p)) { AevonBandWatching = NO; return NO; }
+        AevonBandWatching = YES;
+        if (AevonBandNotes < 20) {
+            AevonBandNotes += 1;
+            char line[160];
+            snprintf(line, sizeof(line), "app: band touch at %.0f,%.0f held\n", p.x, p.y);
+            AevonAppLogWrite(line);
+        }
+        return YES;
+    }
+    if (!AevonBandWatching) return NO;
+    if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
+        AevonBandWatching = NO;
+    }
+    return YES;
+}
+
 static void AevonAppSendEvent(id self, SEL _cmd, UIEvent *event) {
     if (AevonOriginalUISendEvent == NULL) return;
     // 只拦触摸事件。远程控制、运动事件这些和停靠无关，原样放行。
@@ -4878,6 +5019,10 @@ static void AevonAppSendEvent(id self, SEL _cmd, UIEvent *event) {
         AevonMiniSwallowNote(began);
         return;
     }
+    // 0.1.29 — 主窗四边热区。排在右缘之前是因为它在带内起手就定案（不判方向、
+    // 不用 replay），而 `AevonEdgeTake` 会扣住 began 再还回去 —— 两条都在一块时
+    // 让「立刻定案」的先答，不会出现半截还回去又被吞的错位。
+    if (AevonBandTake(event)) return;
     // 0.1.24 — 右缘呼盘：同一根手指在 App 这一份也要收走。
     BOOL replay = NO;
     if (AevonEdgeTake(event, &replay)) return;
@@ -4954,6 +5099,11 @@ static void AevonAppBoot(void) {
     // 0.1.9 — 通知通道的观察者。注册在 `sendEvent` 之前之后都行，但必须早于第一次
     // 触摸；构造函数是唯一有保证的时机。
     AevonMiniObserve();
+    // 0.1.29 — 主窗四边热区（同上那段）；构造函数里先读一次，宿主的卡片可能
+    // 早于这个进程起来。
+    AevonBandObserve();
+    // 0.1.29 — 深浅色。桌面上每切一次就发一条，这里把窗口样式重设一遍。
+    AevonStyleObserve();
     // 0.1.17 — 键盘在屏的那一声。软键盘属于应用这一侧，桌面要等这里报才知道
     // （见上面 `AevonKbObserve`）。
     AevonKbObserve();

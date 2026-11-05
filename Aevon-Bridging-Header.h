@@ -186,6 +186,30 @@ void AevonAppMiniNotify(NSString *_Nullable bundleID, BOOL mini);
 /// 任何触摸，用户看到的是「这个 App 点不动了」。构造函数第一拍调用一次。
 int AevonAppMiniFlagsClearAll(void);
 
+/// 0.1.29 — 主窗四边热区的屏幕矩形，交给 App 进程做「同一根手指也收走」。
+///
+/// 用户原话：「在全屏应用中操作主悬浮窗的四边手势时有概率触发全屏 app 的操作
+/// （例如上滑关闭悬浮窗手势，上滑后，悬浮窗关闭，全屏 app 会向下滑动）」。
+///
+/// 原因和右缘呼盘（0.1.24）完全一样：backboardd 把同一根手指**分别**投递给
+/// SpringBoard 和前台 App，宿主侧吞掉自己那份不影响 App 那份。所以要把这块
+/// 矩形告诉 App 进程，让它在自己 `sendEvent:` 里也扣住带内的触摸。
+///
+/// 用 Darwin 通知而不是文件：容器找不到就写不进去（0.1.9 在 25 个进程上踩过）。
+/// 矩形本身编码进通知名，形如
+/// `com.aevon.band.<bundle>.<x>_<y>_<w>_<h>_<hx>_<hy>_<hw>_<hh>`（整数点数），
+/// 传 `CGRectNull` 表示「没有主窗，撤掉」。调用点是每一次手势结束 / 布局落定，
+/// 不是每帧 —— 拖动的中间帧不发，那时手指已经归宿主了。
+void AevonAppBandSet(NSString *_Nullable bundleID, CGRect band, CGRect hole);
+
+/// 0.1.29 — 系统换了深浅色。
+///
+/// 悬浮窗里的 App 是另一个进程的 scene：系统切换时它自己那条 trait 更新链在我们
+/// 这套「挂起启动 + 宿主缩放摆放」的方式下不一定走得到。桌面侧盯住
+/// `traitCollection`，变化时发这一条，App 侧把窗口的 `overrideUserInterfaceStyle`
+/// 重设一遍。只改样式，不改几何，不会让 App 重新布局。
+void AevonAppStyleNotify(NSString *_Nullable bundleID, BOOL dark);
+
 /// 0.0.72 — 把 scene 的尺寸真正动一下再还回去，幅度由调用者给。
 ///
 /// 只改承载视图的 bounds 不会让 App 重排：视图变了、scene 没变。冷启的抖音

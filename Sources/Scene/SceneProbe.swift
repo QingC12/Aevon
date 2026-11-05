@@ -931,6 +931,21 @@ zStackParticipantDidChange:
     /// and a dead control on the home screen is worse than a full-screen app.
     static func openCard(_ bundleID: String, fallback: @escaping (String) -> Void) {
         guard !bundleID.isEmpty, !bundleID.hasPrefix("placeholder.") else { return }
+        // 0.1.29 — 圆盘选中的图标**已经在停靠小窗里**：把它升回主悬浮窗，
+        // 不要再开一张。
+        //
+        // 用户原话：「如果圆盘选中的图标已经在停靠小窗中了，那么再次选择圆盘
+        // 图标时停靠的小窗应该自动还原成主悬浮窗。」
+        //
+        // 放在 `if cardUp` 之外是有意的：「主窗关掉了、只剩几张小窗」是常见局面，
+        // 那时 `cardUp` 是 false，走旧路会给同一个 App 再开一张卡 —— 屏幕上一大
+        // 一小两个同样的 App，正是用户要避免的。升窗这一条路自己会处理「谁给谁
+        // 让位」（`performUndock` → `demoteMain(except:)`）。
+        if let docked = FloatHost.dockedHost(of: bundleID) {
+            Log.write("win: icon " + bundleID + " is docked, promoting it")
+            docked.promoteFromRing()
+            return
+        }
         // 0.0.98 — 已经有主窗时，先把它降级成停靠小窗，再开新的。
         //
         // 0.0.97 及以前这里是 `guard !cardUp else { log("ignored, a card is already
