@@ -5431,15 +5431,20 @@ static void AevonKbLog(const char *line) {
 }
 
 /// 换算过程的四个数。判据全靠这一行：`h`（系统给的原始交点高）、`screen`（屏高）、
-/// `kbwin`（键盘窗高）三个数一比，就知道母本那条式子在这台机器上算出什么，
-/// 下一版按真数调，不再靠推。
-static void AevonKbLeadNote(double h, double screen, double kbwin, double out, int took) {
-    if (AevonKbLeadNotes >= 6) return;
+/// `kbwin`（键盘窗高）、`scene`（承载场景自己的高度）四个数一比，就知道母本那条
+/// 式子在这台机器上算出什么，下一版按真数调，不再靠推。
+///
+/// 0.1.44 加 `scene`：Aevon(117) 的 `app: geom early` 显示承载时
+/// `scene=430x717`（屏是 430x932），键盘是在这个 717 高的画布里排的 ——
+/// 「只露一条工具栏」很可能出在这里，不是出在屏幕尺寸上。
+static void AevonKbLeadNote(double h, double screen, double kbwin, double scene,
+                            double out, int took) {
+    if (AevonKbLeadNotes >= 12) return;
     AevonKbLeadNotes += 1;
-    char line[220];
+    char line[240];
     snprintf(line, sizeof(line),
-             "kb: lead h=%.1f screen=%.1f kbwin=%.1f -> %.1f took=%d\n",
-             h, screen, kbwin, out, took);
+             "kb: lead h=%.1f screen=%.1f kbwin=%.1f scene=%.1f -> %.1f took=%d\n",
+             h, screen, kbwin, scene, out, took);
     AevonKbLog(line);
 }
 
@@ -5456,20 +5461,30 @@ static CGRect AevonKbNativeBounds(UIScreen *screen) {
     return CGRectMake(0, 0, 430, 932);
 }
 
-/// 键盘窗口实例。`_UIRemoteKeyboards` 是系统类（母本同一套），`+activeInstance`
-/// 拿管理器、`-keyboardWindow` 拿窗口。只读，不问就返回 nil。
-static id AevonKbWindowNow(void) {
+/// 键盘窗口实例。
+///
+/// 0.1.44 — 0.1.43 的真机日志（Aevon(117)）里 `kb: no keyboard window` 一共出现
+/// 六次（设置 3 次、QQ 3 次），也就是说键盘一次都没被换算过。原因是取值链：
+/// 上一版走的是 `[_UIRemoteKeyboards activeInstance]`，而 `activeInstance` 在
+/// `_UIRemoteKeyboards` 上是**实例方法**；对类对象问 `+respondsToSelector:`
+/// 恒为 NO ⇒ mgr 恒为 nil ⇒ 恒返回 nil。
+///
+/// 母本不是这么取的：`0x52fc mov x0, x23`（x23 = self，钩子的第一个参数，也就是
+/// manager 自己）紧接着 `bl keyboardWindow` 桩。所以这里也优先用 self，拿不到
+/// 再退回类方法。
+static id AevonKbWindowNow(id keyboardManager) {
+    SEL win = sel_registerName("keyboardWindow");
+    if (keyboardManager != nil && [keyboardManager respondsToSelector:win]) {
+        id window = ((id (*)(id, SEL))objc_msgSend)(keyboardManager, win);
+        if (window != nil) return window;
+    }
     static Class kb = Nil;
     if (kb == Nil) kb = objc_getClass("_UIRemoteKeyboards");
     if (kb == Nil) return nil;
-    id mgr = nil;
     SEL active = sel_registerName("activeInstance");
-    if ([kb respondsToSelector:active]) {
-        mgr = ((id (*)(id, SEL))objc_msgSend)(kb, active);
-    }
-    if (mgr == nil) return nil;
-    SEL win = sel_registerName("keyboardWindow");
-    if (![mgr respondsToSelector:win]) return nil;
+    if (![kb respondsToSelector:active]) return nil;
+    id mgr = ((id (*)(id, SEL))objc_msgSend)(kb, active);
+    if (mgr == nil || ![mgr respondsToSelector:win]) return nil;
     return ((id (*)(id, SEL))objc_msgSend)(mgr, win);
 }
 
@@ -5499,16 +5514,29 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
                                                                                   scene, isLocal, ignore);
     if (AevonOrigIntersection == NULL) return answer;
     if (!AevonKbHostGate()) return answer;
-    id window = AevonKbWindowNow();
+    id window = AevonKbWindowNow(self);
     if (window == nil) {
         if (AevonKbMissNotes < 3) {
             AevonKbMissNotes += 1;
-            AevonKbLog("kb: no keyboard window\n");
+            char line[200];
+            SEL win = sel_registerName("keyboardWindow");
+            Class kbCls = objc_getClass("_UIRemoteKeyboards");
+            snprintf(line, sizeof(line),
+                     "kb: no keyboard window self=%.44s win=%d cls_active=%d\n",
+                     self != nil ? object_getClassName(self) : "-",
+                     (self != nil && [self respondsToSelector:win]) ? 1 : 0,
+                     (kbCls != Nil
+                      && [kbCls respondsToSelector:sel_registerName("activeInstance")]) ? 1 : 0);
+            AevonKbLog(line);
         }
         return answer;
     }
     CGFloat screenHeight = AevonKbNativeBounds(nil).size.height;
     CGFloat keyboardHeight = ((UIView *)window).bounds.size.height;
+    CGFloat sceneHeight = -1;
+    if ([scene isKindOfClass:[UIWindowScene class]]) {
+        sceneHeight = ((UIWindowScene *)scene).coordinateSpace.bounds.size.height;
+    }
     if (screenHeight < 1 || keyboardHeight < 40) return answer;
     double lifted = (answer * screenHeight / keyboardHeight) + keyboardHeight - screenHeight;
     int took = 0;
@@ -5520,7 +5548,7 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     } else {
         lifted = answer;
     }
-    AevonKbLeadNote(answer, screenHeight, keyboardHeight, lifted, took);
+    AevonKbLeadNote(answer, screenHeight, keyboardHeight, sceneHeight, lifted, took);
     return lifted;
 }
 

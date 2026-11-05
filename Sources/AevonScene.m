@@ -2462,6 +2462,69 @@ static void AevonNotifyPresent(id self, SEL _cmd, id presentable, id options, id
     }
 }
 
+// MARK: - 0.1.44 通知：先普查，再挂钩
+//
+// 真机日志（Aevon(117)，0.1.43）：
+//   notify: armed
+//   notify: present probe UNSUserNotificationServer=0 NCNotificationDispatcher=0
+//                            SBNotificationBannerDestination=0 hooked=0
+// 三个类在 SpringBoard 里**全部不存在** ⇒ 0.1.42 补的那一路（母本那条
+// `presentPresentable:`）连挂都挂不上；而 `SBMainWorkspace -executeTransitionRequest:`
+// 虽然挂上了（`armed`），却在整个日志里一次都没被调用过（没有 `notify: req`）。
+// 也就是说：通知点击在 iOS 17.3 的 SpringBoard 里既不走那个 transition 方法，
+// 也不经过这三个类。
+//
+// 继续按名字猜就是赌。这一版只做一件事：把 SpringBoard 里真实存在的类名列出来，
+// 把关键类上含 transition / activate / notification 的方法名列出来，一次装机
+// 拿到全部真名，下一版按真名挂。
+
+static void AevonNotifyCensus(void) {
+    int total = objc_getClassList(NULL, 0);
+    if (total <= 0) {
+        AevonLogRaw("notify: census unavailable");
+        return;
+    }
+    Class *list = (Class *)malloc(sizeof(Class) * (size_t)total);
+    if (list == NULL) return;
+    total = objc_getClassList(list, total);
+    NSMutableString *hits = [NSMutableString string];
+    int count = 0;
+    for (int i = 0; i < total && count < 70; i++) {
+        const char *name = class_getName(list[i]);
+        if (name == NULL || strlen(name) > 70) continue;
+        if (strstr(name, "Notification") == NULL && strstr(name, "notification") == NULL) continue;
+        [hits appendFormat:@"%s ", name];
+        count += 1;
+    }
+    free(list);
+    AevonLogRaw([[NSString stringWithFormat:@"notify: census n=%d %@", count,
+                  count > 0 ? hits : @"(none)"] UTF8String]);
+}
+
+/// 把某个类上方法名里含 `needle` 的前 12 条打出来。只读。
+static void AevonNotifyMethods(const char *className, const char *needle) {
+    Class cls = objc_getClass(className);
+    if (cls == Nil) {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: %s absent", className] UTF8String]);
+        return;
+    }
+    unsigned int n = 0;
+    Method *methods = class_copyMethodList(cls, &n);
+    if (methods == NULL) return;
+    NSMutableString *hits = [NSMutableString string];
+    int count = 0;
+    for (unsigned int i = 0; i < n && count < 12; i++) {
+        const char *sel = sel_getName(method_getName(methods[i]));
+        if (sel == NULL) continue;
+        if (strcasestr(sel, needle) == NULL) continue;
+        [hits appendFormat:@"%s ", sel];
+        count += 1;
+    }
+    free(methods);
+    AevonLogRaw([[NSString stringWithFormat:@"notify: %s~%s n=%d %@",
+                  className, needle, count, count > 0 ? hits : @"(none)"] UTF8String]);
+}
+
 void AevonNotificationOpenInstall(void) {
     static int installed = 0;
     if (installed) return;
@@ -2505,4 +2568,11 @@ void AevonNotificationOpenInstall(void) {
     NSString *line = [NSString stringWithFormat:@"notify: present probe%@ hooked=%d",
                       found, AevonOrigPresent != NULL ? 1 : 0];
     AevonLogRaw(line.UTF8String);
+
+    // 0.1.44 — 普查。装的时候跑一次，只读 runtime。
+    AevonNotifyCensus();
+    AevonNotifyMethods("SBMainWorkspace", "transition");
+    AevonNotifyMethods("SBMainWorkspace", "notification");
+    AevonNotifyMethods("SBWorkspace", "notification");
+    AevonNotifyMethods("SBLockScreenManager", "notification");
 }
