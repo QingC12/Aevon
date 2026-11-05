@@ -965,6 +965,11 @@ def main():
                       # `app: band touch at` 是 0，而带子的值明明是对的 ⇒ 分不出
                       # 「这一拍没进来」还是「进来了被几何否掉」。有这一行就分得开。
                       b"app: band miss at ",
+                      # 0.1.36 — 「靠锁吞掉」的证词。V111/V112 里
+                      # `app: band touch at` 一直是 0，而用户仍然看到 App 亮了一行：
+                      # 说明真正吞掉手指的是锁那条路，而那条路一句日志都没有。
+                      # 有这一行，下一份日志才能回答「是谁吞的」。
+                      b"app: band hold at ",
                       # 0.1.29 — 深浅色的应用侧观察者。
                       b"com.aevon.style.",
                       b"setContentOffset:"):

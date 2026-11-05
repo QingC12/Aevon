@@ -2088,8 +2088,17 @@ NSInteger AevonAppBandSet(NSString *bundleID, CGRect band, CGRect hole) {
     }
     AevonBandShown = band;
     AevonBandHoleShown = hole;
-    AevonBandLocked = NO;
+    // 0.1.36 — 这里**不再**把锁抹成 NO。
+    //
+    // 0.1.34/0.1.35 每次都写 `AevonBandLocked = NO`，而 `reportBand` 不只在
+    // 抬手那一拍被调到：开卡、拆窗、几何落定都会走一遍。只要其中任何一次落在
+    // 一次手势中途，写出去的正文就是 `… 0`，App 那边的锁被解开，剩下的
+    // `moved` / `ended` 原样漏进去 —— 而 App 已经吞了起手，收到的是一根
+    // 「半根手指」。锁只由 `AevonAppBandLock` 开关，几何上报不许动它。
     BOOL off = CGRectIsNull(band) || band.size.width < 1 || band.size.height < 1;
+    // 卡片没了就没有「这一块归宿主」可言，锁也必须一起撤 —— 否则下一张开卡
+    // 的上报会带着上一位留下的 `1`，App 那边会把整块区域吞到租约过期。
+    if (off) AevonBandLocked = NO;
     NSArray *list = AevonBandTargets(bundleID, off);
     for (NSString *bid in list) {
         AevonBandPublish(bid, [bid isEqualToString:bundleID]);

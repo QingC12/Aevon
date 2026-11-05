@@ -4937,6 +4937,13 @@ static int AevonBandNotes = 0;
 static int AevonBandProof = 0;
 /// 0.1.35 — 几何判不中的次数。第一次能回答「进来了但被否掉」而不是「没进来」。
 static int AevonBandRejects = 0;
+/// 0.1.36 — 「靠锁吞掉」的证词预算。
+///
+/// 0.1.35 的日志里 `app: band touch at` 是 0 而用户仍然看到 App 亮了一行 ——
+/// 锁那条路一句证词都没有，于是「是锁吞的」和「根本没进来」在日志上一样。
+static int AevonBandLockLogs = 0;
+/// 0.1.36 — 擦高亮的那一次还排在主队列上（防止一串通知把遍历排成好几遍）。
+static volatile int AevonBandClearing = 0;
 /// 0.1.34 — 「这根手指归宿主」。拖动 / 缩放期间为 1（见 `AevonAppBandLock`）。
 static volatile int AevonBandLock = 0;
 /// 上面那把锁是什么时候打开的（3 秒租约，见 `AevonBandHeld`）。
@@ -4997,7 +5004,13 @@ static void AevonBandReload(void) {
     AevonBandHole = CGRectMake((CGFloat)v[4], (CGFloat)v[5], (CGFloat)v[6], (CGFloat)v[7]);
     AevonBandOn = (AevonBandOuter.size.width >= 1 && AevonBandOuter.size.height >= 1);
     BOOL locked = (got >= 9 && v[8] >= 0.5);
-    if (locked && !AevonBandLock) AevonBandLockAt = CFAbsoluteTimeGetCurrent();
+    // 0.1.36 — 每读到一个「锁着」就把租约往后推，不再只在 0→1 那一次起表。
+    //
+    // 3 秒租约的本意是「宿主没来得及解锁时自己收回」，可 0.1.34/0.1.35 只在
+    // 锁初次成立那一下起表：一次慢拖（用户按住 0.25 s 才开闸，再慢慢上滑）超过
+    // 3 秒，租约中途到期，`AevonBandHeld` 把锁抹掉 —— 那一根剩下的半截就漏给
+    // App 了。锁着就一直续，这才是「宿主还在说这根归我」的意思。
+    if (locked) AevonBandLockAt = CFAbsoluteTimeGetCurrent();
     AevonBandLock = locked ? 1 : 0;
     // 判据：这一行出现 ⇒ 通道真的通了（值、来源、锁都在里面）。没有它而用户
     // 还被透传，问题就不在这条通道上，别再改这里。
@@ -5012,24 +5025,33 @@ static void AevonBandReload(void) {
     }
 }
 
-/// 0.1.34 — 把 App 里已经亮起来的那一项擦掉。
+/// 0.1.36 — 把 App 里已经亮起来的那一项擦掉。
 ///
-/// 时序上不可避免：`touchesBegan` 在同一批事件里已经送进 App 了，通知到得再快
-/// 也在它之后。所以「锁」不是拦住那一拍，而是擦掉它的后果，再把后面的
-/// `moved` / `ended` 全部收走 —— App 从此等不到抬手，也就不会真的触发功能。
-static void AevonBandDropHighlights(UIView *view) {
-    if ([view isKindOfClass:[UIControl class]]) {
-        UIControl *control = (UIControl *)view;
-        if (control.isHighlighted) control.highlighted = NO;
+/// **0.1.35 这里只认 `UIControl`，所以它在真机上一次都没生效过。**
+///
+/// 用户的原话是「APP 内的选项出现选中背景，但是不会触发选中功能」——那正是
+/// `touchesBegan` 起来了、`moved`/`ended` 被我们吞掉的形状。而列表里的行没有
+/// 一个是 `UIControl`：设置那一页是 `PSTableCell`（继承 `UITableViewCell`），
+/// Sileo 那一类列表是 cell 或 SwiftUI 的宿主视图。`isKindOfClass:[UIControl
+/// class]` 在这个树上永远为假，高亮就留在屏幕上，直到下一次有人点它。
+///
+/// 三家（`UIControl` / `UITableViewCell` / `UICollectionViewCell`）都有
+/// `setHighlighted:`，那就按消息问，不按类问。谁没有就跳过。
+///
+/// `depth` 是防病态树：真实页面十几层，卡在 40 层足够，再深也不可能是列表行。
+static void AevonBandDropHighlights(UIView *view, int depth) {
+    if (view == nil || depth > 40) return;
+    if ([view respondsToSelector:@selector(setHighlighted:)]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(view, @selector(setHighlighted:), NO);
     }
-    for (UIView *child in view.subviews) AevonBandDropHighlights(child);
+    for (UIView *child in view.subviews) AevonBandDropHighlights(child, depth + 1);
 }
 
 static void AevonBandDropAllHighlights(void) {
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
         for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-            AevonBandDropHighlights(window);
+            AevonBandDropHighlights(window, 0);
         }
     }
 }
@@ -5045,14 +5067,25 @@ static void AevonBandNote(CFNotificationCenterRef __unused center,
         AevonBandNotes += 1;
         AevonAppLogWrite("app: band note from host\n");
     }
-    BOOL wasLocked = AevonBandLock != 0;
     AevonBandReload();
-    if (wasLocked || !AevonBandLock) return;
+    // 0.1.36 — 只要锁是开的就擦一次，不再要求「这一次是 0→1」。
+    //
+    // 0.1.34/0.1.35 的写法是 `if (wasLocked || !AevonBandLock) return;`：锁在上
+    // 一通通知里已经是 1，这一通就什么都不做。可 `.began` 是**每一次手势**单独
+    // 漏进来的，上一次擦过不代表下一次没亮 —— 一次拖完紧接着上滑关闭，第二根
+    // 手指点亮的那一行就没人擦。
+    //
+    // 用 `AevonBandClearing` 把并发的几通通知压成一遍遍历：锁着的时候连着来
+    // 两三通是常态（几何 + 锁各一发），每通都走一遍整棵树是白花。
+    if (!AevonBandLock) return;
+    if (AevonBandClearing) return;
+    AevonBandClearing = 1;
     // Darwin 通知的回调**不保证在主线程**，而下面要动 UIView：必须跳回主队列。
     // 跳一拍不损失什么 —— 这一行本来就是在 `touchesBegan` 之后才可能执行到，
     // 目的只是把那一拍点亮的高亮擦掉。
     dispatch_async(dispatch_get_main_queue(), ^{
         AevonBandDropAllHighlights();
+        AevonBandClearing = 0;
     });
 }
 
@@ -5097,6 +5130,18 @@ static BOOL AevonBandTake(UIEvent *event) {
     NSSet *touches = [event allTouches];
     if (touches.count != 1) { AevonBandWatching = NO; return NO; }
     UITouch *touch = [touches anyObject];
+    // 0.1.36 — 起手这一拍**自己读一次**，不等通知。
+    //
+    // 真机上 `.began` 与宿主那一份是同时到的：宿主刚落指、`dragBegin` 才把
+    // 几何和锁写进偏好域，那封 Darwin 通知还在路上。0.1.35 只认通知带过来的
+    // 值，于是这一拍用的是**上一次**上报的矩形 —— 用户刚把卡片拖到别处、立刻
+    // 上滑关闭时，旧矩形里的「卡片内部」正好盖住现在这根手指，判成「归 App」，
+    // 漏出去点亮一行。日志里 `app: band prefs band=430x713 at 0,182` 与紧随其
+    // 后的 `band touch` 为 0，就是这一拍的时差。
+    //
+    // 一次手势读一次偏好域，代价是一次 cfprefsd 往返（亚毫秒），换掉的是整条
+    // 通道对「通知什么时候到」的依赖。
+    if (touch.phase == UITouchPhaseBegan) AevonBandReload();
     // 0.1.35 — **锁在任何一拍都算数。**
     //
     // 0.1.34 只在 `.began` 判一次锁，而锁是跨进程送来的：界面上手指落下时，
@@ -5108,6 +5153,15 @@ static BOOL AevonBandTake(UIEvent *event) {
     // 锁是「这根手指归宿主」的权威说法，它一旦为真，这一根从头到尾都不该到
     // App 手里。放在 phase 判断之前，代价是一次整数读。
     if (AevonBandHeld()) {
+        // 0.1.36 — 这一条路以前一句证词都没有。下一份日志要能回答「是谁吞的」：
+        // 锁（`app: band hold`）还是几何（`app: band touch at … held`）。
+        if (touch.phase == UITouchPhaseBegan && AevonBandLockLogs < 8) {
+            AevonBandLockLogs += 1;
+            CGPoint p = [touch locationInView:nil];
+            char line[96];
+            snprintf(line, sizeof(line), "app: band hold at %.0f,%.0f\n", p.x, p.y);
+            AevonAppLogWrite(line);
+        }
         AevonBandWatching = YES;
         return YES;
     }

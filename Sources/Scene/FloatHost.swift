@@ -2103,6 +2103,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.1.34 — 这一根从此刻起归宿主。App 那份 `touchesBegan` 已经落地了，
         // 通知到得再快也在它之后，所以对面收到锁先擦一次高亮，再吞掉剩下的
         // `moved` / `ended` —— 用户看到的是「拖动时 App 不再跟着亮」。
+        //
+        // 0.1.36 — 先补一次几何，再上锁。
+        //
+        // 手势期间宿主不上报几何（那会是每秒几十次 cfprefsd 往返），所以 App
+        // 手里那份矩形停在**上一次抬手**的位置。而这一拍正要开始搬卡片：几何
+        // 与锁一起发，对面读到的「卡片内部」就是这张卡片现在的样子。`reportBand`
+        // 自己带判重，没变就什么都不写。
+        reportBand()
         if !bundle.isEmpty { AevonAppBandLock(bundle, true) }
     }
 
@@ -3081,14 +3089,39 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let shape = bandRect(for: card)
         if !bandReported.isNull && shape.frame == bandReported { return }
         bandReported = shape.frame
+        // 0.1.36 — 交给 App 进程的「卡片内部」比真卡片内缩 `bandRim`。
+        //
+        // 用户这一条只剩上滑关闭：「百分百触发全屏 App 的触摸，出现选中背景但
+        // 不触发功能」。起手点量出来就压在卡片下边缘上 —— `win: gesture grab
+        // zone=bottom-middle at 211,592`，而卡片高度正是 592。也就是说这根手指
+        // 落在「卡片外面 0.3 pt」这个量级上，宿主按 `>` 判成环，App 按 `>=` 判成
+        // 卡片内部，两个进程对同一点给出不同答案。
+        //
+        // 上报是 `%.0f`（整数）：只要卡片边长带小数，四舍五入本身就能把边界翻
+        // 过去。内缩 6 pt 把这条缝盖掉 —— 那 6 pt 里本来也不该有可点的内容。
+        var inner = card.frame
+        let rim = FloatHost.bandRim
+        if inner.width > rim * 3, inner.height > rim * 3 {
+            inner = inner.insetBy(dx: rim, dy: rim)
+        }
         // 0.1.35 — `cast` 是这一条广播到了几个进程。它必须 > 1（卡片 + 桌面上
         // 那个全屏 App）；只有 1 说明 `SBApplicationController` 没取到运行列表，
         // 那么下一份日志里的 `app: band touch at` 仍会是 0，一眼就能对上。
-        let cast = AevonAppBandSet(bundle, shape.frame, card.frame)
-        Log.write("win: band report " + size(shape.frame.size)
-                  + " at " + point(shape.frame.origin)
-                  + " cast=" + String(cast))
+        //
+        // 0.1.36 — 把 hole 一起写进这一行：下一份日志能直接看出上报的是「真卡片」
+        // 还是内缩之后的那一块，不必再靠 `app: band miss … hole=` 反推。
+        let cast = AevonAppBandSet(bundle, shape.frame, inner)
+        Log.write(String(format: "win: band report %.0fx%.0f at %.0f,%.0f cast=%d hole=%.0fx%.0f",
+                         shape.frame.size.width, shape.frame.size.height,
+                         shape.frame.origin.x, shape.frame.origin.y,
+                         Int32(clamping: cast), inner.size.width, inner.size.height))
     }
+
+    /// 0.1.36 — 交给 App 的「卡片内部」内缩量（pt）。
+    ///
+    /// 只盖边界上那点缝（亚像素 + `%.0f` 取整），不是把卡片边上一条让出去：
+    /// 6 pt 在 355 宽的卡片上是 1.7 %，看不见也摸不出。
+    static let bandRim: CGFloat = 6
 
     private var bandReported: CGRect = .null
 
