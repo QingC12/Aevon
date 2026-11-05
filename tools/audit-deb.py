@@ -1192,13 +1192,19 @@ def main():
                   #     缝都生效了（Aevon(89) 第 3 条）。
                   b"win: mini tap down at ",
                   b"win: mini tap up, promoting back to main",
+                  # 0.1.3 — 小窗触摸**一条都不放行**的判据（Aevon(91) 第 1 条）。
+                  # 0.1.1 在小窗贴边的那一侧让了 12 pt，于是一次完整的点击被交给
+                  # 了 App；而 `mini tap down` 只在吞掉之后才写，漏掉的那些一行都
+                  # 没有。这一行把「落进矩形的按下数」和「被吞掉的按下数」并排打
+                  # 出来：`down != eaten` 就是又漏了。整条字面量，不拼。
+                  b"win: mini touch down=%d eaten=%d",
                   # 0.0.69 — 三条新的行为证据，缺一条就说明这一轮有一件事没落地：
                   #   · `long press corner, already default` = 长按在默认尺寸上真的
                   #     什么都不做（Aevon(59) 的第一条）；
                   #   · `canvas re-asserted` = 承载面尺寸在 `activate` 之后又交了一
                   #     次（「每次打开内容尺寸不对」的修法，见 FloatHost）；
                   #   · `frame restore again` = 关窗后第二次交还整屏（退出后偏下）。
-                  b"win: card already default %.0fx%.0f target %.0fx%.0f",
+                  b"win: card already default %.0fx%.0f target %.0fx%.0f at %.0f,%.0f",
                   b"win: canvas re-asserted ",
                   b"win: frame restore again door=",
                   # 0.0.70 — 沙盒 App 的读数取回。这三条是「量尺终于能到手」的证据：
