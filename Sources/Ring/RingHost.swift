@@ -126,10 +126,16 @@ final class RingHost: NSObject {
     /// 0.0.55 — 上一次由边缘带呼盘的时间。0.6 s 节流，旧版原值：一次呼盘之后
     /// 手指往往还贴着边，没有它，收起的圆盘会被同一段滑动立刻再喊出来。
     private var edgeAt: CFTimeInterval = 0
-    /// 旧版常量：带宽 15 pt / 底部 35 % / 节流 0.6 s（zoneWDefault / zoneHDefault）。
-    private let edgeWidth: CGFloat = 15
+    /// 旧版常量：底部 35 % / 节流 0.6 s（zoneHDefault）。
+    /// 0.1.13 — 节流 0.6 → 0.3 s：用户 Aevon(100) 那句「触发几率很小」里有一截
+    /// 是这个 —— 圆盘开了一次又收起，手指还在边上再划，0.6 s 内一律 `pad refused
+    /// by throttle`。**新的一次落指是个明确动作**，0.3 s 已足够防「同一段滑动
+    /// 把盘再喊一次」。
+    ///
+    /// 带宽不再用 `edgeWidth`。它就是 `stripWidth`（0.1.13 起 24 pt），两处定义
+    /// 会出现「日志说 band=15、实际认 24」这种对不上的情况。
     private let edgeHeightPercent: CGFloat = 35
-    private let edgeInterval: CFTimeInterval = 0.6
+    private let edgeInterval: CFTimeInterval = 0.3
 
     private var config = RingConfig()
     private var expanded = false
@@ -375,7 +381,9 @@ final class RingHost: NSObject {
         // 0.1.7 — 整条带子换成 `stripRect` 那一条，竖条那块 40×212 的垫子从这一刻
         // 起**只是画**，不接触摸（见 `addBar`）。0.1.8 起 `stripRect` 的高度又回到
         // 底部 35 %（全高会和左滑返回插件抢整条右缘，见那个函数上的注释）。
-        edgePad?.frame = stripRect(in: bounds)
+        // 0.1.13 — frame 只是外接矩形，真正认领的是 `claimRects` 那两块（列 + 光环）。
+        // 外接矩形里剩下的角**不属于我们**，由 `EdgeSwipePad.point(inside:)` 退回给应用。
+        edgePad?.frame = claimBounds(in: bounds)
         // 0.1.6 — 开关只有一个来源（`syncGrip`）。原来这里直接写
         // `!AevonRingGrip.cardUp`，那是第三个各写一遍的地方：布局写一次、开卡关一次、
         // 面板关回调再写一次，任何一条路没回来，入口就一直是关的。
@@ -401,12 +409,16 @@ final class RingHost: NSObject {
                       + String(Int(m.barHeight.rounded())) + "pt pad="
                       + String(Int(m.padWidth.rounded())) + "x"
                       + String(Int(m.padHeight.rounded()))
-                      // 0.1.8 — 呼盘命中区一起报：`strip=14x326 at y=606` 就是
-                      // 「贴右缘 14 pt × 底部 35 %」的实测值，判据在日志里自证。
-                      + " strip="
-                      + String(format: "%.0fx%.0f at y=%.0f",
+                      // 0.1.8 — 呼盘命中区一起报：`claim=24x326 at y=606` 是
+                      // 「贴右缘 × 底部 35 %」的实测值，判据在日志里自证。
+                      // 0.1.13 — 加了 `halo`（对着可见抓手那一段的宽区），并且
+                      // 整段合成**一个**长格式串：` claim=` 只有 7 字节，会被编成
+                      // 立即数，二进制里 grep 不到（audit 断言就抓了个空）。
+                      + String(format: " claim=%.0fx%.0f at y=%.0f halo=%.0fx%.0f at y=%.0f",
                                stripWidth, stripRect(in: bounds).height,
-                               stripRect(in: bounds).minY))
+                               stripRect(in: bounds).minY,
+                               haloWidth, haloRect(in: bounds).height,
+                               haloRect(in: bounds).minY))
         }
     }
 
@@ -525,22 +537,37 @@ final class RingHost: NSObject {
             if AevonAppPanel.current != nil { return "panel" }
             // 圆盘已经在屏：这一下不是「呼出」，收手。
             if AevonRingMenu.presented != nil { return "ring" }
-            // 连击节流：旧版原值 0.6 s，一次呼盘之后手指往往还贴着边。
+            // 连击节流：一次呼盘之后手指往往还贴着边，没有它同一段滑动会把盘再
+            // 喊一次。0.1.13 起 0.3 s（原 0.6 s）：太快了会把「收起来再划一次」
+            // 也一起拒掉，用户感觉就是「时灵时不灵」。
             if CACurrentMediaTime() - self.edgeAt <= self.edgeInterval { return "throttle" }
             return nil
         }
         pad.onPhase = { [weak self] phase, from, to in
             self?.handleEdgePhase(phase, from: from, to: to)
         }
-        // 圆盘在屏 ⇒ 这条带子让开，盘中滑动才回得到圆盘自己（Aevon(96) 第 1 条
-        // 「圆盘打开期间手指在盘中滑动会触发应用内的滑动」的根就在这里：带子贴在
-        // 最上层，圆盘在它下面，14 pt 被带子吞掉之后既不开盘也不给盘）。
-        pad.yieldsToRing = { AevonRingMenu.presented != nil }
+        // 0.1.13 — **`yieldsToRing` 撤掉。** 它原来是「圆盘在屏时 `hitTest` 返回
+        // nil」，本意是把右缘还给圆盘。但 nil 的含义是「这块不归我」，而圆盘挂在
+        // 圆心 (215,699)、外圈半径 108 —— 最右才到 x=323，**永远够不到 404 以外的
+        // 这条带**。所以那块地不是还给了圆盘，是还给了下面的应用：用户在圆盘开着
+        // 的时候贴着右缘一划，收到的是应用的左滑返回。用户 Aevon(100) 第 2 条
+        // 「触发条区域中还有几率触发左滑返回」的一条路就在这儿。
+        //
+        // 现在这条带在任何时候都只归我们：圆盘开着就认「这一下不开盘」并吃掉，
+        // 应用一条都收不到。
+        pad.claimRects = { [weak self] in
+            guard let self = self, let window = self.window else { return [] }
+            return self.claimRects(in: window.bounds)
+        }
         // 0.1.12 — 落指无条件报点：这一行证明「手指真的落在这条带上」，是
         // 「没落到带上」与其余失败原因的唯一分界线。
-        pad.onDown = { at in
+        // 0.1.13 — 附带离右缘多少 pt：Aevon(100) 里 14 次落指全在 3~6 pt，说明
+        // 用户的习惯是「顶到边缘」；以后调带宽不用再猜。
+        pad.onDown = { [weak self] at in
+            let inset = (self?.window?.bounds.maxX ?? at.x) - at.x
             Log.write("ring: pad down at "
-                      + String(format: "%.0f,%.0f", at.x, at.y))
+                      + String(format: "%.0f,%.0f", at.x, at.y)
+                      + " inset=" + String(format: "%.0f", inset))
         }
         pad.onBlocked = { [weak self] reason in
             guard let self = self, self.stripProbe < 20 else { return }
@@ -566,8 +593,22 @@ final class RingHost: NSObject {
         edgePad = pad
     }
 
-    /// 0.1.7 — 呼盘的手势条：贴右缘。唯一一处几何定义。
-    private let stripWidth: CGFloat = 14
+    /// 0.1.13 — 呼盘命中区的贴边列宽。唯一一处几何定义。
+    ///
+    /// 14 → 24：0.1.12 的真机日志（Aevon(100)）里 14 次落指**全部**在
+    /// `x = 424…427`（离右缘 3~6 pt），一次没落在 408~423 这一段 —— 不是没人划，
+    /// 是划了也落不进来。而这个文件里 0.0.55 留下的旧测（49 次 hold）说拇指中心
+    /// 真正落在**离边 12~15 pt**：14 pt 的带宽正好把分布的中位数压在边界上，
+    /// 一半样本在里、一半在外。24 pt 把 12~15 这一簇整个包进来，两侧各留余量。
+    private let stripWidth: CGFloat = 24
+    /// 0.1.13 — 可见抓手周围的宽区（「光环」）。
+    ///
+    /// 用户对着那条 6×87 的可见抓手去划，手落在哪儿不由我们决定；只在贴边 24 pt
+    /// 里认，等于要求他把指尖顶到屏幕边缘。光环把**可见物的周围**也算成我们的，
+    /// 而它只覆盖抓手上下 `haloHeight` 这一段，不是一个 46×326 的大方块 ——
+    /// 方块会白吃掉应用右下角一整条（发送键、输入框都在那儿）。
+    private let haloWidth: CGFloat = 46
+    private let haloHeight: CGFloat = 176
     /// 0.1.11 — 「认作左滑的最小横向位移」这个常量搬进了 `EdgeSwipePad.openDistance`
     /// （10 pt）。原来这里是 12 并且用于 `gestureRecognizerShouldBegin`，那一拍
     /// `translation` 只有 10 pt 上下，12 永远够不到 —— 就是 Aevon(98)「呼不出」的死因。
@@ -588,6 +629,34 @@ final class RingHost: NSObject {
                       y: bounds.maxY - h,
                       width: stripWidth,
                       height: Swift.max(0, h))
+    }
+
+    /// 0.1.13 — 可见抓手周围那块宽区。中心跟着 `barY` 滑块走，高度 `haloHeight`。
+    private func haloRect(in bounds: CGRect) -> CGRect {
+        let centre = barCentreY(in: bounds)
+        let h = Swift.min(haloHeight, stripRect(in: bounds).height)
+        return CGRect(x: bounds.maxX - haloWidth,
+                      y: centre - h / 2,
+                      width: haloWidth, height: h)
+    }
+
+    /// 0.1.13 — 真正认领的两块地：贴边列 + 抓手光环。
+    ///
+    /// **认领 = 应用拿不到这一根手指**（窗口在上层，没有「先收下再还回去」这回事），
+    /// 所以形状必须跟「看得见的东西 + 拇指落得到的地方」对齐，能小就不大。
+    /// 列负责「贴着右缘随便哪一段都能划」，光环负责「对着抓手划但手落偏了」。
+    private func claimRects(in bounds: CGRect) -> [CGRect] {
+        guard bounds.width > 0 else { return [] }
+        return [stripRect(in: bounds), haloRect(in: bounds)]
+    }
+
+    /// 两块地的外接矩形，也就是 `edgePad` 的 frame。命中与否由
+    /// `EdgeSwipePad.point(inside:)` 按 `claimRects` 再判一次 —— 外接矩形里
+    /// 不属于任何一块的那些点必须**放行**，否则 46×326 会被整块吃掉。
+    private func claimBounds(in bounds: CGRect) -> CGRect {
+        let rects = claimRects(in: bounds)
+        guard let first = rects.first else { return .zero }
+        return rects.dropFirst().reduce(first) { $0.union($1) }
     }
 
     /// 0.0.55 — 浮窗开/关时同步右缘带能不能接触摸。
@@ -693,7 +762,7 @@ final class RingHost: NSObject {
                 AevonRingMenu.presentTracking(in: host, at: point, source: "edge")
                 Log.write("ring: edge swipe open at "
                           + String(format: "%.0f,%.0f", point.x, point.y)
-                          + " band=" + String(format: "%.0f", edgeWidth))
+                          + " band=" + String(format: "%.0f", stripWidth))
             }
 
         case .moved:
@@ -1056,7 +1125,12 @@ final class RingHost: NSObject {
 
 // MARK: - 0.1.11 右缘呼盘垫（自己掌勺的触摸判定）
 
-/// 右缘 14 pt 的那条带子。**判定在这里做，不在手势识别器里做。**
+/// 右缘的呼盘垫。**判定在这里做，不在手势识别器里做。**
+///
+/// 0.1.13 — 认领的不是「14 pt 一条」而是两块地（见 `RingHost.claimRects`）：
+/// 贴右缘 24 pt × 底部 35 % 的列，加上可见抓手周围 46×176 的宽区。Aevon(100)
+/// 的 14 次落指全在离边 3~6 pt，而旧测说拇指中心通常落在 12~15 pt —— 14 pt 的
+/// 带宽把分布的中位数压在边界上，这就是「触发几率很小」的主要来源。
 ///
 /// 为什么撤掉 `UIPanGestureRecognizer` + `gestureRecognizerShouldBegin`（0.1.10）：
 ///
@@ -1096,9 +1170,9 @@ final class EdgeSwipePad: UIView {
     /// 「没落到带上」和「落上了被挡住」在日志里长得一模一样（Aevon(99) 两份
     /// 日志的 5 分半里只有 2 次落指，其余尝试无从对账）。现在返回原因串。
     var blockReason: (() -> String?)?
-    /// 命中闸：圆盘在屏时**让开**。返回 true ⇒ `hitTest` 给 nil，父视图继续往
-    /// 下层问（圆盘挂在 pad 之下），盘中手势才回得到圆盘自己。
-    var yieldsToRing: (() -> Bool)?
+    /// 认领的地盘（窗口坐标）。命中由这几块矩形决定，不是 frame —— frame 只是
+    /// 它们的外接矩形，里面的「空角」必须放行应用。
+    var claimRects: (() -> [CGRect])?
     /// 业务回调，坐标已转成 window 坐标。
     var onPhase: ((Phase, CGPoint, CGPoint) -> Void)?
     /// 落指报点，取证用（坐标 window）。**无条件**，在闸门之前。
@@ -1126,10 +1200,14 @@ final class EdgeSwipePad: UIView {
     private var tracking = false
     private var opened = false
 
-    /// 圆盘在屏 ⇒ 这一下不是「呼盘」，别把右缘那 14 pt 从圆盘手里抢走。
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        if yieldsToRing?() == true { return nil }
-        return super.hitTest(point, with: event)
+    /// 圆盘在屏时**不再让开**（0.1.13）：见 `addEdgePad` 里那段账 —— 让开的其实是
+    /// 应用，不是圆盘。命中只按 `claimRects` 两块矩形判。
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        guard let rects = claimRects?(), !rects.isEmpty else {
+            return super.point(inside: point, with: event)
+        }
+        let inWindow = convert(point, to: window)
+        return rects.contains { $0.contains(inWindow) }
     }
 
     // 下面四个触摸方法**都不调 super**：一调，未处理的触摸就沿响应链上传

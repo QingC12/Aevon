@@ -497,6 +497,11 @@ def main():
                   b"ring: pad down at ",
                   b"ring: pad refused by ",
                   b"ring: pad cancelled dx=",
+                  # 0.1.13 — 命中区的两块地要能在日志里读出来：贴边列 + 抓手光环。
+                  # ` claim=` 只有 7 字节会被编成立即数，所以整段合成一个长格式串，
+                  # 断言取后半段（halo 那 24 字节）。没有它，「触发几率很小」到底是
+                  # 带宽不够还是判据太严，下一份日志还是分不开。
+                  b" halo=%.0fx%.0f at y=%.0f",
                   b"ring: bar layer put back on top (level=",
                   b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",
