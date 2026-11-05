@@ -544,6 +544,12 @@ def main():
                   #     pad frame / padOn），四种「划了没反应」一次摆开。
                   b"ring: win touch at ",
                   b"ring: mount state ",
+                  # 0.1.23 — 呼盘判定最终落点：`UIApplication.sendEvent:`。
+                  # 0.1.22 的窗口级 `sendEvent` 在 Aevon(106) 里零调用，而这一层
+                  # 一直是通的（浮窗五个手势靠它）。`app touch` 是「进程收到了
+                  # 这根手指」的新分界线。
+                  b"ring: app touch at ",
+                  b"AevonRingEdgeTouch",
                   # 窗口丢了场景 ⇒ 触摸永远送不进来（能合成、能看见、收不到）。
                   b"ring: window lost its scene, touches will not be delivered",
                   b"ring: bar layer put back on top (level=",

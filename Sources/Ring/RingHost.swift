@@ -153,6 +153,11 @@ final class RingHost: NSObject {
     /// 0.1.22 — 窗口丢了场景只报一次。那种状态下触摸永远送不进来，
     /// 反复报没有新信息，还会把同一个 tick 的其它证词冲掉。
     private var sceneLostLogged = false
+    /// 0.1.23 — 应用层（`UIApplication.sendEvent:`）那条入口的跟踪状态。
+    private var edgeWatchStart: CGPoint = .zero
+    private var edgeWatching = false
+    private var edgeOwned = false
+    private var edgeNoteCount = 0
     /// 0.1.17 — 通道名。**两个类型，别合并。**
     ///
     /// 同一对 API 的 name 参数签名不一样，这是 CoreFoundation 的历史遗留：
@@ -974,6 +979,102 @@ final class RingHost: NSObject {
     /// 上一次写进日志的开关值，只用来去重。
     private var gripLoggedBar = true
     private var gripLoggedEdge = true
+
+    /* ⛔ 0.1.23 — **呼盘判定搬到 `UIApplication.sendEvent:` 上。**
+     *
+     * 三层都试过了，一层一层被日志否掉：
+     *   · 0.1.10~0.1.21 挂 `edgePad`（视图命中）⇒ Aevon(105) 零 `pad down`；
+     *   · 0.1.20 加 `PassthroughView.hitTest` 兜底 ⇒ 同上，连兜底那行都没有；
+     *   · 0.1.22 搬窗口的 `sendEvent` ⇒ Aevon(106) 整份日志**零 `win touch`**。
+     *
+     * 而 0.1.22 的 `mount state` 在同一份日志里是全绿的：
+     * `win=430x932 level=1002 hidden=0 touchable=1 scene=ok pad=18x912@412,8 padOn=1`。
+     * 窗口没被藏、没被禁、场景在、垫子几何正确 —— 可 `sendEvent` 一次没被调用。
+     * 唯一的解释是 `UIApplication` 派发时**根本没选中这个窗口**（`_hitTestWindow`
+     * 按它自己的顺序问，问到哪一层返回 nil 就跳过一个窗口）。
+     *
+     * 这条结论项目里早就写下过一遍，只是写的是浮窗（见 `AevonScene.m`
+     * 「卡片外面没有一个触摸进过我们的任何窗口」那段）：`-[UIApplication
+     * sendEvent:]` 是唯一一个不管命中哪个窗口都会经过的地方。浮窗的五个手势
+     * 就是靠它工作的 —— 所以那个入口在 SpringBoard 里**确定是通的**。
+     *
+     * 现在把右缘判定也挂在那里：`AevonScene.m` 的 `AevonSendEventReplacement`
+     * 先问浮窗（`AevonFloatTouch`），没被吃掉再问这一层。
+     *
+     * 判据与 `EdgeSwipePad` 完全一致（8 pt 开 / 16 pt 认输 / `*0.7` 斜度容忍），
+     * 只是位移由这里自己累积 —— 两者共用一个来源 `stripRect`，不会出现两套带宽。
+     *
+     * - Parameter phase: `UITouchPhase` 原值（0 began / 1 moved / 2 stationary /
+     *   3 ended / 4 cancelled）。
+     * - Returns: 这一拍要不要吞掉（不往应用传）。
+     */
+    func edgeTouch(phase: Int32, x: Double, y: Double) -> Bool {
+        guard let window = window, window.bounds.width > 0,
+              let pad = edgePad else { return false }
+        let point = CGPoint(x: x, y: y)
+
+        switch phase {
+        case 0:  // began
+            // 键盘 / 面板在屏时带子收走，右缘整条还给应用。
+            guard !pad.isHidden, pad.isUserInteractionEnabled,
+                  stripRect(in: window.bounds).contains(point) else {
+                edgeWatching = false
+                return false
+            }
+            edgeWatchStart = point
+            edgeWatching = true
+            edgeOwned = false
+            if edgeNoteCount < 20 {
+                edgeNoteCount += 1
+                // 一个格式串，不拼：` inset=` 只有 7 字节，拼出来会被编成立即数。
+                Log.write(String(format: "ring: app touch at %.0f,%.0f inset=%.0f",
+                                 point.x, point.y, window.bounds.maxX - point.x))
+            }
+            // 第一拍不吞：应用该收到的 `began` 照常收到。只有真的判成左滑之后
+            // 才从那一刻起接管，方向不对应用全程无感。
+            return false
+
+        case 1, 2:  // moved / stationary
+            guard edgeWatching else { return false }
+            if edgeOwned {
+                handleEdgePhase(.moved, from: edgeWatchStart, to: point)
+                return true
+            }
+            let dx = point.x - edgeWatchStart.x
+            let dy = point.y - edgeWatchStart.y
+            if dx <= -8, abs(dx) >= abs(dy) * 0.7 {
+                // 已经在开圆盘了（另一条入口先到）：别抢，也别吞。
+                if expanded { edgeWatching = false; return false }
+                edgeOwned = true
+                handleEdgePhase(.began, from: edgeWatchStart, to: point)
+                return true
+            }
+            // 认输要决定性：走够 16 pt 且方向明确不横，才放弃这一根。
+            if dx >= 16 || (abs(dy) >= 16 && abs(dy) > abs(dx)) {
+                edgeWatching = false
+            }
+            return false
+
+        case 3:  // ended
+            guard edgeWatching else { return false }
+            edgeWatching = false
+            guard edgeOwned else { return false }
+            edgeOwned = false
+            handleEdgePhase(.ended, from: edgeWatchStart, to: point)
+            return true
+
+        case 4:  // cancelled
+            guard edgeWatching else { return false }
+            edgeWatching = false
+            guard edgeOwned else { return false }
+            edgeOwned = false
+            handleEdgePhase(.cancelled, from: edgeWatchStart, to: point)
+            return true
+
+        default:
+            return false
+        }
+    }
 
     /// 右缘的滑动。语义与竖条那条完全一致（落指 → 圆盘从这一点长出来 → 跟随 →
     /// 抬手定生死），只是入口不同：竖条要**按住它**，这里只要**贴着右缘往左划**。
@@ -1923,4 +2024,18 @@ private final class PassthroughView: UIView {
         let hit = super.hitTest(point, with: event)
         return hit === self ? nil : hit
     }
+}
+
+// MARK: - 应用层触摸入口（0.1.23）
+
+/// `AevonScene.m` 的 `AevonSendEventReplacement` 调的入口。
+///
+/// 为什么是 C 而不是直接 `RingHost.shared.edgeTouch(...)`：调用方是 ObjC，
+/// 而 Swift 的类名 / 方法名在 `-x` 链接之后不进符号表，ObjC 那边看不到。
+/// `@_cdecl` 给的是一个稳定的 C 符号，两个编译单元只靠这一行名字耦合。
+///
+/// 返回值：非 0 = 这一拍吞掉（不往应用传）。
+@_cdecl("AevonRingEdgeTouch")
+public func AevonRingEdgeTouch(_ phase: Int32, _ x: Double, _ y: Double) -> Int32 {
+    RingHost.shared.edgeTouch(phase: phase, x: x, y: y) ? 1 : 0
 }

@@ -1470,6 +1470,10 @@ NSInteger AevonWakeScene(id scene) {
 extern int AevonFloatTouch(int phase, double x, double y, double stamp);
 /// 0.1.4 — 多指时那条窄入口：只问停靠小窗，不碰主窗。
 extern int AevonFloatTouchMini(int phase, double x, double y, double stamp);
+/// 0.1.23 — 右缘呼盘。同一件事的第二次证明：窗口级的 `sendEvent`（0.1.22）
+/// 在 Aevon(106) 里**一次都没被调用**，而这一层一直是通的 —— 浮窗的五个手势
+/// 就是证据。定义在 `RingHost.swift` 末尾（`@_cdecl`）。
+extern int AevonRingEdgeTouch(int phase, double x, double y);
 
 static IMP AevonSendEventOriginal = NULL;
 
@@ -1487,6 +1491,14 @@ static void AevonSendEventReplacement(id self, SEL _cmd, UIEvent *event) {
         CGPoint point = [touch locationInView:nil];
         eaten = AevonFloatTouch((int)[touch phase], point.x, point.y,
                                 [touch timestamp]) != 0;
+        // 0.1.23 — 浮窗没吃掉，再问右缘呼盘。
+        //
+        // 放在浮窗**之后**：小窗真的压在右缘上时，那根手指该归小窗（用户看得见
+        // 的那个东西优先）。`AevonFloatTouch` 在手指不在任何卡上时立刻回 0，
+        // 所以正常情况这里只是一次矩形判断。
+        if (!eaten) {
+            eaten = AevonRingEdgeTouch((int)[touch phase], point.x, point.y) != 0;
+        }
     } else if ([touches count] > 1) {
         // 0.1.4 — 多指仍然不交给主窗（上面那条纪律没变），但**停靠小窗要看一眼**：
         // 只要有一根手指真的落在小窗里，那一下就必须被吞，否则会透给 App。
