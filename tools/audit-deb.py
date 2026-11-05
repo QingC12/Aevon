@@ -535,6 +535,17 @@ def main():
                   # `autoPin` 恒 false，那段日志永不执行，留着只会让 audit 骗人。
                   b"ring: summon fell back to edge pad #",
                   b"ring: stale disc cleared before summon (not on screen)",
+                  # 0.1.22 — 呼盘判定搬到了窗口的 `sendEvent` 上（Aevon(105)：
+                  # 整份日志零 `pad down`，说明手指根本没送到边垫）。
+                  #   · `win touch` 是「窗口到底收没收到触摸」的唯一分界线 ——
+                  #     它比 `pad down` 更靠上游：有它没 pad down = 命中链断，
+                  #     两个都没有 = 窗口不在触摸派发里；
+                  #   · `mount state` 是挂载现场留档（scene / level / hidden /
+                  #     pad frame / padOn），四种「划了没反应」一次摆开。
+                  b"ring: win touch at ",
+                  b"ring: mount state ",
+                  # 窗口丢了场景 ⇒ 触摸永远送不进来（能合成、能看见、收不到）。
+                  b"ring: window lost its scene, touches will not be delivered",
                   b"ring: bar layer put back on top (level=",
                   b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",

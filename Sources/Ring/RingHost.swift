@@ -150,6 +150,9 @@ final class RingHost: NSObject {
     /// 0.1.19 — 呼盘垫上一次的隐藏状态，只在变化时写日志。
     /// 用来把「垫子被键盘/面板收走了」和「手指没落到带子上」分开。
     private var edgeHiddenLogged = false
+    /// 0.1.22 — 窗口丢了场景只报一次。那种状态下触摸永远送不进来，
+    /// 反复报没有新信息，还会把同一个 tick 的其它证词冲掉。
+    private var sceneLostLogged = false
     /// 0.1.17 — 通道名。**两个类型，别合并。**
     ///
     /// 同一对 API 的 name 参数签名不一样，这是 CoreFoundation 的历史遗留：
@@ -312,6 +315,12 @@ final class RingHost: NSObject {
         observe()
         Log.write("ring: hosted on desktop (旧版圆盘 1:1 · AevonRingMenu "
                   + "\(AevonRingStore.bundleIDs().count)/\(AevonRingStore.maxCount))")
+        // 0.1.22 — **挂载现场一次性留档。**
+        //
+        // 「划了没反应」有四种事实：窗口没收到事件、垫子不在带子上、垫子被藏、
+        // 判据拒绝。前三种在旧日志里全都长得一样（只有最后一种会说话）。
+        // 这一行把窗口与垫子的硬状态一次摆出来，下一份日志一眼就能定位到第几层。
+        mountStateLine()
 
         // Warm the icon cache off the critical path. The first tap must not
         // pay for a LaunchServices enumeration; one second after mount is a
@@ -346,6 +355,7 @@ final class RingHost: NSObject {
         // 0.1.19 — 装配状态也一起归零，否则「关了再开」第一次 tick 会拿旧值
         // 判「没变化」而不写日志。
         edgeHiddenLogged = false
+        sceneLostLogged = false
 
         bar?.removeFromSuperview()
         barPad?.removeFromSuperview()
@@ -397,12 +407,64 @@ final class RingHost: NSObject {
     /// re-creates its hierarchy on rotation and on app exit, and anything added
     /// straight to it disappears with the next layout pass.
     private func makeWindow() -> UIWindow {
+        let window: PassthroughWindow
         if #available(iOS 13.0, *), let scene = mainScene() {
-            let window = PassthroughWindow(windowScene: scene)
+            window = PassthroughWindow(windowScene: scene)
             window.frame = scene.coordinateSpace.bounds
-            return window
+        } else {
+            window = PassthroughWindow(frame: UIScreen.main.bounds)
         }
-        return PassthroughWindow(frame: UIScreen.main.bounds)
+        wireEdgeJudge(window)
+        return window
+    }
+
+    /// 0.1.22 — 窗口级呼盘判定的接线。
+    ///
+    /// 几何仍然只有 `stripRect` 一个来源：窗口这边问的是同一个矩形，所以
+    /// 「视图命中」和「窗口判定」不会出现两套带宽。
+    private func wireEdgeJudge(_ window: UIWindow) {
+        guard let w = window as? PassthroughWindow else { return }
+        w.edgeRect = { [weak self] in
+            guard let self = self, let win = self.window, win.bounds.width > 0 else { return nil }
+            return self.stripRect(in: win.bounds)
+        }
+        // 带子被键盘 / 面板收走时不判：那段时间右缘本来就该还给应用。
+        w.edgeArmed = { [weak self] in
+            guard let self = self, let pad = self.edgePad else { return false }
+            return !pad.isHidden && pad.isUserInteractionEnabled
+        }
+        // `expanded` 是「这一根手指已经在开圆盘了」。圆盘固定留在屏上
+        //（`autoPin`）不算 busy —— 那种情况用户就是想再划一次重摆。
+        w.edgeBusy = { [weak self] in self?.expanded ?? false }
+        w.edgeOnPhase = { [weak self] phase, from, to in
+            self?.handleEdgePhase(phase, from: from, to: to)
+        }
+        w.edgeTouchNote = { point, inset in
+            // 一个格式串，不拼：` inset=` 只有 7 字节，拼出来会被编成立即数。
+            Log.write(String(format: "ring: win touch at %.0f,%.0f inset=%.0f",
+                             point.x, point.y, inset))
+        }
+    }
+
+    /// 0.1.22 — 窗口 + 边垫的硬状态，挂载时写一次。
+    ///
+    /// 这四件事各自都能让「划右缘没反应」而彼此看不出区别：
+    /// 窗口没进触摸派发（`scene=nil` / `hidden=1` / `touchable=0`）、
+    /// 垫子不在带子上（`pad=` 与 `claim=` 对不上）、
+    /// 垫子被藏（`padHidden=1`）、垫子被禁（`padOn=0`）。
+    private func mountStateLine() {
+        guard let w = window as? PassthroughWindow, let pad = edgePad else { return }
+        Log.write("ring: mount state "
+                  + String(format: "win=%.0fx%.0f", w.bounds.width, w.bounds.height)
+                  + " level=" + String(Int(w.windowLevel.rawValue))
+                  + " hidden=" + (w.isHidden ? "1" : "0")
+                  + " touchable=" + (w.isUserInteractionEnabled ? "1" : "0")
+                  + " scene=" + (w.windowScene == nil ? "nil" : "ok")
+                  + " pad=" + String(format: "%.0fx%.0f@%.0f,%.0f",
+                                     pad.frame.width, pad.frame.height,
+                                     pad.frame.minX, pad.frame.minY)
+                  + " padOn=" + (pad.isUserInteractionEnabled ? "1" : "0")
+                  + " padHidden=" + (pad.isHidden ? "1" : "0"))
     }
 
     /// `UIApplication.shared` is a force-unwrapped accessor. Inside SpringBoard
@@ -417,7 +479,24 @@ final class RingHost: NSObject {
               let application = unmanaged.takeUnretainedValue() as? UIApplication else {
             return nil
         }
-        return application.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let scenes = application.connectedScenes.compactMap { $0 as? UIWindowScene }
+        // 0.1.22 — **优先挂在「前台活跃」的那个场景上。**
+        //
+        // SpringBoard 可能同时挂着不止一个 `UIWindowScene`（主屏、车机、外接、
+        // 锁屏转场中间态）。`first` 拿到的是集合顺序里的第一个，**不保证是
+        // 用户正在戳的那块屏**。挂在后台场景上的窗口照样能显示（窗口服务器按
+        // level 合成），但触摸派发是**按场景**路由的 —— 那种窗口一个触摸都
+        // 收不到，日志里连 `pad down` 都不会有。
+        //
+        // 这就是「带子明明在、怎么划都没反应」最省事的一种解释，一并按事实排序：
+        // 先要前台活跃且铺满屏的，再退到任意一个。
+        if let active = scenes.first(where: {
+            $0.activationState == .foregroundActive
+                && $0.coordinateSpace.bounds.width > 0
+        }) {
+            return active
+        }
+        return scenes.first
     }
 
     private func observe() {
@@ -456,6 +535,16 @@ final class RingHost: NSObject {
 
         let bounds = window.bounds
         guard bounds.width > 0 else { return }
+        // 0.1.22 — **窗口丢了场景 = 一个触摸都收不到。**
+        //
+        // `UIWindow.windowScene` 是只读的：一旦它变成 nil（场景被系统回收、
+        // 或者创建时挂在了后来失效的那个场景上），这个窗口还能被合成出来
+        // （所以竖条照样看得见），但触摸派发是按场景路由的 —— 从此这根手指
+        // 永远送不进来，日志里连 `pad down` 都没有。只报一次，不刷屏。
+        if window.windowScene == nil, !sceneLostLogged {
+            sceneLostLogged = true
+            Log.write("ring: window lost its scene, touches will not be delivered")
+        }
 
         // Flush with the right edge: `maxX - padWidth` is the pad's left edge
         // and the strip sits in the pad's last `barWidth` points, so the strip
@@ -1685,9 +1774,116 @@ final class BarPad: UIView {
 }
 
 private final class PassthroughWindow: UIWindow {
+    /* ⛔ 0.1.22 — **呼盘判定搬到窗口的 `sendEvent` 上。**
+     *
+     * Aevon(105) 的日志把「视图命中」这条路判死了：整份日志里
+     * `claim=18x912 at y=8`（带子在全高、18 pt、贴边）和
+     * `edge pad back on the right edge`（没被藏）都在，可是
+     * **一条 `pad down` 都没有** —— 手指压根没送到 `edgePad` 上。
+     *
+     * 0.1.20 加的根视图兜底（`PassthroughView.hitTest`）理应接住它，但那份
+     * 日志里 `summon fell back to edge pad` 也一次没出现，说明
+     * **`hitTest` 根本没被问到**：0.1.21 的兜底挂在「点落在 `stripRect` 里」，
+     * 只要 `host` 的 frame / 坐标换算出一点岔子，这条兜底就静默失效，
+     * 而它失效时没有任何证词 —— 和「带子不在这儿」长得一模一样。
+     *
+     * `sendEvent` 是窗口收到触摸的**必经之路**，没有子视图层级能绕开它。
+     * 所以把判定直接放在这里：
+     *   ① 落点落在带子里 ⇒ 无条件报一行（这是「窗口到底收没收到触摸」的
+     *      唯一分界线，比 `pad down` 更靠上游）；
+     *   ② 位移够左 ⇒ 直接开圆盘，并把后续事件吞掉（这根手指归圆盘）；
+     *   ③ 方向不对 ⇒ 原样 `super`，应用该收到什么还收到什么。
+     *
+     * `edgePad` 保留不动：它仍是「带内点击被我们吃掉、不落到应用」的那道门。
+     * 两条路各管一段，互相不抢 —— 谁先判出「这是左滑」谁就 `owned`，
+     * 另一个看 `edgeBusy` 就知道已经有人在处理。
+     */
+    var edgeRect: (() -> CGRect?)?
+    /// 带子此刻能不能用（键盘 / 面板在屏时不能）。
+    var edgeArmed: (() -> Bool)?
+    /// 已经有人在处理这根手指了（`RingHost.expanded`）。
+    var edgeBusy: (() -> Bool)?
+    var edgeOnPhase: ((EdgeSwipePad.Phase, CGPoint, CGPoint) -> Void)?
+    /// 落点证词，参数是 (窗口坐标, 离右缘多少 pt)。
+    var edgeTouchNote: ((CGPoint, CGFloat) -> Void)?
+
+    private var watch: UITouch?
+    private var startPoint: CGPoint = .zero
+    private var owned = false
+    /// 落点证词的上限。**每答一次窗口就多一行日志，但一次都不能省** ——
+    /// 「窗口收不到触摸」这种事故只有这一行能证。
+    private var noted = 0
+
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let hit = super.hitTest(point, with: event)
         return hit === self ? nil : hit
+    }
+
+    override func sendEvent(_ event: UIEvent) {
+        guard event.type == .touches, let touches = event.allTouches else {
+            super.sendEvent(event)
+            return
+        }
+        for touch in touches {
+            let point = touch.location(in: self)
+            switch touch.phase {
+            case .began:
+                // 多指不算呼盘：只认第一根，第二根落下时直接不管。
+                guard watch == nil else { continue }
+                guard edgeArmed?() ?? true,
+                      let rect = edgeRect?(), rect.contains(point) else { continue }
+                watch = touch
+                startPoint = point
+                owned = false
+                if noted < 20 {
+                    noted += 1
+                    edgeTouchNote?(point, bounds.maxX - point.x)
+                }
+
+            case .moved:
+                guard let w = watch, w === touch else { continue }
+                if owned {
+                    edgeOnPhase?(.moved, startPoint, point)
+                    continue
+                }
+                let dx = point.x - startPoint.x
+                let dy = point.y - startPoint.y
+                // 与 `EdgeSwipePad` 同一套门：够左 8 pt 且横向不明显吃亏（*0.7）。
+                if dx <= -8, abs(dx) >= abs(dy) * 0.7 {
+                    // 别处已经在处理这根手指 ⇒ 别抢，也别吞。
+                    if edgeBusy?() ?? false { watch = nil; continue }
+                    owned = true
+                    edgeOnPhase?(.began, startPoint, point)
+                }
+
+            case .ended:
+                guard let w = watch, w === touch else { continue }
+                watch = nil
+                if owned {
+                    owned = false
+                    edgeOnPhase?(.ended, startPoint, point)
+                    // 抬手这一帧也吞掉：应用只收到过 `began`，再给它一个
+                    // `ended` 会让它把那半根序列当成一次点击 / 一次返回。
+                    return
+                }
+
+            case .cancelled:
+                guard let w = watch, w === touch else { continue }
+                watch = nil
+                if owned {
+                    owned = false
+                    edgeOnPhase?(.cancelled, startPoint, point)
+                    return
+                }
+
+            @unknown default:
+                break
+            }
+        }
+        // 这根手指已经归圆盘了：后续事件不再下发，否则应用会拿半根序列
+        // （只有 began、没有 ended）去跑它自己的返回手势。
+        if owned { return }
+        super.sendEvent(event)
     }
 }
 
