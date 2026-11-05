@@ -640,6 +640,37 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     var level: CGFloat { window?.windowLevel.rawValue ?? 0 }
 
+    /// 0.1.4 — 卡片窗分成两档，**主窗一定压在所有停靠小窗之上**。
+    ///
+    /// Aevon(92) 第 2 条：「新吸附的小窗会遮挡主悬浮窗，已经吸附的不会」。
+    /// 根因不在几何，在 z 序：0.1.3 之前所有卡片窗都是 `normal + 100` 同一个
+    /// 层级，而同一层的 UIWindow 按**建窗顺序**排 —— 也就是按「谁先被打开」。
+    /// 于是后开的 App 的窗永远压在先开的窗上面；先开的那张升成主窗（几何上
+    /// 347x578 铺满屏幕中间）之后，它的窗仍然在最底下，被后开的那张小窗
+    /// （98x163）盖住右下角那一条。
+    ///
+    /// 用户的原话是「已经吸附的不会」—— 完全对得上：老的窗在下面，新的在上面。
+    ///
+    /// 两档而不是「每次升窗都把窗提到最前」：提层要改 level 再改回来
+    /// （`RingHost` 里就是这么干的），中间那一瞬会重排两次；分档是稳态，
+    /// 只有「降级 / 升窗」这两个动作会换档，平时一次都不动。
+    static let miniLevel = UIWindow.Level(rawValue: UIWindow.Level.normal.rawValue + 100)
+    /// 主窗比小窗高一层。101 与 `statusBar`（1000）之间留着整个普通窗口区间，
+    /// 不会和手势环（`statusBar + 2`）、竖条（`statusBar + 1`）打架。
+    static let mainLevel = UIWindow.Level(rawValue: UIWindow.Level.normal.rawValue + 101)
+
+    /// 按「现在是大卡片还是停靠小窗」换档。只在真的变了的时候写一次 ——
+    /// 每次写 `windowLevel` 都是一次窗口表重排，平稳期不该有这种开销。
+    private func applyWindowLevel() {
+        guard let window = window else { return }
+        let want = miniFrame == nil ? FloatHost.mainLevel : FloatHost.miniLevel
+        guard window.windowLevel != want else { return }
+        let old = window.windowLevel.rawValue
+        window.windowLevel = want
+        Log.write(String(format: "win: level %.0f -> %.0f %@",
+                         old, want.rawValue, miniFrame == nil ? "main" : "mini"))
+    }
+
     /// 0.0.63 — 现在交给系统的画布尺寸。看门狗（SceneProbe 的保活时钟）拿它和
     /// scene 真实的 `settings.frame` 对比，被系统改回去时当场重写并记一行 ——
     /// 0.0.61/0.0.62 只在一开一关两个时刻回读，中间那几秒是不是被改回去了，
@@ -678,7 +709,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
         window.backgroundColor = .clear
         window.isOpaque = false
-        window.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.normal.rawValue + 100)
+        // 0.1.4 — 新开的窗一律按主窗起档（见 `mainLevel` / `miniLevel`）。
+        // 这里是**唯一**建窗的地方，所以两档不会出现第三个数。
+        window.windowLevel = FloatHost.mainLevel
         window.rootViewController = UIViewController()
         window.rootViewController?.view.backgroundColor = .clear
         window.isHidden = false
@@ -1779,6 +1812,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 就是两列开始互相借位）。
         FloatHost.claimDock(self, preferLeft: column ?? (manual && side == .left))
         FloatHost.relayoutDocked()
+        // 0.1.4 — 变小的这一瞬降到小窗档，否则它会继续压在主窗上面（见 `mainLevel`）。
+        applyWindowLevel()
         let landed = card.frame
         let column = FloatHost.columnIndex(self)
         Log.write(String(format: "win: card docked %.0fx%.0f at %.0f,%.0f nth=%d col=%@ row=%d",
@@ -1858,16 +1893,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let e = touchEaten
         let md = miniDown
         let me = miniEaten
+        let mn = miniNear
         touchIn = 0
         touchEaten = 0
         miniDown = 0
         miniEaten = 0
+        miniNear = 0
         touchAt = stamp
         // 没手指、也没吞过：这一秒什么都不用说。
         guard n > 0 || e > 0 else { return }
         // 0.1.3 — 小窗那一侧的单独结算。`down` 与 `eaten` 不等就是漏了一条。
-        if md > 0 || me > 0 {
-            Log.write(String(format: "win: mini touch down=%d eaten=%d", md, me))
+        // 0.1.4 — `near` 是「落在小窗框外 6 pt 容忍带里」的按下数，它不进 `down`
+        // （`down` 只数框内）。一直 `down=0 near=N` ⇒ 手指总在框外，容忍带不够；
+        // `down=N near=0` 却仍然透传 ⇒ 漏的根本不在这条路上，要去查 `sendEvent`。
+        if md > 0 || me > 0 || mn > 0 {
+            Log.write(String(format: "win: mini touch down=%d eaten=%d near=%d", md, me, mn))
         }
         // 一整条字面量（不是拼接）：交付前的审计要在二进制里 grep 到它，
         // 相邻字面量拼出来的串在源码里根本搜不到 —— 这个坑记在项目纪律里。
@@ -2069,10 +2109,48 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 0.1.3 — `mini tap down` 只写前 12 条（Aevon(91) 一次会话点了 20 多次，
     /// 每条都写会把日志埋掉），之后靠每秒那一行计数继续作证。
     private var miniLogs = 0
+    /// 0.1.4 — `mini miss` 的日志预算，与 `miniLogs` 分开：一种是正常的认领，
+    /// 一种是漏网，混用一个预算会让其中一种把另一种挤掉。
+    private var miniMissLogs = 0
+
+    /// 0.1.4 — 小窗边缘的「手滑」容忍带（pt）。
+    ///
+    /// Aevon(92) 里 `down` 与 `eaten` **每一行都相等**（1/1、2/2、4/4…），可用户
+    /// 第三次报「透传还在」。两个数相等的唯一解释是：漏掉的那些根本没进
+    /// `miniTouch` 的 `inside` 那一支 —— 它们连 `miniDown` 都没加。
+    ///
+    /// 小窗只有 98x163，又贴着屏幕边缘，手指中心落在边界外 1~2 pt 是很常见的。
+    /// 一旦 `began` 被判成「窗外」，后面 `moved` / `ended` 全都放行 ⇒ App 收到
+    /// **一整次完整点击**，而我们两条计数都不动，日志上完全看不见。
+    ///
+    /// 6 pt：半个指腹的余量，比屏幕最外那 12 pt 系统手势区小一半，不足以把
+    /// 小窗旁边的桌面图标也吃进来。
+    private static let miniSlop: CGFloat = 6
+    /// 落进容忍带（窗外但很近）的按下数 —— 与 `miniDown` 分开记，因为它的
+    /// 「算不算一次点按」的语义相同、但位置不在小窗里，下次要看的是它的量。
+    private static var miniNear = 0
+
+    /// 这张卡现在是不是停靠小窗。给多指那条窄入口用（`AevonFloatTouchMini`）。
+    var onMini: Bool { miniFrame != nil && window != nil }
+
+    /// 屏幕坐标是不是落在这一张小窗里（含 `miniSlop` 容忍带）。
+    ///
+    /// 和 `rawTouch` 里那段 `screen - card.frame.origin` 是同一个算法 —— 两处必须
+    /// 一致，否则「多指入口认领的」与「单指入口认领的」会变成两个不同的矩形。
+    func miniHit(_ screen: CGPoint) -> Bool {
+        guard miniFrame != nil, let card = card else { return false }
+        let local = CGPoint(x: screen.x - card.frame.minX, y: screen.y - card.frame.minY)
+        return card.bounds.insetBy(dx: -FloatHost.miniSlop, dy: -FloatHost.miniSlop)
+            .contains(local)
+    }
 
     /// 卡片坐标系里的 `local`（`rawTouch` 已减掉 frame 原点）。
     private func miniTouch(phase: Int, local: CGPoint) -> Bool {
         let inside = card.map { $0.bounds.contains(local) } ?? false
+        // 0.1.4 — 窗外 6 pt 也算「小窗这一下」（见 `miniSlop`）。
+        let near = card.map {
+            $0.bounds.insetBy(dx: -FloatHost.miniSlop, dy: -FloatHost.miniSlop).contains(local)
+        } ?? false
         switch phase {
         case 0:
             // 每一根新手指都重新判一次：上一根留下的 `miniTapEaten` 不能带过来，
@@ -2080,7 +2158,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             miniTapOn = false
             miniTapEaten = false
             // 手指在小窗外面：不认领，原样放行（屏幕别处该干嘛干嘛）。
-            guard inside else { return false }
+            // 0.1.4 — 但「外面一点点」要认领：`miniSlop` 那 6 pt 不是装饰，
+            // 它是 Aevon(92) 里「透传还在、可 down 与 eaten 却全相等」的唯一出口。
+            guard inside || near else {
+                // 落在附近（24 pt 内）却没被认领的按下，前 12 条写出来。这一行
+                // 就是下次判「是不是又从这里漏了」的证据 —— 远处那些正常放行
+                // 的不写，否则日志会被桌面的点击灌满。
+                if miniMissLogs < 12,
+                   card.map({ $0.bounds.insetBy(dx: -24, dy: -24).contains(local) }) == true {
+                    miniMissLogs += 1
+                    Log.write("win: mini miss at " + point(local))
+                }
+                return false
+            }
             // 0.1.3 — **小窗矩形以内，一条都不放行**（Aevon(91) 第 1 条）。
             //
             // 0.1.1 在这里留了两条例外：小窗贴着屏幕左边时最外 12 pt 放行、贴着
@@ -2099,6 +2189,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             miniTapStart = local
             FloatHost.miniDown += 1
             FloatHost.miniEaten += 1
+            if !inside { FloatHost.miniNear += 1 }
             if miniLogs < 12 {
                 miniLogs += 1
                 Log.write("win: mini tap down at " + point(local))
@@ -2208,6 +2299,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     @objc private func undock() {
         guard let card = card, let window = window, let saved = miniFrame else { return }
         miniFrame = nil
+        // 0.1.4 — 先抬层再改几何：反过来会有一帧「大卡片已经铺开、但还在小窗层」
+        // 的画面，那正是用户报的「主窗被新小窗压住」（见 `mainLevel`）。
+        applyWindowLevel()
         // 0.1.3 — 先记下「这一张原来在哪一列」，再把它从队列里摘掉。
         //
         // 用户定档：点 1~5 里任何一个小窗，升上来的这张占它的位置，其余依次上升
@@ -2645,6 +2739,28 @@ public func AevonFloatTouch(_ phase: Int32, _ x: Double, _ y: Double, _ stamp: D
     let when = TimeInterval(stamp)
     for host in FloatHost.touchOrder {
         if host.touchEntry(phase: Int(phase), at: point, stamp: when) { return 1 }
+    }
+    return 0
+}
+
+/// 0.1.4 — 多指时只问停靠小窗的那条窄入口。
+///
+/// `sendEvent` 钩子原来在 `[touches count] != 1` 时**整条事件都不看**（见
+/// `AevonSendEventReplacement` 的注释：多指就是在替系统决定缩放手势的生死）。
+/// 那条纪律来自「浮窗的五个手势都是单指」，但它漏了一个情形：只要有一根手指
+/// 落在停靠小窗上，那一下**必须**被吞，否则会透给 App —— 而「有小窗时恰好还有
+/// 另一根手指在别处」并不罕见（前一根还没抬干净、或者手掌压到屏幕）。
+///
+/// 所以这条入口只做一件事：手指**真的落在某张小窗里（含 6 pt 容忍带）**时，
+/// 把事件交给那一张去吞；不落在任何小窗里就回 0，主窗那条路一步都不碰。
+/// 多指不归主窗管这条纪律因此没被破坏。
+@_cdecl("AevonFloatTouchMini")
+public func AevonFloatTouchMini(_ phase: Int32, _ x: Double, _ y: Double, _ stamp: Double) -> Int32 {
+    let point = CGPoint(x: CGFloat(x), y: CGFloat(y))
+    let when = TimeInterval(stamp)
+    for host in FloatHost.touchOrder where host.onMini {
+        if !host.miniHit(point) { continue }
+        return host.touchEntry(phase: Int(phase), at: point, stamp: when) ? 1 : 0
     }
     return 0
 }

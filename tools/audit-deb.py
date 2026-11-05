@@ -1197,7 +1197,16 @@ def main():
                   # 了 App；而 `mini tap down` 只在吞掉之后才写，漏掉的那些一行都
                   # 没有。这一行把「落进矩形的按下数」和「被吞掉的按下数」并排打
                   # 出来：`down != eaten` 就是又漏了。整条字面量，不拼。
-                  b"win: mini touch down=%d eaten=%d",
+                  b"win: mini touch down=%d eaten=%d near=%d",
+                  # 0.1.4 — 三个新读数，各管一条：
+                  #   `win: level %.0f -> %.0f %@` = 卡片窗换档（主窗 101 / 小窗 100）。
+                  #     用户 Aevon(92) 第 2 条「新吸附的小窗遮挡主悬浮窗」就是同一层
+                  #     级下按建窗顺序排 z 序造成的；这行是换档真的发生的证据。
+                  #   `win: mini miss at ` = 落在小窗框**外** 24 pt 内却没被认领的按下。
+                  #     92 里 `down`/`eaten` 一直相等却仍透传，漏的就是这些没进
+                  #     `inside` 那一支的事件。
+                  b"win: level %.0f -> %.0f %@",
+                  b"win: mini miss at ",
                   # 0.0.69 — 三条新的行为证据，缺一条就说明这一轮有一件事没落地：
                   #   · `long press corner, already default` = 长按在默认尺寸上真的
                   #     什么都不做（Aevon(59) 的第一条）；

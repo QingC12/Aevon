@@ -1465,6 +1465,8 @@ NSInteger AevonWakeScene(id scene) {
 //  就不往下传。
 //
 extern int AevonFloatTouch(int phase, double x, double y, double stamp);
+/// 0.1.4 — 多指时那条窄入口：只问停靠小窗，不碰主窗。
+extern int AevonFloatTouchMini(int phase, double x, double y, double stamp);
 
 static IMP AevonSendEventOriginal = NULL;
 
@@ -1482,6 +1484,21 @@ static void AevonSendEventReplacement(id self, SEL _cmd, UIEvent *event) {
         CGPoint point = [touch locationInView:nil];
         eaten = AevonFloatTouch((int)[touch phase], point.x, point.y,
                                 [touch timestamp]) != 0;
+    } else if ([touches count] > 1) {
+        // 0.1.4 — 多指仍然不交给主窗（上面那条纪律没变），但**停靠小窗要看一眼**：
+        // 只要有一根手指真的落在小窗里，那一下就必须被吞，否则会透给 App。
+        // 用户第三次报「透传还在」，而 Aevon(92) 里 `down`/`eaten` 一直相等 ——
+        // 那不是小窗边界的问题，是这些事件根本没进过单指那条路。
+        // `AevonFloatTouchMini` 在手指不落在任何小窗里时立刻回 0，所以主窗的
+        // 缩放手势（多指）一点都没被碰到。
+        for (UITouch *touch in touches) {
+            CGPoint point = [touch locationInView:nil];
+            if (AevonFloatTouchMini((int)[touch phase], point.x, point.y,
+                                    [touch timestamp]) != 0) {
+                eaten = YES;
+                break;
+            }
+        }
     }
     if (!eaten) {
         ((void (*)(id, SEL, UIEvent *))AevonSendEventOriginal)(self, _cmd, event);
