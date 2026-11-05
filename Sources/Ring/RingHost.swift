@@ -1277,26 +1277,17 @@ final class RingHost: NSObject {
 
     // MARK: - Disc (AevonRingMenu, 1:1)
 
-    private func expand() {
-        // 0.0.56 — 应用选择面板在屏时不呼圆盘：两者都要屏幕下半部，叠在一起
-        // 就是「点哪儿都不对」。
-        guard AevonAppPanel.current == nil else { return }
-        guard !expanded, let host = window?.rootViewController?.view else { return }
-        expanded = true
-
-        // The disc reads the store itself, plays its own unfold
-        // (`AevonRingUnfold` — the whole cluster grows from one point, the
-        // GIF's own entrance) and owns every touch until it goes away.
-        AevonRingMenu.present(in: host)
-        Log.write("ring: expanded (\(AevonRingStore.bundleIDs().count) apps)")
-    }
-
-    private func collapse() {
-        guard expanded else { return }
-        expanded = false
-        AevonRingMenu.dismissCurrent()
-        Log.write("ring: collapsed")
-    }
+    /* ⛔ 0.1.24 — `expand()` / `collapse()` 删除，它们是死代码。
+     *
+     * 这两个函数原本只有 `toggle()`（点竖条开合）一个调用者。竖条下线、
+     * `toggle` 一起删之后，它们再也没有任何入口 —— 圆盘现在只有一条路：
+     * `handleEdgePhase` → `AevonRingMenu.presentTracking`。
+     *
+     * 留着不只是无用：`-dead_strip` 会把它们剥掉，而 audit 里断言的那句
+     * 「圆盘已展开」日志（`ring: expanded` 那一行）也就跟着从二进制里消失 ——
+     * 0.1.24 第一次 CI 就是这么挂的，报的是这句 missing from Aevon.dylib。
+     * 删干净，断言一起撤。
+     */
 
     // MARK: - Store seeding
 

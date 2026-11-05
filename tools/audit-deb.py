@@ -463,7 +463,7 @@ def main():
                   # `ring: edge claim=`：竖条那行原本自带 `claim=` 段，是「热区在
                   # 哪儿」的唯一读数；竖条没了，这条读数必须自己站出来，否则下一
                   # 份日志连「带子在不在底部 35 %」都答不出。
-                  b"ring: edge claim=", b"ring: expanded (",
+                  b"ring: edge claim=",
                   # 0.0.45 的 `ring: held open at ` / `ring: bar released at ` 两条
                   # 在 0.1.24 撤掉：它们只由 `handleBarPan`（按住竖条拖动）打印，
                   # 而那个手势随竖条一起删了。
