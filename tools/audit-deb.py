@@ -502,6 +502,11 @@ def main():
                   # 断言取后半段（halo 那 24 字节）。没有它，「触发几率很小」到底是
                   # 带宽不够还是判据太严，下一份日志还是分不开。
                   b" halo=%.0fx%.0f at y=%.0f",
+                  # 0.1.15 — 热区可见层（Aevon(101)：把触发热区设为可见性）。
+                  # 有这两行说明热区层真的随设置显隐了；没有就是「设置里那个
+                  # 开关只是个装饰」。
+                  b"ring: hot zone shown",
+                  b"ring: hot zone hidden (switch off)",
                   b"ring: bar layer put back on top (level=",
                   b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",

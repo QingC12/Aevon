@@ -380,6 +380,17 @@ def build_panel(panel_id, title, intro, items):
                       "key": "!ring.barWidth", "default": 20.0,
                       "min": 10.0, "max": 100.0, "showValue": True, "defaults": DOMAIN})
 
+        # 0.1.15 — 热区可见性。Aevon(101) 原话：「把触发热区设为可见性，以便我们
+        # 清晰地知道」。默认开：默认关的话，用户第一次遇到「单手够不着」还是只能猜。
+        specs.append({"cell": "PSGroupCell", "label": "呼盘热区",
+                      "footerText": "打开后，屏幕右下角会浮出一层淡青色底纹，"
+                                    "那就是「呼盘热区」本体：贴右缘 40 pt 宽的一列"
+                                    "（屏幕底部 35% 高），加上可见竖条上下左右的一大片。"
+                                    "手指落在里面、向左滑就呼出圆盘，落在外面则原样交给"
+                                    "应用。呼盘成功时热区会亮一下。觉得碍眼可以关掉。"})
+        specs.append({"cell": "PSSwitchCell", "label": "显示热区",
+                      "key": "!ring.hotzone", "default": True, "defaults": DOMAIN})
+
 
         # 手势：母本把这些写进 GestureIntroduction 原文，圆盘这边没有独立设置项，
         # 但功能必须能被发现 —— 一个只有作者知道的长按，等于没有做。

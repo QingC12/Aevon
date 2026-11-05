@@ -59,6 +59,27 @@ final class RingHost: NSObject {
     /// while the strip itself stays 8 pt of visible width.
     private var barPad: UIView?
 
+    /// 0.1.15 — 呼盘热区的可见层。
+    ///
+    /// 用户 Aevon(101) 原话：「把触发热区设为可见性，以便我们清晰地知道」。
+    /// 前几轮的问题都是同一类：热区在哪儿只有源码知道 —— 用户只能靠「划中没划中」
+    /// 反推，我这边只能靠 `pad down` 的 `inset` 反推，两边都在猜。画出来之后，
+    /// 「够不着」从一句描述变成一件看得见的事。
+    ///
+    /// 常态极淡（填充 8 %、1.5 pt 虚线描边），够看清边界又不挡应用；呼盘成功那一下
+    /// 闪到 22 % 并在 0.5 s 内淡回，等于每次成功都给一次位置确认。
+    /// `config.hotZone` 关掉就整层隐藏 —— 它不接收触摸，也不参与命中判定。
+    private var hotView: UIView?
+    private var hotShape: CAShapeLayer?
+    /// 连续呼盘时后一次闪不能把前一次的恢复提前触发（否则第二次闪立刻被抹）。
+    private var hotFlash = 0
+    /// 上一次的热区显隐状态。只在**变化**时写日志 —— `layout()` 在旋转、滑块
+    /// 拖动、切换页面时都会被叫到，每次写一行会把日志淹掉。
+    private var hotLogged: Bool?
+    /// 热区配色。青绿：屏幕上没有哪个系统控件用它当主色，不会和页面自己的
+    /// 高亮混淆；两条填充/描边各一处定义，`flashHotZone` 只改 alpha。
+    private let hotTint = UIColor.systemTeal
+
     /// Strip geometry. 8 x 56 reads as a handle rather than a control, and it
     /// is 4x the dot's target area without covering an icon.
     ///
@@ -213,6 +234,7 @@ final class RingHost: NSObject {
         // 理由见文件末尾 `gestureRecognizerShouldBegin` 上方那段。
 
         addBar()
+        addHotZone()
         addEdgePad()
         layout()
         startOverlayWatch()
@@ -249,10 +271,17 @@ final class RingHost: NSObject {
         bar?.removeFromSuperview()
         barPad?.removeFromSuperview()
         edgePad?.removeFromSuperview()
+        // 0.1.15 — 热区层也要拆，否则「关了再开」会在宿主视图上堆叠两层底纹，
+        // 后一层还绑着旧的 config 与旧的 claimRects。
+        hotView?.removeFromSuperview()
         bar = nil
         barBlur = nil
         barPad = nil
         edgePad = nil
+        hotView = nil
+        hotShape = nil
+        hotFlash = 0
+        hotLogged = nil
         window?.isHidden = true
         window = nil
         Log.write("ring: removed from desktop (switch off)")
@@ -384,6 +413,8 @@ final class RingHost: NSObject {
         // 0.1.13 — frame 只是外接矩形，真正认领的是 `claimRects` 那两块（列 + 光环）。
         // 外接矩形里剩下的角**不属于我们**，由 `EdgeSwipePad.point(inside:)` 退回给应用。
         edgePad?.frame = claimBounds(in: bounds)
+        // 0.1.15 — 可见的就是判定的那一组矩形（同一个 `claimRects`）。
+        updateHotZone(in: bounds)
         // 0.1.6 — 开关只有一个来源（`syncGrip`）。原来这里直接写
         // `!AevonRingGrip.cardUp`，那是第三个各写一遍的地方：布局写一次、开卡关一次、
         // 面板关回调再写一次，任何一条路没回来，入口就一直是关的。
@@ -594,22 +625,29 @@ final class RingHost: NSObject {
         edgePad = pad
     }
 
-    /// 0.1.13 — 呼盘命中区的贴边列宽。唯一一处几何定义。
+    /// 0.1.15 — 呼盘命中区的贴边列宽。唯一一处几何定义。
     ///
-    /// 14 → 24：0.1.12 的真机日志（Aevon(100)）里 14 次落指**全部**在
-    /// `x = 424…427`（离右缘 3~6 pt），一次没落在 408~423 这一段 —— 不是没人划，
-    /// 是划了也落不进来。而这个文件里 0.0.55 留下的旧测（49 次 hold）说拇指中心
-    /// 真正落在**离边 12~15 pt**：14 pt 的带宽正好把分布的中位数压在边界上，
-    /// 一半样本在里、一半在外。24 pt 把 12~15 这一簇整个包进来，两侧各留余量。
-    private let stripWidth: CGFloat = 24
-    /// 0.1.13 — 可见抓手周围的宽区（「光环」）。
+    /// 24 → 40，依据是真机两轮的 `inset` 分布：0.1.14 的日志（Aevon(101)）里
+    /// **28 次落指、inset 全部是 3/4/5 pt、28 次全开**。100 % 的成功率配上清一色
+    /// 的 3~5 pt，说明这条列从来没有「接住过稍微靠里的手」—— 用户每次都把指尖
+    /// 顶到屏幕物理边缘才落进来。他自己给出的结论是「双手拿着才容易触发，单手
+    /// 不易」：双手时另一只手可以从右侧推，单手时拇指够不到那条最边缘的线，
+    /// 落点必然更靠内（20~40 pt），而 24 pt 的列在 24 就断了。
     ///
-    /// 用户对着那条 6×87 的可见抓手去划，手落在哪儿不由我们决定；只在贴边 24 pt
-    /// 里认，等于要求他把指尖顶到屏幕边缘。光环把**可见物的周围**也算成我们的，
-    /// 而它只覆盖抓手上下 `haloHeight` 这一段，不是一个 46×326 的大方块 ——
-    /// 方块会白吃掉应用右下角一整条（发送键、输入框都在那儿）。
-    private let haloWidth: CGFloat = 46
-    private let haloHeight: CGFloat = 176
+    /// 40 pt 不是拍的：单手右手持机、拇指从右下角伸过来，指腹能稳定按到的
+    /// 横向范围就是离右缘 0~40 pt 这一段；再往里会开始压到页面自己的点击目标
+    /// （列表右侧、发送键），所以到 40 为止，不加到 60。
+    private let stripWidth: CGFloat = 40
+    /// 0.1.15 — 可见抓手周围的宽区（「光环」）。
+    ///
+    /// 46 → 108、176 → 248。列只解决「贴边那一条」，光环要解决的是「根本没对准
+    /// 抓手、只是朝右下角划了一下」。单手时拇指落点既横偏又纵偏：日志里 28 次
+    /// 成功样本的 y 跨了 709~753（44 pt）全部落在抓手上下 ±22 内，那是**瞄准过**
+    /// 的落点；没瞄准的单手落点会散到 ±100 以上。光环按「抓手中心 ±124 pt、
+    /// 离边 108 pt 以内」取，刚好把「右下角这一片」包住，同时仍不覆盖整条边 ——
+    /// 覆盖整条边就会重演 Aevon(95) 和左滑返回插件抢手势。
+    private let haloWidth: CGFloat = 108
+    private let haloHeight: CGFloat = 248
     /// 0.1.11 — 「认作左滑的最小横向位移」这个常量搬进了 `EdgeSwipePad.openDistance`
     /// （10 pt）。原来这里是 12 并且用于 `gestureRecognizerShouldBegin`，那一拍
     /// `translation` 只有 10 pt 上下，12 永远够不到 —— 就是 Aevon(98)「呼不出」的死因。
@@ -658,6 +696,95 @@ final class RingHost: NSObject {
         let rects = claimRects(in: bounds)
         guard let first = rects.first else { return .zero }
         return rects.dropFirst().reduce(first) { $0.union($1) }
+    }
+
+    // MARK: - 热区可见层（0.1.15）
+
+    /// 把「手指落在这儿才算呼盘」的那两块地画出来。
+    ///
+    /// 它不参与任何判定：`isUserInteractionEnabled = false`，命中仍然只由
+    /// `EdgeSwipePad.point(inside:)` 按 `claimRects` 决定。**画的和判的必须是
+    /// 同一组矩形**（都走 `claimRects`），否则这块半透明色块就成了第二个真相，
+    /// 用户按着它划却呼不出盘，比不画更糟。
+    private func addHotZone() {
+        guard let host = window?.rootViewController?.view else { return }
+        let view = UIView(frame: .zero)
+        view.isUserInteractionEnabled = false
+        view.backgroundColor = .clear
+        view.isHidden = true
+        let shape = CAShapeLayer()
+        shape.fillColor = UIColor.clear.cgColor
+        shape.strokeColor = UIColor.clear.cgColor
+        view.layer.addSublayer(shape)
+        // 0.1.15 — 必须加在宿主视图**最上面**才看得见（host 的第 0 层是承载应用的
+        // 容器，画在它下面等于画进抽屉里）。代价是它会盖住竖条，所以紧接着把
+        // 竖条垫子提回顶层：抓手必须浮在色块之上，「热区在哪」和「抓在哪」才分得开。
+        host.addSubview(view)
+        if let pad = barPad { host.bringSubviewToFront(pad) }
+        hotView = view
+        hotShape = shape
+    }
+
+    private func aevonHotColor(_ alpha: CGFloat) -> CGColor {
+        return hotTint.withAlphaComponent(alpha).cgColor
+    }
+
+    private func restoreHotZoneColors() {
+        guard let shape = hotShape else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shape.fillColor = aevonHotColor(0.08)
+        shape.strokeColor = aevonHotColor(0.45)
+        CATransaction.commit()
+    }
+
+    /// 呼盘成功那一下闪一下：确认「就是这块地」。
+    private func flashHotZone() {
+        guard config.hotZone, let shape = hotShape,
+              let view = hotView, !view.isHidden else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shape.fillColor = aevonHotColor(0.22)
+        shape.strokeColor = aevonHotColor(0.90)
+        CATransaction.commit()
+        hotFlash += 1
+        let token = hotFlash
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            // 这 0.5 s 里又闪了一次 ⇒ 交给后一次的收尾，别提前把亮度压回去。
+            guard let self = self, self.hotFlash == token else { return }
+            self.restoreHotZoneColors()
+        }
+    }
+
+    /// 布局 / 设置变化时重画。开关关掉就整层隐藏，不留残余像素。
+    private func updateHotZone(in bounds: CGRect) {
+        guard let view = hotView, let shape = hotShape else { return }
+        guard config.hotZone, bounds.width > 0 else {
+            view.isHidden = true
+            if hotLogged != false {
+                hotLogged = false
+                Log.write("ring: hot zone hidden (switch off)")
+            }
+            return
+        }
+        view.isHidden = false
+        if hotLogged != true {
+            hotLogged = true
+            Log.write("ring: hot zone shown")
+        }
+        view.frame = bounds
+        let path = UIBezierPath()
+        for rect in claimRects(in: bounds) {
+            path.append(UIBezierPath(roundedRect: rect, cornerRadius: 14))
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shape.frame = view.bounds
+        shape.path = path.cgPath
+        shape.lineWidth = 1.5
+        shape.lineDashPattern = [5, 4]
+        CATransaction.commit()
+        restoreHotZoneColors()
     }
 
     /// 0.0.55 — 浮窗开/关时同步右缘带能不能接触摸。
@@ -756,6 +883,8 @@ final class RingHost: NSObject {
         case .began:
             edgeAt = CACurrentMediaTime()
             barHeld = true
+            // 0.1.15 — 热区闪一下：成功呼盘的同时给一次「位置确认」。
+            flashHotZone()
             if let menu = AevonRingMenu.presented {
                 menu.beginRemoteTracking(at: point, source: "edge")
             } else {
@@ -999,6 +1128,9 @@ final class RingHost: NSObject {
             overlayStrikes = 0
         }
         let hidden = overlayStrikes >= 2 && !barHeld
+        // 0.1.15 — 热区跟着垫子一起藏：系统面板（通知中心 / 控制中心）拉下来时，
+        // 那块青色底纹会浮在面板上面，看着像我们的 bug。
+        hotView?.isHidden = hidden || !config.hotZone
         guard pad.isHidden != hidden else { return }
         pad.isHidden = hidden
         // 0.0.49 — 面板刚退下去，正是窗口栈最不可靠的时刻：顺手把这一层放回顶上，
@@ -1194,6 +1326,18 @@ final class EdgeSwipePad: UIView {
     /// 快甩判据：位移这么点但速度够，也算左滑。
     private let flickDistance: CGFloat = 5
     private let flickSpeed: Double = 900
+    /// 0.1.15 — 允许多斜。
+    ///
+    /// 0.1.14 及以前要求 `|dx| > |dy|`（横向必须严格占优），那等于只认「水平
+    /// 左推」。但单手右手持机时拇指是从右下角往左上**斜着**扫的：Aevon(101) 的
+    /// 原话「双手拿着才容易触发，单手不易」里有一半是这一条 —— 双手时另一只手
+    /// 可以从侧面水平推，单手时拇指的轨迹天然带 30~50° 的竖分量，`|dx| > |dy|`
+    /// 直接把这类划法判成「不是左滑」，连带着盘也不开。
+    ///
+    /// 0.7 的含义：竖分量到横分量的 1.43 倍以内（约 55°）仍算左滑。再斜下去
+    /// 就真是竖划了 —— 而竖划在右缘是页面的滚动，不能抢。判「这不是左滑」的
+    /// 那条线（`failDistance`）同时要求竖向**占优**，两道门是配套的。
+    private let slantTolerance: CGFloat = 0.7
 
     private var start: CGPoint = .zero
     /// 落指时刻，用来算甩动速度（`UITouch.timestamp`）。
@@ -1245,15 +1389,17 @@ final class EdgeSwipePad: UIView {
         let dy = point.y - start.y
         let span = Swift.max(touch.timestamp - startAt, 0.001)
         let speed = -Double(dx) / span        // 向左为正，pt/s
-        // ① 走够 8 pt 且横向占优 ⇒ 呼盘。两个条件同时成立，纵向拖不会误开。
-        if dx <= -openDistance, abs(dx) > abs(dy) {
+        // ① 走够 8 pt 且方向够横 ⇒ 呼盘。两个条件同时成立，纵向拖不会误开。
+        //    0.1.15 — 「横向占优」放宽成 `|dx| >= |dy| * 0.7`，理由见 `slantTolerance`。
+        if dx <= -openDistance, abs(dx) >= abs(dy) * slantTolerance {
             opened = true
             onPhase?(.began, convert(start, to: window), convert(point, to: window))
             return
         }
         // ② 走得不远但甩得很快 ⇒ 也算。只按位移判会把短促左甩当点击扔掉，
         //    而拇指在窄带上最常用的正是这一种。
-        if dx <= -flickDistance, speed >= flickSpeed, abs(dx) >= abs(dy) {
+        if dx <= -flickDistance, speed >= flickSpeed,
+           abs(dx) >= abs(dy) * slantTolerance {
             opened = true
             onPhase?(.began, convert(start, to: window), convert(point, to: window))
             return
@@ -1278,7 +1424,7 @@ final class EdgeSwipePad: UIView {
         }
         // ④ 采样粗的时候位移可能整段落在最后一次投递里：抬手那一刻只要够 8 pt
         //    且横向占优，仍然算左滑（先报 `.began` 再报 `.ended`，盘照常出来）。
-        if dx <= -openDistance, abs(dx) >= abs(dy) {
+        if dx <= -openDistance, abs(dx) >= abs(dy) * slantTolerance {
             opened = true
             onPhase?(.began, convert(start, to: window), convert(point, to: window))
             onPhase?(.ended, convert(start, to: window), convert(point, to: window))
