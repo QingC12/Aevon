@@ -2246,7 +2246,7 @@ NSInteger AevonNudgeSceneFrame(id scene, double delta) {
     return door;
 }
 
-// MARK: - 0.1.40 通知点击 → 悬浮窗
+// MARK: - 0.1.40 通知点击 → 悬浮窗（0.1.42 补第二路）
 //
 // 母本取证（主库 `Stheno.dylib` 的 Swift 侧）：类
 // `_TtC6Stheno29UNSUserNotificationServerHook`（Orion 的 Glue 生成物），配套的
@@ -2260,18 +2260,23 @@ NSInteger AevonNudgeSceneFrame(id scene, double delta) {
 // 也就是：识别「通知回应」这个 action → 收起当时的 presentable（通知中心/横幅）
 // → 用 URL + 来源进程构造一次 workspace 请求。
 //
-// 这里取的是同一条链的**入口**：`SBMainWorkspace -executeTransitionRequest:`。
-// 不猜 `UNSUserNotificationServer` 的方法名（母本那一侧是 Swift + Orion 的
-// dynamic replacement，方法名被 strip，按名字猜等于赌），而是看请求里带的是不是
-// 一个 `…NotificationResponse…` 的 action —— 类名是这条链唯一稳定的东西。
+// 0.1.41 只挂了入口 `SBMainWorkspace -executeTransitionRequest:`。真机日志
+// （Aevon(116)）里 `notify: armed` 有、`notify: action cls=` 一条都没有 —— 而
+// `AevonNotifyInspect` 里有四处静默 `return`，分不清「没调用」与「没认出来」。
 //
-// 不再自己调 dismiss：`openCard` 把 App 的 scene 推到前台，SpringBoard 会收起
-// 通知中心（这是系统自己的「打开 App 就收起覆盖层」）。真机上如果日志出现
+// 0.1.42 两件事一起做：
+//   1. 给那个入口加有界取证 `AevonNotifyShape`（前 15 次请求打类名 + 关键字段类型）；
+//   2. 按母本的落点补挂 `UNSUserNotificationServer -presentPresentable:withOptions:userInfo:`
+//      —— 这个方法名逐字出现在母本主库的 `__objc_methname` 里，不是猜的。
+//
+// 仍然不自己调 dismiss：`openCard` 把 App 的 scene 推到前台，SpringBoard 会收起
+// 通知中心（系统自己的「打开 App 就收起覆盖层」）。真机上如果日志出现
 // `notify: open` 而通知中心还挂着，下一版再加显式 `_dismissPresentable:`。
 
 static IMP AevonOrigExecuteTransition = NULL;
 static double AevonNotifyLastAt = 0;
 static int AevonNotifyNotes = 0;
+static int AevonNotifyShapeNotes = 0;
 
 static void AevonNotifyLog(NSString *line) {
     if (AevonNotifyNotes >= 12) return;
@@ -2340,9 +2345,43 @@ static void AevonNotifyInspect(id request) {
     }
 }
 
+/// 顶层的类名，nil 安全。
+static NSString *AevonNotifyCls(id object) {
+    if (object == nil) return @"nil";
+    return NSStringFromClass([object class]) ?: @"?";
+}
+
+/// 有界取证：一次 transition 请求到底长什么样。
+///
+/// 0.1.41 的 `AevonNotifyInspect` 里有四处静默 `return`（`actions` 不是数组、
+/// 类名不含 `NotificationResponse`、bundle 取不到、bundle 太短），任何一处不成立
+/// 都不留日志 ⇒ 真机上「钩子装上了但一个字都没打」时无法区分「没被调用」和
+/// 「被调用了但没认出来」。这一行就是补那个洞：前 15 次请求把类名与几个关键
+/// 字段的存在性/类型打出来，下一版按真名精确识别。
+static void AevonNotifyShape(id request) {
+    if (AevonNotifyShapeNotes >= 15 || request == nil) return;
+    AevonNotifyShapeNotes += 1;
+    NSMutableString *detail = [NSMutableString string];
+    NSArray<NSString *> *names = @[@"actions", @"applicationSceneEntity", @"transientOverlayContext",
+                                   @"deactivationSettings", @"activationSettings",
+                                   @"source", @"eventLabel"];
+    for (NSString *key in names) {
+        if (![request respondsToSelector:NSSelectorFromString(key)]) continue;
+        id value = AevonNotifyValue(request, key);
+        NSString *kind = AevonNotifyCls(value);
+        if ([value isKindOfClass:[NSArray class]]) {
+            kind = [kind stringByAppendingFormat:@"#%lu", (unsigned long)[value count]];
+        }
+        [detail appendFormat:@" %@=%@", key, kind];
+    }
+    AevonNotifyLog([NSString stringWithFormat:@"notify: req %@%@",
+                    AevonNotifyCls(request), detail]);
+}
+
 static void AevonExecuteTransition(id self, SEL _cmd, id request) {
     if (AevonOrigExecuteTransition == NULL) return;
     @try {
+        AevonNotifyShape(request);
         AevonNotifyInspect(request);
     } @catch (NSException *exception) {
         AevonNotifyLog([NSString stringWithFormat:@"notify: inspect threw %@", exception.name]);
@@ -2350,18 +2389,120 @@ static void AevonExecuteTransition(id self, SEL _cmd, id request) {
     ((void (*)(id, SEL, id))AevonOrigExecuteTransition)(self, _cmd, request);
 }
 
+// MARK: - 0.1.42 母本那条链：`UNSUserNotificationServer -presentPresentable:withOptions:userInfo:`
+//
+// 母本主库 `Stheno.dylib` 的证据（arm64e 切片）：
+//   · `__objc_methname` 里唯一一条通知相关的方法是 `presentPresentable:withOptions:userInfo:`
+//     —— 也就是 Swift 类 `_TtC6Stheno29UNSUserNotificationServerHook` 覆盖的那一个；
+//   · `__cstring` 里另有两条 Swift 字面量 `UINotificationResponseAction` 与
+//     `_dismissPresentable:withReason:animated:userInfo:`，配合
+//     `performSelector:withObject:withObject:` 使用 —— 先认「通知回应」这个 action，
+//     再显式收起当时那个 presentable（通知中心 / 横幅）。
+//
+// 0.1.42 在这一侧挂一条：只挂母本那个类、只挂那个方法，且**先调原实现、再取证**。
+// 认不出「通知回应」就什么都不做 —— 宁可这条不生效，也不能在 SpringBoard 主线程上
+// 靠猜调用。
+
+static IMP AevonOrigPresent = NULL;
+static int AevonNotifyPresentNotes = 0;
+
+/// 在 options / userInfo 这两层字典里找「通知回应」那个 action。
+/// 只看两层、只认类名 —— 不猜字段名，也不递归对象图。
+static id AevonNotifyFindResponse(id object, int depth) {
+    if (object == nil || depth <= 0) return nil;
+    if ([AevonNotifyCls(object) rangeOfString:@"NotificationResponse"
+                                      options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        return object;
+    }
+    if (![object isKindOfClass:[NSDictionary class]]) return nil;
+    for (id key in (NSDictionary *)object) {
+        id value = ((NSDictionary *)object)[key];
+        if ([value isKindOfClass:[NSString class]]) continue;
+        if ([AevonNotifyCls(value) rangeOfString:@"NotificationResponse"
+                                         options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return value;
+        }
+        if ([value isKindOfClass:[NSDictionary class]]) {
+            id deep = AevonNotifyFindResponse(value, depth - 1);
+            if (deep != nil) return deep;
+        }
+    }
+    return nil;
+}
+
+/// `presentPresentable:withOptions:userInfo:` 的替身。**先调原实现**，再取证：
+/// 通知要不要弹、怎么弹是系统的事，我们只在它做完之后判断「这是不是一次点击」。
+static void AevonNotifyPresent(id self, SEL _cmd, id presentable, id options, id userInfo) {
+    if (AevonOrigPresent == NULL) return;
+    ((void (*)(id, SEL, id, id, id))AevonOrigPresent)(self, _cmd, presentable, options, userInfo);
+    @try {
+        if (AevonNotifyPresentNotes < 12) {
+            AevonNotifyPresentNotes += 1;
+            AevonNotifyLog([NSString stringWithFormat:@"notify: present cls=%@ opt=%@ info=%@",
+                            AevonNotifyCls(presentable), AevonNotifyCls(options),
+                            AevonNotifyCls(userInfo)]);
+        }
+        id response = AevonNotifyFindResponse(presentable, 2);
+        if (response == nil) response = AevonNotifyFindResponse(options, 2);
+        if (response == nil) response = AevonNotifyFindResponse(userInfo, 2);
+        if (response == nil) return;
+        NSString *bundle = AevonNotifyBundle(response);
+        AevonNotifyLog([NSString stringWithFormat:@"notify: response cls=%@ bundle=%@",
+                        AevonNotifyCls(response), bundle ?: @"?"]);
+        if (bundle.length < 3) return;
+        if ([bundle hasPrefix:@"com.apple.springboard"]) return;
+        double now = CFAbsoluteTimeGetCurrent();
+        if (now - AevonNotifyLastAt < 10.0) return;
+        AevonNotifyLastAt = now;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonOpenFromNotification(bundle.UTF8String);
+        });
+    } @catch (NSException *exception) {
+        AevonNotifyLog([NSString stringWithFormat:@"notify: present threw %@", exception.name]);
+    }
+}
+
 void AevonNotificationOpenInstall(void) {
     static int installed = 0;
     if (installed) return;
     installed = 1;
+
+    // 第一路（0.1.40 起）：workspace 的 transition 请求。仍然保留 —— 它是
+    // 「点了通知之后一定会发生的那一次跳转」，只是识别规则要按真机日志校准。
     Class workspace = NSClassFromString(@"SBMainWorkspace");
     SEL sel = NSSelectorFromString(@"executeTransitionRequest:");
     Method method = workspace != Nil ? class_getInstanceMethod(workspace, sel) : NULL;
     if (method == NULL) {
         AevonLogRaw("notify: SBMainWorkspace executeTransitionRequest: absent");
-        return;
+    } else {
+        AevonOrigExecuteTransition = method_getImplementation(method);
+        method_setImplementation(method, (IMP)AevonExecuteTransition);
+        AevonLogRaw("notify: armed");
     }
-    AevonOrigExecuteTransition = method_getImplementation(method);
-    method_setImplementation(method, (IMP)AevonExecuteTransition);
-    AevonLogRaw("notify: armed");
+
+    // 第二路（0.1.42 起）：母本那个类上的那个方法。类名与方法名都不是猜的 ——
+    // 它们逐字出现在母本主库的 `__objc_methname` 与 Swift 符号里。
+    // 其余两个候选只探不挂：`presentPresentable:` 在多个通知类上同名，全挂上就是
+    // 同一件事被做两遍。
+    SEL present = NSSelectorFromString(@"presentPresentable:withOptions:userInfo:");
+    NSArray<NSString *> *candidates = @[@"UNSUserNotificationServer",
+                                        @"NCNotificationDispatcher",
+                                        @"SBNotificationBannerDestination"];
+    NSMutableString *found = [NSMutableString string];
+    for (NSString *name in candidates) {
+        Class cls = NSClassFromString(name);
+        if (cls == Nil) {
+            [found appendFormat:@" %@=0", name];
+            continue;
+        }
+        Method m = class_getInstanceMethod(cls, present);
+        [found appendFormat:@" %@=%d", name, m != NULL ? 1 : 0];
+        if (m == NULL || AevonOrigPresent != NULL) continue;
+        if (![name isEqualToString:@"UNSUserNotificationServer"]) continue;  // 只挂母本那个类
+        AevonOrigPresent = method_getImplementation(m);
+        method_setImplementation(m, (IMP)AevonNotifyPresent);
+    }
+    NSString *line = [NSString stringWithFormat:@"notify: present probe%@ hooked=%d",
+                      found, AevonOrigPresent != NULL ? 1 : 0];
+    AevonLogRaw(line.UTF8String);
 }
