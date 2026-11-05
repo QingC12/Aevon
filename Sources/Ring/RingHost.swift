@@ -565,9 +565,10 @@ final class RingHost: NSObject {
         // 用户的习惯是「顶到边缘」；以后调带宽不用再猜。
         pad.onDown = { [weak self] at in
             let inset = (self?.window?.bounds.maxX ?? at.x) - at.x
-            Log.write("ring: pad down at "
-                      + String(format: "%.0f,%.0f", at.x, at.y)
-                      + " inset=" + String(format: "%.0f", inset))
+            // 一个格式串，不拼 —— ` inset=` 只有 7 字节，拼出来的话会被编成立即数，
+            // 二进制里 grep 不到（audit 断言就白写一条）。
+            Log.write(String(format: "ring: pad down at %.0f,%.0f inset=%.0f",
+                             at.x, at.y, inset))
         }
         pad.onBlocked = { [weak self] reason in
             guard let self = self, self.stripProbe < 20 else { return }
