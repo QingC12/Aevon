@@ -78,12 +78,15 @@ struct RingConfig {
     /// 三个字段，手势状态里有 `pinned` / `pinSpeed` / `fingerLocation` /
     /// `fingerStartLocation` / `translationPadding` —— 也就是「手指按下时盘跟着
     /// 手指走（fingerLocation + translationPadding），松手时按 pinSpeed 缓动到
-    /// 指定位并置 pinned」。我们照这个语义做：手指在屏上时圆心跟手，抬手没选中
-    /// 图标就**固定在原地不收起**，再点图标或点盘外才结束。
+    /// 指定位并置 pinned」。
     ///
-    /// 默认开：用户 Aevon(104) 第 2 条要的就是这个（「像 stheno 母版那样跟随手指
-    /// 移动，然后固定」）。关掉即回到 0.1.18 的「抬手未选中就收起」。
-    var autoPin: Bool = true
+    /// ⛔ **0.1.20 起默认关。** 用户 Aevon(105) 把「跟手」整条否了（「既然圆盘和
+    /// 圆心跟手无法制作，那么恢复成之前的固定位置出现」），跟手一撤，`AutoPin`
+    /// 剩下的那半截语义（抬手未选中也不收起）就变成了负担：盘固定在屏上、又不再
+    /// 跟着手指走，用户下一次贴边划只会把它拖来拖去，看起来像「呼不出新盘」。
+    /// 恢复 0.1.18 的老语义 —— 抬手没选中就收起，下一次划边从干净状态开始。
+    /// 想要「留在屏上」的人可以在设置里打开 `!ring.autopin`。
+    var autoPin: Bool = false
 
     /// 0.1.18 — `hotZone` 已删除（热区可见层整条撤除，Aevon(104) 第 3 条）。
     ///
@@ -139,7 +142,7 @@ struct RingConfig {
         config.barLength = clamp(number("!ring.barLength", 6), 4, 20)
         config.barWidth = clamp(number("!ring.barWidth", 20), 10, 100)
         config.fullEdge = flag("!ring.fulledge", true)
-        config.autoPin = flag("!ring.autopin", true)
+        config.autoPin = false   // 0.1.20：跟手已撤，本版一律不固定（见 `autoPin` 字段注释）
         return config
     }
 
@@ -209,7 +212,7 @@ struct RingConfig {
         config.barLength = clamp(number("barLength", 6), 4, 20)
         config.barWidth = clamp(number("barWidth", 20), 10, 100)
         config.fullEdge = flag("fullEdge", true)
-        config.autoPin = flag("autoPin", true)
+        config.autoPin = false   // 0.1.20：同 `load()`，忽略存盘值
         return config
     }
 

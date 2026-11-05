@@ -274,8 +274,11 @@ final class RingHost: NSObject {
         // which is what 「任何页面都能呼出」 needs.
         window.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.statusBar.rawValue + 2)
         window.rootViewController = UIViewController()
-        window.rootViewController?.view = PassthroughView(frame: window.bounds)
-        window.rootViewController?.view.backgroundColor = .clear
+        // 0.1.20 — 留一个具名引用：根视图同时是「边缘带兜底命中」的落点，
+        // 见文件末尾 `PassthroughView.hitTest`。
+        let host = PassthroughView(frame: window.bounds)
+        host.backgroundColor = .clear
+        window.rootViewController?.view = host
         window.isHidden = false
         self.window = window
 
@@ -487,6 +490,14 @@ final class RingHost: NSObject {
         // 贴边那一列，光环已撤）。
         // 外接矩形里剩下的角**不属于我们**，由 `EdgeSwipePad.point(inside:)` 退回给应用。
         edgePad?.frame = claimBounds(in: bounds)
+        // 0.1.20 — **呼盘垫必须是 `host` 的最上层（圆盘不在屏时）。**
+        // 圆盘打的是 `host.bringSubviewToFront(menu)`，它收起之后没有谁把垫子
+        // 抬回来；之后再有任何视图被加到 host 上，垫子就沉到下面去了。这条
+        // 每次布局纠一次，配合根视图兜底，两条路各自独立。
+        if let pad = edgePad, let hostView = window.rootViewController?.view,
+           AevonRingMenu.presented == nil {
+            hostView.bringSubviewToFront(pad)
+        }
         // 0.1.18 — 热区可见层撤掉了（Aevon(104) 第 3 条）：认的几何不变，
         // 只是不再往桌面上画那条淡青底纹。
         // 0.1.6 — 开关只有一个来源（`syncGrip`）。原来这里直接写
@@ -700,12 +711,20 @@ final class RingHost: NSObject {
         // 0.1.7 — 点击识别器不挂。用户明确要求「移除点击触发圆盘，只保留左滑」。
         host.addSubview(pad)
         edgePad = pad
+        // 0.1.20 — 根视图兜底：右缘那一条永远轮得到我们，不管上面盖了几层。
+        if let shield = host as? PassthroughView {
+            shield.fallbackHit = pad
+            shield.fallbackRect = { [weak self] in
+                guard let self = self, let window = self.window else { return nil }
+                return self.stripRect(in: window.bounds)
+            }
+        }
     }
 
-    /// 0.1.17 — 呼盘命中区的贴边列宽。唯一一处几何定义。**用户定值：12 pt。**
+    /// 0.1.17 — 呼盘命中区的贴边列宽。唯一一处几何定义。
     ///
     /// 一路的量：0.1.13 = 24、0.1.15 = 40（另加 108×248 的光环宽区）、0.1.16 = 10、
-    /// 0.1.17 = 12。
+    /// 0.1.17 = 12、0.1.20 = 18。
     ///
     /// Aevon(103) 的真机日志证明 10 pt 这边已经到边了：25 次落指 **25 次全开**
     /// （判据零失败），但 inset 分布是 `4:1 / 7:3 / 8:3 / 9:11 / 10:7` ——
@@ -716,13 +735,14 @@ final class RingHost: NSObject {
     /// 习惯落点」在 9 上下浮动 ±2；12 把这段浮动的上沿包进来，又不会回到 24/40
     /// 那种「认领一大片、应用拿不到手指」的老毛病。
     ///
-    /// 0.1.18 — **这个数就此定稿，不再动。** Aevon(104) 的原话是：「其实上一版的
-    /// 10 pt 时从屏幕右侧的边框处左滑时 95 % 会触发也挺好…默认 12 pt 也可以」。
-    /// 同一份日志（16 次落指、**16 次全开**、0 次拒绝、inset 9~12）也证明 12 是
-    /// 刚好包住习惯落点的那一档，既没有「够不着」也没有「吃掉太多右侧内容」。
-    /// 这一版起判定几何冻结：要改的是**别的**东西（出现延迟、圆心位置、可见性），
-    /// 不是这里。
-    private let stripWidth: CGFloat = 12
+    /// ⛔ **0.1.20 起 12 → 18。** 0.1.19 把带子拉成全高、宽度仍是 12，用户回的是
+    /// 「这一版依旧无法呼出圆盘，触发条自动消失后，无法通过右侧的触发区呼出
+    /// 圆盘」。12 是「有可见竖条当路标」时量出来的：竖条亮着，手指是**对着那条
+    /// 亮线**落的，落点自然压在 9~12。0.1.18 起竖条 0.5 s 就淡出，路标没了，
+    /// 用户只能凭「大概贴边」落指，落点整体往里挪了 —— 12 pt 里那 3 pt 的余量
+    /// 就不够了。18 把「凭感觉贴边」的落点包进来，代价是右缘多认领 6 pt；
+    /// 24/40 那两版的问题是「吃掉应用右缘一整片」，18 到 24 之间才是那片地的边。
+    private let stripWidth: CGFloat = 18
     /// 0.1.11 — 「认作左滑的最小横向位移」这个常量搬进了 `EdgeSwipePad.openDistance`
     /// （10 pt）。原来这里是 12 并且用于 `gestureRecognizerShouldBegin`，那一拍
     /// `translation` 只有 10 pt 上下，12 永远够不到 —— 就是 Aevon(98)「呼不出」的死因。
@@ -820,6 +840,13 @@ final class RingHost: NSObject {
         if let window = window, window.bounds.width > 0 {
             AevonRingGrip.summonRect = stripRect(in: window.bounds)
         }
+        // 0.1.20 — 每 tick 确认呼盘垫还在 `host` 的最上层（圆盘不在屏时）。
+        // 只在「它已经不是最后一个」时才重排，正常情况零成本。
+        if let pad = edgePad, !pad.isHidden, AevonRingMenu.presented == nil,
+           let hostView = window?.rootViewController?.view,
+           hostView.subviews.last !== pad {
+            hostView.bringSubviewToFront(pad)
+        }
         let panel = AevonAppPanel.current != nil
         let card = FloatHost.anyCardUp
         let barOn = !panel
@@ -879,13 +906,29 @@ final class RingHost: NSObject {
         case .began:
             edgeAt = CACurrentMediaTime()
             barHeld = true
-            // 0.1.18 — 热区的可见层已经撤了，改由竖条「亮 0.5 s」给同一份反馈：
-            // 手指是在这条竖条附近呼出圆盘的（圆盘圆心也会跟到这个落点上，
-            // 见 `AevonRingMenu.pendingAnchor`）。
+            // 0.1.18 — 热区的可见层已经撤了，改由竖条「亮 0.5 s」给同一份反馈。
             revealBar()
-            if let menu = AevonRingMenu.presented {
+            /* 0.1.20 — **僵尸盘先清掉，再开盘。**
+             *
+             * 0.1.19 的写法是「`presented` 非 nil 就把它当成在屏上的盘，只喂跟手」。
+             * 可 `presented` 只是静态变量 `current`，它和「屏上真有一个能看见的盘」
+             * 不是一回事：`dismiss()` 的动画跑完、视图被摘掉、或者圆盘被别的路径
+             * 从 `superview` 上摘走之后，`current` 仍可能留着。那种时候边缘一划，
+             * 代码走进「跟手」分支，屏幕上什么都不出现 —— 用户看到的就是
+             * **「贴边划了，一点反应都没有」**，而且日志里连 `edge swipe open`
+             * 都不会有（那一行只在 `else` 分支里）。
+             *
+             * 判据只用两条硬事实：`superview` 和 `window`。两者任一为空，这个盘
+             * 在物理上就不可能被看见 / 被摸到，先 `dismissCurrent()` 把它归零
+             * （`dismiss()` 会同步写 `current = nil`），再走正常开盘。
+             */
+            if let menu = AevonRingMenu.presented, menu.superview != nil, menu.window != nil {
                 menu.beginRemoteTracking(at: point, source: "edge")
             } else {
+                if AevonRingMenu.presented != nil {
+                    Log.write("ring: stale disc cleared before summon (not on screen)")
+                    AevonRingMenu.dismissCurrent()
+                }
                 expanded = true
                 AevonRingMenu.presentTracking(in: host, at: point, source: "edge")
                 // 0.1.19 — 带上带子的高度：整条右缘 ≈ 全高，退回 35 % 时只有
@@ -900,9 +943,9 @@ final class RingHost: NSObject {
 
         case .moved:
             guard barHeld else { return }
-            // 0.1.19 — 跟手：手指还在屏上时圆心跟着它走（由菜单夹进屏幕）。
-            // 母版就是这条语义（`fingerLocation` + `translationPadding`）。
-            AevonRingMenu.presented?.remoteAnchor(to: point)
+            // 0.1.20 — **不再调 `remoteAnchor`**（跟手已撤，用户 Aevon(105)）。
+            // 圆心由 `computeGeometry` 固定成「中心偏下、右移 10 % 屏宽」。
+            // 指针喂料保留：它负责角度 / 高亮 / 抬手判定，与圆心位置无关。
             AevonRingMenu.presented?.remoteMoved(to: point, source: "edge")
 
         case .ended:
@@ -1649,7 +1692,38 @@ private final class PassthroughWindow: UIWindow {
 }
 
 private final class PassthroughView: UIView {
+    /// 0.1.20 — **边缘带的最后一道兜底。**
+    ///
+    /// `hitTest` 只把「命中了我们自己」当成穿透；子视图照常参与命中。可
+    /// `edgePad` 是 `host` 的**普通子视图** —— 只要有任何一层比它晚添加、
+    /// 比它大的透明视图盖在右缘上（圆盘的全屏视图、面板容器、浮动窗的环形
+    /// 手势层、甚至一次布局把它的 frame 算成零），`super.hitTest` 就再也
+    /// 返回不到它，用户贴着右缘划一整条都落不到呼盘垫上，日志里连
+    /// `pad down` 都没有。
+    ///
+    /// 这跟 0.1.19「触发条消失后呼不出」的观感完全一致，而且**没有任何证词**：
+    /// 不是判据拒绝了，是手指根本没送到。
+    ///
+    /// 所以在根视图这一层补一条：点落在认领矩形里、且那块地此刻归我们
+    /// （`pad` 没被藏、没被禁），就直接把 pad 交出去，绕过所有子视图层级。
+    /// 几何仍然只有 `stripRect` 一个来源，兜底不扩大也不缩小认领范围。
+    weak var fallbackHit: UIView?
+    var fallbackRect: (() -> CGRect?)?
+    private var fallbackLogged = 0
+
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        if let pad = fallbackHit, !pad.isHidden, pad.isUserInteractionEnabled,
+           let rect = fallbackRect?() {
+            let inWindow = convert(point, to: window)
+            if rect.contains(inWindow) {
+                if fallbackLogged < 3 {
+                    fallbackLogged += 1
+                    Log.write("ring: summon fell back to edge pad #"
+                              + String(fallbackLogged))
+                }
+                return pad
+            }
+        }
         let hit = super.hitTest(point, with: event)
         return hit === self ? nil : hit
     }

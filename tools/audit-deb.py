@@ -522,12 +522,19 @@ def main():
                   # `AevonRingMenu.applyAnchor` 的日志里，没有它就说明「圆心还是
                   # 固定 215,699」。
                   b"AevonRingAnchorFollowV118",
-                  # 0.1.19 — 「呼盘垫被谁收走的」证词，以及「展开后固定」的标记。
-                  # 前两条把「垫子被键盘/面板藏了」和「手指没落到带子上」分开；
-                  # 第三条说明这一版真的实现了母版那个 AutoPin 语义。
+                  # 0.1.19 — 「呼盘垫被谁收走的」证词。
+                  # 前两条把「垫子被键盘/面板藏了」和「手指没落到带子上」分开。
                   b"ring: edge pad stepped aside",
                   b"ring: edge pad back on the right edge",
-                  b"AevonRingAutoPinV119",
+                  # 0.1.20 — 呼不出圆盘的两条新证词（Aevon(105)）。
+                  #   · fallback：根视图兜底命中，证明「手指落在带子里，但子视图
+                  #     层级把它漏掉了」这条路真的走到了；
+                  #   · stale disc：上一个盘已经脱离视图、`current` 还留着 ——
+                  #     0.1.19 里这就是「贴边划没反应，日志还干净」的死因。
+                  # 0.1.19 的 `AevonRingAutoPinV119` 断言撤掉：0.1.20 起
+                  # `autoPin` 恒 false，那段日志永不执行，留着只会让 audit 骗人。
+                  b"ring: summon fell back to edge pad #",
+                  b"ring: stale disc cleared before summon (not on screen)",
                   b"ring: bar layer put back on top (level=",
                   b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",

@@ -436,6 +436,16 @@ final class AevonRingMenu: UIView {
     /// 圆心纵向位置（占屏幕高度比例）
     private static let verticalRatio: CGFloat = 0.75
 
+    /// 0.1.20 — **圆心横向右移量（占屏幕宽度比例）。**
+    ///
+    /// 用户 Aevon(105)：「恢复成之前的固定位置出现，但是需要调整一下位置，之前是
+    /// 屏幕正中心靠下，在此基础上靠右一点」。0.1.18/0.1.19 的「跟手」做不出来
+    /// （跟手 ⇒ 手指永远在圆心 ⇒ 拖多远都选不中图标），所以退回固定点，但把
+    /// 固定点本身右移 —— 右手拇指从右缘伸进来时，最左侧那一圈图标才是够得着的
+    /// 那个。390 pt 宽上 0.10 = 39 pt，圆心从 195 到 234；外沿仍按
+    /// `min(圆心到左, 到右)` 夹，右侧图标不会被推出屏幕。
+    private static let horizontalShiftRatio: CGFloat = 0.10
+
     /// 0.1.18 — 本次呼盘的落点，由 `presentTracking` 塞进来、`present(in:)` 取走。
     /// 静态是为了在 `AevonRingMenu` 实例创建之前就把值递进去（几何是在 `reload()`
     /// 里一次算完的，没有第二次布局机会）。
@@ -605,15 +615,18 @@ final class AevonRingMenu: UIView {
     static func presentTracking(in host: UIView, at point: CGPoint,
                                 source: String) -> AevonRingMenu? {
         if current != nil { return nil }
-        /* 0.1.18 — **圆心跟着呼盘的那个落点走**（用户 Aevon(104) 第 2 条：
-         * 「圆盘的出现位置可以向右移动一点，因为现在在屏幕中心朝下，圆盘展开时
-         * 右手拇指不容易触摸到圆盘最左侧图标（也可以改为不在固定点出现，而是像
-         * stheno 母版那样跟随手指移动，然后固定）」）。
+        /* 0.1.20 — **不再把落点当圆心。**
          *
-         * 固定圆心 215,699 时，最左侧图标在 x≈87 —— 拇指从右缘伸过来要跨 300 pt，
-         * 这就是「够不到最左边」的全部原因。跟手之后圆心落在拇指附近，整个环
-         * 跟着右移；外沿由 `applyAnchor` 夹进屏幕，图标不会被推出边。 */
-        AevonRingMenu.pendingAnchor = point
+         * 0.1.18/0.1.19 让圆心跟着呼盘的那一下走（`pendingAnchor = point`），
+         * 用户 Aevon(105) 的结论是这条路做不成：跟手 ⇒ 手指永远在圆心 ⇒
+         * 到每个图标的距离恒定 ⇒ 拖多远都选不中一个。现在的语义回到「固定位置
+         * 出现」，位置由 `computeGeometry` 里的 `horizontalShiftRatio` 决定：
+         * 中心偏下，再往右挪 10% 屏宽。
+         *
+         * 静态 `pendingAnchor` 留着不删（`present(in:)` 仍在读、仍在清），只是
+         * 这条路永远不写它 —— 于是 `applyAnchor` 是空转。
+         */
+        AevonRingMenu.pendingAnchor = nil
         present(in: host)
         guard let menu = current else { return nil }
         menu.beginRemoteTracking(at: point, source: source)
@@ -865,12 +878,20 @@ final class AevonRingMenu: UIView {
     // MARK: - 几何
 
     private func computeGeometry() {
-        // 圆心固定：水平正中，纵向 75%（用户 2026-10-22 第二次要求）
+        // 圆心固定：纵向 75%（用户 2026-10-22 第二次要求）。
         //
         // 0.1.18 — 这**只是第一遍**：`applyAnchor` 会在 `ringRadii` 算完之后把圆心
         // 挪到这次呼盘的落点上。分两拍是因为 `maxRadius`（决定每圈半径）要读
         // `ringCenter`，而夹落点又要知道最大半径 —— 两件事互相依赖。
-        ringCenter = CGPoint(x: bounds.midX, y: bounds.height * AevonRingMenu.verticalRatio)
+        //
+        // 0.1.20 — **跟手撤掉，圆心回到固定点，但横向右移。** 用户 Aevon(105)：
+        // 「既然圆盘和圆心跟手无法制作，那么恢复成之前的固定位置出现，但是需要
+        // 调整一下位置，之前是屏幕正中心靠下，在此基础上靠右一点」。`pendingAnchor`
+        // 现在恒为 nil（`presentTracking` 不再塞落点），所以 `applyAnchor` 是空转，
+        // 下面这一行就是最终圆心。
+        let shift = bounds.width * AevonRingMenu.horizontalShiftRatio
+        ringCenter = CGPoint(x: bounds.midX + shift,
+                             y: bounds.height * AevonRingMenu.verticalRatio)
 
         centerButton.center = ringCenter
         centerGradient.frame = centerButton.bounds
@@ -913,26 +934,18 @@ final class AevonRingMenu: UIView {
     /// `center` 赋值，21 个图标也只是几十次浮点运算。
     ///
     /// 位移小于 0.5 pt 直接返回：单指抖动会让同一位置反复重建路径，白烧帧。
+    ///
+    /// ---
+    /// ⛔ **0.1.20 起这个函数是空转。** 用户 Aevon(105) 判了这条路的死刑：
+    /// 「既然圆盘和圆心跟手无法制作，那么恢复成之前的固定位置出现」。原因在
+    /// 0.1.19 的实现里就写明过：跟手 ⇒ 手指永远在圆心 ⇒ 到每个图标的距离恒定
+    /// ⇒ **拖多远都选不中一个图标**。两段式（先摆位置、抬手固定、再点选）在
+    /// 真机上也没站住 —— 用户要的是「划开就能选」，不是「先摆再选」。
+    ///
+    /// 函数保留、调用点保留、行为清空：`RingHost` 的 `.moved` 仍然每帧调它，
+    /// 但圆心不再移动。这样万一以后要做「手动拖盘」的显式入口，接回来只改这里。
     func remoteAnchor(to point: CGPoint) {
-        /* ⛔ 只在这个开关开着时跟手 —— 两件事是一套的。
-         *
-         * 圆心跟着手指走 ⇒ 手指**永远在圆心**，`icon(at:)` 到每个图标的距离
-         * 恒定，拖多远都选不中一个图标。所以「跟手」必须配「抬手固定」：
-         * 第一段是摆位置（抬手 → 盘留在原地），第二段才是点选。
-         *
-         * `autoPin` 关掉时（= 0.1.18 的一段式）绝不能跟手，否则用户划到图标上
-         * 松手会发现「怎么点不到」—— 那不是画错，是几何上不可能。 */
-        guard autoPin else { return }
-        guard !isDismissing, !pinned else { return }
-        anchor = point
-        let before = ringCenter
-        applyAnchor()
-        guard abs(before.x - ringCenter.x) > 0.5 || abs(before.y - ringCenter.y) > 0.5 else { return }
-        centerButton.center = ringCenter
-        centerGradient.frame = centerButton.bounds
-        layoutHub()
-        drawRingTracks()
-        layoutIcons()
+        _ = point
     }
 
     /// V0.2.11（AevonRingHubFitV211）：心圆底盘 + 四宫格图标的尺寸与位置。
@@ -965,8 +978,14 @@ final class AevonRingMenu: UIView {
     }
 
     /// 圆的可用最大半径：不超出左右边界，也不顶到状态栏 / 底部
+    ///
+    /// 0.1.20 — 横向那一项从「屏幕半宽」改成「圆心到**较近那一侧**的距离」。
+    /// 圆心右移 39 pt 之后，还用半宽算半径就会把最右一列图标顶出屏幕（圆心
+    /// 234 + 半径 169 + 图标 20 = 423 > 390）。`sideRoom` 是同一件事的正确写法，
+    /// 居中时它等于半宽，右移越多它收得越紧，永远不会溢出。
     private var maxRadius: CGFloat {
-        let byWidth = bounds.width / 2 - AevonRingMenu.iconSize / 2 - 6
+        let sideRoom = Swift.min(ringCenter.x, bounds.width - ringCenter.x)
+        let byWidth = sideRoom - AevonRingMenu.iconSize / 2 - 6
         let verticalRoom = min(ringCenter.y, bounds.height - ringCenter.y)
         let byHeight = verticalRoom - AevonRingMenu.iconSize / 2 - 12
         return max(64, min(byWidth, byHeight))
