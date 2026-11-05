@@ -1902,7 +1902,7 @@ static id AevonShared(NSString *className) {
 
 /// 只取 NSNumber 型的布尔，别的一律当 NO。`valueForKey:` 碰到没有的键会抛，
 /// 所以先 `respondsToSelector:`。
-static BOOL AevonBoolOf(id object, NSString *key) {
+static BOOL AevonTruthy(id object, NSString *key) {
     if (object == nil) return NO;
     if (![object respondsToSelector:NSSelectorFromString(key)]) return NO;
     id value = [object valueForKey:key];
@@ -1914,11 +1914,11 @@ static BOOL AevonBoolOf(id object, NSString *key) {
 /// 三个单例与 `RingHost.computeSystemOverlay` 同一组判据，只是那边是 private：
 /// 右缘那条带早就靠它让开了，卡片这一层一直没跟。
 BOOL AevonSystemCovered(void) {
-    if (AevonBoolOf(AevonShared(@"SBLockScreenManager"), @"isUILocked")) return YES;
+    if (AevonBoolOf(AevonShared(@"SBLockScreenManager"), @"isUILocked") == 1) return YES;
     id cover = AevonShared(@"SBCoverSheetPresentationManager");
-    if (AevonBoolOf(cover, @"isPresented") || AevonBoolOf(cover, @"isVisible")) return YES;
+    if (AevonTruthy(cover, @"isPresented") || AevonTruthy(cover, @"isVisible")) return YES;
     id center = AevonShared(@"SBControlCenterController");
-    if (AevonBoolOf(center, @"isVisible") || AevonBoolOf(center, @"isPresented")) return YES;
+    if (AevonTruthy(center, @"isVisible") || AevonTruthy(center, @"isPresented")) return YES;
     return NO;
 }
 
