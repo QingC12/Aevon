@@ -17,6 +17,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import <dispatch/dispatch.h>
 #import <math.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -24,6 +25,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+// 0.1.40 — 这两个符号由 Swift 侧（`Log.swift` / `SceneProbe.swift`）用
+// `@_cdecl` 导出。Swift 的 bridging header 不会进 `.m`，所以在这里各写一行
+// `extern`：签名必须与那两处逐字一致（`const char *`，可空）。
+extern void AevonLogRaw(const char *line);
+extern void AevonOpenFromNotification(const char *bundleID);
 
 /// The scene manager is a singleton with no public door, and its spelling has
 /// changed across releases. Resolving it here keeps the class-method dispatch
@@ -2237,4 +2244,264 @@ NSInteger AevonNudgeSceneFrame(id scene, double delta) {
         AevonPushSceneFrame(scene);
     });
     return door;
+}
+
+// MARK: - 0.1.40 键盘宿主侧：把键盘从卡片的缩放/裁剪里摘出来
+//
+// 母本在 SpringBoard 侧留下的证据是**结构**而不是调用：`ReflectManager.keyboard`
+// 是一个 `UIView` 数组，`ReflectEnv.floatingsHasKeyboard` 是布尔，
+// `DeviceEnv._keyboardHeight` / `_baseKeyboardOffset` / `baseKeyboardOffsetLast`
+// 是三个数字，另外还有一个类名字符串 `ReflectKeyboardView`。也就是说她把「键盘
+// 视图」单独收着一份、按键盘高度算一个基准偏移、并用一个状态位记住「浮窗此刻
+// 有没有键盘」。键盘进程那一半（三条几何钩子）在 `AevonAppHook.m` 里，不在这个文件。
+//
+// 这一半只做三件事，且都只在键盘在屏的那段时间里成立：
+//   1. 找到键盘视图（类名里带 Keyboard 的窗口或视图）；
+//   2. 把它按设备原生尺寸摆正（`bounds` + `transform`，不写 `frame` —— 0.0.22
+//      的黑屏就是直接写 frame 写出来的）；
+//   3. 键盘收起时**原样放回去**（`bounds` / `transform` 逐项还原）。
+//
+// 为什么先找窗口再找视图：`UIRemoteKeyboardWindow` 在 SpringBoard 里也会被链接
+// （0.0.12 的 census 列过它的 `setWindowLevel:`），但**有没有实例**是运行时事实。
+// 两个都试，日志把命中的类名写清楚，下一版就能只留一条。
+
+/// 还原用。每一项是 `@{@"view": UIView, @"bounds": NSValue, @"tf": NSValue}`。
+static NSMutableArray *AevonKbSavedViews = nil;
+static int AevonKbHostNotes = 0;
+
+static void AevonKbHostLog(NSString *line) {
+    if (AevonKbHostNotes >= 10) return;
+    AevonKbHostNotes += 1;
+    AevonLogRaw(line.UTF8String);
+}
+
+static BOOL AevonKbNameLooksKeyboard(NSString *name) {
+    if (name.length == 0) return NO;
+    return [name rangeOfString:@"Keyboard" options:NSCaseInsensitiveSearch].location != NSNotFound;
+}
+
+/// 只走 `connectedScenes`：`UIApplication.windows` 在 iOS 15 已经弃用，CI 是
+/// `-Werror`，写它编译不过（这一条是 0.1.x 的教训，不是洁癖）。
+static NSArray<UIWindow *> *AevonKbWindows(void) {
+    NSMutableArray *out = [NSMutableArray array];
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (![out containsObject:window]) [out addObject:window];
+        }
+    }
+    return [out copy];
+}
+
+static void AevonKbCollect(UIView *view, NSMutableArray *hits, int depth) {
+    if (view == nil || depth > 6 || hits.count > 32) return;
+    if (AevonKbNameLooksKeyboard(NSStringFromClass([view class]))) [hits addObject:view];
+    for (UIView *sub in view.subviews) AevonKbCollect(sub, hits, depth + 1);
+}
+
+/// 摆正一个键盘视图。记录原值再动手，顺序反过来的话「摆正失败」就再也还原不了。
+static void AevonKbLift(UIView *view, CGRect screen) {
+    if (view == nil) return;
+    if (AevonKbSavedViews == nil) AevonKbSavedViews = [NSMutableArray array];
+    for (NSDictionary *entry in AevonKbSavedViews) {
+        if (entry[@"view"] == view) return;   // 已经在管，不重复记
+    }
+    CGRect before = view.bounds;
+    CGAffineTransform tf = view.transform;
+    [AevonKbSavedViews addObject:@{ @"view": view,
+                                   @"bounds": [NSValue valueWithCGRect:before],
+                                   @"tf": [NSValue valueWithCGAffineTransform:tf] }];
+    AevonKbHostLog([NSString stringWithFormat:
+                    @"kb: host lift cls=%@ from=%.0fx%.0f tf=%.2f to=%.0fx%.0f",
+                    NSStringFromClass([view class]),
+                    before.size.width, before.size.height, tf.a,
+                    screen.size.width, screen.size.height]);
+    view.transform = CGAffineTransformIdentity;
+    view.bounds = CGRectMake(0, 0, screen.size.width, screen.size.height);
+    view.hidden = NO;
+    view.alpha = 1.0;
+}
+
+static void AevonKbRestore(void) {
+    for (NSDictionary *entry in [AevonKbSavedViews reverseObjectEnumerator]) {
+        UIView *view = entry[@"view"];
+        view.transform = [entry[@"tf"] CGAffineTransformValue];
+        view.bounds = [entry[@"bounds"] CGRectValue];
+    }
+    if (AevonKbSavedViews.count > 0) {
+        AevonKbHostLog([NSString stringWithFormat:@"kb: host restore n=%lu",
+                        (unsigned long)AevonKbSavedViews.count]);
+    }
+    [AevonKbSavedViews removeAllObjects];
+}
+
+static void AevonKbHostApply(BOOL up) {
+    if (!up) { AevonKbRestore(); return; }
+    NSArray<UIWindow *> *windows = AevonKbWindows();
+    CGRect screen = [UIScreen mainScreen].bounds;
+    NSMutableArray<UIView *> *hits = [NSMutableArray array];
+    for (UIWindow *window in windows) {
+        if (AevonKbNameLooksKeyboard(NSStringFromClass([window class]))) [hits addObject:window];
+        AevonKbCollect(window, hits, 0);
+    }
+    if (hits.count == 0) {
+        NSMutableArray *names = [NSMutableArray array];
+        for (UIWindow *window in windows) {
+            [names addObject:NSStringFromClass([window class])];
+        }
+        AevonKbHostLog([NSString stringWithFormat:@"kb: host none windows=%lu [%@]",
+                        (unsigned long)windows.count,
+                        [names componentsJoinedByString:@","]]);
+        return;
+    }
+    AevonKbHostLog([NSString stringWithFormat:@"kb: host up screen=%.0fx%.0f hits=%lu",
+                    screen.size.width, screen.size.height, (unsigned long)hits.count]);
+    for (UIView *view in hits) AevonKbLift(view, screen);
+}
+
+static void AevonKbHostNote(CFNotificationCenterRef center, void *observer,
+                            CFStringRef name, const void *object,
+                            CFDictionaryRef userInfo) {
+    BOOL up = (CFStringCompare(name, CFSTR("com.aevon.kb.up"), 0) == kCFCompareEqualTo);
+    // 通知回调可能在任意线程。UIKit 只在主线程上碰，一次都不例外。
+    dispatch_async(dispatch_get_main_queue(), ^{
+        AevonKbHostApply(up);
+    });
+}
+
+/// 构造函数之外唯一的安装点（`Boot.swift` 的 `AevonStart`）。重复调用无害：
+/// `CFNotificationCenterAddObserver` 同一个函数指针只注册一次由调用方保证，
+/// 这里用一个静态闸门兜住。
+void AevonKeyboardHostInstall(void) {
+    static int installed = 0;
+    if (installed) return;
+    installed = 1;
+    CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
+    CFNotificationCenterAddObserver(center, NULL, AevonKbHostNote,
+                                    CFSTR("com.aevon.kb.up"), NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(center, NULL, AevonKbHostNote,
+                                    CFSTR("com.aevon.kb.off"), NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+    AevonLogRaw("kb: host armed");
+}
+
+// MARK: - 0.1.40 通知点击 → 悬浮窗
+//
+// 母本取证（主库 `Stheno.dylib` 的 Swift 侧）：类
+// `_TtC6Stheno29UNSUserNotificationServerHook`（Orion 的 Glue 生成物），配套的
+// 选择器/常量按二进制顺序是
+//    UINotificationResponseAction
+//    _dismissPresentable:withReason:animated:userInfo:
+//    initWithURL:workspaceOriginatingProcess:
+//    UIApplicationLaunchOptionsSourceApplicationKey
+//    unlockedEnvironmentMode
+//    continuousExposeIdentifier
+// 也就是：识别「通知回应」这个 action → 收起当时的 presentable（通知中心/横幅）
+// → 用 URL + 来源进程构造一次 workspace 请求。
+//
+// 这里取的是同一条链的**入口**：`SBMainWorkspace -executeTransitionRequest:`。
+// 不猜 `UNSUserNotificationServer` 的方法名（母本那一侧是 Swift + Orion 的
+// dynamic replacement，方法名被 strip，按名字猜等于赌），而是看请求里带的是不是
+// 一个 `…NotificationResponse…` 的 action —— 类名是这条链唯一稳定的东西。
+//
+// 不再自己调 dismiss：`openCard` 把 App 的 scene 推到前台，SpringBoard 会收起
+// 通知中心（这是系统自己的「打开 App 就收起覆盖层」）。真机上如果日志出现
+// `notify: open` 而通知中心还挂着，下一版再加显式 `_dismissPresentable:`。
+
+static IMP AevonOrigExecuteTransition = NULL;
+static double AevonNotifyLastAt = 0;
+static int AevonNotifyNotes = 0;
+
+static void AevonNotifyLog(NSString *line) {
+    if (AevonNotifyNotes >= 12) return;
+    AevonNotifyNotes += 1;
+    AevonLogRaw(line.UTF8String);
+}
+
+/// KVC 取值，任何一步不成立都返回 nil。`@try` 在这里是必须的：`valueForKey:`
+/// 碰到没有的键会抛 `NSUndefinedKeyException`，而这条链跑在 SpringBoard 主线程上。
+static id AevonNotifyValue(id object, NSString *key) {
+    if (object == nil || key.length == 0) return nil;
+    SEL sel = NSSelectorFromString(key);
+    if (![object respondsToSelector:sel]) return nil;
+    @try {
+        return [object valueForKey:key];
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+/// 从通知 action 上取被点 App 的 bundle id。三个落点按母本用过的顺序试：
+/// 启动选项里的来源 App、action 自己的 `application`、以及通知请求的 section。
+static NSString *AevonNotifyBundle(id action) {
+    id info = AevonNotifyValue(action, @"userInfo");
+    if ([info isKindOfClass:[NSDictionary class]]) {
+        id source = ((NSDictionary *)info)[@"UIApplicationLaunchOptionsSourceApplicationKey"];
+        if ([source isKindOfClass:[NSString class]] && [source length] > 2) return source;
+    }
+    id application = AevonNotifyValue(action, @"application");
+    id bundle = AevonNotifyValue(application, @"bundleIdentifier");
+    if ([bundle isKindOfClass:[NSString class]] && [bundle length] > 2) return bundle;
+    id request = AevonNotifyValue(action, @"notificationRequest");
+    id section = AevonNotifyValue(request, @"sectionIdentifier");
+    if ([section isKindOfClass:[NSString class]] && [section length] > 2) {
+        // `sectionIdentifier` 通常就是 bundle id；带后缀的（线程分组）截掉。
+        NSRange slash = [section rangeOfString:@"/"];
+        if (slash.location != NSNotFound) section = [section substringToIndex:slash.location];
+        return section;
+    }
+    return nil;
+}
+
+static void AevonNotifyInspect(id request) {
+    id actions = AevonNotifyValue(request, @"actions");
+    if (![actions isKindOfClass:[NSArray class]]) return;
+    for (id action in (NSArray *)actions) {
+        NSString *cls = NSStringFromClass([action class]);
+        if (cls.length == 0) continue;
+        if ([cls rangeOfString:@"NotificationResponse" options:NSCaseInsensitiveSearch].location
+            == NSNotFound) {
+            continue;
+        }
+        NSString *bundle = AevonNotifyBundle(action);
+        AevonNotifyLog([NSString stringWithFormat:@"notify: action cls=%@ bundle=%@",
+                        cls, bundle ?: @"?"]);
+        if (bundle.length < 3) continue;
+        if ([bundle hasPrefix:@"com.apple.springboard"]) continue;
+        // 10 s 去重：同一次点击会被多个 workspace 请求带上，开两张卡比不开更糟。
+        double now = CFAbsoluteTimeGetCurrent();
+        if (now - AevonNotifyLastAt < 10.0) return;
+        AevonNotifyLastAt = now;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonOpenFromNotification(bundle.UTF8String);
+        });
+        return;
+    }
+}
+
+static void AevonExecuteTransition(id self, SEL _cmd, id request) {
+    if (AevonOrigExecuteTransition == NULL) return;
+    @try {
+        AevonNotifyInspect(request);
+    } @catch (NSException *exception) {
+        AevonNotifyLog([NSString stringWithFormat:@"notify: inspect threw %@", exception.name]);
+    }
+    ((void (*)(id, SEL, id))AevonOrigExecuteTransition)(self, _cmd, request);
+}
+
+void AevonNotificationOpenInstall(void) {
+    static int installed = 0;
+    if (installed) return;
+    installed = 1;
+    Class workspace = NSClassFromString(@"SBMainWorkspace");
+    SEL sel = NSSelectorFromString(@"executeTransitionRequest:");
+    Method method = workspace != Nil ? class_getInstanceMethod(workspace, sel) : NULL;
+    if (method == NULL) {
+        AevonLogRaw("notify: SBMainWorkspace executeTransitionRequest: absent");
+        return;
+    }
+    AevonOrigExecuteTransition = method_getImplementation(method);
+    method_setImplementation(method, (IMP)AevonExecuteTransition);
+    AevonLogRaw("notify: armed");
 }

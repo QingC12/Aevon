@@ -1332,6 +1332,17 @@ final class RingHost: NSObject {
         }
     }
 
+    /// 0.1.40 — 通知点击那条路。
+    ///
+    /// 和圆盘图标同一个终点（`openFromRing`），只是多一行来路证词：日志里
+    /// `notify: open <bundle>` 之后紧跟 `ring: card route declined …` 时，
+    /// 才能分清「通知这条路没通」和「通了但卡片没起来」。
+    func openFromNotification(_ bundleID: String) {
+        guard !bundleID.isEmpty, !bundleID.hasPrefix("placeholder.") else { return }
+        Log.write("notify: open " + bundleID)
+        openFromRing(bundleID)
+    }
+
     /// The old behaviour, kept as the fallback and unchanged: the same private
     /// entry point SpringBoard itself uses. Guarded at every step.
     private func launch(_ bundleID: String) {

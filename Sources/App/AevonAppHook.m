@@ -5355,6 +5355,213 @@ static void AevonBootNote(void) {
     AevonAppLogWrite(line);
 }
 
+// MARK: - 0.1.40 键盘进程：把键盘的几何钉回原生全屏
+//
+// 母本取证（`SthenoKeyboard.dylib`，MobileSubstrate Filter = `com.apple.UIKit`，
+// 也就是键盘进程；同版本母本的 `SthenoKb.dylib` 在 SpringBoard 侧只 hook 了
+// `NSNotificationCenter -postNotificationName:object:userInfo:` 并原样转发，
+// 没有几何逻辑）：
+//
+//   · `UIScreen -bounds`
+//       恒返回原生全屏 bounds。母本在命中「键盘窗存在 + 竖屏 + 本进程是键盘宿主」
+//       时改用 `-_boundsForInterfaceOrientation:`，等价于不要被宿主缩小后的值。
+//   · `UIRemoteKeyboardWindow -remoteKeyboardWindowForScreen:create:`
+//       拿到窗口后按键盘 frame 与屏幕 bounds 的比例分 1.0 / 0.5 / 0.0 三档，
+//       给窗口 `CGAffineTransformMakeScale(1,1)` 再 `setBounds:`/`setFrame:`。
+//       效果是键盘**按设备原生尺寸**出图，与宿主卡片缩到多小无关。
+//   · `_UIRemoteKeyboards -intersectionHeightForWindowScene:isLocalMinimumHeightOut:ignoreHorizontalOffset:`
+//       替换返回值：`(原值 × 屏幕高 ÷ 键盘窗高) × 1.0 + 键盘窗高 − 屏幕高`
+//       （母本 0x5284，常量 1.0 在 `__DATA` 0xc320，0.01 是它自己的下限）。
+//       原值是「键盘对某个 window scene 还能占多高」，被缩小的宿主报上来的是
+//       缩小后的数；这一条把它换算回整屏基准。
+//
+// **三条都只在 `com.apple.UIKit` 这个进程里装。** 这不是洁癖：0.0.65 / 0.0.67
+// 在**应用**进程里改过 `UIScreen.bounds` / `_referenceBounds`，代价是「打不开 App、
+// 桌面黑屏、小组件空白」，两次同样的反馈。本文件注入 250 个进程，判据放在
+// 安装处（而不是钩子体内）——装错了连钩子都不存在，比「进了钩子再判断」少一层
+// 出错的机会。
+//
+// 为什么不能只做这一层：键盘进程按全屏出图之后，宿主那张被 `card.transform`
+// 缩小的卡片里，键盘会**超出卡片**并被裁掉。宿主侧那一半见
+// `FloatHost.keyboardNative*`（0.1.40 的 SpringBoard 侧）：把卡片换成「不裁键盘、
+// 只裁画面」的 mask，并按键盘高度把卡片抬起来。
+
+/// 本进程是不是键盘进程。`-1` = 还没判。只在第一次调用时读 bundle id。
+static int AevonKbIsKeyboardProc = -1;
+
+static BOOL AevonKbProcCheck(void) {
+    if (AevonKbIsKeyboardProc >= 0) return AevonKbIsKeyboardProc == 1;
+    AevonKbIsKeyboardProc = 0;
+    NSString *b = [[NSBundle mainBundle] bundleIdentifier];
+    if (b != nil && [b isEqualToString:@"com.apple.UIKit"]) AevonKbIsKeyboardProc = 1;
+    return AevonKbIsKeyboardProc == 1;
+}
+
+/// 键盘原生尺寸的开关。缺省开 —— 它和卡片是一体的功能：关掉它，悬浮窗里的
+/// 键盘就退回「只露一条工具栏」。
+static int AevonKbNativeGate = -1;
+
+static BOOL AevonKbNativeAllowed(void) {
+    if (AevonKbNativeGate >= 0) return AevonKbNativeGate == 1;
+    AevonKbNativeGate = 1;
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("!ring.keyboardNative"),
+                                                       AevonDomain);
+    if (value != NULL) {
+        if (CFGetTypeID(value) == CFBooleanGetTypeID()) {
+            AevonKbNativeGate = CFBooleanGetValue((CFBooleanRef)value) ? 1 : 0;
+        }
+        CFRelease(value);
+    }
+    return AevonKbNativeGate == 1;
+}
+
+static IMP AevonOrigScreenBounds = NULL;
+static IMP AevonOrigKeyboardWindow = NULL;
+static IMP AevonOrigIntersection = NULL;
+
+/// 日志配额。键盘进程里一次输入会反复问 bounds，证词只留前几条 —— 这一条链上
+/// 写日志本身就可能把键盘帧率拖下来。
+static volatile int AevonKbGeomNotes = 0;
+
+static void AevonKbGeomNote(const char *what, CGRect a, CGRect b) {
+    if (AevonKbGeomNotes >= 6) return;
+    AevonKbGeomNotes += 1;
+    char line[200];
+    snprintf(line, sizeof(line),
+             "kb: proc %s %.0fx%.0f -> %.0fx%.0f\n",
+             what, a.size.width, a.size.height, b.size.width, b.size.height);
+    AevonAppLogWrite(line);
+}
+
+/// 键盘进程「自己的」屏幕尺寸。母本用的是 `-_boundsForInterfaceOrientation:`；
+/// 那是私有方法，这里用公开的 `nativeBounds / nativeScale` 得到同一个数，
+/// 拿不到就退回 430×932 的物理基准，绝不返回一个猜出来的更大值。
+static CGRect AevonKbNativeBounds(UIScreen *screen) {
+    if (screen == nil) screen = [UIScreen mainScreen];
+    CGRect native = screen.nativeBounds;
+    CGFloat scale = screen.nativeScale;
+    if (scale > 0.01 && native.size.width > 1 && native.size.height > 1) {
+        return CGRectMake(0, 0, native.size.width / scale, native.size.height / scale);
+    }
+    return CGRectMake(0, 0, 430, 932);
+}
+
+/// 键盘窗口实例。`_UIRemoteKeyboards` 是系统类（母本同一套），`+activeInstance`
+/// 拿管理器、`-keyboardWindow` 拿窗口。问不到就返回 nil —— 所有钩子都以它为准。
+static id AevonKbWindowNow(void) {
+    static Class kb = Nil;
+    if (kb == Nil) kb = objc_getClass("_UIRemoteKeyboards");
+    if (kb == Nil) return nil;
+    id mgr = nil;
+    SEL active = sel_registerName("activeInstance");
+    if ([kb respondsToSelector:active]) {
+        mgr = ((id (*)(id, SEL))objc_msgSend)(kb, active);
+    }
+    if (mgr == nil) return nil;
+    SEL win = sel_registerName("keyboardWindow");
+    if (![mgr respondsToSelector:win]) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(mgr, win);
+}
+
+static CGRect AevonKbScreenBounds(UIScreen *self, SEL _cmd) {
+    if (AevonOrigScreenBounds == NULL) return CGRectZero;
+    CGRect answer = ((CGRect (*)(id, SEL))AevonOrigScreenBounds)(self, _cmd);
+    if (!AevonKbProcCheck() || !AevonKbNativeAllowed()) return answer;
+    // 没有键盘窗口时一次都不改：这个进程平时还会画别的系统界面。
+    if (AevonKbWindowNow() == nil) return answer;
+    CGRect full = AevonKbNativeBounds(self);
+    if (full.size.height <= answer.size.height + 1.0
+        && full.size.width <= answer.size.width + 1.0) {
+        return answer;
+    }
+    AevonKbGeomNote("screen", answer, full);
+    return full;
+}
+
+/// 母本 0x5390。只改 `bounds` + `transform`，不写 `frame` —— 0.0.22 的那次黑屏
+/// 就是把 `frame` 直接赋值出来的（改几何只碰 bounds/center/transform 是纪律）。
+static id AevonKbWindowForScreen(id self, SEL _cmd, id screen, BOOL create) {
+    id window = ((id (*)(id, SEL, id, BOOL))AevonOrigKeyboardWindow)(self, _cmd, screen, create);
+    if (AevonOrigKeyboardWindow == NULL || window == nil) return window;
+    if (!AevonKbProcCheck() || !AevonKbNativeAllowed()) return window;
+    UIScreen *target = (UIScreen *)screen;
+    if (target == nil) target = [UIScreen mainScreen];
+    CGRect full = AevonKbNativeBounds(target);
+    UIView *view = (UIView *)window;
+    if (full.size.width < 1 || full.size.height < 1) return window;
+    CGRect now = view.bounds;
+    if (fabs(now.size.width - full.size.width) < 1.0
+        && fabs(now.size.height - full.size.height) < 1.0
+        && CGAffineTransformIsIdentity(view.transform)) {
+        return window;
+    }
+    AevonKbGeomNote("window", now, full);
+    view.transform = CGAffineTransformIdentity;
+    view.bounds = CGRectMake(0, 0, full.size.width, full.size.height);
+    return window;
+}
+
+/// 母本 0x5284 的原式：`(原值 × 屏幕高 ÷ 键盘窗高) + 键盘窗高 − 屏幕高`。
+/// 原值本来就是全屏基准时，这个式子算回来还是原值（不抖动）；只有宿主把场景
+/// 缩小过，它才会被放大回整屏。
+static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BOOL ignore) {
+    double answer = ((double (*)(id, SEL, id, BOOL *, BOOL))AevonOrigIntersection)(self, _cmd,
+                                                                                  scene, isLocal, ignore);
+    if (AevonOrigIntersection == NULL) return answer;
+    if (!AevonKbProcCheck() || !AevonKbNativeAllowed()) return answer;
+    id window = AevonKbWindowNow();
+    if (window == nil) return answer;
+    CGFloat screenHeight = AevonKbNativeBounds(nil).size.height;
+    CGFloat keyboardHeight = ((UIView *)window).bounds.size.height;
+    if (screenHeight < 1 || keyboardHeight < 40) return answer;
+    double lifted = (answer * screenHeight / keyboardHeight) + keyboardHeight - screenHeight;
+    if (!isfinite(lifted) || lifted < 0) return answer;
+    if (lifted < answer) return answer;
+    return lifted;
+}
+
+/// 构造函数里调一次。三条钩子分别装，任何一条问不到方法就跳过那一条 ——
+/// 装不上等于行为退回系统自带，不会让键盘进程带着半个钩子跑。
+static void AevonKbNativeInstall(void) {
+    static int installed = 0;
+    if (installed) return;   // 二次安装会把 `AevonOrig*` 覆盖成我们自己的钩子（自递归）
+    installed = 1;
+    if (!AevonKbProcCheck()) return;
+    if (!AevonKbNativeAllowed()) {
+        AevonRawNote("kb: native off by pref\n");
+        return;
+    }
+    Class screen = [UIScreen class];
+    if (screen != Nil) {
+        SEL sel = sel_registerName("bounds");
+        Method m = class_getInstanceMethod(screen, sel);
+        if (m != NULL) {
+            AevonOrigScreenBounds = method_getImplementation(m);
+            method_setImplementation(m, (IMP)AevonKbScreenBounds);
+        }
+    }
+    Class kbWindow = objc_getClass("UIRemoteKeyboardWindow");
+    if (kbWindow != Nil) {
+        SEL sel = sel_registerName("remoteKeyboardWindowForScreen:create:");
+        Method m = class_getInstanceMethod(kbWindow, sel);
+        if (m != NULL) {
+            AevonOrigKeyboardWindow = method_getImplementation(m);
+            method_setImplementation(m, (IMP)AevonKbWindowForScreen);
+        }
+    }
+    Class keyboards = objc_getClass("_UIRemoteKeyboards");
+    if (keyboards != Nil) {
+        SEL sel = sel_registerName("intersectionHeightForWindowScene:isLocalMinimumHeightOut:"
+                                   "ignoreHorizontalOffset:");
+        Method m = class_getInstanceMethod(keyboards, sel);
+        if (m != NULL) {
+            AevonOrigIntersection = method_getImplementation(m);
+            method_setImplementation(m, (IMP)AevonKbIntersection);
+        }
+    }
+    AevonRawNote("kb: native hooks installed\n");
+}
+
 __attribute__((constructor))
 static void AevonAppBoot(void) {
     // 第一个注入点已经拥有 SpringBoard 这个进程。两条 reason 都要看：一是
@@ -5406,6 +5613,9 @@ static void AevonAppBoot(void) {
     // 0.1.17 — 键盘在屏的那一声。软键盘属于应用这一侧，桌面要等这里报才知道
     // （见上面 `AevonKbObserve`）。
     AevonKbObserve();
+    // 0.1.40 — 键盘**进程**侧的三条几何钩子（见上面 `AevonKbNativeInstall`）。
+    // 只在 bundle id == com.apple.UIKit 时真的装；别的进程连 Method 都不碰。
+    AevonKbNativeInstall();
 
     // Both getters, both chained: a process that is not hosted keeps the
     // system's answers byte for byte.

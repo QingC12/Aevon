@@ -2284,3 +2284,23 @@ private func aevonFaultWitness(_ signo: Int32) {
     _ = signal(signo, SIG_DFL)
     _ = raise(signo)
 }
+
+// MARK: - 0.1.40 通知点击 → 悬浮窗（C 侧的入口）
+
+/// `AevonScene.m` 的 `AevonNotifyInspect` 在 `SBMainWorkspace -executeTransitionRequest:`
+/// 上认出 `…NotificationResponse…` 之后，从这里把 bundle id 交回来。
+///
+/// 走的是**和圆盘同一条**路（`RingHost.openFromNotification` → `openCard` → 全屏兜底），
+/// 不另开一套几何：屏幕上的卡片只有一种形状，从哪个入口来都一样。
+@_cdecl("AevonOpenFromNotification")
+public func AevonOpenFromNotification(_ bundle: UnsafePointer<CChar>?) {
+    guard let bundle = bundle else { return }
+    let identifier = String(cString: bundle)
+    guard identifier.count > 2 else { return }
+    let work = { RingHost.shared.openFromNotification(identifier) }
+    if Thread.isMainThread {
+        work()
+    } else {
+        DispatchQueue.main.async(execute: work)
+    }
+}

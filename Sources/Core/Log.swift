@@ -53,3 +53,19 @@ public enum Log {
         try? handle.write(contentsOf: Data(line.utf8))
     }
 }
+
+/// 0.1.40 — C 侧的日志入口。
+///
+/// `AevonScene.m` 里新加的两条链（键盘宿主归位、通知点击开浮窗）都是事件型的：
+/// 它们要写的是「这一刻发生了什么」，而那个文件里的 `AevonNote` 是**缓冲**，
+/// 要等某一次 `AevonTakeNotes` 才落盘 —— 键盘弹起后如果什么都没发生，缓冲里的
+/// 证词就永远读不到。所以给 C 一个直写口，走同一个 `Log.write`（同一份
+/// `/var/mobile/Aevon.log`、同一个 512 KB 截断、同一个版本号后缀）。
+@_cdecl("AevonLogRaw")
+public func AevonLogRaw(_ line: UnsafePointer<CChar>?) {
+    guard let line = line else { return }
+    var text = String(cString: line)
+    while text.hasSuffix("\n") { text.removeLast() }
+    guard !text.isEmpty else { return }
+    Log.write(text)
+}
