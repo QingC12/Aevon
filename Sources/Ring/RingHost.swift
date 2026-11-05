@@ -135,9 +135,25 @@ final class RingHost: NSObject {
     /// `rawDownAt` / `rawMovedFar` / `rawOpenedHere` / `barProbe`，以及只服务于
     /// 它的 `discProbe`。留着不用会被 CI 的 `-Werror` 抓（unused variable）。
 
-    /// 0.1.11 — 「这一下不算呼盘」记过几次（前 20 次写日志）。0.1.10 时它是
+    /// 0.1.11 — 「这一下不算呼盘」记过几次。0.1.10 时它是
     /// `gestureRecognizerShouldBegin` 的拒绝计数，现在由 `EdgeSwipePad.onReject` 写。
+    ///
+    /// 0.1.16 — 这个 `#N` 是判据本身：「停在 #1 = 整场只拒过 1 次」。所以它必须
+    /// 一直往上数，不能因为「日志太多了」而在某个数上闭嘴 —— 见 `padBlockProbe`。
     private var stripProbe = 0
+    /// 0.1.16 — 闸门拒绝（`pad refused by`）与被系统抢断（`pad cancelled`）各自
+    /// 一份计数，各自限流。
+    ///
+    /// 0.1.12 起这三类**共用** `stripProbe < 20` 一个上限，后果在 Aevon(102) 的
+    /// 日志里露出来了：33 次未开盘的落指只有 20 次留下 `strip refuse dx=0 dy=0`，
+    /// 后面 13 次一声不响 —— 又变回「日志干干净净、可用户明明点了没反应」，
+    /// 正是 MEMORY 里那条「静默三态 = 日志无法对账」。每类各留 40 次，够一整场
+    /// 正常测试用，又不会把手机写爆。
+    private var padBlockProbe = 0
+    private var padCancelProbe = 0
+    /// 每类证词的上限。40 是「一场 10 分钟的试用里最多能踩多少次」的量级估计，
+    /// 不是从数据里算出来的 —— 它只是防刷屏的天花板，不是判据。
+    private let probeLimit = 40
 
     /// 0.0.55 — 右缘左滑呼盘的触摸带。旧版 `AevonRingGrip.bandRect` 的同一套几何：
     /// 贴右缘 15 pt 宽 × 屏幕底部 35 % 高。旧版在这台 17.3.1 上做过 49 次 hold
@@ -153,7 +169,7 @@ final class RingHost: NSObject {
     /// by throttle`。**新的一次落指是个明确动作**，0.3 s 已足够防「同一段滑动
     /// 把盘再喊一次」。
     ///
-    /// 带宽不再用 `edgeWidth`。它就是 `stripWidth`（0.1.13 起 24 pt），两处定义
+    /// 带宽不再用 `edgeWidth`。它就是 `stripWidth`（0.1.16 起 10 pt），两处定义
     /// 会出现「日志说 band=15、实际认 24」这种对不上的情况。
     private let edgeHeightPercent: CGFloat = 35
     private let edgeInterval: CFTimeInterval = 0.3
@@ -267,6 +283,11 @@ final class RingHost: NSObject {
         barHeld = false
         overlayStrikes = 0
         padProbe = 0
+        // 0.1.16 — 三类证词各自的计数器一起清零，否则「关了再开」之后
+        // `strip refuse` 的编号会从上次的位置接着数。
+        stripProbe = 0
+        padBlockProbe = 0
+        padCancelProbe = 0
 
         bar?.removeFromSuperview()
         barPad?.removeFromSuperview()
@@ -410,7 +431,8 @@ final class RingHost: NSObject {
         // 0.1.7 — 整条带子换成 `stripRect` 那一条，竖条那块 40×212 的垫子从这一刻
         // 起**只是画**，不接触摸（见 `addBar`）。0.1.8 起 `stripRect` 的高度又回到
         // 底部 35 %（全高会和左滑返回插件抢整条右缘，见那个函数上的注释）。
-        // 0.1.13 — frame 只是外接矩形，真正认领的是 `claimRects` 那两块（列 + 光环）。
+        // 0.1.13 — frame 只是外接矩形，真正认领的是 `claimRects`（0.1.16 起只剩
+        // 贴边那一列，光环已撤）。
         // 外接矩形里剩下的角**不属于我们**，由 `EdgeSwipePad.point(inside:)` 退回给应用。
         edgePad?.frame = claimBounds(in: bounds)
         // 0.1.15 — 可见的就是判定的那一组矩形（同一个 `claimRects`）。
@@ -440,16 +462,14 @@ final class RingHost: NSObject {
                       + String(Int(m.barHeight.rounded())) + "pt pad="
                       + String(Int(m.padWidth.rounded())) + "x"
                       + String(Int(m.padHeight.rounded()))
-                      // 0.1.8 — 呼盘命中区一起报：`claim=24x326 at y=606` 是
+                      // 0.1.8 — 呼盘命中区一起报：`claim=10x326 at y=606` 是
                       // 「贴右缘 × 底部 35 %」的实测值，判据在日志里自证。
-                      // 0.1.13 — 加了 `halo`（对着可见抓手那一段的宽区），并且
-                      // 整段合成**一个**长格式串：` claim=` 只有 7 字节，会被编成
-                      // 立即数，二进制里 grep 不到（audit 断言就抓了个空）。
-                      + String(format: " claim=%.0fx%.0f at y=%.0f halo=%.0fx%.0f at y=%.0f",
+                      // 0.1.16 — `halo` 段删掉（光环已撤），整段合成**一个**长
+                      // 格式串：` claim=` 只有 7 字节，会被编成立即数，二进制里
+                      // grep 不到（audit 断言就抓了个空）。
+                      + String(format: " claim=%.0fx%.0f at y=%.0f",
                                stripWidth, stripRect(in: bounds).height,
-                               stripRect(in: bounds).minY,
-                               haloWidth, haloRect(in: bounds).height,
-                               haloRect(in: bounds).minY))
+                               stripRect(in: bounds).minY))
         }
     }
 
@@ -602,52 +622,53 @@ final class RingHost: NSObject {
                              at.x, at.y, inset))
         }
         pad.onBlocked = { [weak self] reason in
-            guard let self = self, self.stripProbe < 20 else { return }
-            self.stripProbe += 1
-            Log.write("ring: pad refused by " + reason)
+            guard let self = self, self.padBlockProbe < self.probeLimit else { return }
+            self.padBlockProbe += 1
+            Log.write("ring: pad refused by " + reason
+                      + " #" + String(self.padBlockProbe))
         }
         pad.onReject = { [weak self] delta in
-            guard let self = self, self.stripProbe < 20 else { return }
+            guard let self = self, self.stripProbe < self.probeLimit else { return }
             self.stripProbe += 1
             Log.write("ring: strip refuse dx=" + String(format: "%.0f", delta.width)
                       + " dy=" + String(format: "%.0f", delta.height)
                       + " #" + String(self.stripProbe))
         }
         pad.onCancel = { [weak self] delta in
-            guard let self = self, self.stripProbe < 20 else { return }
-            self.stripProbe += 1
+            guard let self = self, self.padCancelProbe < self.probeLimit else { return }
+            self.padCancelProbe += 1
             // 未开就被抢断 = 「滑了没反应、日志还干净」的唯一来源，必须留证词。
             Log.write("ring: pad cancelled dx=" + String(format: "%.0f", delta.width)
-                      + " dy=" + String(format: "%.0f", delta.height))
+                      + " dy=" + String(format: "%.0f", delta.height)
+                      + " #" + String(self.padCancelProbe))
         }
         // 0.1.7 — 点击识别器不挂。用户明确要求「移除点击触发圆盘，只保留左滑」。
         host.addSubview(pad)
         edgePad = pad
     }
 
-    /// 0.1.15 — 呼盘命中区的贴边列宽。唯一一处几何定义。
+    /// 0.1.16 — 呼盘命中区的贴边列宽。唯一一处几何定义。**用户定值：10 pt。**
     ///
-    /// 24 → 40，依据是真机两轮的 `inset` 分布：0.1.14 的日志（Aevon(101)）里
-    /// **28 次落指、inset 全部是 3/4/5 pt、28 次全开**。100 % 的成功率配上清一色
-    /// 的 3~5 pt，说明这条列从来没有「接住过稍微靠里的手」—— 用户每次都把指尖
-    /// 顶到屏幕物理边缘才落进来。他自己给出的结论是「双手拿着才容易触发，单手
-    /// 不易」：双手时另一只手可以从右侧推，单手时拇指够不到那条最边缘的线，
-    /// 落点必然更靠内（20~40 pt），而 24 pt 的列在 24 就断了。
+    /// 一路的量：0.1.13 = 24、0.1.15 = 40（另加 108×248 的光环宽区），0.1.16 = 10。
     ///
-    /// 40 pt 不是拍的：单手右手持机、拇指从右下角伸过来，指腹能稳定按到的
-    /// 横向范围就是离右缘 0~40 pt 这一段；再往里会开始压到页面自己的点击目标
-    /// （列表右侧、发送键），所以到 40 为止，不加到 60。
-    private let stripWidth: CGFloat = 40
-    /// 0.1.15 — 可见抓手周围的宽区（「光环」）。
+    /// 40 + 光环那一版（Aevon(102) 真机日志）证明了两件相反的事：
     ///
-    /// 46 → 108、176 → 248。列只解决「贴边那一条」，光环要解决的是「根本没对准
-    /// 抓手、只是朝右下角划了一下」。单手时拇指落点既横偏又纵偏：日志里 28 次
-    /// 成功样本的 y 跨了 709~753（44 pt）全部落在抓手上下 ±22 内，那是**瞄准过**
-    /// 的落点；没瞄准的单手落点会散到 ±100 以上。光环按「抓手中心 ±124 pt、
-    /// 离边 108 pt 以内」取，刚好把「右下角这一片」包住，同时仍不覆盖整条边 ——
-    /// 覆盖整条边就会重演 Aevon(95) 和左滑返回插件抢手势。
-    private let haloWidth: CGFloat = 108
-    private let haloHeight: CGFloat = 248
+    /// - 正面：带宽确实不再是瓶颈。96 次落指的 inset 从上一版清一色 3/4/5 摊到
+    ///   5~81，63 次划动**全部**开盘，其中 inset 32 / 55 / 66 / 73 / 77 / 81 各有
+    ///   一次成功 —— 那是光环在接住「没对准抓手的手」，单手不用再顶到物理边缘。
+    /// - 反面：40 pt 列 + 108 宽光环在视觉上是一大块（热区可见之后尤其明显），
+    ///   而**这块地一旦认领，应用就拿不到这一根手指**（窗口在上层，没有「先收下
+    ///   再还回去」）。用户据此把触发区手动收到 10 pt：宁可难一点，也不要吃掉
+    ///   右侧的按钮与滚动。
+    ///
+    /// ⚠️ **已知代价，写在这里以免下一版当成 bug 查**。按上一轮 63 次成功样本的
+    /// 起点 inset 重算，10 pt 能接住的只有 `≤10` 那 46 次；`11~13` 10 次、`17`
+    /// 1 次、`32` 1 次、`55/66/73/77/81` 5 次全部落到带外（还给应用）。也就是说
+    /// 同一批操作的成功数会从 63 掉到 46（96 次落指里 46 次开盘，约 48 %），剩下
+    /// 50 次不开里有 33 次本来就是零位移的点击。若下份日志显示 `inset` 堆在
+    /// 11~14 而 `open` 明显变少，那是这个值加撤掉光环的直接后果，不是判据坏了
+    /// —— 到时候按实测回调到 12~14，别猜。
+    private let stripWidth: CGFloat = 10
     /// 0.1.11 — 「认作左滑的最小横向位移」这个常量搬进了 `EdgeSwipePad.openDistance`
     /// （10 pt）。原来这里是 12 并且用于 `gestureRecognizerShouldBegin`，那一拍
     /// `translation` 只有 10 pt 上下，12 永远够不到 —— 就是 Aevon(98)「呼不出」的死因。
@@ -670,28 +691,24 @@ final class RingHost: NSObject {
                       height: Swift.max(0, h))
     }
 
-    /// 0.1.13 — 可见抓手周围那块宽区。中心跟着 `barY` 滑块走，高度 `haloHeight`。
-    private func haloRect(in bounds: CGRect) -> CGRect {
-        let centre = barCentreY(in: bounds)
-        let h = Swift.min(haloHeight, stripRect(in: bounds).height)
-        return CGRect(x: bounds.maxX - haloWidth,
-                      y: centre - h / 2,
-                      width: haloWidth, height: h)
-    }
-
-    /// 0.1.13 — 真正认领的两块地：贴边列 + 抓手光环。
+    /// 0.1.16 — 认领的地盘只剩**一条**：贴右缘 10 pt × 底部 35 %。
+    ///
+    /// 0.1.13~0.1.15 这里是两块（列 + 抓手光环）。光环撤掉的账见 `stripWidth`
+    /// 上方：它确实接住了 6 次「没对准」的落指（inset 32~81），但它同时也把
+    /// 右侧一大片地认领掉了 —— 用户选择「宁可难，也别吃应用」。
     ///
     /// **认领 = 应用拿不到这一根手指**（窗口在上层，没有「先收下再还回去」这回事），
     /// 所以形状必须跟「看得见的东西 + 拇指落得到的地方」对齐，能小就不大。
-    /// 列负责「贴着右缘随便哪一段都能划」，光环负责「对着抓手划但手落偏了」。
     private func claimRects(in bounds: CGRect) -> [CGRect] {
         guard bounds.width > 0 else { return [] }
-        return [stripRect(in: bounds), haloRect(in: bounds)]
+        return [stripRect(in: bounds)]
     }
 
-    /// 两块地的外接矩形，也就是 `edgePad` 的 frame。命中与否由
+    /// 认领区的外接矩形，也就是 `edgePad` 的 frame。命中与否由
     /// `EdgeSwipePad.point(inside:)` 按 `claimRects` 再判一次 —— 外接矩形里
-    /// 不属于任何一块的那些点必须**放行**，否则 46×326 会被整块吃掉。
+    /// 不属于任何一块的那些点必须**放行**，否则整块 frame 会被吃掉。
+    /// 0.1.16 只剩一条矩形，frame 与 `claimRects` 此刻重合；这个函数保留是为了
+    /// 以后再加形状时不用改调用方。
     private func claimBounds(in bounds: CGRect) -> CGRect {
         let rects = claimRects(in: bounds)
         guard let first = rects.first else { return .zero }
@@ -700,7 +717,7 @@ final class RingHost: NSObject {
 
     // MARK: - 热区可见层（0.1.15）
 
-    /// 把「手指落在这儿才算呼盘」的那两块地画出来。
+    /// 把「手指落在这儿才算呼盘」的那块地画出来（0.1.16 起只有贴边一条）。
     ///
     /// 它不参与任何判定：`isUserInteractionEnabled = false`，命中仍然只由
     /// `EdgeSwipePad.point(inside:)` 按 `claimRects` 决定。**画的和判的必须是
@@ -775,7 +792,10 @@ final class RingHost: NSObject {
         view.frame = bounds
         let path = UIBezierPath()
         for rect in claimRects(in: bounds) {
-            path.append(UIBezierPath(roundedRect: rect, cornerRadius: 14))
+            // 0.1.16 — 圆角跟着宽度收（10 pt 宽的列用 14 会被钳成 5，显式算出来
+            // 免得以后调宽度时圆角看起来忽大忽小）。
+            path.append(UIBezierPath(roundedRect: rect,
+                                     cornerRadius: Swift.min(14, rect.width / 2)))
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -1260,10 +1280,15 @@ final class RingHost: NSObject {
 
 /// 右缘的呼盘垫。**判定在这里做，不在手势识别器里做。**
 ///
-/// 0.1.13 — 认领的不是「14 pt 一条」而是两块地（见 `RingHost.claimRects`）：
-/// 贴右缘 24 pt × 底部 35 % 的列，加上可见抓手周围 46×176 的宽区。Aevon(100)
-/// 的 14 次落指全在离边 3~6 pt，而旧测说拇指中心通常落在 12~15 pt —— 14 pt 的
-/// 带宽把分布的中位数压在边界上，这就是「触发几率很小」的主要来源。
+/// 0.1.13 — 认领的不是「14 pt 一条」而是两块地：贴右缘 24 pt × 底部 35 % 的列，
+/// 加上可见抓手周围 46×176 的宽区。Aevon(100) 的 14 次落指全在离边 3~6 pt，
+/// 而旧测说拇指中心通常落在 12~15 pt —— 14 pt 的带宽把分布的中位数压在边界上，
+/// 这就是「触发几率很小」的主要来源。
+///
+/// 0.1.16 — **又收回一条**：光环撤掉，只剩贴右缘 10 pt × 底部 35 %（用户定值）。
+/// 0.1.15 的 40 + 光环把成功率做到 63/63（所有划动全开），代价是右侧一大片地
+/// 被认领 —— 热区可见之后那块面积太显眼，而且认领 = 应用拿不到这一根手指。
+/// 取舍与已知代价写在 `RingHost.stripWidth` 上方，别再按「越宽越好」往回加。
 ///
 /// 为什么撤掉 `UIPanGestureRecognizer` + `gestureRecognizerShouldBegin`（0.1.10）：
 ///
