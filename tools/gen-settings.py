@@ -324,6 +324,27 @@ def build_panel(panel_id, title, intro, items):
         specs.append({"cell": "PSTitleValueCell", "label": "桌面状态",
                       "key": "@ring.host", "default": "—", "defaults": DOMAIN})
 
+        # 0.1.19 — 呼盘手势两个开关。Aevon(104) 第 4 条把竖条改成「亮 0.5 s 就淡出」
+        # 之后，竖条同时失去了「带子在这儿」这个路标；用户随即报「触发条隐藏后无法
+        # 通过手势呼出圆盘」。所以热区默认放到整条右缘，并把母版那个 AutoPin
+        #（「自锁::展开后立即固定」）也做成开关，两个都能自己关回去。
+        specs.append({"cell": "PSGroupCell", "label": "呼盘手势",
+                      "footerText": "竖条亮 0.5 秒就淡出，它原本还兼着「带子在这儿」的"
+                                    "路标。所以热区默认是**整条右缘**：手指贴在右缘任何"
+                                    "高度向左划都能呼出圆盘（上下各让开一点点）。"
+                                    "如果某个页面右缘要留给他自己的返回手势，关掉它，"
+                                    "热区就退回屏幕底部 35%。"})
+        specs.append({"cell": "PSSwitchCell", "label": "热区覆盖整条右缘",
+                      "key": "!ring.fulledge", "default": True, "defaults": DOMAIN})
+        specs.append({"cell": "PSGroupCell", "label": "展开后固定",
+                      "footerText": "对应母版的「自锁::展开后立即固定」。开着时：手指向左划，"
+                                    "圆盘跟着手指走；抬手如果没落在图标上，圆盘就**留在原地"
+                                    "不收起**，再点图标（或点盘外收起）即可。关掉则回到"
+                                    "「抬手未选中就收起」。两个阶段都在日志里："
+                                    "圆心跟手 / 抬手未选中 → 固定。"})
+        specs.append({"cell": "PSSwitchCell", "label": "展开后固定（AutoPin）",
+                      "key": "!ring.autopin", "default": True, "defaults": DOMAIN})
+
         # App 侧激活态桥：浮窗里的内容能不能点，取决于 App 自己是否认为
         # 自己在前台。这一项装在一个独立注入点里（只注入 UIKit，不碰桌面），
         # 关掉即等于回到 0.0.43 的行为，不需要卸载。

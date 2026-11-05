@@ -61,6 +61,30 @@ struct RingConfig {
     /// code never lets the result exceed 40 pt.
     var barWidth: CGFloat = 20
 
+    /// 0.1.19 — 呼盘热区是否覆盖**整条右缘**（默认开）。
+    ///
+    /// 0.1.18 把竖条改成「亮 0.5 s 就淡出」之后，用户的第一反应是
+    /// 「触发条隐藏后无法通过手势呼出圆盘」—— 竖条不只是个按钮，它同时是
+    /// **「带子在这儿」的唯一视觉路标**。路标没了，手指就不知道该贴哪一段划；
+    /// 而带子只有底部 35 %，上半段划上去连 `pad down` 都不会有，看起来像失效。
+    ///
+    /// 现在默认整条右缘（上下各留 8 / 12 pt 让开状态栏与 home 条），划哪儿都算；
+    /// 留一个开关是为了「某些页面右缘要留给它自己的返回手势」这种局面对得上账。
+    var fullEdge: Bool = true
+
+    /// 0.1.19 — 展开后固定，对应母版的 `AutoPin`（「自锁::展开后立即固定」）。
+    ///
+    /// 母版 `Stheno.dylib` 的偏好结构里有 `autoPin` / `pinSpeed` / `vibratePin`
+    /// 三个字段，手势状态里有 `pinned` / `pinSpeed` / `fingerLocation` /
+    /// `fingerStartLocation` / `translationPadding` —— 也就是「手指按下时盘跟着
+    /// 手指走（fingerLocation + translationPadding），松手时按 pinSpeed 缓动到
+    /// 指定位并置 pinned」。我们照这个语义做：手指在屏上时圆心跟手，抬手没选中
+    /// 图标就**固定在原地不收起**，再点图标或点盘外才结束。
+    ///
+    /// 默认开：用户 Aevon(104) 第 2 条要的就是这个（「像 stheno 母版那样跟随手指
+    /// 移动，然后固定」）。关掉即回到 0.1.18 的「抬手未选中就收起」。
+    var autoPin: Bool = true
+
     /// 0.1.18 — `hotZone` 已删除（热区可见层整条撤除，Aevon(104) 第 3 条）。
     ///
     /// 0.1.15 加它是为了把「够不着」变成看得见的事，这个目的在 Aevon(102)/(103)
@@ -75,6 +99,7 @@ struct RingConfig {
         "DampingFraction", "CustomSpringAnimation", "VIBRATE", "INTENSITY",
         "Speed", "!ring.desktop", "!ring.barY",
         "!ring.barLength", "!ring.barWidth",
+        "!ring.fulledge", "!ring.autopin",
     ]
 
     // MARK: Reading
@@ -113,6 +138,8 @@ struct RingConfig {
         config.barY = clamp(number("!ring.barY", 50), 0, 100)
         config.barLength = clamp(number("!ring.barLength", 6), 4, 20)
         config.barWidth = clamp(number("!ring.barWidth", 20), 10, 100)
+        config.fullEdge = flag("!ring.fulledge", true)
+        config.autoPin = flag("!ring.autopin", true)
         return config
     }
 
@@ -142,6 +169,8 @@ struct RingConfig {
             "barY": Double(barY),
             "barLength": Double(barLength),
             "barWidth": Double(barWidth),
+            "fullEdge": fullEdge,
+            "autoPin": autoPin,
             "writtenAt": Date().timeIntervalSince1970,
         ]
     }
@@ -179,6 +208,8 @@ struct RingConfig {
         config.barY = clamp(number("barY", 50), 0, 100)
         config.barLength = clamp(number("barLength", 6), 4, 20)
         config.barWidth = clamp(number("barWidth", 20), 10, 100)
+        config.fullEdge = flag("fullEdge", true)
+        config.autoPin = flag("autoPin", true)
         return config
     }
 

@@ -147,6 +147,9 @@ final class RingHost: NSObject {
     private var kbObserver: UnsafeMutableRawPointer?
     /// 租约时长。1 秒心跳 + 3 秒租约 = 丢两条心跳才判死，够宽松。
     private let kbLease: CFTimeInterval = 3.0
+    /// 0.1.19 — 呼盘垫上一次的隐藏状态，只在变化时写日志。
+    /// 用来把「垫子被键盘/面板收走了」和「手指没落到带子上」分开。
+    private var edgeHiddenLogged = false
     /// 0.1.17 — 通道名。**两个类型，别合并。**
     ///
     /// 同一对 API 的 name 参数签名不一样，这是 CoreFoundation 的历史遗留：
@@ -215,6 +218,10 @@ final class RingHost: NSObject {
     /// 会出现「日志说 band=15、实际认 24」这种对不上的情况。
     private let edgeHeightPercent: CGFloat = 35
     private let edgeInterval: CFTimeInterval = 0.3
+    /// 0.1.19 — 整条右缘时上下各让开多少。上面 8 pt 让开状态栏（在状态栏里起手
+    /// 本来就该归系统），下面 12 pt 让开 home 指示条那一条上滑。
+    private let edgeTopInset: CGFloat = 8
+    private let edgeBottomInset: CGFloat = 12
 
     private var config = RingConfig()
     private var expanded = false
@@ -333,6 +340,9 @@ final class RingHost: NSObject {
         stripProbe = 0
         padBlockProbe = 0
         padCancelProbe = 0
+        // 0.1.19 — 装配状态也一起归零，否则「关了再开」第一次 tick 会拿旧值
+        // 判「没变化」而不写日志。
+        edgeHiddenLogged = false
 
         bar?.removeFromSuperview()
         barPad?.removeFromSuperview()
@@ -629,7 +639,10 @@ final class RingHost: NSObject {
             // 面板在屏：右缘整条让给面板自己（0.0.56 的语义）。
             if AevonAppPanel.current != nil { return "panel" }
             // 圆盘已经在屏：这一下不是「呼出」，收手。
-            if AevonRingMenu.presented != nil { return "ring" }
+            // 0.1.19 — 只有**没固定住**的盘才拒绝。固定住的盘（抬手未选中但开着
+            // 「展开后固定」）应该被下一次边缘滑动拖走重摆；否则用户会看到
+            // 「盘还在屏上，但划边缘一点反应都没有」—— 那是 0.1.18 的死角。
+            if let menu = AevonRingMenu.presented, !menu.isPinned { return "ring" }
             // 连击节流：一次呼盘之后手指往往还贴着边，没有它同一段滑动会把盘再
             // 喊一次。0.1.13 起 0.3 s（原 0.6 s）：太快了会把「收起来再划一次」
             // 也一起拒掉，用户感觉就是「时灵时不灵」。
@@ -725,6 +738,20 @@ final class RingHost: NSObject {
     /// 与插件。这一条同时把 0.1.6 那个「卡片里点右侧任意位置误触」的根也压住了：
     /// 命中区只有右下角这一块 14 × 326。
     private func stripRect(in bounds: CGRect) -> CGRect {
+        // 0.1.19 — 默认**整条右缘**。竖条 0.5 s 就淡出之后，它原本还兼着
+        // 「带子在这儿」这个路标；路标没了，只剩底部 35 % 的带子等于让用户
+        // 靠猜 —— 上半段划上去连 `pad down` 都不会有（那一截根本不归我们），
+        // 看起来就是「触发条隐藏后呼不出圆盘」。整条边都认之后，拇指贴在右缘
+        // 任何位置往左划都能开。
+        //
+        // 开关 `!ring.fulledge` 关掉即回到 0.1.18 的「底部 35 %」：某些页面
+        // 右缘要留给他自己的返回手势时，这是唯一能退回去的档。
+        if config.fullEdge {
+            let top = bounds.minY + edgeTopInset
+            let bottom = bounds.maxY - edgeBottomInset
+            return CGRect(x: bounds.maxX - stripWidth, y: top,
+                          width: stripWidth, height: Swift.max(0, bottom - top))
+        }
         let h = bounds.height * edgeHeightPercent / 100
         return CGRect(x: bounds.maxX - stripWidth,
                       y: bounds.maxY - h,
@@ -861,13 +888,21 @@ final class RingHost: NSObject {
             } else {
                 expanded = true
                 AevonRingMenu.presentTracking(in: host, at: point, source: "edge")
+                // 0.1.19 — 带上带子的高度：整条右缘 ≈ 全高，退回 35 % 时只有
+                // 底部那一段。下一次「划了没反应」一读这行就知道手指那条高度
+                // 到底在不在带子里。
                 Log.write("ring: edge swipe open at "
                           + String(format: "%.0f,%.0f", point.x, point.y)
-                          + " band=" + String(format: "%.0f", stripWidth))
+                          + " band=" + String(format: "%.0f", stripWidth)
+                          + "x" + String(format: "%.0f", stripRect(in: window.bounds).height)
+                          + (config.fullEdge ? " full-edge" : " bottom-35%"))
             }
 
         case .moved:
             guard barHeld else { return }
+            // 0.1.19 — 跟手：手指还在屏上时圆心跟着它走（由菜单夹进屏幕）。
+            // 母版就是这条语义（`fingerLocation` + `translationPadding`）。
+            AevonRingMenu.presented?.remoteAnchor(to: point)
             AevonRingMenu.presented?.remoteMoved(to: point, source: "edge")
 
         case .ended:
@@ -1242,6 +1277,15 @@ final class RingHost: NSObject {
         // 都比不藏更糟。藏起来之后这一根手指落在键盘上，键盘照常收。
         bar?.isHidden = hidden
         edgePad?.isHidden = hidden
+        // 0.1.19 — **谁把呼盘垫关掉的，日志里必须看得见。**
+        // 隐藏的视图不参与命中，它一旦被藏住，「划了没反应」和「带子不在这儿」
+        // 在日志里长得一模一样（后者至少有 `pad down`，前者一个字都没有）。
+        // 只在这一位变化时写，不会刷屏。
+        if edgeHiddenLogged != hidden {
+            edgeHiddenLogged = hidden
+            Log.write(hidden ? "ring: edge pad stepped aside"
+                             : "ring: edge pad back on the right edge")
+        }
         // tick 速度跟着「藏没藏」换档：藏着的时候快（早点显示），显示着的时候慢。
         rescheduleOverlayWatch(fast: hidden)
         guard wasHidden != hidden else { return }

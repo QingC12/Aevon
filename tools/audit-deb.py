@@ -522,6 +522,12 @@ def main():
                   # `AevonRingMenu.applyAnchor` 的日志里，没有它就说明「圆心还是
                   # 固定 215,699」。
                   b"AevonRingAnchorFollowV118",
+                  # 0.1.19 — 「呼盘垫被谁收走的」证词，以及「展开后固定」的标记。
+                  # 前两条把「垫子被键盘/面板藏了」和「手指没落到带子上」分开；
+                  # 第三条说明这一版真的实现了母版那个 AutoPin 语义。
+                  b"ring: edge pad stepped aside",
+                  b"ring: edge pad back on the right edge",
+                  b"AevonRingAutoPinV119",
                   b"ring: bar layer put back on top (level=",
                   b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",

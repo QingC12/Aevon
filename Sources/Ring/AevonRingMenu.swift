@@ -480,8 +480,14 @@ final class AevonRingMenu: UIView {
     private var displayLink: CADisplayLink?
     private var ringCenter: CGPoint = .zero
     /// 0.1.18 — 这一盘的落点（nil = 老行为：水平正中、纵向 75%）。
-    /// 只在 `present(in:)` 里赋值一次，之后整局不变 —— 用户要的是「跟手出现然后固定」。
+    /// 0.1.19 — 不再是「赋值一次」：`remoteAnchor(to:)` 会在手指移动时持续改写它，
+    /// 于是圆心跟着手指走，抬手那一刻才真正固定（母版的 pinned / pinSpeed 语义）。
     private var anchor: CGPoint?
+    /// 0.1.19 — 这一局是否开了「展开后固定」（由 `present(in:)` 从配置里读一次）。
+    var autoPin = true
+    /// 0.1.19 — 已经固定住了：抬手没选中也不收起，等下一次触摸（点图标 / 点盘外）。
+    /// 静默看门狗必须认这一位，否则固定住的盘会在 0.8 秒后被它自己收走。
+    private var pinned = false
     private var isDismissing = false
 
     /* V0.3.20（AevonFrameProbeV320，性能包 P6）：本轮展开期间的**帧率自证**。
@@ -562,6 +568,10 @@ final class AevonRingMenu: UIView {
         /* V0.3.18（AevonSpringUnifyV318）：阻尼比在展开这一刻读一次，之后整局复用。
          * 滑条改动要下次呼盘才生效 —— 这是刻意的：逐帧读 prefs 是跨进程 IPC。 */
         menu.hoverZ = AevonSpring.userDampingFraction()
+        /* 0.1.19 — 「展开后固定」每局读一次（母版把它做成设置项 `AutoPin`：
+         * 自锁::展开后立即固定）。读一次而不是逐帧读：一次呼盘只召唤一次盘，
+         * 逐帧读 UserDefaults 是跨进程 IO。 */
+        menu.autoPin = RingConfig.loadRuntime().autoPin
         /* 0.1.18 — 圆心跟手：`presentTracking` 把落点塞进 `pendingAnchor`，这里
          * 在 `reload()`（真正算半径与图标位置的地方）之前吃掉它。
          * 用完立刻清空 —— 下一条 `present(in:)`（比如面板那条路）不能再拿上一次
@@ -691,6 +701,9 @@ final class AevonRingMenu: UIView {
              *
              * 一秒不是「漏发实锤」，是「根本没人来过」。这种局面的收尾由用户自己的
              * 下一次触摸（touchesBegan 接管）或抬手判定负责，看门狗在这里没有职责。 */
+            // 0.1.19 — 「展开后固定」那一局，抬手之后本来就没有指针了，
+            // 看门狗在这里没有职责（它不是 ended 漏发，是我们把人留住了）。
+            guard !self.pinned else { return }
             guard self.pointerLastEventAt > 0 else { return }
             guard self.pointerIdleSeconds >= AevonRingMenu.pointerIdleDismissInterval else { return }
             guard !self.hasLiveTouch else { return }
@@ -734,6 +747,13 @@ final class AevonRingMenu: UIView {
     }
 
     static var presented: AevonRingMenu? { return current }
+
+    /// 0.1.19 — 这一盘是否已经「固定住」（抬手未选中、但开了展开后固定）。
+    ///
+    /// 呼盘垫用它决定「边缘再划一下」是拒绝还是接管：固定住的盘应该被下一次
+    /// 边缘滑动**拖走重摆**，而不是像 0.1.18 那样一律 `pad refused by ring`
+    /// —— 那时用户看到的就是「盘还在，但划边缘没反应」。
+    var isPinned: Bool { return pinned }
     static var isPresented: Bool { return current != nil }
 
     static func dismissCurrent() {
@@ -865,17 +885,54 @@ final class AevonRingMenu: UIView {
     ///
     /// 屏幕装不下这一盘（外沿 × 2 > 短边）时退回固定圆心：与其把半径压到看不清，
     /// 不如承认这一台放不下「拇指当圆心」。
-    private func applyAnchor() {
+    ///
+    /// 0.1.19 — 加 `announce`：跟手时每帧都会调它，逐次写日志会把日志淹掉。
+    /// 只在「这一盘第一次定位」和「抬手固定」两处说话。
+    private func applyAnchor(announce: Bool = false) {
         guard let target = anchor else { return }
         let outer = (ringRadii.max() ?? 62) + AevonRingMenu.iconSize / 2 + 6
         guard bounds.width > outer * 2, bounds.height > outer * 2 else { return }
         let x = Swift.min(Swift.max(target.x, outer), bounds.width - outer)
         let y = Swift.min(Swift.max(target.y, outer), bounds.height - outer)
         ringCenter = CGPoint(x: x, y: y)
+        guard announce else { return }
         AevonLog.info("[圆盘] 圆心跟手 ("
             + String(format: "%.0f,%.0f", target.x, target.y) + " → "
             + String(format: "%.0f,%.0f", x, y) + "，外沿 " + String(Int(outer))
             + "pt）（AevonRingAnchorFollowV118）")
+    }
+
+    /// 0.1.19 — **手指还在屏上时，圆心跟着它走。**
+    ///
+    /// 用户 Aevon(104) 第 2 条要的是「像 stheno 母版那样跟随手指移动，然后固定」。
+    /// 0.1.18 只在 `.began` 那一拍取一次落点（离边 8~12 pt 的那个点），夹进屏幕
+    /// 之后固定 —— 手指继续往里滑，盘却停在边上不动，看起来像「盘跟手指没关系」。
+    ///
+    /// 现在每次 `moved` 都把落点喂进来，夹进屏幕后重新落笔。落笔只有三个消费者
+    /// （轨道 / 图标 / 心圆底盘），逐帧调用就是一次 `UIBezierPath` 重建 + N 次
+    /// `center` 赋值，21 个图标也只是几十次浮点运算。
+    ///
+    /// 位移小于 0.5 pt 直接返回：单指抖动会让同一位置反复重建路径，白烧帧。
+    func remoteAnchor(to point: CGPoint) {
+        /* ⛔ 只在这个开关开着时跟手 —— 两件事是一套的。
+         *
+         * 圆心跟着手指走 ⇒ 手指**永远在圆心**，`icon(at:)` 到每个图标的距离
+         * 恒定，拖多远都选不中一个图标。所以「跟手」必须配「抬手固定」：
+         * 第一段是摆位置（抬手 → 盘留在原地），第二段才是点选。
+         *
+         * `autoPin` 关掉时（= 0.1.18 的一段式）绝不能跟手，否则用户划到图标上
+         * 松手会发现「怎么点不到」—— 那不是画错，是几何上不可能。 */
+        guard autoPin else { return }
+        guard !isDismissing, !pinned else { return }
+        anchor = point
+        let before = ringCenter
+        applyAnchor()
+        guard abs(before.x - ringCenter.x) > 0.5 || abs(before.y - ringCenter.y) > 0.5 else { return }
+        centerButton.center = ringCenter
+        centerGradient.frame = centerButton.bounds
+        layoutHub()
+        drawRingTracks()
+        layoutIcons()
     }
 
     /// V0.2.11（AevonRingHubFitV211）：心圆底盘 + 四宫格图标的尺寸与位置。
@@ -998,7 +1055,8 @@ final class AevonRingMenu: UIView {
         ringCounts = AevonRingMenu.distribution(for: bundleIDs.count)
         ringRadii = radii(forCounts: ringCounts)
         // 0.1.18 — 半径有了，才夹得住落点；夹完再落笔（轨道 / 图标都在下面）。
-        applyAnchor()
+        // 0.1.19 — 这一处要说话：它是「这一盘的圆心落在哪」的唯一一行证词。
+        applyAnchor(announce: true)
 
         var cursor = 0
         for (ringIndex, count) in ringCounts.enumerated() {
@@ -1398,6 +1456,9 @@ final class AevonRingMenu: UIView {
         pointerEverInsideRing = isInsideRingArea(point)
         // 新手指落下来，重新允许「按住圆心 1 秒」切换模式
         centerHoldSuppressed = false
+        // 0.1.19 — 固定住的盘被手指再碰一次，就交回这一次触摸决定去留
+        // （点图标 → 开窗；点盘外 → 收起）。
+        pinned = false
         // 0.1.18 — 见 `hoverArmed`：呼盘那根手指先不许高亮，动过 12 pt 再说。
         hoverArmed = (source == "local")
         hoverOrigin = point
@@ -1554,6 +1615,18 @@ final class AevonRingMenu: UIView {
         // Aevon(104) 补充的语义（本版写进日志，免得再猜）：**只有抬手才会收**。
         // 呼盘那一刻手指贴在右缘、离圆心一百多 pt（本来就在盘外），这不叫「手指在圆盘外」；
         // 手指继续按着往盘里滑的整段过程，圆盘一动不动，直到抬手才判定。
+        // 0.1.19 — **展开后固定**（母版 `AutoPin`）：抬手没选中图标就把盘留在原地，
+        // 用另一根手指 / 再点一次选。0.1.18 及以前这里是直接收起，于是「划出来以后
+        // 想换手再选」这件事根本做不到。
+        if autoPin {
+            pinned = true
+            AevonLog.info("[圆盘] 抬手未选中（\(landing)·间隙，来源 \(source)），"
+                + "「展开后固定」开着 → 固定在 ("
+                + String(format: "%.0f,%.0f", ringCenter.x, ringCenter.y)
+                + ") 不收起，等下一次触摸（AevonRingAutoPinV119）")
+            setHovered(nil)
+            return
+        }
         AevonLog.info("[圆盘] 抬手未选中（\(landing)·间隙，来源 \(source)，进过盘内=\(everInside ? "是" : "否")），收起圆盘（AevonRingLiftDismissV217 AevonRingCloseOnLiftV218）")
         setHovered(nil)
         dismiss()
