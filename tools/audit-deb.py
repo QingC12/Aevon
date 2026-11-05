@@ -1167,13 +1167,25 @@ def main():
                   # 这个前缀已经唯一 —— 半句就够定位。
                   b"win: gesture long press bottom-left-side, ",
                   b"win: raw long press bottom-right-side, already default",
+                  # 0.1.1 — 修 Aevon(89) 三条反馈的一组证据：
+                  #   `win: card already default … target …` = 复位判定的**两端**都
+                  #     打出来了。0.1.0 只打现状，于是「目标被算成现状」与「本来就
+                  #     是默认」在日志上一模一样（Aevon(89) 第 1 条：复位永远不生效）。
+                  #     两端相等 = 真默认；不相等却没复位 = 判定还是错的。
+                  #   `win: mini tap down at ` / `win: mini tap up, promoting back to
+                  #     main` = 停靠小窗把触摸**吞掉**并按一次还原成主窗。缺第二条
+                  #     ⇒ 手指走了 App 那条路（Aevon(89) 第 2 条：点小窗透传）。
+                  #   `win: card docked … at` 的 y 不再是 0 的整数倍 ⇒ 上下留白与窗间
+                  #     缝都生效了（Aevon(89) 第 3 条）。
+                  b"win: mini tap down at ",
+                  b"win: mini tap up, promoting back to main",
                   # 0.0.69 — 三条新的行为证据，缺一条就说明这一轮有一件事没落地：
                   #   · `long press corner, already default` = 长按在默认尺寸上真的
                   #     什么都不做（Aevon(59) 的第一条）；
                   #   · `canvas re-asserted` = 承载面尺寸在 `activate` 之后又交了一
                   #     次（「每次打开内容尺寸不对」的修法，见 FloatHost）；
                   #   · `frame restore again` = 关窗后第二次交还整屏（退出后偏下）。
-                  b"win: long press corner, already default ",
+                  b"win: card already default %.0fx%.0f target %.0fx%.0f",
                   b"win: canvas re-asserted ",
                   b"win: frame restore again door=",
                   # 0.0.70 — 沙盒 App 的读数取回。这三条是「量尺终于能到手」的证据：
