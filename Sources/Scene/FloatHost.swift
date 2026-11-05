@@ -373,13 +373,65 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var miniFlagged = false
 
     /// 0.1.8 — 把「我被停靠成小窗」这件事告诉 App 进程（见 `AevonAppMiniFlagSet`）。
+    ///
+    /// 0.1.9 — 通道从「只有文件」变成「通知 + 文件」，返回值也变成位掩码：
+    /// 0 = 两条都没成，1 = 只有通知，2 = 通知 + 文件，3 = 只有文件。日志必须分得清，
+    /// 否则「用户说还是透传」和「闸门根本没装上」在日志上长得一模一样。
     private func setMiniFlag(_ mini: Bool) {
         guard miniFlagged != mini else { return }
         miniFlagged = mini
-        let ok = AevonAppMiniFlagSet(bundle, mini)
+        let mask = Int(AevonAppMiniFlagSet(bundle, mini))
+        // 文案必须长过 16 字节：15 字节以内的字符串字面量在 -Osize 下会被编成
+        // 一条 mov 立即数，二进制里根本搜不到（` mem=%.0f%%` 就是这么 MISS 的）。
+        let how: String
+        switch mask {
+        case 0: how = " no channel at all"
+        case 1: how = " notify only, no file"
+        case 2: how = " notify and file"
+        case 3: how = " file only, no notify"
+        default: how = " unknown channel mask"
+        }
         Log.write((mini ? "win: mini flag armed " : "win: mini flag cleared ")
                   + (bundle.isEmpty ? "-" : bundle)
-                  + (ok ? "" : " (no container)"))
+                  + how)
+        if mini {
+            FloatHost.startMiniBeat()
+        } else {
+            FloatHost.stopMiniBeatIfIdle()
+        }
+    }
+
+    /// 0.1.9 — 停靠标记的**心跳**。App 侧把 on 当成 2.5 s 的租约，这里每秒续一次。
+    ///
+    /// 为什么需要心跳而不是只发一次：off 那条通知如果在通道上丢了，或者桌面进程
+    /// 直接崩了，App 侧会永久认为「我是小窗」—— 用户看到的是那个 App 再也点不动。
+    /// 有租约就没有这个死态：最多僵 2.5 秒，自己恢复。
+    private static var miniBeat: Timer?
+
+    private static func startMiniBeat() {
+        guard miniBeat == nil else { return }
+        let timer = Timer(timeInterval: 1.0, repeats: true) { _ in
+            FloatHost.ensureSlots()
+            var live = 0
+            for host in FloatHost.slots where host.miniFlagged {
+                live += 1
+                AevonAppMiniNotify(host.bundle, true)
+            }
+            if live == 0 { FloatHost.stopMiniBeat() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        miniBeat = timer
+    }
+
+    private static func stopMiniBeatIfIdle() {
+        ensureSlots()
+        if slots.contains(where: { $0.miniFlagged }) { return }
+        stopMiniBeat()
+    }
+
+    private static func stopMiniBeat() {
+        miniBeat?.invalidate()
+        miniBeat = nil
     }
 
     /// 把当前主窗缩成停靠小窗。主窗位置**不动**：`mainIndex` 不在这里换，

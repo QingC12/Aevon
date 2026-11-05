@@ -12,6 +12,9 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+// 0.1.9 — 停靠标记的 Darwin 通知通道（`CFNotificationCenterGetDarwinNotifyCenter`）。
+// Foundation 一般会带进来，显式写一行免得换 SDK 时莫名为空。
+#import <CoreFoundation/CoreFoundation.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <math.h>
@@ -1751,14 +1754,26 @@ static NSString *AevonAppContainer(NSString *bundleID) {
     }
     NSString *root = @"/var/mobile/Containers/Data/Application";
     NSFileManager *manager = [NSFileManager defaultManager];
-    for (NSString *name in [manager contentsOfDirectoryAtPath:root error:NULL]) {
-        NSString *dir = [root stringByAppendingPathComponent:name];
-        NSString *meta = [dir stringByAppendingPathComponent:
-                          @".com.apple.mobile_container_manager.metadata.plist"];
-        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:meta];
-        if ([info isKindOfClass:[NSDictionary class]]
-            && [[info objectForKey:@"MCMMetadataIdentifier"] isEqualToString:bundleID]) {
-            return dir;
+    // 0.1.9 — 只扫 Application 那一层是不够的：Aevon(96) 的日志里
+    // `win: mini flag armed com.apple.Preferences (no container)` 出现 25 次、
+    // `org.coolstar.SileoStore` 24 次，而 `com.apple.DocumentsApp` 一次都没失败 ——
+    // 前两个正是不住在 `Data/Application` 里的那一类（系统 App 的容器在 `Data/System`，
+    // 部分带插件容器的 App 在 `PluginKitPlugin`）。容器取不到 ⇒ 文件写不进去 ⇒
+    // App 侧那条闸门根本没装，用户看到的就是「点了小窗 App 还是动」。
+    NSArray<NSString *> *roots = @[@"/var/mobile/Containers/Data/Application",
+                                   @"/var/mobile/Containers/Data/System",
+                                   @"/var/containers/Data/System",
+                                   @"/var/mobile/Containers/Data/PluginKitPlugin"];
+    for (NSString *one in roots) {
+        for (NSString *name in [manager contentsOfDirectoryAtPath:one error:NULL]) {
+            NSString *dir = [one stringByAppendingPathComponent:name];
+            NSString *meta = [dir stringByAppendingPathComponent:
+                              @".com.apple.mobile_container_manager.metadata.plist"];
+            NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:meta];
+            if ([info isKindOfClass:[NSDictionary class]]
+                && [[info objectForKey:@"MCMMetadataIdentifier"] isEqualToString:bundleID]) {
+                return dir;
+            }
         }
     }
     return nil;
@@ -1788,20 +1803,47 @@ static NSString *AevonMiniArmedPath(void) {
     return @"/var/mobile/Library/Logs/Aevon/mini-armed.txt";
 }
 
+/// 0.1.9 — 实时通道：Darwin 通知。
+///
+/// 文件通道有个绕不过去的缺口：**取不到容器就写不进去**。Aevon(96) 的日志里
+/// `(no container)` 出现 49 次（设置 25 / Sileo 24），那些 App 的闸门一次都没装上，
+/// 用户看到的就是「点小窗 App 还是动」。Darwin 通知是系统级的，跨进程不需要任何
+/// 沙盒权限，也不依赖容器能不能找到 —— 只要那个 App 进程还活着就一定收得到。
+///
+/// 名字按 bundle 分开，App 侧在构造函数里注册自己那两个。
+void AevonAppMiniNotify(NSString *bundleID, BOOL mini) {
+    if (bundleID.length == 0) return;
+    NSString *name = [NSString stringWithFormat:@"com.aevon.mini.%@.%@",
+                      mini ? @"on" : @"off", bundleID];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         (__bridge CFStringRef)name,
+                                         NULL, NULL, true);
+}
+
 /// 0.1.8 — 写 / 删停靠标记。见 `Aevon-Bridging-Header.h` 里那段说明。
 ///
 /// 写在 `placeDock`（降级成小窗）与 `performUndock`（升回主窗）、拆窗三处。
-/// 调用频率是「一次停靠一次」，用文件而不是常驻内存，是因为跨进程只有文件这
-/// 一条确定可用的路。
-BOOL AevonAppMiniFlagSet(NSString *bundleID, BOOL mini) {
+/// 调用频率是「一次停靠一次」，用文件而不是常驻内存，是因为跨进程只有文件这一
+/// 条确定可用的路。
+///
+/// 0.1.9 — 返回值改成「哪几条通道真成了」：0 = 都失败，1 = 只有通知，
+/// 2 = 通知 + 文件。日志靠它一眼分清「闸门到底装没装上」。
+int AevonAppMiniFlagSet(NSString *bundleID, BOOL mini) {
+    int mask = 0;
+    if (bundleID.length == 0) return 0;
+    // 通知先发：它是唯一不依赖容器的通道，也是最实时的那一条。
+    AevonAppMiniNotify(bundleID, mini);
+    mask |= 1;
+
     NSString *path = AevonAppMiniFlagPath(bundleID);
-    if (path == nil) return NO;
+    if (path == nil) return mask;
     if (!mini) {
-        [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
-        return YES;
+        if ([[NSFileManager defaultManager] removeItemAtPath:path error:NULL]) mask |= 2;
+        return mask;
     }
     NSData *mark = [@"1\n" dataUsingEncoding:NSUTF8StringEncoding];
-    if (![mark writeToFile:path atomically:YES]) return NO;
+    if (![mark writeToFile:path atomically:YES]) return mask;
+    mask |= 2;
     NSString *armed = AevonMiniArmedPath();
     NSFileManager *manager = [NSFileManager defaultManager];
     [manager createDirectoryAtPath:[armed stringByDeletingLastPathComponent]
@@ -1819,7 +1861,7 @@ BOOL AevonAppMiniFlagSet(NSString *bundleID, BOOL mini) {
         } @catch (__unused NSException *exception) {
         }
     }
-    return YES;
+    return mask;
 }
 
 /// 0.1.8 — 启动时把上一次留下的标记全撤掉。返回清掉的个数（写进启动日志）。

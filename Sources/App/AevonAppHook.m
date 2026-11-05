@@ -62,6 +62,8 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+// 0.1.9 — 停靠标记的 Darwin 通知通道，见下面 `AevonMiniObserve`。
+#import <CoreFoundation/CoreFoundation.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 
@@ -4506,7 +4508,7 @@ static void AevonInstallHangWatch(void) {
 
 /// 停靠标记的路径。沙盒里 `NSTemporaryDirectory()` 是唯一保证可写的位置，
 /// 宿主按同一规则写（见 `AevonAppMiniFlagSet`）。
-static BOOL AevonMiniDockedNow(void) {
+static BOOL AevonMiniFlagFile(void) {
     static char path[PATH_MAX];
     static int ready = 0;
     if (!ready) {
@@ -4521,6 +4523,68 @@ static BOOL AevonMiniDockedNow(void) {
     if (path[0] == '\0') return NO;
     struct stat info;
     return stat(path, &info) == 0 && info.st_size > 0;
+}
+
+// MARK: - 0.1.9 Darwin 通知通道（不依赖容器）
+//
+// 文件通道的缺口是硬的：容器找不到就写不进去。Aevon(96) 的日志里
+// `win: mini flag armed com.apple.Preferences (no container)` 出现 25 次、
+// `org.coolstar.SileoStore` 24 次 —— 这两个 App 的闸门一次都没装上，用户看到的
+// 就是「快速或者慢速点击停靠小窗时还是会触发应用内操作」。
+//
+// 通知是系统级的（`CFNotificationCenterGetDarwinNotifyCenter`），跨进程不需要任何
+// 沙盒权限，容器能不能找到完全不影响。名字按 bundle 分开，两边同一个规则：
+// `com.aevon.mini.on.<bundle>` / `com.aevon.mini.off.<bundle>`。
+//
+// **租约**：on 只在 2.5 秒内有效，宿主每秒续一次（`AevonAppMiniNotify`）。这样
+// 桌面崩掉、或者 off 那条通知在通道上丢了，App 最多僵 2.5 秒就自己恢复 ——
+// 而不是从此点不动（0.1.8 的文件标记就有这个风险，只是还没被踩到）。
+
+static volatile int AevonMiniLeaseOn = 0;
+static CFAbsoluteTime AevonMiniLeaseAt = 0;
+static const CFAbsoluteTime AevonMiniLeaseSpan = 2.5;
+
+static void AevonMiniLeaseOnNote(CFNotificationCenterRef __unused center,
+                                 void *__unused observer,
+                                 CFStringRef __unused name,
+                                 const void *__unused object,
+                                 CFDictionaryRef __unused userInfo) {
+    AevonMiniLeaseOn = 1;
+    AevonMiniLeaseAt = CFAbsoluteTimeGetCurrent();
+}
+
+static void AevonMiniLeaseOffNote(CFNotificationCenterRef __unused center,
+                                  void *__unused observer,
+                                  CFStringRef __unused name,
+                                  const void *__unused object,
+                                  CFDictionaryRef __unused userInfo) {
+    AevonMiniLeaseOn = 0;
+    AevonMiniLeaseAt = CFAbsoluteTimeGetCurrent();
+}
+
+/// 构造函数里调一次。注册两个观察者（on / off），名字带自己的 bundle id。
+static void AevonMiniObserve(void) {
+    NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
+    if (bundle.length == 0) return;
+    CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
+    NSString *on = [NSString stringWithFormat:@"com.aevon.mini.on.%@", bundle];
+    NSString *off = [NSString stringWithFormat:@"com.aevon.mini.off.%@", bundle];
+    CFNotificationCenterAddObserver(center, NULL, AevonMiniLeaseOnNote,
+                                    (__bridge CFStringRef)on, NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(center, NULL, AevonMiniLeaseOffNote,
+                                    (__bridge CFStringRef)off, NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+}
+
+/// 此刻是不是停靠小窗。两条通道取或：通知（实时、租约 2.5 s）优先，文件兜冷启动。
+static BOOL AevonMiniDockedNow(void) {
+    if (AevonMiniLeaseOn) {
+        if (CFAbsoluteTimeGetCurrent() - AevonMiniLeaseAt < AevonMiniLeaseSpan) return YES;
+        // 租约过期 = 心跳断了（宿主没了）或 off 丢了。自己收回，绝不让 App 僵死。
+        AevonMiniLeaseOn = 0;
+    }
+    return AevonMiniFlagFile();
 }
 
 /// 0.2 s 缓存。`sendEvent:` 是热路径，一次手势里会有几十条事件；但标记是随
@@ -4642,6 +4706,9 @@ static void AevonAppBoot(void) {
         AevonOriginalUISendEvent = method_getImplementation(sendEvent);
         method_setImplementation(sendEvent, (IMP)AevonAppSendEvent);
     }
+    // 0.1.9 — 通知通道的观察者。注册在 `sendEvent` 之前之后都行，但必须早于第一次
+    // 触摸；构造函数是唯一有保证的时机。
+    AevonMiniObserve();
 
     // Both getters, both chained: a process that is not hosted keeps the
     // system's answers byte for byte.

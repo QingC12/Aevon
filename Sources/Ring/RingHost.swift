@@ -116,6 +116,9 @@ final class RingHost: NSObject {
     private var rawOpenedHere = false
     private var barProbe = 0
 
+    /// 0.1.9 — 圆盘在屏时落在盘面（全屏）上的手指，取证计数。
+    private var discProbe = 0
+
     /// 0.0.55 — 右缘左滑呼盘的触摸带。旧版 `AevonRingGrip.bandRect` 的同一套几何：
     /// 贴右缘 15 pt 宽 × 屏幕底部 35 % 高。旧版在这台 17.3.1 上做过 49 次 hold
     /// 的落点统计（12~15 pt 占 84%，0~6 pt 一次都没有），15 pt 是「拇指顶在屏幕外
@@ -813,6 +816,43 @@ final class RingHost: NSObject {
                     Log.write("ring: edge swipe released at "
                               + String(format: "%.0f,%.0f", point.x, point.y))
                 }
+                return true
+            default:
+                return true
+            }
+        }
+
+        // 0.1.9 — 圆盘在屏时它是**模态的**（全屏暗化 + 抬手未选中就收起），但它的
+        // 触摸一条都收不到：宿主窗口对触摸是穿透的，`AevonRingMenu` 自己的
+        // `touchesBegan` 从来没被调用过。此前手指落在盘面上滑动，整条漏给下面的
+        // App —— 用户 Aevon(96) 第 1 条「圆盘打开期间手指在圆盘中滑动时会触发
+        // 应用内的滑动」。所以应用层把圆盘期间的**全屏**触摸接过来，按三条远程
+        // 通道喂给圆盘（点图标 / 圆心开面板 / 盘外收起全在 `handlePointerEnded`）。
+        //
+        // 为什么是全屏而不是「盘面那个圆」：圆盘开着时它把整屏压暗了 28 %，
+        // 语义上就是模态；盘外的落指本来就该走「抬手未选中 → 收起」这一条，
+        // 不该同时点到下面的 App。
+        if let menu = AevonRingMenu.presented {
+            switch phase {
+            case 0:
+                if !menu.isPointerActive {
+                    menu.beginRemoteTracking(at: point, source: "disc")
+                    if discProbe < 20 {
+                        discProbe += 1
+                        Log.write("ring: disc touch down at "
+                                  + String(format: "%.0f,%.0f", point.x, point.y)
+                                  + " #" + String(discProbe))
+                    }
+                }
+                return true
+            case 1:
+                menu.remoteMoved(to: point, source: "disc")
+                return true
+            case 3:
+                menu.remoteLift(at: point, source: "disc")
+                return true
+            case 4:
+                menu.remoteCancelled(source: "disc")
                 return true
             default:
                 return true

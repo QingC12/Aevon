@@ -765,6 +765,10 @@ def main():
                       # UIApplication 都不经过，下一手要往 `_UIApplicationHandleEvent-
                       # FromEventQueue` 上走。
                       b"app: mini touch swallowed down=%d ev=%d",
+                      # 0.1.9 — Darwin 通知通道（容器取不到时的唯一一条）。
+                      # 名字是格式串，前缀就是它；两个方向都要在二进制里。
+                      b"com.aevon.mini.on.%@",
+                      b"com.aevon.mini.off.%@",
                       # 0.0.91 — 死因证词。signal handler 只做 open/write/close
                       # （崩溃现场不能碰 NSString/stdio），`step=` 说死在哪个函数里；
                       # 异常那一路带名字与原因。`alive t=` 是被托管期间每秒一行：
@@ -1093,6 +1097,15 @@ def main():
                   #   宿主写标记 / 启动时按名单清（崩了也不留死标记）/ App 真的吞了。
                   b"win: mini flag armed ",
                   b"boot mini flags cleared ",
+                  # 0.1.9 — 停靠标记的第二条通道（Aevon(96) 第 2 条：`(no container)`
+                  # 出现 49 次，容器找不到就写不进文件，那些 App 的闸门一次都没装上）。
+                  #   `(notify only)` / `(notify+file)` 是返回值打出来的口径 ——
+                  #   日志里看到 `(notify only)` 就说明「文件不成、通知成了」。
+                  b" notify only, no file",
+                  b" notify and file",
+                  # 0.1.9 — 圆盘在屏时的全屏触摸接管（Aevon(96) 第 1 条）。没有这一行
+                  # 就分不清「圆盘收不到手指」和「收到了但喂错了通道」。
+                  b"ring: disc touch down at ",
                   # 白图标过滤：一条汇总（kept / dropped 与四个理由各多少），
                   # 外加每个被丢掉的白图标的名字（前 20 个）。只看汇总分不清
                   # 「删掉的是几个白图标」还是「删掉了半屏正常 App」。

@@ -164,9 +164,21 @@ NSString *_Nullable AevonAppLogPathOf(NSString *_Nullable bundleID);
 /// 宿主能写（非沙盒），App 能读自己的 `NSTemporaryDirectory()`，两个方向都已被
 /// `aevon-app.log` 证明可用。
 ///
-/// `AevonAppMiniFlagSet(bundle, YES)` 写 `1`，`NO` 删除文件。返回是否真的写成了
-/// （容器找不到 = NO，此时日志里要有痕迹，不然分不清「没开」和「没写成」）。
-BOOL AevonAppMiniFlagSet(NSString *_Nullable bundleID, BOOL mini);
+/// `AevonAppMiniFlagSet(bundle, YES)` 写 `1`，`NO` 删除文件。返回**哪几条通道真成了**：
+/// 0 = 都失败，1 = 只有 Darwin 通知，2 = 通知 + 文件，3 = 只写了文件。
+/// （0.1.9 起才这样返回 —— 日志靠它一眼分清闸门到底装没装上。）
+///
+/// 0.1.9 — 加了第二条通道：**Darwin 通知**。文件那条有个绕不过去的缺口，Aevon(96)
+/// 的日志里 `(no container)` 出现 49 次（设置 25 / Sileo 24）—— 容器找不到就写不进
+/// 去，那些 App 的闸门一次都没装上。通知是系统级的，不依赖容器、不需要沙盒权限，
+/// 只要 App 进程还活着就收得到。两条通道各自独立，任一条成就成立。
+int AevonAppMiniFlagSet(NSString *_Nullable bundleID, BOOL mini);
+
+/// 0.1.9 — 只发通知、不碰文件。宿主每秒给小窗续一次租约用。
+///
+/// App 侧把「收到 on」当成**租约**（2.5 s 内有效）：桌面崩掉 / off 丢了，租约自己
+/// 过期，那个 App 就不会永久点不动。心跳本身只是一次 CFNotification 广播。
+void AevonAppMiniNotify(NSString *_Nullable bundleID, BOOL mini);
 
 /// 0.1.8 — 启动时按名单撤掉上一次留下的停靠标记，返回清掉的个数。
 ///
