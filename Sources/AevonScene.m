@@ -1752,7 +1752,6 @@ static NSString *AevonAppContainer(NSString *bundleID) {
             }
         }
     }
-    NSString *root = @"/var/mobile/Containers/Data/Application";
     NSFileManager *manager = [NSFileManager defaultManager];
     // 0.1.9 — 只扫 Application 那一层是不够的：Aevon(96) 的日志里
     // `win: mini flag armed com.apple.Preferences (no container)` 出现 25 次、
