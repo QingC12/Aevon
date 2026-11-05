@@ -515,15 +515,19 @@ final class RingHost: NSObject {
         //
         // 现在把判定搬进 pad 自己的 `touchesMoved`：位移由我们累积，够左才
         // 「开」，往右或竖向占优就「收手」，全程不依赖 UIKit 何时来问。
-        pad.isArmed = { [weak self] in
-            guard let self = self else { return false }
+        //
+        // 0.1.12 — 闸门从 Bool 改成「原因串」：被挡住也要说话。Aevon(99) 那
+        // 份日志里 5 分半只有 2 次落指，而「没落到带上」「落上了被挡住」「放行了
+        // 没滑够」三种事实完全同形（都是缺 `open at`），只能靠原因串拆开。
+        pad.blockReason = { [weak self] in
+            guard let self = self else { return "gone" }
             // 面板在屏：右缘整条让给面板自己（0.0.56 的语义）。
-            guard AevonAppPanel.current == nil else { return false }
+            if AevonAppPanel.current != nil { return "panel" }
             // 圆盘已经在屏：这一下不是「呼出」，收手。
-            guard AevonRingMenu.presented == nil else { return false }
+            if AevonRingMenu.presented != nil { return "ring" }
             // 连击节流：旧版原值 0.6 s，一次呼盘之后手指往往还贴着边。
-            guard CACurrentMediaTime() - self.edgeAt > self.edgeInterval else { return false }
-            return true
+            if CACurrentMediaTime() - self.edgeAt <= self.edgeInterval { return "throttle" }
+            return nil
         }
         pad.onPhase = { [weak self] phase, from, to in
             self?.handleEdgePhase(phase, from: from, to: to)
@@ -532,9 +536,16 @@ final class RingHost: NSObject {
         // 「圆盘打开期间手指在盘中滑动会触发应用内的滑动」的根就在这里：带子贴在
         // 最上层，圆盘在它下面，14 pt 被带子吞掉之后既不开盘也不给盘）。
         pad.yieldsToRing = { AevonRingMenu.presented != nil }
+        // 0.1.12 — 落指无条件报点：这一行证明「手指真的落在这条带上」，是
+        // 「没落到带上」与其余失败原因的唯一分界线。
         pad.onDown = { at in
-            Log.write("ring: edge swipe armed at "
+            Log.write("ring: pad down at "
                       + String(format: "%.0f,%.0f", at.x, at.y))
+        }
+        pad.onBlocked = { [weak self] reason in
+            guard let self = self, self.stripProbe < 20 else { return }
+            self.stripProbe += 1
+            Log.write("ring: pad refused by " + reason)
         }
         pad.onReject = { [weak self] delta in
             guard let self = self, self.stripProbe < 20 else { return }
@@ -542,6 +553,13 @@ final class RingHost: NSObject {
             Log.write("ring: strip refuse dx=" + String(format: "%.0f", delta.width)
                       + " dy=" + String(format: "%.0f", delta.height)
                       + " #" + String(self.stripProbe))
+        }
+        pad.onCancel = { [weak self] delta in
+            guard let self = self, self.stripProbe < 20 else { return }
+            self.stripProbe += 1
+            // 未开就被抢断 = 「滑了没反应、日志还干净」的唯一来源，必须留证词。
+            Log.write("ring: pad cancelled dx=" + String(format: "%.0f", delta.width)
+                      + " dy=" + String(format: "%.0f", delta.height))
         }
         // 0.1.7 — 点击识别器不挂。用户明确要求「移除点击触发圆盘，只保留左滑」。
         host.addSubview(pad)
@@ -1049,9 +1067,16 @@ final class RingHost: NSObject {
 /// 再被问第二次，于是「一个都呼不出来」。
 ///
 /// 换成 `UIView` 自己收 `touchesBegan/Moved/Ended`：
-/// - 位移自己累积，`-10` 够左且横向占优 ⇒ 报 `.began`（弹盘）
-/// - 往右 ≥ 8、或竖向占优 ≥ 8 ⇒ 报 `.reject` 并停止跟踪（不弹盘）
+/// - 位移自己累积，够左且横向占优 ⇒ 报 `.began`（弹盘）
+/// - 走得不远但甩得很快（≥900 pt/s）⇒ 也算左滑（短促左甩是拇指最常用的形态）
+/// - 往右、或竖向占优**且已经走了 16 pt** ⇒ 报 `.reject` 并停止跟踪
 /// - 没到任何一条就抬手 ⇒ `.reject`（点击不弹盘，用户 Aevon(94) 第 1 条）
+///
+/// 0.1.12 — **三处静默改掉了。** Aevon(99) 的日志里 5 分半只有 2 次落指
+/// （拒绝计数停在 `#1`），而「手指没落到带上」「落上了被闸挡住」「放行了没滑够」
+/// 在这份日志里完全一样：都是没有 `open at`。现在落指无条件报点
+/// （`ring: pad down at`），被闸挡住报原因（`ring: pad refused by`），未开就被
+/// 系统抢断也报位移（`ring: pad cancelled dx=`）—— 三者从此分得开。
 ///
 /// 事件序列是 UIKit 正规投递（began → moved* → ended），不会出现半截态；
 /// 而这条带子命中时下层 App 本来就收不到触摸（窗口在上层），所以「不误触 App」
@@ -1065,25 +1090,39 @@ final class EdgeSwipePad: UIView {
         case cancelled // 被系统取消
     }
 
-    /// 阶段闸：面板在屏 / 圆盘已开 / 节流未到 ⇒ 不接这一根。
-    var isArmed: (() -> Bool)?
+    /// 阶段闸：面板在屏 / 圆盘已开 / 节流未到 ⇒ 不接这一根，**并说明是哪一条**。
+    ///
+    /// 0.1.12 — 原来是 `isArmed: (() -> Bool)?`：被挡的时候一个字都不写，于是
+    /// 「没落到带上」和「落上了被挡住」在日志里长得一模一样（Aevon(99) 两份
+    /// 日志的 5 分半里只有 2 次落指，其余尝试无从对账）。现在返回原因串。
+    var blockReason: (() -> String?)?
     /// 命中闸：圆盘在屏时**让开**。返回 true ⇒ `hitTest` 给 nil，父视图继续往
     /// 下层问（圆盘挂在 pad 之下），盘中手势才回得到圆盘自己。
     var yieldsToRing: (() -> Bool)?
     /// 业务回调，坐标已转成 window 坐标。
     var onPhase: ((Phase, CGPoint, CGPoint) -> Void)?
-    /// 落指报点，取证用（坐标 window）。
+    /// 落指报点，取证用（坐标 window）。**无条件**，在闸门之前。
     var onDown: ((CGPoint) -> Void)?
+    /// 落指被闸挡住时的证词（附原因）。
+    var onBlocked: ((String) -> Void)?
     /// 「这一下不算呼盘」时的证词，附最终位移。
     var onReject: ((CGSize) -> Void)?
+    /// 未开就被系统抢断（来电、控制中心、别的识别器优先）时的证词。
+    var onCancel: ((CGSize) -> Void)?
 
-    /// 认作左滑的最小横向位移。10 pt 是手指「有意图地划」的下限；0.1.10 的 12
-    /// 撞上的正是 UIKit 自己的 10 pt 启动线，这里必须低于它。
-    private let openDistance: CGFloat = 10
-    /// 判「这不是呼盘」的位移：反方向或竖向占优超过它就收手。
-    private let failDistance: CGFloat = 8
+    /// 认作左滑的最小横向位移。8 pt 是「有意图地划」的下限；0.1.10 的 12
+    /// 撞上的正是 UIKit 自己的 10 pt 启动线，这里必须明显低于它。
+    private let openDistance: CGFloat = 8
+    /// 认输的位移。只有**决定性**的位移才收手：0.1.11 用 8 pt，拇指起手的纵向
+    /// 抖动一起手就把这一根判死（Aevon(99) 那次 `dx=-2 dy=-7`）。
+    private let failDistance: CGFloat = 16
+    /// 快甩判据：位移这么点但速度够，也算左滑。
+    private let flickDistance: CGFloat = 5
+    private let flickSpeed: Double = 900
 
     private var start: CGPoint = .zero
+    /// 落指时刻，用来算甩动速度（`UITouch.timestamp`）。
+    private var startAt: CFTimeInterval = 0
     private var tracking = false
     private var opened = false
 
@@ -1100,36 +1139,49 @@ final class EdgeSwipePad: UIView {
         // 多指不算呼盘：只认第一根。
         guard touches.count == 1, let touch = touches.first else {
             tracking = false
+            onBlocked?("multi")
             return
         }
         start = touch.location(in: self)
+        startAt = touch.timestamp
         tracking = true
         opened = false
-        guard isArmed?() != false else {
-            tracking = false
-            return
-        }
+        // 0.1.12 — **先报点，再判闸。** 落指这一声是无条件的：它证明「手指确实
+        // 落在这条 14 pt 带上」，之后才有资格区分「被闸挡住」与「滑得不够」。
         onDown?(convert(start, to: window))
+        if let reason = blockReason?() {
+            tracking = false
+            onBlocked?(reason)
+        }
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard tracking, let touch = touches.first else { return }
         let point = touch.location(in: self)
-        let dx = point.x - start.x
-        let dy = point.y - start.y
         if opened {
             onPhase?(.moved, convert(start, to: window), convert(point, to: window))
             return
         }
-        // 够左且横向占优 ⇒ 呼盘。两个条件同时成立，纵向拖不会误开。
+        let dx = point.x - start.x
+        let dy = point.y - start.y
+        let span = Swift.max(touch.timestamp - startAt, 0.001)
+        let speed = -Double(dx) / span        // 向左为正，pt/s
+        // ① 走够 8 pt 且横向占优 ⇒ 呼盘。两个条件同时成立，纵向拖不会误开。
         if dx <= -openDistance, abs(dx) > abs(dy) {
             opened = true
             onPhase?(.began, convert(start, to: window), convert(point, to: window))
             return
         }
-        // 往右、或竖向占优 ⇒ 收手。**在 touchesMoved 里直接认输**，不等到抬手，
-        // 这样「手指还在带上但明显在往下滑」不会被一张早就该作废的判定拖着。
-        if dx >= failDistance || (abs(dy) >= failDistance && abs(dy) >= abs(dx)) {
+        // ② 走得不远但甩得很快 ⇒ 也算。只按位移判会把短促左甩当点击扔掉，
+        //    而拇指在窄带上最常用的正是这一种。
+        if dx <= -flickDistance, speed >= flickSpeed, abs(dx) >= abs(dy) {
+            opened = true
+            onPhase?(.began, convert(start, to: window), convert(point, to: window))
+            return
+        }
+        // ③ 认输要**决定性**：走够 16 pt 之后才收手，中间这段继续看 —— 后面只要
+        //    横向压过来，盘照样出来。0.1.11 的 8 pt 门槛把起手抖动当成了结论。
+        if dx >= failDistance || (abs(dy) >= failDistance && abs(dy) > abs(dx)) {
             tracking = false
             onReject?(CGSize(width: dx, height: dy))
         }
@@ -1139,20 +1191,36 @@ final class EdgeSwipePad: UIView {
         guard tracking else { return }
         tracking = false
         let point = touches.first?.location(in: self) ?? start
+        let dx = point.x - start.x
+        let dy = point.y - start.y
         if opened {
             onPhase?(.ended, convert(start, to: window), convert(point, to: window))
-        } else {
-            // 停在原地就抬手 = 点击。用户 Aevon(94) 明确要求「移除点击触发圆盘」。
-            onReject?(CGSize(width: point.x - start.x, height: point.y - start.y))
+            return
         }
+        // ④ 采样粗的时候位移可能整段落在最后一次投递里：抬手那一刻只要够 8 pt
+        //    且横向占优，仍然算左滑（先报 `.began` 再报 `.ended`，盘照常出来）。
+        if dx <= -openDistance, abs(dx) >= abs(dy) {
+            opened = true
+            onPhase?(.began, convert(start, to: window), convert(point, to: window))
+            onPhase?(.ended, convert(start, to: window), convert(point, to: window))
+            return
+        }
+        // 停在原地就抬手 = 点击。用户 Aevon(94) 明确要求「移除点击触发圆盘」。
+        onReject?(CGSize(width: dx, height: dy))
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard tracking else { return }
         tracking = false
-        guard opened else { return }
         let point = touches.first?.location(in: self) ?? start
-        onPhase?(.cancelled, convert(start, to: window), convert(point, to: window))
+        let delta = CGSize(width: point.x - start.x, height: point.y - start.y)
+        if opened {
+            onPhase?(.cancelled, convert(start, to: window), convert(point, to: window))
+        } else {
+            // 0.1.12 — 未开就被抢断，原来一个字都不写。它是「滑了没反应、日志
+            // 里还干干净净」的唯一来源（被别的识别器/窗口先拿走），必须留证词。
+            onCancel?(delta)
+        }
     }
 }
 

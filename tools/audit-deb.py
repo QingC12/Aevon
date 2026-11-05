@@ -490,7 +490,13 @@ def main():
                   # 0.1.11 — 落指就报一声：这条是「手指真的落到右缘 14 pt 上了」
                   # 的唯一证词。以后「呼不出」先看它有没有：没有 ⇒ 就是几何没覆盖
                   # 或 pad 被别人盖住；有但没有 `edge swipe open at` ⇒ 是判据问题。
-                  b"ring: edge swipe armed at ",
+                  # 0.1.12 — 改名成 `ring: pad down at `：它现在是**无条件**的
+                  # （在闸门之前报），所以「没落到带上」与「落上了被闸挡住」终于
+                  # 分得开。Aevon(99) 的 5 分半里只有 2 次落指、拒绝计数停在 #1，
+                  # 就是被这个静默害的。配套两条：被挡原因、未开就抢断。
+                  b"ring: pad down at ",
+                  b"ring: pad refused by ",
+                  b"ring: pad cancelled dx=",
                   b"ring: bar layer put back on top (level=",
                   b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",
