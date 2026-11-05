@@ -322,19 +322,22 @@ NSInteger AevonLaunchSuspended(id _Nullable application, NSString *_Nullable bun
 @end
 
 // ---------------------------------------------------------------------------
-// 0.1.40 — 键盘外部化与通知点击开浮窗。
+// 0.1.40 — 通知点击开浮窗。
 //
-// 三条都在 `AevonScene.m` 里：键盘那一半是几何（窗口/视图的 bounds 与 transform），
-// 通知那一半是 `SBMainWorkspace -executeTransitionRequest:` 上的一个钩子。两边都
-// 是 C 侧更稳的活（IMP 当函数指针用，编译器不会在转换处打问号），Swift 侧只留
-// 入口与日志。
+// `AevonScene.m` 里挂 `SBMainWorkspace -executeTransitionRequest:` 一个钩子，C 侧
+// 更稳（IMP 当函数指针用，编译器不会在转换处打问号），Swift 侧只留入口与日志。
+//
+// 0.1.41 — 键盘那一半的 Swift 入口删了。`AevonKeyboardHostInstall` 在
+// SpringBoard 里遍历窗口树、把「类名带 Keyboard」的视图按全屏 bounds 摆正，
+// 0.1.40 真机第一下点输入框就在那里进了安全模式（`__NSMallocBlock__
+// countByEnumeratingWithState:`）。母本 `SthenoKb.dylib`（注入 SpringBoard）的
+// 导入表里没有 UIView / UIWindow / UIScreen，选择器只有 `isEqualToString:` 与
+// `postNotificationName:object:userInfo:` —— 母本在 SpringBoard 侧只转发通知，
+// 从不碰键盘视图。键盘几何全部在键盘进程（`AevonAppHook.m` 的 `AevonKbNative*`）。
 // ---------------------------------------------------------------------------
 
 /// C 侧的直写日志。`AevonNote` 是缓冲，事件型的证词不能等下一次排空。
 void AevonLogRaw(const char *_Nullable line);
-
-/// SpringBoard 侧：监听 App 桥过来的键盘上下线，把键盘视图按原生尺寸摆正 / 还原。
-void AevonKeyboardHostInstall(void);
 
 /// SpringBoard 侧：挂 `SBMainWorkspace -executeTransitionRequest:`，认通知回应。
 void AevonNotificationOpenInstall(void);

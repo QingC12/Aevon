@@ -5382,9 +5382,15 @@ static void AevonBootNote(void) {
 // 出错的机会。
 //
 // 为什么不能只做这一层：键盘进程按全屏出图之后，宿主那张被 `card.transform`
-// 缩小的卡片里，键盘会**超出卡片**并被裁掉。宿主侧那一半见
-// `FloatHost.keyboardNative*`（0.1.40 的 SpringBoard 侧）：把卡片换成「不裁键盘、
-// 只裁画面」的 mask，并按键盘高度把卡片抬起来。
+// 缩小的卡片里，键盘会**超出卡片**并被裁掉。
+//
+// 0.1.40 曾经用「SpringBoard 侧把键盘视图按全屏 bounds 摆正」补这一刀，真机第一
+// 下点输入框就进了安全模式（`__NSMallocBlock__ countByEnumeratingWithState:`，
+// 见 0.1.41 的交付说明）。那一段已经整段撤掉：母本 `SthenoKb.dylib` 注入的是
+// SpringBoard，可它的导入表里没有 UIView / UIWindow / UIScreen —— 母本管键盘视图
+// 的地方不在那个小 dylib 里，而在主库 `Stheno.dylib` 的 `ReflectManager.keyboard`
+// / `ReflectEnv.floatingsHasKeyboard` / `DeviceEnv._baseKeyboardOffset` 那一套字段。
+// 要补「键盘不被卡片裁掉」，下一步按那套字段重做，不要再遍历窗口树猜视图。
 
 /// 本进程是不是键盘进程。`-1` = 还没判。只在第一次调用时读 bundle id。
 static int AevonKbIsKeyboardProc = -1;

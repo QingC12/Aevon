@@ -88,13 +88,14 @@ public func AevonStart() {
     // 这个方法是每一个触摸都必经的地方。装不上就只是退回旧行为，不会弄坏触摸。
     AevonInstallTouchTap()
 
-    // 0.1.40 — 键盘外部化的宿主那一半，和通知点击开浮窗。
+    // 0.1.40 — 通知点击开浮窗。挂 `SBMainWorkspace -executeTransitionRequest:`，
+    // 认的是 action 的类名而不是母本那套 Swift 方法名（方法名被 strip，猜等于赌）。
     //
-    // 键盘这里只装**监听与归位**：真正的几何在键盘进程里（`AevonAppHook.m` 的
-    // `AevonKbNativeInstall`），这一侧负责把宿主里的键盘视图从卡片的缩放里摘出来。
-    // 通知那一条挂在 `SBMainWorkspace -executeTransitionRequest:` 上，认的是
-    // action 的类名而不是母本那套 Swift 方法名（方法名被 strip，猜等于赌）。
-    AevonKeyboardHostInstall()
+    // 0.1.41 — 这里原来还有 `AevonKeyboardHostInstall()`，撤了。它在 SpringBoard
+    // 里遍历窗口树并把「类名带 Keyboard」的视图按全屏 bounds 摆正，0.1.40 真机
+    // 第一下点输入框就进了安全模式（`__NSMallocBlock__ countByEnumerating...`）。
+    // 母本 `SthenoKb.dylib` 注入 SpringBoard 却连 UIView 都没导入 —— 键盘几何
+    // 全在键盘进程（`AevonAppHook.m` 的 `AevonKbNativeInstall`），这里不该有活。
     AevonNotificationOpenInstall()
 
     // Before anything else touches the runtime: if a probe left a death marker
