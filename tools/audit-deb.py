@@ -1068,7 +1068,9 @@ def main():
                   # 是长按复位，`raw touch cancelled` 是系统把手势收走。
                   b"win: touch seen at ",
                   b"win: raw touch grab zone=",
-                  b"win: raw long press corner",
+                  # 0.1.0 — 「恢复默认尺寸」从右下角搬到它内侧那一格，所以这条路
+                  # 的证据也跟着改名（旧串 `raw long press corner` 已不存在）。
+                  b"win: raw long press bottom-right-side",
                   b"win: raw touch cancelled by the system",
                   # 0.0.36 — Aevon(33) and Aevon(34) both reported "the gesture
                   # does not fire" while the log proved the ring existed and was
@@ -1143,12 +1145,28 @@ def main():
                   #   `win: no window - presenter released` = 开窗失败后 presenter
                   #     被拆掉。这条缺了，同一个 App 第二次选就是主线程卡死。
                   #   `win: hide found no window for ` = 找错名字时不拆别人的窗。
-                  b"win: card docked %.0fx%.0f at %.0f,%.0f nth=%d",
+                  b"win: card docked %.0fx%.0f at %.0f,%.0f nth=%d col=%@ row=%d",
                   b"win: gesture gate open zone=",
                   b"raw gesture gate open zone=",
                   b"win: gesture edge-middle not a close up=%d vx=%d dy=%d gate=%d",
                   b"win: no window - presenter released",
                   b"win: hide found no window for ",
+                  # 0.1.0 — 修 Aevon(88) 三条反馈的一组证据：
+                  #   `win: card docked … col=R/L row=` = 落点由「右列先满再左列」那条
+                  #     队列算。0.0.99 是 5 个全堆左列（`nth=1 at 0,0`、`nth=2 at 0,280`），
+                  #     这一行是那次修复的读数。
+                  #   `win: gesture long press bottom-right-side` = 底右内那格的长按真的
+                  #     收到了（用户：「底部右侧的长按恢复默认尺寸不易触发」）。
+                  #   `win: gesture long press bottom-left-side, 横屏 not wired yet` =
+                  #     底左内那格是 V4 的位子，本版只确认格子能收到手指。
+                  #   `win: grip ring band=` 后面带 `cell=`：两个数都是卡片宽度的比例，
+                  #     卡片一变它们就变 —— 用户第 2 条「热区随悬浮窗大小变化」的判据。
+                  b"win: grip ring band=",
+                  b"win: gesture long press bottom-right-side",
+                  # 只到逗号：`b"..."` 里不能放中文（bytes 只能 ASCII），而源码里
+                  # 这个前缀已经唯一 —— 半句就够定位。
+                  b"win: gesture long press bottom-left-side, ",
+                  b"win: raw long press bottom-right-side, already default",
                   # 0.0.69 — 三条新的行为证据，缺一条就说明这一轮有一件事没落地：
                   #   · `long press corner, already default` = 长按在默认尺寸上真的
                   #     什么都不做（Aevon(59) 的第一条）；

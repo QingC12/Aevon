@@ -96,6 +96,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return slots
     }
 
+    /// 手指该先问谁：主窗，然后是其余还活着的槽（0.1.0）。
+    ///
+    /// 顺序不为空的槽不参与 —— 它们的 `window` 是 nil，`rawTouch` 第一句就会
+    /// 早退，排进来只是白跑一遍。
+    static var touchOrder: [FloatHost] {
+        ensureSlots()
+        let main = slots[mainIndex]
+        var order: [FloatHost] = [main]
+        for (index, slot) in slots.enumerated() where index != mainIndex && slot.window != nil {
+            order.append(slot)
+        }
+        return order
+    }
+
     /// 当前主窗里演的 App；没有主窗时是空串。
     ///
     /// 0.0.98 — `cardUp` 原来是「有没有卡」唯一答案，多窗之后它变成「屏幕上还有
@@ -182,21 +196,38 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         dockLeft.removeAll { $0 === host }
     }
 
-    /// 数量分档：1~2 个 280 pt、3~4 个 220 pt、5 个及以上 186 pt。
+    /// 停靠小窗的高度：**固定**，不随数量变（Aevon(88) 第 1 条）。
     ///
-    /// 932 ÷ 5 = 186.4，所以「一列装满五个」是这个数唯一的来处。
-    private static func dockHeight(count: Int) -> CGFloat {
-        if count >= 5 { return 186 }
-        if count >= 3 { return 220 }
-        return 280
+    /// 0.0.99 是按数量分档（280 / 220 / 186），结果是「多开一个，所有小窗一起
+    /// 变小」—— 用户的原话是「吸附的小窗应该是固定大小，而不是随着数量增加而
+    /// 变小」。而且那一档还带了个真 bug：跨档时先来的几个没有重排，日志里
+    /// `nth=2 at 0,280`（高 280，占 280~560）与 `nth=3 at 0,440`（高 220）压了
+    /// 120 pt，两个小窗叠在一起。固定尺寸把这两件事一起解决。
+    ///
+    /// 20 % 这个数的来处：932 × 0.20 = 186.4，正是「一列装满五个」的上界
+    /// （5 × 186 = 930 ≤ 932）。用比例而不是常数，是因为母本自己的贴边几何就是
+    /// 按百分比存的（`SettingEnv` 的 `leftHeightPecent` / `rightHeightPecent`，
+    /// 逆向时没抓到默认值）—— 换一台矮一点的机器，比例仍然保证一列五个装得下。
+    ///
+    /// 为什么是 20 % 而不是「母本的值」：母本那几个字段的默认数值没有落在我们
+    /// 手里的任何一份 dump 里（`analysis/dump2.txt` 只给了 ivar 名）。查不到就
+    /// 按用户选定的 186 pt 换算成比例。
+    private static let dockHeightFraction: CGFloat = 0.20
+
+    private static func dockHeight(in bounds: CGRect) -> CGFloat {
+        let raw = (bounds.height * dockHeightFraction).rounded(.down)
+        // 下限 120：再小就没有一块能认出是谁的画面了。
+        return Swift.max(120, raw)
     }
 
-    /// 重新摆所有停靠小窗。数量跨档时（第 3 个、第 5 个出现）调用一次。
+    /// 重新摆所有停靠小窗。每次停靠 / 取消 / 拆窗之后都调一次 ——
+    /// 尺寸固定之后它不再是「跨档才跑」，而是「位置永远等于 行号 × 行高」。
     static func relayoutDocked() {
         ensureSlots()
-        let count = dockRight.count + dockLeft.count
-        guard count > 0 else { return }
-        let height = dockHeight(count: count)
+        guard dockRight.isEmpty == false || dockLeft.isEmpty == false else { return }
+        let probe = dockRight.first ?? dockLeft.first
+        let bounds = probe?.window?.bounds ?? UIScreen.main.bounds
+        let height = dockHeight(in: bounds)
         for (row, host) in dockRight.enumerated() {
             host.placeDock(right: true, row: row, height: height)
         }
@@ -216,7 +247,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 「小窗现在在哪」。在这里覆盖它，取消停靠就会回到一个小窗尺寸。
         followContent()
         installShield()
+        // 0.1.0 — 停靠小窗没有手势环。`syncGrip` 会按新尺寸重算环，摆完必须把
+        // 它收起：环是「可操作」的意思，而小窗的定义就是不可操作。
         syncGrip()
+        grip?.isHidden = true
+        // 遮罩必须盖在画面之上、且吃掉整张卡片 —— 用户要的是「点小窗任何位置都
+        // 还原成主窗，且不要透传到 App 里」。
+        if let shield = shield { card.bringSubviewToFront(shield) }
     }
 
     /// 把当前主窗缩成停靠小窗。主窗位置**不动**：`mainIndex` 不在这里换，
@@ -247,8 +284,25 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         /// 无法分开 —— 一个格子只能有一个长按。
         case bottomLeft
         case bottomRight
+        /// 0.1.0 — 底排从三格改成五格，角两侧各补一格（Aevon(88) 第 2 条）。
+        ///
+        /// 0.0.99 的底排只有三格：角 / 中 / 角，而「恢复默认尺寸」这个长按被绑在
+        /// 右下角上 —— 同一个格子里既有一个「一碰就缩放」的拖动，又有一个「按住
+        /// 0.25 秒」的长按，拖动永远先赢。用户的原话是「底部右侧的长按恢复默认
+        /// 尺寸不易触发，反而是底部两侧的缩放手势很灵敏」，说的就是这一件事。
+        ///
+        /// 拆开之后：角只做缩放，侧格只做长按。两个动作各占一个格子，判据只有
+        /// 一条（手指落在哪个格里），不需要用时间/距离去猜意图。
+        ///
+        /// `bottomLeftSide` 是给 V4 的「长按切横屏」留的位 —— 本版只落格子和日志，
+        /// 切换动作还没实现，因为要动 `FBScene.settings.interfaceOrientation`。
+        case bottomLeftSide
+        case bottomRightSide
 
         var isCorner: Bool { self == .bottomLeft || self == .bottomRight }
+
+        /// 底排两侧那两格（不是角）。它们不移动、不缩放、不停靠，只有长按。
+        var isBottomSide: Bool { self == .bottomLeftSide || self == .bottomRightSide }
     }
 
     private var window: FloatWindow?
@@ -313,11 +367,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 0.0.99 — 长按闸门。
     ///
     /// 用户定档的五格（对照他发的那张图）：**两侧轻滑什么都不做，只有按住
-    /// 0.4 秒之后拖才移动**；底部中间轻滑是移动，按住 0.4 秒之后上滑才是关闭。
+    /// 0.25 秒之后拖才移动**；底部中间轻滑是移动，按住 0.25 秒之后上滑才是关闭。
     /// 这两条都要一个「这次触摸里长按有没有成立」的读数，就是 `gateAt`。
     ///
     /// 为什么记时刻而不是布尔：两条输入路径里，长按都可能比 `dragBegin` **晚**
-    /// 成立（手指先落、停 0.4 秒、再移动 → 长按先到、pan 后到，`dragBegin` 是
+    /// 成立（手指先落、停 0.25 秒、再移动 → 长按先到、pan 后到，`dragBegin` 是
     /// pan 的到来）。布尔会在 `dragBegin` 那一拍被抹掉；时刻不会，它只由触摸
     /// 结束清（`gateReset`），所以「按住再拖」这一整段都看得到闸门。
     private var gateAt: CFTimeInterval = 0
@@ -474,20 +528,61 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     ///
     /// 60 pt + 6 of slack it is. That is a band a thumb finds without being
     /// told, and it survives the card being resized smaller by the operator.
-    private let band: CGFloat = 60
+    ///
+    /// 0.1.0 — **环的厚度改成跟着卡片宽度走**（Aevon(88) 第 2 条）。
+    ///
+    /// 常数 60 是一条只在「卡片接近满屏」时成立的近似：373 宽的卡片它占 16 %，
+    /// 一旦缩到 275 就占 22 %，而底部那一格里还挤着两个角和三块格。用户的原话
+    /// 是「手势热区长度应该随着悬浮窗大小而变化」—— 环是卡片的一部分，卡片小
+    /// 了环就该窄。
+    ///
+    /// 15.5 % 这个比例是从「373 宽 → 57.8」反推的：它让默认尺寸下的手感与
+    /// 0.0.99 的 60 pt 几乎一样（差 2 pt，测不出来），同时把 275 宽的那档从
+    /// 60 收到 42.6。
+    private var band: CGFloat {
+        let width = card?.bounds.width ?? 0
+        guard width > 16 else { return bandMax }
+        return Swift.min(bandMax, Swift.max(bandMin, width * bandRatio))
+    }
+    private let bandRatio: CGFloat = 0.155
+    private let bandMin: CGFloat = 20
+    private let bandMax: CGFloat = 60
     /// 0.0.41 — 6 pt of tolerance on the *outside*. 0.0.37's Aevon(35) shows a
     /// thumb landing at x=390 on a card whose right edge was 375: 15 pt outside,
     /// comfortably inside a 40 pt band. The same thumb on 0.0.40's 32 pt band
     /// touched nothing. `band` is what the zone map is written in; `slack` is
     /// how far past it a touch still counts, and the two are added once, here,
     /// so the hit area and the zone arithmetic can never drift apart.
-    private let slack: CGFloat = 6
+    ///
+    /// 0.1.0 — 也跟着成比例。它是 `band` 的一成，上下夹在 3~8 pt：环窄的时候
+    /// 一层固定 6 pt 的外扩会把「窄环」变成「宽环」，等于白改。
+    private var slack: CGFloat { Swift.min(8, Swift.max(3, band * 0.10)) }
     /// The ring's real half-width: the band plus its tolerance.
     private var reach: CGFloat { band + slack }
+    /// 底排五格里的角格与侧格：正方形，边长与环同宽。
+    ///
+    /// 用户原话「底角的缩放手势热区应该是圆角（高和宽各占一点的角）」。以前角
+    /// 是「底带的三分之一宽」—— 一个 373 宽的卡片角格有 124 pt，比环还深，于是
+    /// 「碰一下底边靠右」就变成缩放。改成边长 = 环厚之后，角是一个真正的方角，
+    /// 想缩放就得瞄准那个角。
+    ///
+    /// `width / 5` 是硬上限：五个格子的宽度加起来不能超过卡片宽度，否则底排
+    /// 会互相蚕食（112 宽的小窗上 4 × 20 只剩 32 给中格）。
+    private var cellSide: CGFloat {
+        let width = card?.bounds.width ?? 0
+        guard width > 16 else { return bandMin }
+        return Swift.min(band, width / 5)
+    }
     /// 快速上滑: a flick, not a drag. 900 pt/s is above a deliberate slow drag and
     /// below the speed a thumb reaches when it is actually swiping away.
     private let flick: CGFloat = 900
-    private let pressDelay: TimeInterval = 0.4
+    /// 0.1.0 — 长按门槛 0.4 → 0.25 秒（用户：「所有需要长按触发的手势时间改为 0.25」）。
+    ///
+    /// 0.4 是为「上滑关闭不要误触」挑的，但它同时把另外两个长按（两侧开移动闸门、
+    /// 底右侧恢复默认尺寸）也拖到了 0.4 —— 那两个不是危险动作，等这么久只会让人
+    /// 以为没反应。0.25 仍在系统长按（0.5）之下，`allowableMovement = 12` 保证
+    /// 轻滑不会把它误判成长按。
+    private let pressDelay: TimeInterval = 0.25
 
     var level: CGFloat { window?.windowLevel.rawValue ?? 0 }
 
@@ -733,7 +828,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // of against a memory. Two `let`s: one long concatenation of format calls
         // is a type-checker timeout, and 0.0.30 lost a build to it.
         let ring = "win: grip ring band=" + String(format: "%.0f", host.band)
-        let cell = " cell=" + String(format: "%.0f", FloatHost.cell(in: card.bounds.size).width)
+        // 0.1.0 — 底排五格之后不再有「一个中格矩形」可打印，改打角格边长（角与
+        // 侧格同宽）。这一行是「热区到底多大」的唯一读数：它是环厚的一个比例，
+        // 卡片一变它就变 —— 正是 Aevon(88) 第 2 条要验的东西。
+        let cell = " cell=" + String(format: "%.0f", host.cellSide)
         // 0.0.46 — the room left on each side, printed with the ring. A band
         // narrower than `reach` is a band the thumb cannot find, and that is
         // exactly what 0.0.45 could not show: `room=l57 r8 t56 b84` would have
@@ -748,7 +846,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let fit = " inset=" + String(format: "%.0f/%.0f", host.bandInset.x, host.bandInset.y)
             + " corner=" + String(format: "%.0f", card.layer.cornerRadius)
         Log.write(ring + cell + room + fit
-                  + " 外侧 (四边 拖动, 左右 点吸附, 底中 上滑关, 左下 缩放, 右下 缩放/长按复位)")
+                  + " 外侧 (四边 拖动, 左右 点吸附, 底中 上滑关, 底角 缩放, 底右内 长按复位, 底左内 横屏待落)")
         return window.isHidden ? nil : host
     }
 
@@ -1175,29 +1273,29 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
 
 
-    /// The bottom band's middle third — the cell that closes on a flick and
-    /// moves otherwise. The rest of the bottom band is 边角. The top band is its
-    /// own zone: the master's caption puts the whole perimeter under gestures
-    /// (「浮窗手势区域为边缘外侧」), and a perimeter with one dead edge is what
-    /// three rounds of 「四边手势失效」 were actually reporting.
+    /// 底排怎么分格：角 / 侧 / 中 / 侧 / 角，五格（0.1.0）。
+    ///
+    /// 角格与侧格都是边长 = 环厚的正方形（见 `cellSide`），中间那一格吃掉剩下的
+    /// 宽度。所以整排的宽度恒等于卡片宽度，不会出现「最后一格探到卡片外面」。
+    ///
+    /// 上沿（`top`）与左右两条竖边仍是各自一整格：母本的文案把整个周界都算作
+    /// 手势区（「浮窗手势区域为边缘外侧」），而「四边手势失效」那三轮反馈说的是
+    /// 周界上有一条边是死的。
     private func zoneFor(_ point: CGPoint) -> Zone {
         guard let card = card else { return .bottomRight }
         let size = card.bounds.size
         if point.y > size.height {
-            let cell = FloatHost.cell(in: size)
-            if point.x >= cell.minX && point.x <= cell.maxX { return .bottomMiddle }
-            return point.x < cell.minX ? .bottomLeft : .bottomRight
+            let side = cellSide
+            if point.x < side { return .bottomLeft }
+            if point.x < side * 2 { return .bottomLeftSide }
+            if point.x > size.width - side { return .bottomRight }
+            if point.x > size.width - side * 2 { return .bottomRightSide }
+            return .bottomMiddle
         }
         if point.y < 0 { return .top }
         return point.x < 0 ? .left : .right
     }
 
-    // Not private: GripView (same file, different type) paints the heat map
-    // with the very same cell arithmetic, and one number must not fork in two.
-    static func cell(in size: CGSize) -> CGRect {
-        let third = size.width / 3
-        return CGRect(x: third, y: 0, width: third, height: size.height)
-    }
 
     private func name(_ zone: Zone) -> String {
         switch zone {
@@ -1207,6 +1305,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         case .bottomMiddle: return "bottom-middle"
         case .bottomLeft: return "bottom-left"
         case .bottomRight: return "bottom-right"
+        case .bottomLeftSide: return "bottom-left-side"
+        case .bottomRightSide: return "bottom-right-side"
         }
     }
 
@@ -1258,18 +1358,30 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 同一次触摸从 tap 那里抢走（识别器之间是排他的），于是「点一下停靠」
             // 会一起失效。让 pan 在闸门关着时不开，tap 才有机会赢。
             //
-            // 「按住 0.4 秒再拖」不受影响：那时闸门已经打开，pan 才起步。
+            // 「按住 0.25 秒再拖」不受影响：那时闸门已经打开，pan 才起步。
             if zone == .left || zone == .right {
+                return gateOpen
+            }
+            // 0.1.0 — 底排两侧那两格只有长按，没有拖动。
+            //
+            // 它们的动作（恢复默认尺寸 / 切横屏）都是「按一下」，格子本身不该
+            // 能被拖走：一拖就等于借这两个格子移动卡片。让 pan 在这里也要求
+            // 闸门，长按才有机会先成立。
+            if zone.isBottomSide {
                 return gateOpen
             }
             return true
         }
         if gesture === press {
-            // 0.0.99 — 长按现在有三种意思，三格都需要它：
-            //   右下角 = 恢复默认尺寸（0.0.39 起的「重启」）
+            // 0.1.0 — 长按现在有四种意思，四格都需要它：
+            //   底右内 = 恢复默认尺寸（0.0.39 起的「重启」；0.1.0 从右下角搬过来）
             //   两侧   = 打开移动闸门（轻滑不移动，按住拖才移动）
             //   底中   = 打开关闭闸门（轻滑只是移动，按住后上滑才关）
-            return zone == .bottomRight || zone == .bottomMiddle
+            //   底左内 = 切横屏（V4，本版只记日志）
+            // 角格不再收长按：它整格都是「裸滑即缩放」，按住不动的时候用户想做的
+            // 是缩放而不是复位，抢过来只会让缩放变得小心翼翼。
+            return zone == .bottomRightSide || zone == .bottomMiddle
+                || zone == .bottomLeftSide
                 || zone == .left || zone == .right
         }
         return true
@@ -1277,7 +1389,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     /// 0.0.99 — 长按与拖动必须能同时活着。
     ///
-    /// 五格里的「两侧：按住 0.4 秒之后拖才移动」要求长按先成立、拖动后接上。
+    /// 五格里的「两侧：按住 0.25 秒之后拖才移动」要求长按先成立、拖动后接上。
     /// UIKit 默认的排他规则会让先成立的那个把另一个判负，于是「按住再拖」永远
     /// 拖不动 —— 长按赢了，pan 已经失败。`allowableMovement = 12` 保证轻滑的
     /// 长按一定失败（手指动了 >12 pt），所以放开并行不会让轻滑也开闸。
@@ -1390,7 +1502,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // a corner is a resize and this branch is the other three.
             //
             // 0.0.99 — 两侧要长按闸门。用户原话「两侧红色为点击停靠，长按拖拽
-            // 移动」：轻滑不移动，只有按住 0.4 秒之后才跟手。顶部与底部中间不要
+            // 移动」：轻滑不移动，只有按住 0.25 秒之后才跟手。顶部与底部中间不要
             // 闸门（底部中间是「轻滑为移动悬浮窗」）。
             //
             // 闸门关着时**不移动，但 `panStep` 照旧推进**（上面那三行已经做了）：
@@ -1400,8 +1512,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 return
             }
             // 0.0.99 — 底中长按之后的那一段是「关闭手势」，不是移动。
-            // 不挡住的话，按住 0.4 秒再上滑会一边把卡片往上拖一边关掉。
+            // 不挡住的话，按住 0.25 秒再上滑会一边把卡片往上拖一边关掉。
             if zone == .bottomMiddle && gateOpen {
+                return
+            }
+            // 0.1.0 — 底排两侧那两格只有长按，没有拖动。它们分别代表「切横屏」
+            // 与「恢复默认尺寸」，是按钮不是把手：手指在那里划过不该让卡片跟着飞。
+            if zone.isBottomSide {
                 return
             }
             var frame = card.frame
@@ -1421,6 +1538,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             gateReset()
             return
         }
+        // 0.1.0 — 底排两侧：只有长按，拖动不产生任何结果。闸门（= 长按成立）
+        // 并不是这里的放行条件 —— 就算长按成立了，那两格的动作用长按本身已经
+        // 做完了（复位 / 待落的横屏），抬手这一拍不该再叠一次移动。
+        if zone.isBottomSide {
+            gateReset()
+            return
+        }
         if miniFrame != nil { return }
         if zone.isCorner, resizeStart != nil {
             resizeStart = nil
@@ -1435,10 +1559,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return
         }
         if zone == .bottomMiddle {
-            // 0.0.99 — 关闭要「先按住 0.4 秒」。
+            // 0.0.99 — 关闭要「先按住 0.25 秒」。
             //
             // Aevon(87) 之前的规则是「快速上滑就关」，而用户的原话是「现在的
-            // 上滑关闭容易误触」。五格图里底中是两件事：轻滑 = 移动，长按 0.4 秒
+            // 上滑关闭容易误触」。五格图里底中是两件事：轻滑 = 移动，长按 0.25 秒
             // 之后上滑 = 关闭。闸门就是这两件事的分界，没有第二套判据。
             let lift = -total.y
             let up = -velocity.y
@@ -1487,23 +1611,38 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard let window = window, let grip = grip else { return }
         switch gesture.state {
         case .began:
-            // 0.0.99 — 五格里的长按有三种意思：
-            //   右下角 = 恢复默认尺寸（0.0.39 起的「重启」，读记忆之前先清记忆）
+            // 0.1.0 — 五格里的长按有四种意思，各占一格：
+            //   底右内 = 恢复默认尺寸（0.0.39 起的「重启」，先清记忆再复位）
             //   两侧   = 开移动闸门
             //   底中   = 开关闭闸门
-            // 左下角仍然不响应长按：母本 `GestureIntroduction` 里「长按」只作为
-            // 「切换横竖」出现，Aevon(59) 明确把左下角留给横屏手势（V4 做）。
+            //   底左内 = 切横屏（V4，本版只记日志，不动界面）
+            // 两个角**不收**长按：角格整格是「一碰就缩放」，按住不动时用户想做的
+            // 还是缩放，把复位抢过来只会让缩放变得小心翼翼。
             //
             // 这里**重新算一次格子**，不读 `zone`：两侧的 pan 在闸门关着时根本
             // 不会开始（见 `gestureRecognizerShouldBegin`），`dragBegin` 也就没跑，
             // `zone` 会一直是上一次那个。长按是第一现场，格子从这里读最可靠。
             let here = zoneFor(cardPoint(gesture.location(in: grip)))
-            if here == .bottomRight {
+            if here == .bottomRightSide {
                 // A press that becomes a drag must not also drag the card.
                 pan?.isEnabled = false
                 if resetToPlan(in: window.bounds) {
-                    Log.write("win: gesture long press right corner, 重启 as geometry reset")
+                    Log.write("win: gesture long press bottom-right-side, 重启 as geometry reset")
+                } else {
+                    // 已经是默认尺寸时 `resetToPlan` 回 false。写一行是因为「长按
+                    // 到底有没有被收到」和「收到了但没什么可复位」是两件事。
+                    Log.write("win: gesture long press bottom-right-side, already default")
                 }
+                return
+            }
+            if here == .bottomLeftSide {
+                // V4 的位子。本版只确认「这一格的长按收到了」—— 真去改
+                // `interfaceOrientation` 是单独一版的事，不跟手势混在一起。
+                Log.write("win: gesture long press bottom-left-side, 横屏 not wired yet")
+                return
+            }
+            if here.isCorner {
+                Log.write("win: gesture long press on corner, scaling is a drag here")
                 return
             }
             guard here == .left || here == .right || here == .bottomMiddle else { return }
@@ -1541,7 +1680,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
         guard natural.height > 16 else { return }
         let side: CardLayout.Edge = landed == .left ? .left : .right
-        applyMini(side: side)
+        // `manual: true` —— 手指点的就是这一侧，落点跟着手指走。
+        applyMini(side: side, manual: true)
     }
 
     /// 0.0.98 — 缩成停靠小窗，几何只有这一份。
@@ -1554,38 +1694,46 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 0.0.45 — 贴边缩小，母本自己的说法。高度是唯一的自由量（宽度由画面形状
     /// 推出来），卡片贴齐它被停靠的那条边 —— 一个离边还有缝的小窗，等于没做到
     /// 「让开」这件事本身。
-    private func applyMini(side: CardLayout.Edge) {
+    /// 0.1.0 — `manual` 决定「这一格落哪一列」。
+    ///
+    /// 两种触发必须分开，这是 Aevon(88) 日志里一眼能看见的缺陷：`claimDock` 原来
+    /// 按「卡片原来更靠近哪条边」优先落列，而**自动降级**的卡片几乎总在主窗默认
+    /// 位置（偏左），于是 5 个全部堆到左列：`nth=1 at 0,0`、`nth=2 at 0,280` ——
+    /// 右列一个都没用上，而用户定的规则是「右侧 5 个之后从左边顶部继续排」。
+    ///
+    ///  · `manual = true`（手指点左边条）→ 落被点的那一列，这是「我要放这边」；
+    ///  · `manual = false`（被新主窗挤下去）→ 永远从右列开始填，填满才往左。
+    private func applyMini(side: CardLayout.Edge, manual: Bool) {
         guard let card = card, window != nil else { return }
         // 展开前的 frame 只记一次：已经停靠过就不再覆盖，否则「取消停靠」会回到
         // 上一次的小窗尺寸，而不是回到大卡片。
         if miniFrame == nil { miniFrame = card.frame }
-        // 0.0.99 — 位置不再由「卡片原来靠哪边」决定。
-        //
-        // 0.0.98 那版每个小窗各自按自己原来的 x 贴边、y 沿用卡片原来的 y，于是
-        // 三个以上必然叠在一起（Aevon(87) 的 `card docked left 168x280 at 0,28`
-        // 与 `at 0,75` 就是两张窗抢同一个位置）。现在停靠是一个**列**：谁先停靠
-        // 谁排上面，序号决定一切。`side` 仍然收下，只用来决定「这一格先试哪一边」。
-        // `side` 只决定「这一格先试哪一列」；落点由排列表算。
-        FloatHost.claimDock(self, preferLeft: side == .left)
+        FloatHost.claimDock(self, preferLeft: manual && side == .left)
         FloatHost.relayoutDocked()
         let landed = card.frame
-        Log.write(String(format: "win: card docked %.0fx%.0f at %.0f,%.0f nth=%d",
+        let column = FloatHost.columnIndex(self)
+        Log.write(String(format: "win: card docked %.0fx%.0f at %.0f,%.0f nth=%d col=%@ row=%d",
                          landed.width, landed.height,
                          landed.origin.x, landed.origin.y,
-                         FloatHost.dockCount))
+                         FloatHost.dockCount,
+                         column?.right == true ? "R" : "L",
+                         (column?.row ?? -1) + 1))
     }
 
     /// 停靠表里现在有几个。
     static var dockCount: Int { dockRight.count + dockLeft.count }
 
-    /// 被新主窗挤下去：缩成小窗，贴到卡片原来更靠近的那条边。
+    /// 被新主窗挤下去：缩成小窗，进「右列先满、再左列」那条队列。
     /// 返回落到的边名，给 `win: demote` 那行日志用。
     private func dockAsMini() -> String {
         guard let card = card, let window = window, natural.height > 16 else { return "none" }
         if miniFrame != nil { return "already" }
-        applyMini(side: card.frame.midX < window.bounds.width / 2 ? .left : .right)
+        // `manual: false` —— 这是系统替用户做的决定，落哪一列由队列算，不由卡片
+        // 原来漂在哪半边算（Aevon(88) 里 5 个全堆左列就是这条的锅）。
+        applyMini(side: card.frame.midX < window.bounds.width / 2 ? .left : .right,
+                  manual: false)
         // 落点由排列表决定，不由「原来靠哪边」决定 —— 所以名字要等摆完之后再读。
-        let name = card.frame.midX < window.bounds.width / 2 ? "left" : "right"
+        let name = FloatHost.columnIndex(self)?.right == false ? "left" : "right"
         Log.write(String(format: "win: card demoted side=%@ %@ at %@",
                          name, size(card.bounds.size), point(card.frame.origin)))
         return name
@@ -1681,6 +1829,23 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
         let frame = card.frame
         let local = CGPoint(x: screen.x - frame.minX, y: screen.y - frame.minY)
+        // 0.1.0 — 停靠小窗没有环（Aevon(88) 第 3 条）。
+        //
+        // 母本对她的贴边小窗用的是 `SingleTapMinimize` 那句话：「单点缩小::贴边
+        // 缩小, 不可操作」。不可操作 = 没有手势区。这不只是「小窗用不着手势」：
+        // 5 个 112 宽的小窗竖排在左边缘，每个原本带一圈 66 pt 的环，叠起来就是
+        // 一整条宽 178 pt 的带子 —— 主窗的左边环被压在下面，`AevonFloatTouch` 按
+        // 槽号问、谁先认领谁吞，于是主窗的手势时灵时不灵。拆掉环，那条带子就
+        // 不存在了。
+        //
+        // 收尾仍然必须接住：手指是在这道门之前按下的，抬起也要在这里吞掉。
+        if miniFrame != nil {
+            let was = rawActive
+            rawActive = false
+            rawPress?.cancel()
+            rawPress = nil
+            return was
+        }
         switch phase {
         case 0:
             if rawSeen < 12 {
@@ -1710,8 +1875,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                           + " at " + point(local))
             }
             // 0.0.99 — 长按在这一条路上也得有，因为事件根本没进 UIKit：底中
-            // 「按住 0.4 秒才允许关闭」与两侧「按住才允许移动」都要自己计时。
-            if zone == .bottomRight || zone == .bottomMiddle
+            // 「按住 0.25 秒才允许关闭」与两侧「按住才允许移动」都要自己计时。
+            // 0.1.0 — 底排两侧那两格也归长按管（复位 / 待落的横屏）。
+            if zone == .bottomRightSide || zone == .bottomLeftSide
+                || zone == .bottomMiddle
                 || zone == .left || zone == .right {
                 let work = DispatchWorkItem { [weak self] in
                     guard let self = self else { return }
@@ -1759,12 +1926,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     private func rawPressFired() {
         guard rawActive, !rawMoved, let window = window else { return }
-        if zone == .bottomRight {
+        // 0.1.0 — 「恢复默认尺寸」从右下角搬到它内侧那一格（Aevon(88) 第 2 条）。
+        // 角格现在整格是裸滑缩放，长按在那里什么都不做。
+        if zone == .bottomRightSide {
             // 0.0.69 — 只有真的动了才写这一行。已经是默认尺寸时 `resetToPlan` 回
             // false，日志里就只剩它自己那句 `already default`。
             if resetToPlan(in: window.bounds) {
-                Log.write("win: raw long press corner, 重启 as geometry reset")
+                Log.write("win: raw long press bottom-right-side, 重启 as geometry reset")
+            } else {
+                Log.write("win: raw long press bottom-right-side, already default")
             }
+            return
+        }
+        if zone == .bottomLeftSide {
+            Log.write("win: raw long press bottom-left-side, 横屏 not wired yet")
             return
         }
         // 0.0.99 — 两侧与底中：长按成立 = 开闸门。手指还在屏幕上，接下来的移动
@@ -1859,6 +2034,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         followContent()
         shield?.removeFromSuperview()
         shield = nil
+        // 0.1.0 — 环回来。停靠时 `placeDock` 把它收起了，取消停靠必须放出来，
+        // 否则「点小窗升成主窗」之后这张卡就再也没有边的热区了。
+        grip?.isHidden = false
         syncGrip()
         Log.write("win: card undocked " + size(card.bounds.size)
                   + " at " + point(card.frame.origin)
@@ -2205,11 +2383,21 @@ final class BandRoot: UIView {
 /// 0.0.98 — 逐块问。以前只有一个宿主，`shared.touchEntry` 就是全部答案；现在屏幕
 /// 上可能同时有一主一停两块卡，各自的手势环在不同位置，必须让每一块都看见这根手指
 /// —— 谁先认领谁吞，其余原样放行。
+///
+/// 0.1.0 — **主窗排第一个**。以前这里按槽号顺序问（`everySlot`），而槽号是「谁先
+/// 开的窗」，与「谁是主窗」无关：`mainIndex` 会随着降级/取消停靠搬来搬去。于是
+/// 一个 3 号槽的停靠小窗可能比 0 号槽的主窗先被问到 —— 它的环（固定厚度 66 pt，
+/// 在 112 宽的小窗上盖出去 66 pt）把主窗那侧的手势抢走。Aevon(88) 第 3 条
+/// 「多个吸附小窗时手势很混乱、有些触发不了」就是这个。
+///
+/// 停靠小窗的手势环本版已经整圈拆掉（见 `rawTouch` 的那道早退），但顺序仍然要
+/// 定死：只靠「它自己会回 false」是隐式的，哪天小窗上又长出一点热区，这条规则
+/// 就是唯一的保险。
 @_cdecl("AevonFloatTouch")
 public func AevonFloatTouch(_ phase: Int32, _ x: Double, _ y: Double, _ stamp: Double) -> Int32 {
     let point = CGPoint(x: CGFloat(x), y: CGFloat(y))
     let when = TimeInterval(stamp)
-    for host in FloatHost.everySlot {
+    for host in FloatHost.touchOrder {
         if host.touchEntry(phase: Int(phase), at: point, stamp: when) { return 1 }
     }
     return 0
