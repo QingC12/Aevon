@@ -20,6 +20,7 @@
 //
 
 import UIKit
+import ObjectiveC
 
 @objc(AevonPanelController)
 final class PanelController: PSListController {
@@ -33,8 +34,10 @@ final class PanelController: PSListController {
         super.init(nibName: nil, bundle: nil)
     }
 
+    /// 0.1.38 — 返 nil，不 `fatalError`：设置面板被 nib 反序列化时宁可空一页，
+    /// 也不该把 Preferences 进程打死。
     required init?(coder: NSCoder) {
-        fatalError("PanelController is created in code only")
+        return nil
     }
 
     // MARK: Lifecycle
@@ -244,8 +247,15 @@ final class PanelController: PSListController {
                   let key = row.property(forKey: "key") as? String else { continue }
             if key == "@ring.summary" || key == "@ring.host"
                 || key == "@ring.apps" {
-                if responds(to: NSSelectorFromString("reloadSpecifier:")) {
-                    _ = perform(NSSelectorFromString("reloadSpecifier:"), with: row)
+                let sel = NSSelectorFromString("reloadSpecifier:")
+                // 0.1.38 — 不再用 `perform(_:with:)`。它把返回值当对象交给自动
+                // 释放池，而 `reloadSpecifier:` 返回 void：那一格寄存器里是上一
+                // 条指令留下的垃圾，被 autorelease 就是一次野指针。按真实签名
+                // 调 IMP，返回值根本不碰。
+                if responds(to: sel), let method = class_getInstanceMethod(type(of: self), sel) {
+                    typealias Reload = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+                    let call = unsafeBitCast(method_getImplementation(method), to: Reload.self)
+                    call(self, sel, row)
                 } else {
                     reload()
                     return

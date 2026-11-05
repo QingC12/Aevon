@@ -793,7 +793,8 @@ private final class PanelRowView: UIView {
         }
     }
 
-    required init?(coder: NSCoder) { fatalError("not used") }
+    /// 0.1.38 — 同上：反序列化路径上宁可返回 nil，也不要终止进程。
+    required init?(coder: NSCoder) { return nil }
 
     func setHeader(_ title: String, visible: Bool) {
         headerMode = visible
@@ -869,7 +870,8 @@ private final class PanelAppCell: UIControl {
         addSubview(label)
     }
 
-    required init?(coder: NSCoder) { fatalError("not used") }
+    /// 0.1.38 — 同上：反序列化路径上宁可返回 nil，也不要终止进程。
+    required init?(coder: NSCoder) { return nil }
 
     override var isHighlighted: Bool {
         didSet {

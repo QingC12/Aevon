@@ -132,8 +132,12 @@ final class AevonRingIcon: UIView {
         }
     }
 
+    /// 0.1.38 — 返 nil，不 `fatalError`。这个类只由代码创建，走到这里说明系统
+    /// 在按 nib 反序列化它；那条路上 Swift 的 `fatalError` 会直接终止进程，而
+    /// 这里跑在 SpringBoard 里 —— 那就是一次安全模式。返 nil 只是「这个视图没
+    /// 加载出来」，系统会当作普通失败。
     required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+        return nil
     }
 
     /// 当前是否处于高亮态（避免手指每移一帧就重写一遍 layer 属性）
@@ -863,8 +867,12 @@ final class AevonRingMenu: UIView {
         addSubview(centerGlyph)
     }
 
+    /// 0.1.38 — 返 nil，不 `fatalError`。这个类只由代码创建，走到这里说明系统
+    /// 在按 nib 反序列化它；那条路上 Swift 的 `fatalError` 会直接终止进程，而
+    /// 这里跑在 SpringBoard 里 —— 那就是一次安全模式。返 nil 只是「这个视图没
+    /// 加载出来」，系统会当作普通失败。
     required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+        return nil
     }
 
     deinit {

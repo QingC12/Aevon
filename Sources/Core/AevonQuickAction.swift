@@ -179,7 +179,10 @@ enum AevonQuickAction {
             AevonLog.warn("[快捷] sharedApplication 不可达 → 走自抓帧（AevonShotMgrV268）")
             return false
         }
-        if let mgr = sb.value(forKey: "screenshotManager") as? NSObject {
+        // 0.1.38 — 不再裸走 KVC。`value(forKey:)` 碰到没声明的键会抛
+        // `NSUndefinedKeyException`，而 Swift 接不住 ObjC 异常：这一句写在
+        // SpringBoard 里，异常一穿就进安全模式。改读运行时方法表，见 AevonSafe。
+        if let mgr = AevonSafe.object(sb, "screenshotManager") {
             let sel = NSSelectorFromString("saveScreenshotsWithCompletion:")
             if let m = class_getInstanceMethod(type(of: mgr), sel),
                let rawTypes = method_getTypeEncoding(m) {

@@ -1095,13 +1095,16 @@ final class RingHost: NSObject {
         return unmanaged.takeUnretainedValue() as? NSObject
     }
 
-    /// `responds(to:)` first, then KVC: `value(forKey:)` on a key the object does
-    /// not have raises, and this runs in SpringBoard on a timer.
+    /// The old version asked `responds(to:)` and then ran KVC. That guard is
+    /// not enough: a class that forwards answers YES and `value(forKey:)` still
+    /// raises, and an ObjC exception crossing Swift frames kills the process —
+    /// this runs in SpringBoard on a timer, so that is safe mode.
+    ///
+    /// 0.1.38 — `AevonSafe.flag` reads the getter through its IMP instead: if
+    /// the method exists the call cannot raise, and if it does not the answer is
+    /// simply "off", which is what every caller here wants anyway.
     private func boolValue(_ object: NSObject?, _ key: String) -> Bool {
-        guard let object = object,
-              object.responds(to: NSSelectorFromString(key)),
-              let value = object.value(forKey: key) as? NSNumber else { return false }
-        return value.boolValue
+        AevonSafe.flag(object, key)
     }
 
     /// 0.1.18 — tick 有两档速度。

@@ -1846,10 +1846,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// The screen's own corner radius, asked for at runtime. roothide's SpringBoard
     /// answers `_displayCornerRadius`; a device that does not gets the value every
     /// full-screen iPhone since the X has used, which is close enough to look right.
+    ///
+    /// 0.1.38 — 读法换成 `AevonSafe.object`：`value(forKey:)` 在 Swift 里抛的
+    /// 异常接不住，而这一句跑在 SpringBoard 主线程上（首帧就要问一次角半径）。
     private static func deviceCorner() -> CGFloat {
-        let selector = NSSelectorFromString("_displayCornerRadius")
-        if UIScreen.main.responds(to: selector),
-           let value = UIScreen.main.value(forKey: "_displayCornerRadius") as? NSNumber,
+        if let value = AevonSafe.object(UIScreen.main, "_displayCornerRadius") as? NSNumber,
            value.doubleValue > 1 {
             return CGFloat(value.doubleValue)
         }

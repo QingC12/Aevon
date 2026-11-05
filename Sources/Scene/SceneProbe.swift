@@ -1122,7 +1122,13 @@ zStackParticipantDidChange:
 
     private static func hungSnap(_ tag: String, _ bundle: String) {
         let scene = sceneFor(bundle)
-        let cs = scene.flatMap { value(of: $0, "contentState") as? NSNumber }?.intValue ?? -1
+        // 0.1.38 — `contentState` 走整数 ABI，不再走 `perform`。
+        //
+        // 这一列是「App 看着卡住」的现场，而它自己把 SpringBoard 打死了：
+        // `contentState` 返回的是枚举整数，`perform` 把它当对象交回来，Swift
+        // 随即 retain 指针 0x2 ⇒ 安全模式。诊断代码绝不允许成为崩溃原因，
+        // 所以这里改成按返回类型编码调 IMP；读不到仍是 -1，与「读到 0」分得开。
+        let cs = scene.map { integer(of: $0, "contentState") } ?? -1
         let fg = scene.flatMap { value(of: $0, "settings") }
             .map { AevonBoolOf($0, "isForeground") } ?? -1
         Log.write(String(format: "win: hung snap %@ cs=%d fg=%d up=%d",
@@ -2045,10 +2051,64 @@ zStackParticipantDidChange:
         }
     }
 
+    /// Object-returning getter, and **only** an object-returning one.
+    ///
+    /// 0.1.38 — this is the call that put the phone into safe mode, five times
+    /// in one afternoon. `hungSnap` asked for `contentState`, which returns
+    /// `FBSceneContentState`: a plain integer (2 = ready). `perform(_:)` hands
+    /// that back as an `id`, and the very next retain — `swift_unknownObjectRetain`
+    /// — dereferences pointer 0x2. The crash report says exactly that:
+    /// `EXC_BAD_ACCESS / SIGSEGV, KERN_INVALID_ADDRESS at 0x2`, on SpringBoard's
+    /// main thread. `responds(to:)` cannot help: it answers "does it have this
+    /// selector", never "what does it return".
+    ///
+    /// The rule now lives in `AevonSafe`, which every binary shares, so the two
+    /// halves cannot drift apart again.
     private static func value(of object: NSObject, _ key: String) -> NSObject? {
+        AevonSafe.object(object, key)
+    }
+
+    /// The first real character of a method's return type, or nil when the
+    /// method cannot be found. Qualifiers (`r` const, `n` in, `o` out, `N` inout,
+    /// `R` byref, `V` oneway) may sit in front of it and are skipped.
+    ///
+    /// Deliberately class-only: an object that answers through message
+    /// forwarding has no method here, and refusing is the right answer for a
+    /// probe — one missing column beats one dead SpringBoard.
+    private static func returnKind(_ object: NSObject, _ sel: Selector) -> Character? {
+        guard let method = class_getInstanceMethod(type(of: object), sel),
+              let types = method_getTypeEncoding(method) else { return nil }
+        var body = Substring(String(cString: types))
+        while let first = body.first, "rnNoORV".contains(first) { body = body.dropFirst() }
+        return body.first
+    }
+
+    /// A scalar-returning getter, read through the ABI instead of `perform`.
+    ///
+    /// Every integer return comes back in x0 on arm64, so one `UInt64`-shaped
+    /// call covers `Q q I i L l C c S s B`; the width is then cut by the
+    /// encoding so a 32-bit return cannot pick up junk from the high half.
+    /// Structs, floats and objects are refused — -1 stays "could not read",
+    /// which is a different answer from 0.
+    private static func integer(of object: NSObject, _ key: String) -> Int {
         let sel = NSSelectorFromString(key)
-        guard object.responds(to: sel) else { return nil }
-        return object.perform(sel)?.takeUnretainedValue() as? NSObject
+        guard object.responds(to: sel),
+              let method = class_getInstanceMethod(type(of: object), sel),
+              let kind = returnKind(object, sel) else { return -1 }
+        guard "QqIiLlCcSsB".contains(kind) else { return -1 }
+        let call = unsafeBitCast(method_getImplementation(method),
+                                 to: (@convention(c) (AnyObject, Selector) -> UInt64).self)
+        let wide = call(object, sel)
+        switch kind {
+        case "Q", "q", "L", "l": return Int(bitPattern: UInt(truncatingIfNeeded: wide))
+        case "I": return Int(wide & 0xFFFF_FFFF)
+        case "i": return Int(Int32(truncatingIfNeeded: wide))
+        case "S": return Int(wide & 0xFFFF)
+        case "s": return Int(Int16(truncatingIfNeeded: wide))
+        case "C", "B": return Int(wide & 0xFF)
+        case "c": return Int(Int8(truncatingIfNeeded: wide))
+        default: return -1
+        }
     }
 
     /// Answers -1 for "no such method" and -1 for "not a list", which keeps a

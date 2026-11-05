@@ -309,3 +309,59 @@ enum AevonWindowManager {
         return RingIcons.item(for: bundleID)?.name ?? bundleID
     }
 }
+
+/// Reading a private property without the two ways this normally kills a phone.
+///
+/// 0.1.38 — written after the safe-mode report. Two assumptions were wrong in
+/// the same place:
+///
+///   ① **`value(forKey:)` can raise, and Swift cannot catch it.** A key the
+///      class does not have ends in `valueForUndefinedKey:`, whose default
+///      raises `NSUndefinedKeyException`. `@try` exists only in ObjC here, so
+///      the exception unwinds through Swift frames and takes the process with
+///      it — in SpringBoard that is safe mode.
+///   ② **`responds(to:)` is not the guard it looks like.** A class that
+///      forwards answers YES and then raises anyway, so "it said yes" proves
+///      nothing about the value.
+///
+/// Asking the runtime for the method itself cannot be wrong: if the method is
+/// there, calling it cannot raise; if it is not, nil is the honest answer. The
+/// IMP is cast to the shape the encoding promises, so nothing gets autoreleased
+/// behind our back — which is the other half of the 0.1.35 crash.
+enum AevonSafe {
+    /// The first real character of a return type, after `r n N o O R V`.
+    private static func kind(_ target: NSObject, _ sel: Selector) -> Character? {
+        guard let method = class_getInstanceMethod(type(of: target), sel),
+              let types = method_getTypeEncoding(method) else { return nil }
+        var body = Substring(String(cString: types))
+        while let first = body.first, "rnNoORV".contains(first) { body = body.dropFirst() }
+        return body.first
+    }
+
+    /// An object-returning getter. Nil when the method is absent, when it
+    /// returns a scalar (the 0.1.35 crash: `contentState` is an integer), and
+    /// when the value simply is nil.
+    ///
+    /// `perform` is fine **once the return type is known to be an object** —
+    /// that is the whole point of the guard above it. It only misbehaves when
+    /// the method hands back a number, which is exactly what the encoding check
+    /// rejects.
+    static func object(_ target: NSObject?, _ key: String) -> NSObject? {
+        guard let target = target else { return nil }
+        let sel = NSSelectorFromString(key)
+        guard let found = kind(target, sel), found == "@" || found == "#" else { return nil }
+        return target.perform(sel)?.takeUnretainedValue() as? NSObject
+    }
+
+    /// A numeric getter read as a boolean. -1 is never returned: a missing
+    /// method is `false`, because every caller here treats "absent" as "off".
+    static func flag(_ target: NSObject?, _ key: String) -> Bool {
+        guard let target = target else { return false }
+        let sel = NSSelectorFromString(key)
+        guard let found = kind(target, sel), "QqIiLlCcSsB".contains(found),
+              let method = class_getInstanceMethod(type(of: target), sel) else { return false }
+        typealias Call = @convention(c) (AnyObject, Selector) -> UInt64
+        let call = unsafeBitCast(method_getImplementation(method), to: Call.self)
+        return call(target, sel) != 0
+    }
+}

@@ -1221,9 +1221,44 @@ static void AevonPagerStats(UIScrollView *view, CGFloat box,
 /// 「这一行多高」，**不重建单元格、不动数据源**（所以正在播的那一帧不会重来）。
 /// 这两句包在 `performWithoutAnimation:` 里，改高度不带动画；外面套 `@try` ——
 /// 万一 App 正好在自己的更新里，抛异常的是我们，不该是它。
+/// 0.1.38 — 一次只准花 30 ms，超了就永久闭嘴。
+///
+/// 抖音那次不是崩溃，是看门狗强杀：`0x8BADF00D scene-update watchdog …
+/// exhausted real time allowance of 10.00 seconds`。`beginUpdates/endUpdates`
+/// 要整张表把每一次 cell 动画与递归布局**同步**跑完才会返回，feed 那种量级的
+/// 表跑过 10 秒，系统于是判定「这个 scene 十秒没更新」并杀进程。
+///
+/// 这条函数只是「让页高重新量一次」的辅助手段，值不上一次强杀。三道闸：
+///
+///   ① **事前**：手势/惯性/编辑中不发（那时布局本来就在跑，插一脚只是把同一次
+///      布局拉长一倍）；表格不在窗口上不发；表长超过 12 屏不发 —— 一页高度需
+///      要校正的场合都是短表，而长表正是最贵的那一类。
+///   ② **事中**：记一次耗时。小表第一次跑一两毫秒，照旧用；一旦在**任何**一张
+///      表上超过 30 ms，这张牌打掉，本次启动内不再赌第二次（`…Dead`）。
+///   ③ **事后**：异常一律吞掉，绝不把异常带回 App 的布局链。
+static int AevonTableRemeasureDead = 0;
+static int AevonTableRemeasureNotes = 0;
+
 static BOOL AevonTableRemeasure(UITableView *table) {
     if (table == nil) return NO;
+    if (AevonTableRemeasureDead) return NO;
     if ([table numberOfSections] < 1) return NO;
+    if ([table window] == nil) return NO;
+    if ([table isTracking] || [table isDragging] || [table isDecelerating]) return NO;
+    if ([table isEditing]) return NO;
+    CGRect box = [table bounds];
+    CGFloat span = [table contentSize].height;
+    if (box.size.height > 1.0 && span > box.size.height * 12.0) {
+        if (AevonTableRemeasureNotes < 3) {
+            AevonTableRemeasureNotes += 1;
+            char skip[160];
+            snprintf(skip, sizeof(skip), "remeasure skip span=%.0f box=%.0f",
+                     span, box.size.height);
+            AevonPageWrite(skip);
+        }
+        return NO;
+    }
+    CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
     BOOL began = NO;
     @try {
         [UIView performWithoutAnimation:^{
@@ -1234,14 +1269,30 @@ static BOOL AevonTableRemeasure(UITableView *table) {
         began = NO;
     }
     if (!began) return NO;
+    BOOL finished = NO;
     @try {
         [UIView performWithoutAnimation:^{
             [table endUpdates];
         }];
-        return YES;
+        finished = YES;
     } @catch (NSException *two) {
-        return NO;
+        finished = NO;
     }
+    double cost = (CFAbsoluteTimeGetCurrent() - started) * 1000.0;
+    if (cost > 30.0) {
+        AevonTableRemeasureDead = 1;
+        char slow[176];
+        snprintf(slow, sizeof(slow), "remeasure slow %.0fms cls=%s gone for this boot",
+                 cost, class_getName([table class]));
+        AevonPageWrite(slow);
+    } else if (AevonTableRemeasureNotes < 6) {
+        AevonTableRemeasureNotes += 1;
+        char took[160];
+        snprintf(took, sizeof(took), "remeasure %.1fms cls=%s rows=%ld",
+                 cost, class_getName([table class]), (long)[table numberOfRowsInSection:0]);
+        AevonPageWrite(took);
+    }
+    return finished;
 }
 
 static NSInteger AevonPagerRebuild(const char *reason) {
