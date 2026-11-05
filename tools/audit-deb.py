@@ -777,8 +777,21 @@ def main():
                       # （Aevon(86) 那次是 116 秒 ⇒ 不能说「写入点着了风暴」）；
                       # `where=` 是主线程此刻所在模块的 basename（dladdr 得到）——
                       # UIKitCore 与 AwemeCore 意味着完全相反的结论。
-                      b"app: hang step=%d sub=%d d=%d hook=%d cost=%.0fms w=%.0fs top=%d:%d where=%.20s c=%04lx b=%04lx",
-                      b"app: hang pc=%lx",
+                      b"app: hang step=%d sub=%d d=%d hook=%d cost=%.0fms w=%.0fs top=%d:%d where=%.20s c=%04lx b=%04lx cpu=%d st=%d gap=%.0fms th=%d mem=%ldMB off=%d quiet=%d",
+                      # 0.1.2 — `pc=` 从裸地址改成 `模块+偏移`（`%s`），因为裸地址
+                      # 只能靠「落在哪个镜像」去推，推不出函数名；85/86 两份日志里的
+                      # `291e6…` 连镜像都读不出来（PAC 签名没抹掉）。
+                      b"app: hang pc=%s",
+                      # 0.1.2 — 全部线程各自的落点。主线程卡在 CA 提交里这一条记录，
+                      # 只有在「别的线程是不是也在等我们」时才有结论。
+                      b"app: hang threads=%d",
+                      # 0.1.2 — 两个取证开关的读数。没有这两行，一份日志分不清
+                      # 「开关开着但没生效」和「开关根本没编译进去」：
+                      #   `probe mode` = 进程启动时那一行（mainOnly / quiet / bundle）；
+                      #   `probe offmain n= quiet n=` = 子线程上进来的钩子次数（非 0
+                      #   就证明抖音确实在子线程排版）与被静默模式挡下的次数。
+                      b"probe mode mainOnly=%d quiet=%d bundle=%.60s",
+                      b"probe offmain n=%d quiet n=%d",
                       b"app: base=%lx",
                       b"video reset on foreground",
                       # 0.0.84 — 抬高从「呈现」这一声开始，不再等心跳相位。
@@ -1194,6 +1207,15 @@ def main():
                   # 的窗口尺寸变化（`scene nudge`）。缺任何一条，抖音那一侧就还是
                   # 「量了也看不见」。
                   b"win: app log lines=",
+                  # 0.1.2 — 宿主第一次「听懂」App 的求救。Aevon(90) 里抖音自己写了
+                  # 8 条 `app: hang`，宿主每 2 秒读走、只数行数、随后丢掉 ——
+                  # 卡死的前 85 秒我们一条证词都没有。这三条是这一轮的判据：
+                  #   `app hang echo` = 把 App 的原话转写进主日志（时间轴对齐）；
+                  #   `app hung n=/total=/silent=` = 卡了几行、累计多少、心跳静默几秒；
+                  #   `hung snap` = 卡死期间宿主侧现场（每 2 秒一条，5 条）。
+                  b"win: app hang echo ",
+                  b"win: app hung n=",
+                  b"win: hung snap %@ cs=",
                   # 0.0.75 — 关卡之后 4 s 再取一次。Aevon(65) 缺的正是这一段：
                   # App 真正按 932 重排是在用户回到全屏那一刻，而那时的读数一条
                   # 都没取回来（关卡那一拍只取到 3 行，之后 12 s 的 `state` 全在

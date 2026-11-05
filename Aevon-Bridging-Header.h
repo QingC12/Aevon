@@ -134,6 +134,17 @@ CGRect AevonSceneFrameOf(id _Nullable scene);
 /// 返回并入的行数：-2 找不到容器、-3 内容不是 UTF-8、0 没有新内容。
 NSInteger AevonDrainAppLog(NSString *_Nullable bundleID, long cap);
 
+/// 0.1.2 — 同一趟读取的「原文」版本。
+///
+/// 宿主每 2 秒把 App 的日志读走并清空，原先只数行数 —— 于是抖音自己写下的
+/// `app: hang`（"我的主线程 2 秒没动了"）在宿主侧一个字都看不见，Aevon(90) 里
+/// 整整 85 秒没人发现卡死。这一条把原文交回来，宿主用它可以做两件事：
+/// 把证词转写进主日志（两条时间轴对齐），以及数「卡了多久」。
+///
+/// 返回 nil = 找不到容器 / 不是 UTF-8；空串 = 没有新内容。副作用（并入主日志 +
+/// 清空原文件）与 `AevonDrainAppLog` 完全一致，两个函数不要同时调。
+NSString *_Nullable AevonDrainAppLogText(NSString *_Nullable bundleID, long cap);
+
 /// 那份文件在哪。取不到容器返回 nil —— 日志里要能区分「没写」和「没找到」。
 NSString *_Nullable AevonAppLogPathOf(NSString *_Nullable bundleID);
 

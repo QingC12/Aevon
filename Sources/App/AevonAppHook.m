@@ -149,6 +149,50 @@ static volatile sig_atomic_t AevonVideoLaneNow = -1;
 /// 它要回答的是「主线程还在不在跑这个队列」，不是「某个功能还在不在工作」。
 static volatile sig_atomic_t AevonMainBeat = 0;
 
+// MARK: - 0.1.2 取证开关（写死在代码里，不进设置界面）
+
+/// 0.1.2 — 这一版只取证，不救人。两个开关都**默认打开**，并且写死在代码里：
+/// 多一个界面开关就多一个「这次到底跑的是哪一种」的变量，而这次要回答的问题
+/// 只能用一次干净的对跑来问。
+///
+/// 要回答的问题（用户原话）：「是不是我们改了视频自动居中才让抖音卡死？」
+/// 抖音自己的主线程卡在 QuartzCore 的同一个地址 178 秒，我们全程没写过（`w=164s`），
+/// 但那只是「这一拍没写」，不等于「我们从来没碰坏它」。所以这一版做两件事：
+///
+///   · `AevonProbeMainOnly` = 1：钩子体**只在主线程干活**。Aevon(90) 的读数显示
+///     主线程已经停了、我们的钩子还在被叫（19 次/秒）—— 说明抖音在**别的线程**上
+///     调 `layoutSubviews`，而那些线程上我们会沿 superview 上溯、BFS 扫上百个视图、
+///     走下标链、`convertRect:`。其它 App 都在主线程排版，所以只有抖音踩得到。
+///   · `AevonProbeQuietBundles`：名单里的 App **只装钩子、数数、什么都不做**。
+///     钩子照挂（这样 `off=` 读数才有来源），但扫描、认页、写入、延后写全部跳过。
+///     几何一点都不碰 = 最干净的对照组。
+///
+/// 下一次日志里判据很硬：
+///   · 还是卡 → 不是我们的几何改动（`off=`/`quiet=` 也在读数里，能证明开关真的生效了）；
+///   · 不卡了 → 就是我们那条写入（或子线程上的扫描），下一步再二分是哪一个。
+static const int AevonProbeMainOnly = 1;
+static const char *AevonProbeQuietBundles[] = { "com.ss.iphone.ugc.Aweme", NULL };
+static int AevonProbeQuiet = -1;             // -1 = 还没判 / 0 = 否 / 1 = 是
+static volatile sig_atomic_t AevonProbeOffMain = 0;   // 子线程上进来的钩子次数
+static volatile sig_atomic_t AevonProbeQuietN = 0;    // 被静默模式挡下的钩子次数
+static int AevonProbeShownOff = 0;
+static int AevonProbeShownQuiet = 0;
+
+/// 本进程是不是「只数数、不碰几何」的那一类。
+/// 只在第一次调用时读一次 bundle id：之后连字符串比较都不做。
+static int AevonProbeQuietNow(void) {
+    if (AevonProbeQuiet >= 0) return AevonProbeQuiet;
+    AevonProbeQuiet = 0;
+    NSString *b = [[NSBundle mainBundle] bundleIdentifier];
+    const char *mine = b != nil ? [b UTF8String] : NULL;
+    if (mine != NULL) {
+        for (int i = 0; AevonProbeQuietBundles[i] != NULL; i++) {
+            if (strcmp(mine, AevonProbeQuietBundles[i]) == 0) { AevonProbeQuiet = 1; break; }
+        }
+    }
+    return AevonProbeQuiet;
+}
+
 static int AevonEverHosted = 0;
 
 /// The switch in Settings. Absent means on: the feature is the reason the card
@@ -2797,6 +2841,24 @@ static void AevonLayoutHookBody(id self, SEL _cmd) {
     IMP orig = AevonLayoutOriginalFor(object_getClass(self));
     if (orig != NULL) ((void (*)(id, SEL))orig)(self, _cmd);
     AevonSub = AEVON_SUB_ORIG_END;
+    // 0.1.2 — **主线程门**。Aevon(90)：主线程已经停了（`alive` 不再出现），我们的
+    // 钩子却还在被叫（15 秒里 290 次）—— 那些调用只能来自别的线程。抖音有几层是
+    // 自己的渲染容器，会在子线程上排版；而下面这一整段（上溯 superview、BFS 扫视图、
+    // 走下标链、`convertRect:`）全是 UIKit 的读，UIKit 的视图树不是线程安全的。
+    // 主线程正在 `CA::Transaction::commit` 里的时候，子线程去摸同一棵树，是我方唯一
+    // 一条能碰到抖音图层树的路径。这一句把它整条切掉：子线程上只调原实现。
+    //
+    // 代价为零：钩子里真正的写入（`AevonVideoWrite`）从 0.0.92 起就只认主线程，
+    // 而主线程上的 `via=layout` 本来也只占少数（日志里绝大多数是 `via=tick`）。
+    if (![NSThread isMainThread]) {
+        AevonProbeOffMain += 1;
+        if (AevonProbeMainOnly) return;
+    }
+    // 0.1.2 — 静默对照组：名单里的 App 只数数，不认页、不扫、不写。
+    if (AevonProbeQuietNow()) {
+        AevonProbeQuietN += 1;
+        return;
+    }
     if (AevonVideoBusy) return;
     // 0.0.95 — 熔断窗口内什么都不做（原实现照跑，App 的排版不受影响）。
     if (AevonHookHold) return;
@@ -3783,12 +3845,11 @@ static void AevonPagerWatchTick(void *context) {
     // 进程若是被系统 SIGKILL（内存/看门狗，这种杀法谁都拦不住、也写不下证词），
     // 这一行就会停在某一秒上，下一次 `app: boot` 就是它的死亡时刻。
     // 上限 600 行 ≈ 10 分钟，正好是一张卡的最长寿命。
-    if (shrunk && (AevonWatchTicks % 7) == 0 && AevonAliveLines < 600) {
-        AevonAliveLines += 1;
-        char beatLine[64];
-        snprintf(beatLine, sizeof(beatLine), "alive t=%d", AevonAliveLines);
-        AevonPageWrite(beatLine);
-    }
+    //
+    // 0.1.2 — **搬走了**，见 `AevonAliveTick`。心跳原先挂在这条 0.15 s 的翻页器
+    // 守卫上，而那条链 2400 拍（6 分钟）之后会自己停（`AevonWatchDead`）—— 于是
+    // 「卡片开了 6 分钟之后主线程卡死」在这条路上**没有任何证词**，恰好把「卡了
+    // 很久才发现」的那种情况漏掉。心跳现在是一条独立链，只做一件事。
     // 0.0.80 — 1.5 s 一拍看一次「有没有浮层」。只在卡片在屏时看：全屏时窗口就是
     // 932，浮层本来就装得下，量它是白跑。
     if (shrunk) {
@@ -4138,27 +4199,97 @@ static void AevonInstallCrashNotes(void) {
 /// 加一；看门狗每 0.5 s 看一次，连续 4 次没变（2 s）就把「停在哪一句 + 主线程 PC +
 /// 调用栈」写下来。写的时候主线程不用做任何事 —— 这正是 Aevon(84) 缺的那一块：
 /// 主线程不吭声的时候，谁能替它说话。
+/// 0.1.2 — 独立心跳链（1 s 一拍）。
+///
+/// 与翻页器守卫完全解耦，因为它要回答的问题跟翻页器无关：「这个进程的主队列还
+/// 在跑吗」。三点理由：
+///   · 原链 2400 拍（6 分钟）后自停，卡片寿命却是 10 分钟 —— 后 4 分钟没有证词；
+///   · 原链是 0.15 s 一拍、每 7 拍写一行，节奏受守卫自己的开销影响；
+///   · 这一条不需要任何前置条件（翻页器、场景、卡片），构造函数里就能挂上。
+///
+/// 只在「画布比屏幕矮」（= 正被托管）时写，所以全屏运行时日志不会多一行。
+/// 上限 3600 行 ≈ 1 小时，比一张卡的寿命长得多。
+static void AevonAliveTick(void *context) {
+    (void)context;
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), NULL, AevonAliveTick);
+    CGFloat height = AevonWindowHeight();
+    UIScreen *screen = [UIScreen mainScreen];
+    CGFloat full = screen != nil ? [screen bounds].size.height : 0.0;
+    if (height < 200.0 || full < 200.0) return;
+    if (height > full - 40.0) return;
+    AevonEverHosted = 1;
+    if (AevonAliveLines < 3600) {
+        AevonAliveLines += 1;
+        char beatLine[64];
+        snprintf(beatLine, sizeof(beatLine), "alive t=%d", AevonAliveLines);
+        AevonPageWrite(beatLine);
+    }
+    // 0.1.2 — 两个开关的读数，只在变化时出声。
+    // `off=` 是「子线程上调进来的钩子次数」：非 0 就证明抖音确实在子线程排版，
+    // 那么 `AevonProbeMainOnly` 就不是保险而是必需。`quiet=` 是静默模式挡下的次数，
+    // 用来证明对照组真的生效了 —— 没有它，一次「不卡了」分不清是开关起作用还是
+    // 那次本来就不会卡。
+    int off = (int)AevonProbeOffMain;
+    int quiet = (int)AevonProbeQuietN;
+    if (off != AevonProbeShownOff || quiet != AevonProbeShownQuiet) {
+        AevonProbeShownOff = off;
+        AevonProbeShownQuiet = quiet;
+        char probe[96];
+        snprintf(probe, sizeof(probe), "probe offmain n=%d quiet n=%d", off, quiet);
+        AevonPageWrite(probe);
+    }
+}
+
 static mach_port_t AevonMainMach = MACH_PORT_NULL;
 static void *AevonImageBase = NULL;
 static volatile sig_atomic_t AevonMainSeen = -1;
 static int AevonHangLines = 0;
 static int AevonHangStale = 0;
+/// 0.1.2 — 上一拍心跳的时刻。`gap=` 就是「距上一拍多少毫秒」，它与 `w=`（距上次
+/// 写几何多少秒）是两个完全不同的钟：Aevon(90) 里 `w=164s` 说明我们 164 秒没写过，
+/// 却没有任何读数说明「主线程自己停了多久」—— 只有 `hang` 的行数能反推。
+static CFTimeInterval AevonMainBeatAt = 0.0;
 
 /// 主线程的活口链。用 `dispatch_after_f`（不是 block）：这个文件在 Theos 下
 /// 没有开 -fblocks，而且这一条链要从构造函数起一直挂着，越简单越好。
 static void AevonMainBeatTick(void *context) {
     (void)context;
     AevonMainBeat += 1;
+    // 0.1.2 — 记下这一拍的时刻。证词里多一个 `gap=`：上一拍到现在过了多少毫秒。
+    // `w=` 是「距上次写几何」，两者一个是心跳一个是写入，不能混着读。
+    AevonMainBeatAt = CFAbsoluteTimeGetCurrent();
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
                      dispatch_get_main_queue(), NULL, AevonMainBeatTick);
+}
+
+/// 0.1.2 — 把一个地址写成 `模块+偏移`。
+///
+/// Aevon(90) 的栈全是 `192f199f4` 这种裸地址，我只能按「落在哪个镜像 + 调用顺序」
+/// 去推形状，推不出函数名。`模块+偏移` 至少让两次卡死能直接对比「是不是同一个
+/// 点」，而且在任何一台同版本 iOS 上偏移都是稳定的 —— 裸地址不是（要减基址）。
+///
+/// arm64e 的代码指针带 PAC 签名，高位的签名必须抹掉再交给 `dladdr`，否则它认不出
+/// 那个地址属于哪个镜像（这正是 85/86 两份日志里 `291e6…` 读不出模块的原因）。
+static void AevonFmtAddr(char *buf, size_t cap, unsigned long long raw) {
+    unsigned long long a = raw & 0xFFFFFFFFFULL;
+    if (a == 0) { snprintf(buf, cap, "-"); return; }
+    Dl_info info;
+    if (dladdr((void *)(uintptr_t)a, &info) != 0 && info.dli_fname != NULL) {
+        const char *slash = strrchr(info.dli_fname, '/');
+        const char *base = slash != NULL ? slash + 1 : info.dli_fname;
+        unsigned long long off = a - (unsigned long long)(uintptr_t)info.dli_fbase;
+        snprintf(buf, cap, "%s+0x%llx", base, off);
+        return;
+    }
+    snprintf(buf, cap, "%llx", a);
 }
 
 /// 主线程的 PC 与前几层返回地址。
 ///
 /// 只做两件事：`thread_get_state` 读一份寄存器快照，然后顺着帧指针往上走 9 层，
 /// 每层用 `vm_read_overwrite` 读（读不到就停，不 cast、不解引用）。
-/// 拿到的是裸地址，所以构造时把本 dylib 的基址也写一行 `app: base=` ——
-/// 落到 `[base, base+size)` 里的帧就是**我们自己**的代码，其余是抖音/UIKit。
+/// 0.1.2 — 每一帧都带模块名与偏移（`AevonFmtAddr`），不再只标最上面那一帧。
 static void AevonHangStack(void) {
     if (AevonMainMach == MACH_PORT_NULL) return;
     arm_thread_state64_t st;
@@ -4167,23 +4298,56 @@ static void AevonHangStack(void) {
                          (thread_state_t)&st, &cnt) != KERN_SUCCESS) return;
     unsigned long pc = (unsigned long)__darwin_arm_thread_state64_get_pc(st);
     uint64_t fp = __darwin_arm_thread_state64_get_fp(st);
-    char line[420];
-    int n = snprintf(line, sizeof(line), "%ld app: hang pc=%lx",
-                     (long)time(NULL), pc);
+    char one[72];
+    char line[820];
+    AevonFmtAddr(one, sizeof(one), (unsigned long long)pc);
+    int n = snprintf(line, sizeof(line), "%ld app: hang pc=%s",
+                     (long)time(NULL), one);
     for (int i = 0; i < 9 && fp != 0; i++) {
-        if (n < 0 || n > (int)sizeof(line) - 24) break;
+        if (n < 0 || n > (int)sizeof(line) - 90) break;
         uint64_t rec[2] = {0, 0};
         vm_size_t got = 0;
         kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)fp,
                                              sizeof(rec), (vm_address_t)rec, &got);
         if (kr != KERN_SUCCESS || got != sizeof(rec) || rec[1] == 0) break;
-        n += snprintf(line + n, sizeof(line) - n, " %lx", (unsigned long)rec[1]);
+        AevonFmtAddr(one, sizeof(one), (unsigned long long)rec[1]);
+        n += snprintf(line + n, sizeof(line) - n, " %s", one);
         // 栈只会朝高地址走。不涨就是走到了别的帧（或者内存已经变了），停。
         if (rec[0] <= fp) break;
         fp = rec[0];
     }
     if (n > 0 && n < (int)sizeof(line) - 2) snprintf(line + n, sizeof(line) - n, "\n");
     AevonRawNote(line);
+}
+
+/// 0.1.2 — 全部线程各一行：线程号 + 它此刻停在哪个模块。
+///
+/// 一条主线程卡在 `CA::Transaction::commit` 的记录，只有在「另一个线程是不是也在
+/// 等我们」时才有结论。Aevon(90) 里主线程的 PC 178 秒没变，而我们没有任何读数
+/// 说明其它线程在干什么 —— 这条就是补它。只读寄存器，不挂起线程，代价是几十微秒。
+static void AevonHangThreads(void) {
+    thread_act_array_t list = NULL;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(mach_task_self(), &list, &count) != KERN_SUCCESS) return;
+    if (list == NULL) return;
+    char line[900];
+    char one[72];
+    int n = snprintf(line, sizeof(line), "%ld app: hang threads=%d",
+                     (long)time(NULL), (int)count);
+    for (int i = 0; i < (int)count && i < 10; i++) {
+        if (n < 0 || n > (int)sizeof(line) - 90) break;
+        arm_thread_state64_t st;
+        mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state(list[i], ARM_THREAD_STATE64,
+                             (thread_state_t)&st, &cnt) != KERN_SUCCESS) continue;
+        unsigned long pc = (unsigned long)__darwin_arm_thread_state64_get_pc(st);
+        AevonFmtAddr(one, sizeof(one), (unsigned long long)pc);
+        n += snprintf(line + n, sizeof(line) - n, " t%d=%s", i, one);
+    }
+    if (n > 0 && n < (int)sizeof(line) - 2) snprintf(line + n, sizeof(line) - n, "\n");
+    AevonRawNote(line);
+    vm_deallocate(mach_task_self(), (vm_address_t)list,
+                  (vm_size_t)(count * sizeof(thread_t)));
 }
 
 /// 0.0.97 — 主线程**此刻**停在哪一个模块里。
@@ -4217,7 +4381,10 @@ static void AevonHangWatchFire(void) {
     }
     AevonHangStale += 1;
     if (AevonHangStale < 4) return;       // 4 × 0.5 s 不动才算卡住
-    if (AevonHangLines >= 8) return;      // 一张卡最多留 8 行，够看趋势，不够撑满日志
+    // 0.1.2 — 8 → 24 行。8 行只够作证 16 秒，而 Aevon(90) 那次卡了 178 秒：写满
+    // 之后同一个进程再卡，就一个字都没有了。24 行 = 48 秒，正好覆盖「判死 40 秒」
+    // 那一档，也不会把日志撑满（每行 800 字节 × 24 ≈ 19 KB）。
+    if (AevonHangLines >= 24) return;
     AevonHangLines += 1;
     int topI = -1;
     int topN = 0;
@@ -4226,16 +4393,51 @@ static void AevonHangWatchFire(void) {
     }
     double sinceWrite = AevonLastWriteAt > 0.0
                         ? (CFAbsoluteTimeGetCurrent() - AevonLastWriteAt) : -1.0;
-    char line[320];
+    // 0.1.2 — 主线程的三个新读数。Aevon(90) 只有「PC 不变」这一条，而「阻塞在等锁」
+    // 与「在一个循环里空转」在 PC 上长得一模一样，分不开就没法决定下一步：
+    //   cpu=0 且 st=3(waiting)/4(uninterruptible) ⇒ **阻塞**（等锁、等渲染服务器）；
+    //   cpu≈100 且 st=1(running)                  ⇒ **自旋**（图层树成环、死循环）。
+    // gap= 是「距上一拍心跳多少毫秒」，直接量住主线程停了多久，不用再数 hang 行数
+    // 反推。th=/mem= 顺手把「内存压力」和「线程爆炸」这两条旁路排掉。
+    int cpu = -1, runState = -1, threads = -1;
+    thread_basic_info_data_t tb;
+    mach_msg_type_number_t tbc = THREAD_BASIC_INFO_COUNT;
+    memset(&tb, 0, sizeof(tb));
+    if (AevonMainMach != MACH_PORT_NULL &&
+        thread_info(AevonMainMach, THREAD_BASIC_INFO,
+                    (thread_info_t)&tb, &tbc) == KERN_SUCCESS) {
+        cpu = (int)(tb.cpu_usage / 10);      // 0..1000 → 0..100
+        runState = (int)tb.run_state;        // 1 running / 3 waiting / 4 uninterruptible
+    }
+    thread_act_array_t tlist = NULL;
+    mach_msg_type_number_t tcount = 0;
+    if (task_threads(mach_task_self(), &tlist, &tcount) == KERN_SUCCESS && tlist != NULL) {
+        threads = (int)tcount;
+        vm_deallocate(mach_task_self(), (vm_address_t)tlist,
+                      (vm_size_t)(tcount * sizeof(thread_t)));
+    }
+    long memMB = -1;
+    task_vm_info_data_t vm;
+    mach_msg_type_number_t vmc = TASK_VM_INFO_COUNT;
+    memset(&vm, 0, sizeof(vm));
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &vmc) == KERN_SUCCESS) {
+        memMB = (long)(vm.phys_footprint / (1024 * 1024));
+    }
+    double gapMs = AevonMainBeatAt > 0.0
+                   ? (CFAbsoluteTimeGetCurrent() - AevonMainBeatAt) * 1000.0 : -1.0;
+    char line[420];
     snprintf(line, sizeof(line),
-             "%ld app: hang step=%d sub=%d d=%d hook=%d cost=%.0fms w=%.0fs top=%d:%d where=%.20s c=%04lx b=%04lx\n",
+             "%ld app: hang step=%d sub=%d d=%d hook=%d cost=%.0fms w=%.0fs top=%d:%d where=%.20s c=%04lx b=%04lx cpu=%d st=%d gap=%.0fms th=%d mem=%ldMB off=%d quiet=%d\n",
              (long)time(NULL), (int)AevonStep, (int)AevonSub, (int)AevonDepthMax,
              (int)AevonHookCalls, AevonHookSpentAll, sinceWrite, topI, topN,
              AevonHangWhere(),
              (unsigned long)(AevonHangCell & 0xffffUL),
-             (unsigned long)(AevonHangBand & 0xffffUL));
+             (unsigned long)(AevonHangBand & 0xffffUL),
+             cpu, runState, gapMs, threads, memMB,
+             AevonProbeOffMain, AevonProbeQuietN);
     AevonRawNote(line);
     AevonHangStack();
+    AevonHangThreads();
     // 这一段 2 秒已经结算：下一行数的是新的 2 秒。
     AevonHangStale = 0;
     for (int i = 0; i < AEVON_HOOK_SLOTS; i++) AevonHookSlotN[i] = 0;
@@ -4309,6 +4511,20 @@ static void AevonAppBoot(void) {
     AevonInstallHangWatch();
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 4)),
                      dispatch_get_main_queue(), NULL, AevonMainBeatTick);
+    // 0.1.2 — 独立心跳链（1 s）。原先挂在 0.15 s 的翻页器守卫上，那条链 6 分钟后
+    // 自停 ⇒ 卡片后半程没有证词。这一条从构造起就一直挂着。
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), NULL, AevonAliveTick);
+    // 0.1.2 — 开关状态写一行。没有这一行，一份日志分不清「开关开着但没用」和
+    // 「开关根本没被编译进去」—— 这是 A/B 实验最容易翻车的地方。
+    {
+        NSString *b = [[NSBundle mainBundle] bundleIdentifier];
+        char mode[160];
+        snprintf(mode, sizeof(mode), "probe mode mainOnly=%d quiet=%d bundle=%.60s\n",
+                 AevonProbeMainOnly, AevonProbeQuietNow(),
+                 b != nil ? [b UTF8String] : "-");
+        AevonRawNote(mode);
+    }
 
     // Both getters, both chained: a process that is not hosted keeps the
     // system's answers byte for byte.

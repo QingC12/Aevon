@@ -1754,18 +1754,24 @@ NSString *AevonAppLogPathOf(NSString *bundleID) {
     return [dir stringByAppendingPathComponent:@"tmp/aevon-app.log"];
 }
 
-/// 把 App 侧写下的读数并进主日志。返回并入的行数：
-/// -2 = 找不到容器，-3 = 内容不是 UTF-8，0 = 没有新内容（正常情形）。
-/// 取完就清空，下一次开卡不会把旧的再并一遍。
-NSInteger AevonDrainAppLog(NSString *bundleID, long cap) {
+/// 0.1.2 — 同一趟读取，但把原文交还给调用者。
+///
+/// Aevon(90) 的教训：抖音在自己的日志里写了 8 条 `app: hang`，宿主每 2 秒把它们
+/// 读走、只数了个行数（`app log lines=2`），然后丢掉。于是「App 自己说它卡了」
+/// 这条最硬的证词在宿主侧完全不可见 —— 85 秒之后才靠「场景死了」发现。
+///
+/// 返回 nil = 找不到容器 / 不是 UTF-8；空串 = 没有新内容。无论哪种，主日志的并入
+/// 与清空都照旧发生（这一步不能因为返回值不同而分叉）。
+NSString *AevonDrainAppLogText(NSString *bundleID, long cap) {
     NSString *path = AevonAppLogPathOf(bundleID);
-    if (path == nil) return -2;
+    if (path == nil) return nil;
     NSData *data = [NSData dataWithContentsOfFile:path];
-    if (data.length == 0) return 0;
+    if (data.length == 0) return @"";
     NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if (text == nil) return -3;
+    if (text == nil) return nil;
     NSString *prefix = [NSString stringWithFormat:@"applog[%@]: ", bundleID];
     NSMutableString *out = [NSMutableString string];
+    NSMutableString *kept = [NSMutableString string];
     NSInteger lines = 0;
     for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
         if (line.length == 0) continue;
@@ -1773,9 +1779,14 @@ NSInteger AevonDrainAppLog(NSString *bundleID, long cap) {
         [out appendString:prefix];
         [out appendString:line];
         [out appendString:@"\n"];
+        [kept appendString:line];
+        [kept appendString:@"\n"];
         lines += 1;
     }
-    if (lines == 0) return 0;
+    if (lines == 0) {
+        [@"" writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+        return @"";
+    }
     NSData *payload = [out dataUsingEncoding:NSUTF8StringEncoding];
     int fd = open("/var/mobile/Aevon.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd >= 0) {
@@ -1790,6 +1801,20 @@ NSInteger AevonDrainAppLog(NSString *bundleID, long cap) {
         close(fd);
     }
     [@"" writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+    return kept;
+}
+
+/// 把 App 侧写下的读数并进主日志。返回并入的行数：
+/// -2 = 找不到容器，-3 = 内容不是 UTF-8，0 = 没有新内容（正常情形）。
+/// 取完就清空，下一次开卡不会把旧的再并一遍。
+NSInteger AevonDrainAppLog(NSString *bundleID, long cap) {
+    NSString *text = AevonDrainAppLogText(bundleID, cap);
+    if (text == nil) return AevonAppLogPathOf(bundleID) == nil ? -2 : -3;
+    if (text.length == 0) return 0;
+    NSInteger lines = 0;
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        if (line.length > 0) lines += 1;
+    }
     return lines;
 }
 

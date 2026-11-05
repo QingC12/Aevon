@@ -1041,14 +1041,77 @@ zStackParticipantDidChange:
     ///
     /// 这一步之前不存在，所以抖音的量尺跑了三轮、改了两次都没成：`fopen`
     /// `/var/mobile/Aevon.log` 在沙盒里必然失败，读数被我们自己丢掉了。
+    ///
+    /// 0.1.2 — 不再只数行数。Aevon(90) 里抖音自己写了 8 条 `app: hang`
+    /// （「我的主线程 2 秒没动了」），宿主每 2 秒把它们读走、数了个 `lines=2`、
+    /// 然后丢掉 —— 于是卡死在前 85 秒里，我们这边一条证词都没有，最后靠
+    /// 「场景死了」才发现。现在这一趟顺带做三件事：
+    ///   · 数 hang 行，把第一条转写成一条 `win:` 行（两条时间轴从此能对齐）；
+    ///   · 记下最后一条 `alive` 的时刻（主队列还有没有在跑）；
+    ///   · 看见 hang 就排 5 次快照（每 2 秒一次），把宿主侧的现场也留一份。
+    /// 只记录，不做任何恢复动作 —— 这一版是在查「为什么会卡」。
+    private static var hangLines = 0
+    private static var lastAliveAt = Date.distantPast
+    private static var snapsLeft = 0
+
     private static func drainAppLog(_ tag: String, quiet: Bool = false) {
         guard let bundle = hostedBundle else { return }
-        let lines = AevonDrainAppLog(bundle, 400)
+        let text = AevonDrainAppLogText(bundle, 400) ?? ""
+        var lines = 0
+        var hangs = 0
+        var alive = false
+        for row in text.split(separator: "\n") {
+            lines += 1
+            if row.contains("app: hang step=") {
+                hangs += 1
+                if hangs == 1 {
+                    Log.write("win: app hang echo " + String(row.suffix(160)))
+                }
+            } else if row.contains("app: page alive") {
+                alive = true
+            } else if row.contains("probe offmain") || row.contains("probe mode") {
+                // 开关到底有没有生效，靠这两行；它们每次只变一次，不会刷屏。
+                Log.write("win: app " + String(row))
+            }
+        }
         // 0.0.91 — 每 2 秒那一趟是常态，没有新行就不出声，否则日志会被
         // 一分钟 30 行「lines=0」灌满。
         if quiet && lines <= 0 { return }
         Log.write("win: app log lines=" + String(lines) + " from " + tag
                   + " file=" + (AevonAppLogPathOf(bundle) ?? "none"))
+        if alive { lastAliveAt = Date() }
+        guard hangs > 0 else { return }
+        hangLines += hangs
+        Log.write("win: app hung n=" + String(hangs) + " total=" + String(hangLines)
+                  + " silent=" + String(Int(Date().timeIntervalSince(lastAliveAt))) + "s")
+        if snapsLeft == 0 {
+            snapsLeft = 5
+            scheduleHungSnaps(bundle, tag)
+        }
+    }
+
+    /// 卡死期间的宿主侧现场：每 2 秒一条，5 条为止。
+    ///
+    /// App 那侧只能证明「它的主线程停了」；「我们这边看着是什么样」一条都没有 ——
+    /// Aevon(90) 里唯一的证据是 40 拍一次的 `keepalive`，粒度 8 秒，而且它全程
+    /// 显示一切正常。这一组把窗口压到 2 秒，并且和 hang 同一时刻开始。
+    private static func scheduleHungSnaps(_ bundle: String, _ tag: String) {
+        guard snapsLeft > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            guard snapsLeft > 0 else { return }
+            snapsLeft -= 1
+            hungSnap(tag, bundle)
+            if snapsLeft > 0 { scheduleHungSnaps(bundle, tag) }
+        }
+    }
+
+    private static func hungSnap(_ tag: String, _ bundle: String) {
+        let scene = sceneFor(bundle)
+        let cs = scene.flatMap { value(of: $0, "contentState") as? NSNumber }?.intValue ?? -1
+        let fg = scene.flatMap { value(of: $0, "settings") }
+            .map { AevonBoolOf($0, "isForeground") } ?? -1
+        Log.write(String(format: "win: hung snap %@ cs=%d fg=%d up=%d",
+                         tag, cs, fg, cardUp ? 1 : 0))
     }
 
     /// 0.0.91 — 被托管的 App 进程死了，卡片只剩外壳（Aevon(80) 与 Aevon(81) 的
