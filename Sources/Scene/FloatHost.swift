@@ -339,25 +339,30 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 要么窗与窗紧挨。
         let y = metrics.top + CGFloat(row) * (height + metrics.gap)
         let target = CGRect(x: x, y: y, width: width, height: height)
-        // 0.1.10 — 只有「尺寸不变、只是换行」时才动画。
+        // 0.1.26 — 尺寸也进动画。
         //
-        // 尺寸变化（刚被降级那一张，从大卡片缩成小窗）不在这里动画：它的画面
-        // 要重算 `content.transform`，两者放在同一个动画块里会出现「框缩完、
-        // 画面还在旧尺寸」的中间帧 —— 那正是 0.0.22 黑屏那一类事故的形状。
-        // 补位只是平移，尺寸一动没动，动画是安全的。
-        let sameSize = abs(card.bounds.width - width) < 0.5
-            && abs(card.bounds.height - height) < 0.5
-        if animated && sameSize && card.frame != target {
-            UIView.animate(withDuration: 0.26, delay: 0,
-                           options: [.curveEaseOut, .beginFromCurrentState]) {
-                card.frame = target
+        // 0.1.10 只在「尺寸不变、只换行」时动画，理由是「框缩完、画面还在旧尺寸」
+        // 会出现中间帧。那个中间帧的真实成因是**只**animate了 frame：`content` 的
+        // `transform` / `center` 是同一个动画块之外写的，于是各走各的。
+        //
+        // 现在两者在同一个块里：卡片走 `bounds` + `center`，画面走 `followContent`。
+        // 中间帧为什么是准的：`fitScale` 对 5:3 的画布是 `卡宽 / 画布宽` 的线性
+        // 函数，线性函数与插值可交换 —— `lerp(scale(A), scale(B), t)` 恰好等于
+        // `scale(lerp(A, B, t))`。所以每一帧画面都正好填满框，不会露边。
+        let moving = animated && card.frame != target
+        if moving {
+            AevonMotion.spring {
+                card.bounds = CGRect(origin: .zero, size: target.size)
+                card.center = CGPoint(x: target.midX, y: target.midY)
+                self.followContent()
+                self.syncGrip()
             }
         } else {
             card.frame = target
+            followContent()
         }
         // `miniFrame` **不动**：它记的是「取消停靠要回到的那个大卡片」，不是
         // 「小窗现在在哪」。在这里覆盖它，取消停靠就会回到一个小窗尺寸。
-        followContent()
         installShield()
         // 0.1.7 — **停靠小窗里那块画面不再接触摸。**
         //
@@ -384,7 +389,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         setMiniFlag(true)
         // 0.1.0 — 停靠小窗没有手势环。`syncGrip` 会按新尺寸重算环，摆完必须把
         // 它收起：环是「可操作」的意思，而小窗的定义就是不可操作。
-        syncGrip()
+        if !moving { syncGrip() }
         grip?.isHidden = true
         // 遮罩必须盖在画面之上、且吃掉整张卡片 —— 用户要的是「点小窗任何位置都
         // 还原成主窗，且不要透传到 App 里」。
@@ -1108,6 +1113,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             + " corner=" + String(format: "%.0f", card.layer.cornerRadius)
         Log.write(ring + cell + room + fit
                   + " 外侧 (四边 拖动, 左右 点吸附, 底中 上滑关, 底角 缩放, 底右内 长按复位, 底左内 横屏待落)")
+        // 0.1.26 — 入场：0.94 → 1。母本的卡片出现是 SwiftUI 的 `AnyTransition`
+        // （`.scale`/`.opacity` 组合，`AnyTransitionV5scale` / `V7opacity` /
+        // `V8combined` 三个 stub 都在），不是硬切。这里只做缩放，透明度归
+        // `revealContent` 管 —— 两件事分开，才不会「卡片先亮、画面后到」两段式。
+        var entering: [UIView] = [card]
+        if let glow = host.glow { entering.append(glow) }
+        AevonMotion.enter(entering)
         return window.isHidden ? nil : host
     }
 
@@ -1193,7 +1205,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             bandWindow = nil
             onClose = nil
             FloatHost.releaseDock(self)
-            FloatHost.relayoutDocked()
+            // 0.1.26 — 拆掉一格之后，后面几格要「滑上来」而不是瞬移。
+            FloatHost.relayoutDocked(animated: true)
             return
         }
         // 0.0.68 — 收窗时**不碰**承载视图。
@@ -1248,7 +1261,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         self.window = nil
         // 0.0.99 — 关掉的窗必须退出停靠表，否则后面的小窗会按一个空槽算位置。
         FloatHost.releaseDock(self)
-        FloatHost.relayoutDocked()
+        // 0.1.26 — 见上：补位要有过渡，不能瞬移。
+        FloatHost.relayoutDocked(animated: true)
     }
 
     private func makeWindow() -> FloatWindow? {
@@ -1410,7 +1424,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let hook = onClose
         onClose = nil
         Log.write("win: close requested by " + reason)
-        DispatchQueue.main.async { hook?(reason) }
+        // 0.1.26 — 关窗也要有过渡。原来这一拍直接回调，场景一拆卡片就没了 ——
+        // 用户看到的「关闭没有动画」就是这个。缩回 + 淡出 0.2 s，然后才交回
+        // 场景拆除；动画期间卡片不接受触摸，免得「点了关还拖了一下」。
+        var leaving: [UIView] = []
+        if let card = card { leaving.append(card) }
+        if let glow = glow { leaving.append(glow) }
+        guard leaving.isEmpty == false else {
+            DispatchQueue.main.async { hook?(reason) }
+            return
+        }
+        AevonMotion.exit(leaving) {
+            DispatchQueue.main.async { hook?(reason) }
+        }
     }
 
     // MARK: - ring
@@ -1496,6 +1522,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 两者都不会超过半张卡 —— 再大就是胶囊，不是圆角。
         let side = Swift.min(card.bounds.width, card.bounds.height)
         let radius = Swift.max(6, Swift.min(side * share, side / 2))
+        // 0.1.26 — 圆角跟着尺寸一起走。
+        //
+        // `cornerRadius` 不是 UIView 的动画属性：在 `UIView.animate` 块里改它是
+        // 硬赋值，卡片从 98×163 长回 347×578 的那 0.27 秒里，外框在动、圆角已经
+        // 跳到终点值 —— 观感是「框是软的、角是硬的」。正在一次过渡里就补一条同
+        // 时长的 `CABasicAnimation`，把这一跳盖掉。
+        if AevonMotion.inFlight, abs(card.layer.cornerRadius - radius) > 0.5 {
+            let anim = CABasicAnimation(keyPath: "cornerRadius")
+            anim.fromValue = card.layer.cornerRadius
+            anim.toValue = radius
+            anim.duration = AevonMotion.response
+            anim.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            card.layer.add(anim, forKey: "aevon.corner")
+        }
         card.layer.cornerRadius = radius
         card.layer.cornerCurve = .continuous
         card.layer.masksToBounds = true
@@ -2004,10 +2044,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.1.3 — `column` 优先：`undock` 要求「被挤下去的那张主窗落在**这一列**
         // 的最后一格」，那条规则不能交给「右列先满」去猜（点左列的窗却排到右列，
         // 就是两列开始互相借位）。
-        FloatHost.claimDock(self, preferLeft: column ?? (manual && side == .left))
-        FloatHost.relayoutDocked()
-        // 0.1.4 — 变小的这一瞬降到小窗档，否则它会继续压在主窗上面（见 `mainLevel`）。
-        applyWindowLevel()
+        //
+        // 0.1.26 — 从「落位」到「其余各格补位」是一件事，必须落在同一个 spring 里。
+        // 原来 `relayoutDocked()` 是无动画版：这一张缩成小窗有过渡，后面四张
+        // 补位却是瞬移，两者叠在同一拍里，用户看到的就是「1 的画面直接变成 2」。
+        let prefer: Bool? = column
+        AevonMotion.spring {
+            FloatHost.claimDock(self, preferLeft: prefer ?? (manual && side == .left))
+            FloatHost.relayoutDocked(animated: true)
+            // 0.1.4 — 变小的这一瞬降到小窗档，否则它会继续压在主窗上面（见 `mainLevel`）。
+            self.applyWindowLevel()
+        }
         let landed = card.frame
         let column = FloatHost.columnIndex(self)
         Log.write(String(format: "win: card docked %.0fx%.0f at %.0f,%.0f nth=%d col=%@ row=%d",
@@ -2595,67 +2642,75 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 各自独立，不互相借位。所以降级必须指定列 —— 等 `releaseDock` 之后这
         // 个信息就没了。
         let column: Bool? = FloatHost.columnIndex(self).map { !$0.right }
-        // 0.0.99 — 走了就得让位：后面的小窗要顶上来，档位也可能跨回去。
-        FloatHost.releaseDock(self)
-        // 0.0.99 — 取消停靠 = 升为主窗。多窗之后「还原来那张大卡片」不再是唯一
-        // 结果：别的槽里可能还坐着一个主窗，两张一样大的卡片会叠在一起。
+        // 0.1.26 — 「我变大 + 旧主窗变小 + 其余各格补位」是**同一件事**。
         //
-        // 0.1.1 — **这句注释在 0.0.99/0.1.0 里是空话**：那两版只把 `mainIndex`
-        // 挪过来，旧主窗原样坐在原处，于是「点小窗还原」之后屏幕上两张同样大小
-        // 的卡片摞在一起，用户看到的是「点了一下，什么都没发生」（Aevon(89) 第
-        // 2 条的另一半）。现在真的把它降级 —— 排除自己，否则刚点开的这一张会被
-        // 自己这一下缩回去。
-        // 0.1.3 — 降级目标改成「真正的主窗」，并且落到**这一列**的队尾（第 5 格）。
-        // Aevon(91) 里 `replaced=already` 出现 5 次、`replaced=self` 出现 6 次：
-        // 前者是 `mainIndex` 指着一个小窗（谁都没被降级，两张大的摞在一起），
-        // 后者是 `mainIndex` 指着正要升上来的这一张（自己被自己排除掉）。
-        // 现在这两种返回值都不该再出现 —— 它们就是这一条的判据。
-        let replaced = FloatHost.demoteMain(except: self, into: column)
-        if let index = FloatHost.slotIndex(of: self) {
-            FloatHost.mainIndex = index
+        // 用户 Aevon(108) 第 2 条：「没有卡片变为主悬浮窗的过渡」。原来这三步各自
+        // 硬写几何：`demoteMain` 里那张瞬间缩成 98×163，我自己瞬间铺成 347×578，
+        // 队列里其余几张瞬移一格 —— 一帧之内三件事同时发生，看起来就是「画面
+        // 直接换了一张」。母本用 SwiftUI 的 `withAnimation` 包住整批状态变化
+        // （74 处），所以它天然是一次过渡；这里靠 `AevonMotion.spring` 的嵌套
+        // 合并拿到同一个效果。
+        // 0.1.0 — 环必须先放出来再改几何。停靠时 `placeDock` 把它收起了；如果
+        // 在动画块里才 `isHidden = false`，那条 `grip.frame` 的动画是在「隐藏」
+        // 状态下登记的，露出来之后会跳一帧。
+        grip?.isHidden = false
+        var replaced = "none"
+        AevonMotion.spring {
+            // 0.0.99 — 走了就得让位：后面的小窗要顶上来，档位也可能跨回去。
+            FloatHost.releaseDock(self)
+            // 0.0.99 — 取消停靠 = 升为主窗。多窗之后「还原来那张大卡片」不再是
+            // 唯一结果：别的槽里可能还坐着一个主窗，两张一样大的卡片会叠在一起。
+            //
+            // 0.1.1 — **这句注释在 0.0.99/0.1.0 里是空话**：那两版只把 `mainIndex`
+            // 挪过来，旧主窗原样坐在原处，于是「点小窗还原」之后屏幕上两张同样大小
+            // 的卡片摞在一起，用户看到的是「点了一下，什么都没发生」。
+            //
+            // 0.1.3 — 降级目标改成「真正的主窗」，并且落到**这一列**的队尾（第 5 格）。
+            // Aevon(91) 里 `replaced=already` 出现 5 次、`replaced=self` 出现 6 次：
+            // 前者是 `mainIndex` 指着一个小窗（谁都没被降级，两张大的摞在一起），
+            // 后者是 `mainIndex` 指着正要升上来的这一张（自己被自己排除掉）。
+            replaced = FloatHost.demoteMain(except: self, into: column)
+            if let index = FloatHost.slotIndex(of: self) {
+                FloatHost.mainIndex = index
+            }
+            // 0.1.5 — **尺寸与位置都读全局记忆**，不再用 `miniFrame`。
+            //
+            // `miniFrame` 是「这张卡自己停靠之前长什么样」。用户的原话是：还原成
+            // 主悬浮窗时的尺寸应该是**上一个主悬浮窗**的尺寸（含位置），而不是它
+            // 吸附成小窗之前自己的那个。这也是母本的口径：`mfMainCardScale` /
+            // `mfMainCardPosX/Y` 是全局唯一的一份，不按 App 各存。
+            let bounds = window.bounds
+            let planned = self.plan(in: bounds, source: self.natural)
+            // 0.1.7 — 落点用「上一个主悬浮窗的真实 frame」，不再读按边存的百分比。
+            // 见 `lastMainFrame`：那一份会被拖动改写、还会按左右半边分两套，于是
+            // 每一次升窗落在哪儿都不一定。这里用的是上一次主窗**实际**在哪，所以
+            // 每一次都一样，而且等于用户刚放下的那张卡。
+            let target = self.clamped(FloatHost.lastMainFrame ?? planned.frame, in: bounds)
+            // 0.1.26 — `bounds` + `center`，不是 `frame`：前者是 UIView 文档里
+            // 可以安全进动画的那一对，后者会同时写 position 和 bounds，在
+            // 一次 spring 里插值出两套曲线。
+            card.bounds = CGRect(origin: .zero, size: target.size)
+            card.center = CGPoint(x: target.midX, y: target.midY)
+            FloatHost.lastMainFrame = target
+            self.followContent()
+            self.syncGrip()
+            // 0.1.10 — 补位要看得见。
+            FloatHost.relayoutDocked(animated: true)
         }
-        // 0.1.5 — **尺寸与位置都读全局记忆**，不再用 `miniFrame`。
-        //
-        // `miniFrame` 是「这张卡自己停靠之前长什么样」。用户的原话是：还原成
-        // 主悬浮窗时的尺寸应该是**上一个主悬浮窗**的尺寸（含位置），而不是它
-        // 吸附成小窗之前自己的那个。这也是母本的口径：`mfMainCardScale` /
-        // `mfMainCardPosX/Y` 是全局唯一的一份，不按 App 各存。
-        //
-        // 差别在真机上很明显：Aevon(93) 里五张卡分别回 347×578 / 319×532 /
-        // 312×520 / 301×501 / 318×530 —— 几何还是「各回各的」，所以点不同小窗
-        // 升上来的大小不一样，看着像没记住任何东西。走 `plan` 之后它们同一份。
-        let bounds = window.bounds
-        let planned = plan(in: bounds, source: natural)
-        // 0.1.7 — 落点用「上一个主悬浮窗的真实 frame」，不再读按边存的百分比。
-        // 见 `lastMainFrame`：那一份会被拖动改写、还会按左右半边分两套，于是每一次
-        // 升窗落在哪儿都不一定。这里用的是上一次主窗**实际**在哪，所以每一次都一样，
-        // 而且等于用户刚放下的那张卡。
-        let base = FloatHost.lastMainFrame ?? planned.frame
-        card.frame = clamped(base, in: bounds)
-        FloatHost.lastMainFrame = card.frame
         Log.write("win: undock read last main frame "
                   + point(card.frame.origin) + " " + size(card.frame.size))
-        followContent()
         shield?.removeFromSuperview()
         shield = nil
         // 0.1.7 — 画面重新可操作（小窗那条锁在 `placeDock` 里上）。
         content?.isUserInteractionEnabled = true
         // 0.1.8 — 标记必须在几何恢复之后立刻撤掉：留在里面等于「App 永远收不到触摸」。
         setMiniFlag(false)
-        // 0.1.0 — 环回来。停靠时 `placeDock` 把它收起了，取消停靠必须放出来，
-        // 否则「点小窗升成主窗」之后这张卡就再也没有边的热区了。
-        grip?.isHidden = false
-        syncGrip()
         Log.write("win: card undocked " + size(card.bounds.size)
                   + " at " + point(card.frame.origin)
                   + " promoted=" + bundle
                   + " col=" + (column == nil ? "none" : (column! ? "L" : "R"))
                   + " replaced=" + replaced
                   + String(format: " mem=%.0f%%", CardLayout.loadRuntime().heightFraction * 100))
-        // 0.1.10 — 补位要看得见：传 true 让后面每一格滑上去一格（用户 Aevon(97) 第 2 条）。
-        // 只有升窗这条路传 true：停靠、拆窗、复位这些地方画面上本来就在变，
-        // 再叠一层位移动画只会让「点了之后要等一下」的感觉更重。
-        FloatHost.relayoutDocked(animated: true)
     }
 
     // MARK: - geometry
@@ -2802,12 +2857,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return false
         }
         CardLayout.reset()
-        card.frame = clamped(frame, in: bounds)
         miniFrame = nil
+        // 0.1.26 — 复位是「一次状态变化」：尺寸与位置一起走同一个 spring。
+        // 原来这一句是硬赋值，长按之后卡片「啪」地换了个大小 —— 用户要的
+        // 「移动/复位动画」就是这一句。
+        let target = clamped(frame, in: bounds)
+        AevonMotion.spring {
+            card.bounds = CGRect(origin: .zero, size: target.size)
+            card.center = CGPoint(x: target.midX, y: target.midY)
+            self.followContent()
+            self.syncGrip()
+        }
         shield?.removeFromSuperview()
         shield = nil
-        followContent()
-        syncGrip()
         Log.write(String(format: "win: card reset to %.0fx%.0f at %.0f,%.0f",
                          card.bounds.width, card.bounds.height,
                          card.frame.origin.x, card.frame.origin.y))

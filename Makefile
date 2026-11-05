@@ -22,7 +22,7 @@ include $(THEOS)/makefiles/common.mk
 # core, because the disc's two action slots live in the editor and the menu —
 # both binaries — and AevonCompat is the seam layer the ported files call into.
 AE_CORE := Sources/Core/Paths.swift Sources/Core/Log.swift Sources/Core/Gate.swift \
-           Sources/Core/CardLayout.swift \
+           Sources/Core/CardLayout.swift Sources/Core/AevonMotion.swift \
            Sources/Core/AevonCompat.swift Sources/Core/AevonQuickAction.swift \
            Sources/Core/AevonRecProbe.swift
 

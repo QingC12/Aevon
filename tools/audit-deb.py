@@ -553,7 +553,17 @@ def main():
                   b"AevonRingUnfoldV323", b"AevonQuickScreenshotV262",
                   b"AevonQuickRecordingV262", b"RingSpringDamping",
                   b"AevonRingMultiRing", b"AevonRingHoldRotateV28",
-                  b"AevonRingPointerHandoffV216"):
+                  b"AevonRingPointerHandoffV216",
+                  # 0.1.26 — 悬浮窗动效（Aevon(108) 第 1~3 条）。
+                  #
+                  # 这条格式串只在 `AevonMotion.spring` **第一次真的被调用**时才
+                  # 打出去，所以它证明的不是「模块编进去了」，而是「有代码在调
+                  # 它」：`-dead_strip` 会把没有任何调用点的函数连同它的字面量一起
+                  # 剥掉 —— 0.1.24 的 `ring: expanded (` 就是这样在 CI 挂掉的。
+                  #
+                  # 反过来说：这条 MISS，就说明升窗 / 停靠 / 复位里至少有一条路
+                  # 又回到了「硬写几何、没有过渡」的老样子。
+                  b"win: motion spring response="):
         if token not in dylib_early:
             bad(f"host: {token.decode(errors='replace')} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")
