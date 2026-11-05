@@ -44,10 +44,33 @@ enum AevonMotion {
     /// `response = 0.3 / k`。0.2 是下限，防止滑条到底时算出十几秒的动画。
     static var response: TimeInterval { TimeInterval(0.3 / Swift.max(0.2, elasticity)) }
 
-    /// 卡片入场/出场时缩到的比例。母本用 SwiftUI 的 `.scale` 过渡，默认锚点
-    /// 是中心、默认比例 0（`AnyTransition.scale` 的语义）。0 会让整张卡在
-    /// 第一帧「从无到有」，观感上是一次跳变；0.94 才是「弹出来」。
-    static let enterScale: CGFloat = 0.94
+    /// 卡片入场起点。母本用 SwiftUI 的 `.scale` 过渡，默认锚点是中心、默认
+    /// 比例 0（`AnyTransition.scale` 的语义）。0 会让整张卡在第一帧「从无到
+    /// 有」，观感上是一次跳变。
+    ///
+    /// 0.1.28 — 从 0.94 改成 0.74，这一条是「Q 弹」能不能看见的唯一开关。
+    /// 关键不是阻尼，是**行程**：弹簧的过冲幅度是相对「起点→终点」这段行程
+    /// 的比例，不是相对终值的比例。ζ=0.42 的过冲约 25 %，0.94→1 的行程只有
+    /// 6 %，弹出去 1.5 % —— 那是像素级的抖动，肉眼看不见；0.74→1 的行程
+    /// 26 %，同样阻尼下峰值到 1.06，才是「弹一下」。
+    static let enterScale: CGFloat = 0.74
+
+    /// 入场弹簧。母本那一套是过阻尼（damping 1.1）、不回弹；入场单独用一条
+    /// 欠阻尼曲线，这是唯一一处有意偏离母本的地方 —— 它换的不是观感风格，
+    /// 是「这个窗口刚被放到屏幕上」这件事本身要有分量。
+    ///
+    /// 0.44 s 比母本的 0.27 s 长：弹簧要跑完一个完整的「冲过头 → 回落」才
+    /// 叫弹，压缩时长只会把回落砍掉（UIKit 在 duration 到点时直接吸附终值，
+    /// 那就是一次硬跳）。
+    static let enterDuration: TimeInterval = 0.44
+    static let enterDamping: CGFloat = 0.42
+    /// 初速度（1.0 = 一秒走完全程）。0.5 让前段更冲，弹的感觉从起手就有。
+    static let enterVelocity: CGFloat = 0.5
+
+    /// 出场（关窗）。0.1.28 — 时间从 0.2 s 压到 0.17 s：关闭是「快走」，
+    /// 慢一点都不如不关。ease-in 让收缩由慢到快，像被吸走而不是自己躺下去。
+    static let exitDuration: TimeInterval = 0.17
+    static let exitScale: CGFloat = 0.82
 
     // MARK: - 合并
 
@@ -136,30 +159,64 @@ enum AevonMotion {
     /// 出场（关窗）：缩回 + 淡出，然后才把窗口拆掉。
     ///
     /// 不用 `spring` 的默认时长：母本关窗是「消失」，过阻尼的 0.27 s 收尾放在
-    /// 关闭上会显得拖。0.2 s 的 ease-out 与 0.27 s 的 spring 在肉眼上是同一档。
+    /// 关闭上会显得拖。0.17 s 的 ease-in 与 0.27 s 的 spring 在肉眼上是同一档，
+    /// 但加速段的尾巴让「没了」这件事显得干脆。
+    ///
+    /// 0.1.28 — 缩到 0.82（0.1.26 是 0.94）。6 % 的收缩在淡出旁边看不出来，
+    /// 一整张卡片要掉 18 % 才有「收走」的形状。
     static func exit(_ views: [UIView], completion: @escaping () -> Void) {
         for view in views { view.isUserInteractionEnabled = false }
-        UIView.animate(withDuration: 0.2, delay: 0,
-                       options: [.curveEaseOut, .beginFromCurrentState],
+        if !announcedExit {
+            announcedExit = true
+            Log.write(String(format: "win: exit shrink 1.00->%.2f t=%.2f ease-in",
+                             exitScale, exitDuration))
+        }
+        UIView.animate(withDuration: exitDuration, delay: 0,
+                       options: [.curveEaseIn, .beginFromCurrentState],
                        animations: {
                            for view in views {
                                view.alpha = 0
-                               view.transform = CGAffineTransform(scaleX: enterScale,
-                                                                  y: enterScale)
+                               view.transform = CGAffineTransform(scaleX: exitScale,
+                                                                  y: exitScale)
                            }
                        },
                        completion: { _ in completion() })
     }
 
-    /// 入场（开窗）：从 `enterScale` 弹到 1。透明度由首帧看门狗负责
-    /// （`FloatHost.revealContent`），这里只做缩放 —— 两件事分开，才不会出现
-    /// 「卡片先亮、画面后到」那种两段式。
-    static func enter(_ views: [UIView]) {
+    private static var announcedExit = false
+
+    /// 入场（开窗）：从 `enterScale` 弹到 1。
+    ///
+    /// 0.1.28 — 这是全工程唯一一条**欠阻尼**曲线（`enterDamping` 0.42 < 1）。
+    /// 它会真的冲过 1 再回落，观感就是「Q 弹」。透明度不在这里管：
+    /// `FloatHost.revealContent` 用 0.12 s 把卡片从 alpha 0 提上来，两件事分开，
+    /// 才不会「卡片先亮、画面后到」那种两段式。
+    ///
+    /// 返回 true 表示真的开了动画（`inFlight` 时排队，由外层收口）。
+    @discardableResult
+    static func bounce(_ views: [UIView], completion: (() -> Void)? = nil) -> Bool {
+        guard depth == 0 else {
+            outside { bounce(views, completion: completion) }
+            return false
+        }
+        if !announcedEnter {
+            announcedEnter = true
+            Log.write(String(format: "win: enter bounce %.2f->1.00 t=%.2f zeta=%.2f",
+                             enterScale, enterDuration, enterDamping))
+        }
         for view in views {
             view.transform = CGAffineTransform(scaleX: enterScale, y: enterScale)
         }
-        spring {
-            for view in views { view.transform = .identity }
-        }
+        UIView.animate(withDuration: enterDuration, delay: 0,
+                       usingSpringWithDamping: enterDamping,
+                       initialSpringVelocity: enterVelocity,
+                       options: [.beginFromCurrentState, .allowUserInteraction],
+                       animations: {
+                           for view in views { view.transform = .identity }
+                       },
+                       completion: { _ in completion?() })
+        return true
     }
+
+    private static var announcedEnter = false
 }

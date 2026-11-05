@@ -685,6 +685,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 画面，只是另一张图。这一版改成不画任何东西，等真画面自己到。
     private var awaitingFrame = false
     private var frameAt: CFTimeInterval = 0
+
+    /// 0.1.28 — 入场的两块状态。
+    ///
+    /// `bouncePending`：这张卡还在等首帧，所以弹跳**不能现在放**（卡片 alpha 0，
+    /// 弹给谁看）。等 `revealContent` 把卡片提亮的那一拍接手 —— 「打开出现」的
+    /// 时刻对冷启动是首帧到达，不是 `show` 返回。
+    ///
+    /// `entering`：弹跳正在跑。这段窗口里 `card.frame` 是缩放后的派生值
+    /// （约 0.81 倍），谁读它当起点谁就会跳一下，所以读之前必须 `settleEnter`。
+    private var bouncePending = false
+    private var entering = false
     /// 0.0.73 — `reapplyPlacement` 写过几行日志。抹一次写一行，稳定之后闭嘴。
     private var placementLogs = 0
 
@@ -1215,13 +1226,27 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             + " corner=" + String(format: "%.0f", card.layer.cornerRadius)
         Log.write(ring + cell + room + fit
                   + " 外侧 (四边 拖动, 左右 点吸附, 底中 上滑关, 底角 缩放, 底右内 长按复位, 底左内 横屏待落)")
-        // 0.1.26 — 入场：0.94 → 1。母本的卡片出现是 SwiftUI 的 `AnyTransition`
-        // （`.scale`/`.opacity` 组合，`AnyTransitionV5scale` / `V7opacity` /
-        // `V8combined` 三个 stub 都在），不是硬切。这里只做缩放，透明度归
-        // `revealContent` 管 —— 两件事分开，才不会「卡片先亮、画面后到」两段式。
-        var entering: [UIView] = [card]
-        if let glow = host.glow { entering.append(glow) }
-        AevonMotion.enter(entering)
+        // 0.1.28 — 入场从 0.74 弹到 1（Q 弹）。母本的卡片出现是 SwiftUI 的
+        // `AnyTransition`（`.scale`/`.opacity` 组合），不是硬切；这里只做缩放，
+        // 透明度归 `revealContent` 管。
+        //
+        // 冷启动要分开处理：`awaitingFrame` 的卡片此刻 alpha 是 0，现在弹等于
+        // 弹给空气看 —— 0.44 s 弹完、首帧可能还没到，用户只会看到一张静止的卡
+        // 忽然亮起来。所以先把起点摆好，让首帧到达那一下接手（见 `revealContent`）。
+        var pop: [UIView] = [card]
+        if let glow = host.glow { pop.append(glow) }
+        if host.awaitingFrame {
+            for view in pop {
+                view.transform = CGAffineTransform(scaleX: AevonMotion.enterScale,
+                                                   y: AevonMotion.enterScale)
+            }
+            host.bouncePending = true
+        } else {
+            host.entering = true
+            AevonMotion.bounce(pop, completion: { [weak host] in
+                host?.entering = false
+            })
+        }
         return window.isHidden ? nil : host
     }
 
@@ -1334,6 +1359,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         grip = nil
         shield = nil
         awaitingFrame = false
+        // 0.1.28 — 入场两块状态必须跟着拆：这个 host 会被下一张卡复用
+        // （`takeMainSlot` 拿回来直接 `teardown` + 改 `bundle`），残留一个
+        // `bouncePending = true` 会让新卡在首帧到达时莫名弹一下。
+        bouncePending = false
+        entering = false
         card = nil
         content = nil
         visible = .zero
@@ -1523,6 +1553,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     // 「谁关的」写进日志，比从一个控件数组里猜要可靠。
 
     private func requestClose(_ reason: String) {
+        // 0.1.28 — 入场弹跳还没跑完就关：先把缩放落地，否则出场从 0.9 缩到
+        // 0.82 只剩 8 % 的行程，看着像「没动就没了」。
+        settleEnter()
         let hook = onClose
         onClose = nil
         Log.write("win: close requested by " + reason)
@@ -1826,6 +1859,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 二义 —— 同一次触摸只可能由其中一条跑完。
     private func dragBegin(at start: CGPoint) {
         guard let card = card else { return }
+        // 0.1.28 — 入场弹跳里 `card.frame` 是缩过的派生值（0.74 倍时只剩七成）。
+        // 下面 `resizeStart = card.frame` 会把它当锚点，于是第一次移动跳一下。
+        settleEnter()
         zone = zoneFor(start)
         panStep = .zero
         // 0.0.99 — 闸门不在这里归零：长按有可能比这一拍晚成立。清点在
@@ -2685,6 +2721,38 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                            glow?.alpha = 1
                        },
                        completion: nil)
+        // 0.1.28 — 冷启动的 Q 弹在这里接手。
+        //
+        // 上面那句是 alpha（0.12 s），这一句是 transform（0.44 s 欠阻尼）。
+        // 两个 `UIView.animate` 动的是不同属性，各走各的曲线，UIKit 不会互相
+        // 打断；而画面在头 0.12 s 一边亮起来一边胀开，观感正好是「窗口被放到
+        // 屏幕上」而不是「一张图被贴上去」。
+        if bouncePending {
+            bouncePending = false
+            entering = true
+            var views: [UIView] = [card]
+            if let glow = glow { views.append(glow) }
+            AevonMotion.bounce(views, completion: { [weak self] in
+                self?.entering = false
+            })
+        }
+    }
+
+    /// 0.1.28 — 入场弹跳还在跑时，先把卡片落地到最终尺寸。
+    ///
+    /// `transform` 不是 identity 的时候，`UIView.frame` 是「bounds 按缩放后的
+    /// 外接矩形」派生出来的数 —— 0.74 倍时读到的 frame 只有真实尺寸的七成。
+    /// 拖动起点（`resizeStart = card.frame`）、命中环（`bandRect(for:)`）、
+    /// 记忆写入（`remember`）都在读它，所以任何一条会读 frame 的操作进来，
+    /// 先把缩放收掉。落地是硬赋值，不带动画：用户已经在动手了，不该等他。
+    func settleEnter() {
+        guard entering || bouncePending else { return }
+        entering = false
+        bouncePending = false
+        card?.layer.removeAllAnimations()
+        glow?.layer.removeAllAnimations()
+        card?.transform = .identity
+        glow?.transform = .identity
     }
 
     /// 首帧观察器问的那一个问题。`revealContent` 有 guard，这里只负责回答

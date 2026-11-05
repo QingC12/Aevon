@@ -571,7 +571,15 @@ def main():
                   # 没有 landed ⇒ 落地的完成回调没接上，那一张会永远停在「缩到
                   # 一半」的样子（点它、升窗都会露出马脚）。所以一起断言。
                   b"win: dock flight ",
-                  b"win: dock landed "):
+                  b"win: dock landed ",
+                  # 0.1.28 — 打开 Q 弹 / 关闭收缩。
+                  #
+                  # `enter bounce` 写在欠阻尼入场第一次真的开跑的那一拍，
+                  # `exit shrink` 写在关窗出场第一次开跑的那一拍。两条都是
+                  # 「函数真的被调到」的证词：`-dead_strip` 会把没人调的代码整段
+                  # 剥掉，所以二进制里有没有这两个串，等于「这条路还在不在」。
+                  b"win: enter bounce ",
+                  b"win: exit shrink "):
         if token not in dylib_early:
             bad(f"host: {token.decode(errors='replace')} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")
