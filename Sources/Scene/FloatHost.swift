@@ -2952,8 +2952,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     private var bandReported: CGRect = .null
 
-    private var bandReported: CGRect = .null
-
     /// The way out of 停靠小窗: a tap anywhere on its picture. The scene view
     /// would swallow that tap and forward it to the app, so a transparent shield
     /// goes above it — the same trick as the ✕ used to be, a sibling drawn over
