@@ -14,17 +14,14 @@
 //  What stays here is everything that is genuinely host-side:
 //
 //    · the window (level normal+1) and the passthrough hit testing,
-//    · the summon bar's window level and its system-overlay exemption (0.0.45):
-//      the bar lives above every app so it can be reached from anywhere, and
+//    · the window level and its system-overlay exemption (0.0.45): the summon
+//      geometry lives above every app so it can be reached from anywhere, and
 //      goes away for the three places it must not appear — 锁屏 / 控制中心 /
 //      通知中心. Aevon(43) #3 asked for exactly that map.
-//    · the summon bar — 0.0.44's entry: a short vertical strip flush with the
-//      right edge. 0.0.14-0.0.43 used a 14 pt dot in the corner, and Aevon(42)
-//      said what a dot in a corner is worth: 「有点不容易触发」. A strip along the
-//      edge can be hit without aiming, it takes its colours from the material
-//      behind it instead of guessing white-on-white, and its height on the
-//      screen is a slider in 承载形状 instead of a drag that had to be
-//      discovered. Tap it, or swipe left across it.
+//    · the entry — 0.1.24: a left swipe starting within 18 pt of the right
+//      edge, in the bottom 35 % of the screen. The visible strip (0.0.44, a
+//      short vertical bar flush with the edge) is **gone**: Aevon(107)
+//      「既然现在改为依赖右缘左滑触发圆盘，干脆直接移除触发条」.
 //    · wiring the menu's three hooks (launch / panel / grip visibility) to
 //      this package's SceneProbe card route and Settings page,
 //    · the Darwin-notification refresh path.
@@ -54,26 +51,18 @@ final class RingHost: NSObject {
     static let enabledKey = "!ring.desktop"
 
     private var window: UIWindow?
-    /// The visible strip. Drawn, not drawn *on*: a UIView whose only child is a
-    /// blur, so it picks up whatever is behind it.
-    private var bar: UIView?
-    private var barBlur: UIVisualEffectView?
-    /// The touch pad. Wider than the strip on purpose — a bar flush with the
-    /// edge gives a thumb nothing to aim at, so the pad reaches 40 pt inwards
-    /// while the strip itself stays 8 pt of visible width.
-    private var barPad: UIView?
 
-    /// 0.1.18 — 竖条「亮一下就藏」的定时器。
-    ///
-    /// 用户 Aevon(104) 第 4 条：「右侧的触发条会一直显示，改为 0.5 秒后自动隐藏或者
-    /// 直接不显示，但是手势热区依旧存在」。所以藏的是**像素**，不是触摸：`bar`
-    /// 只是 `barPad` 里的一个 `isUserInteractionEnabled = false` 的视图，呼盘靠的是
-    /// `edgePad`（贴边 12 pt），两者互不相干 —— 竖条淡到 0 之后照样能划出圆盘。
-    ///
-    /// 每次重新布局（挂载、改设置、旋转、呼盘成功）都亮 0.5 s 再淡出：既回答了
-    /// 「竖条还在不在」，又不会在桌面上常驻一根看不懂的白条。
-    private var barFadeTimer: Timer?
-    private let barShowFor: CFTimeInterval = 0.5
+    /* ⛔ 0.1.24 — **竖条（`bar` / `barBlur` / `barPad` / `barFadeTimer`）整条删除。**
+     *
+     * 用户 Aevon(107)：「既然现在改为依赖右缘左滑触发圆盘，干脆直接移除触发条」。
+     * 它从 0.0.44 起就是「入口」本身（点它 / 划过它才呼盘），但 0.1.19 把呼盘
+     * 接到右缘手势、0.1.23 又接到应用层 `sendEvent` 之后，它只剩两个作用：
+     * 占掉右侧一块像素，以及让设置里那三个滑块还有东西可调。
+     *
+     * 一并删掉的还有 `BarMetrics` / `metrics()` / `barCentreY()` / `paintBar()` /
+     * `revealBar()` / `addBar()` / `setGripVisible()` / `handleBarPan()` 和
+     * `RingConfig` 的 `barY / barLength / barWidth`。
+     */
 
     /// 0.1.18 — **热区可见层整条撤除**（0.1.15 ~ 0.1.17 曾在这里画一层淡青色底纹）。
     ///
@@ -86,41 +75,6 @@ final class RingHost: NSObject {
     ///
     /// 撤掉的还有 `hotFlash` / `hotLogged` / `hotTint` 与 `RingConfig.hotZone`
     /// —— 留着不用会被 CI 的 `-Werror` 抓（unused variable）。
-
-    /// Strip geometry. 8 x 56 reads as a handle rather than a control, and it
-    /// is 4x the dot's target area without covering an icon.
-    ///
-    /// 0.0.47 — the pad grew to 46 x 150. Aevon(45) #1 is 「触发不灵敏，需要多次
-    /// 点击或滑动」, and a 40 x 112 target a thumb has to hit exactly is one of
-    /// the two things that produces that sentence (the other one is the overlay
-    /// timer hiding the pad, fixed below). The strip itself does not change:
-    /// what grew is the part nobody sees.
-    /// 0.0.49 — 竖条的尺寸不再是常量，而是由两个百分比算出来（设置面板里
-    /// 「竖条长度」「竖条宽度」两行）。四条边都是纯函数的结果，所以 `layout()`
-    /// 和 `barCentreY()` 永远看到同一组数。
-    private struct BarMetrics {
-        let barWidth: CGFloat    // 可见宽度，硬上限 40 pt
-        let barHeight: CGFloat   // 可见长度
-        let padWidth: CGFloat    // 触摸垫宽度（≥ 可见宽度 + 余量）
-        let padHeight: CGFloat   // 触摸垫长度
-    }
-
-    private func metrics(in bounds: CGRect) -> BarMetrics {
-        // 宽度：40 pt 的百分比。上限写死 40 —— 竖条贴屏幕右缘，那里有页面自己
-        // 的点击目标（返回、列表行、滑条），再宽就开始抢它们。
-        let width = Swift.min(40, Swift.max(4, 40 * config.barWidth / 100))
-        // 长度：屏幕高度的百分比。4–20 % 在本机是 37–186 pt。
-        let height = Swift.min(240, Swift.max(24, bounds.height * config.barLength / 100))
-        // 垫子比条子大一圈：手指落在半英寸外也算命中，这是「不灵敏」的第一道防线。
-        let padW = Swift.min(76, Swift.max(40, width + 32))
-        let padH = Swift.min(320, Swift.max(96, height * 2 + 38))
-        return BarMetrics(barWidth: width, barHeight: height,
-                          padWidth: padW, padHeight: padH)
-    }
-
-    /// The last percentage that was laid out, so a slider drag logs one line per
-    /// real change instead of one per refresh.
-    private var laidOutPercent: Int = -1
 
     /// 0.0.45 — 竖条上那根手指还在屏上。`AevonRingGrip.hasActiveGripTouch`
     /// 从这里取值，圆盘的静默看门狗据此放过「按住不动」的局。
@@ -226,10 +180,6 @@ final class RingHost: NSObject {
     /// 会出现「日志说 band=15、实际认 24」这种对不上的情况。
     private let edgeHeightPercent: CGFloat = 35
     private let edgeInterval: CFTimeInterval = 0.3
-    /// 0.1.19 — 整条右缘时上下各让开多少。上面 8 pt 让开状态栏（在状态栏里起手
-    /// 本来就该归系统），下面 12 pt 让开 home 指示条那一条上滑。
-    private let edgeTopInset: CGFloat = 8
-    private let edgeBottomInset: CGFloat = 12
 
     private var config = RingConfig()
     private var expanded = false
@@ -298,10 +248,12 @@ final class RingHost: NSObject {
         AevonEdgeEntry.openPanelHandler = { [weak self] in
             self?.openPanel()
         }
-        AevonRingGrip.setVisibleHandler = { [weak self] visible in
-            self?.setGripVisible(visible)
-        }
-        // 0.0.45 — 竖条按住期间，圆盘不许因为"静默"自收（手指根本没离开屏幕）。
+        // 0.1.24 — `AevonRingGrip.setVisibleHandler` 不再注册：它唯一的用途是
+        // 「圆盘收起时把竖条亮回来」，而竖条这一版整个下线条了。`AevonRingGrip`
+        // 那个兼容层本身不动（菜单 `dismiss()` 里还在调 `setVisible(true)`），
+        // 只是没人接这个电话。
+        //
+        // 0.0.45 — 右缘手势按住期间，圆盘不许因为"静默"自收（手指根本没离开屏幕）。
         AevonRingGrip.activeTouchHandler = { [weak self] in
             self?.barHeld ?? false
         }
@@ -309,7 +261,6 @@ final class RingHost: NSObject {
         // sendEvent 入口）。整条撤掉了：呼出只走 `edgePad` 上的识别器，
         // 理由见文件末尾 `gestureRecognizerShouldBegin` 上方那段。
 
-        addBar()
         addEdgePad()
         layout()
         startOverlayWatch()
@@ -362,16 +313,8 @@ final class RingHost: NSObject {
         edgeHiddenLogged = false
         sceneLostLogged = false
 
-        bar?.removeFromSuperview()
-        barPad?.removeFromSuperview()
+        // 0.1.24 — 竖条已整体下线，这里只剩呼盘垫要摘。
         edgePad?.removeFromSuperview()
-        // 0.1.18 — 竖条那个「亮一下就藏」的定时器也要拆：宿主关了还在烧，
-        // 而且它捕获的是旧 `bar`，下次 `start()` 会淡掉新竖条。
-        barFadeTimer?.invalidate()
-        barFadeTimer = nil
-        bar = nil
-        barBlur = nil
-        barPad = nil
         edgePad = nil
         window?.isHidden = true
         window = nil
@@ -551,38 +494,16 @@ final class RingHost: NSObject {
             Log.write("ring: window lost its scene, touches will not be delivered")
         }
 
-        // Flush with the right edge: `maxX - padWidth` is the pad's left edge
-        // and the strip sits in the pad's last `barWidth` points, so the strip
-        // and the screen edge are the same line. Nothing floats in from the
-        // edge — a strip inset by a margin is a strip a thumb can miss.
-        let m = metrics(in: bounds)
-        let centre = barCentreY(in: bounds)
-        barPad?.frame = CGRect(x: bounds.maxX - m.padWidth,
-                               y: centre - m.padHeight / 2,
-                               width: m.padWidth, height: m.padHeight)
-        bar?.frame = CGRect(x: m.padWidth - m.barWidth,
-                            y: (m.padHeight - m.barHeight) / 2,
-                            width: m.barWidth, height: m.barHeight)
-        // 尺寸变了，圆角也要跟着：8 pt 宽的条子是 4 pt 圆角，40 pt 宽还是 4 pt
-        // 就成了方凳；跟着宽度取一半，两端永远是圆的。
-        bar?.layer.cornerRadius = m.barWidth / 2
-        // 0.0.48 — 竖条的触摸垫位置交给浮窗那一侧。浮窗的手指入口在应用层就
-        // 把环上的触摸吃掉了，环的右半边正好压在这里；没有这条线，卡片开着时
-        // 点竖条会被当成拖浮窗（见 AevonRingGrip.summonRect）。
+        // 0.1.24 — 竖条下线之后，`layout()` 只剩一件事要做：把呼盘垫放到
+        // `stripRect` 上（贴右缘 18 pt × 底部 35 %）。
         //
-        // 0.1.7 — 交出去的是**贴边 14 pt 那条带**（与 `rawBar` 的认领范围同一个），
-        // 不再是 40×212 的视觉垫子：垫子只是画，拿它当让路地盘会让卡片右缘的环
-        // 白瞎 40 pt。
+        // 0.0.48 — 这条带的位置同时交给浮窗那一侧（`AevonRingGrip.summonRect`）：
+        // 浮窗的手指入口在应用层就把环上的触摸吃掉了，环的右半边正好压在这里；
+        // 没有这条线，卡片开着时贴右缘划会被当成拖浮窗。
         AevonRingGrip.summonRect = stripRect(in: bounds)
-        // 0.0.55 — 右缘带：贴右缘 15 pt，从底部往上 35 %。卡片在屏时收回触摸
-        //（`AevonRingGrip.cardUp`），否则右下角拖卡片的手会先落进带子里。
-        //
-        // 0.1.7 — 整条带子换成 `stripRect` 那一条，竖条那块 40×212 的垫子从这一刻
-        // 起**只是画**，不接触摸（见 `addBar`）。0.1.8 起 `stripRect` 的高度又回到
-        // 底部 35 %（全高会和左滑返回插件抢整条右缘，见那个函数上的注释）。
         // 0.1.13 — frame 只是外接矩形，真正认领的是 `claimRects`（0.1.16 起只剩
-        // 贴边那一列，光环已撤）。
-        // 外接矩形里剩下的角**不属于我们**，由 `EdgeSwipePad.point(inside:)` 退回给应用。
+        // 贴边那一列，光环已撤）。外接矩形里剩下的角**不属于我们**，由
+        // `EdgeSwipePad.point(inside:)` 退回给应用。
         edgePad?.frame = claimBounds(in: bounds)
         // 0.1.20 — **呼盘垫必须是 `host` 的最上层（圆盘不在屏时）。**
         // 圆盘打的是 `host.bringSubviewToFront(menu)`，它收起之后没有谁把垫子
@@ -592,96 +513,29 @@ final class RingHost: NSObject {
            AevonRingMenu.presented == nil {
             hostView.bringSubviewToFront(pad)
         }
-        // 0.1.18 — 热区可见层撤掉了（Aevon(104) 第 3 条）：认的几何不变，
-        // 只是不再往桌面上画那条淡青底纹。
         // 0.1.6 — 开关只有一个来源（`syncGrip`）。原来这里直接写
         // `!AevonRingGrip.cardUp`，那是第三个各写一遍的地方：布局写一次、开卡关一次、
         // 面板关回调再写一次，任何一条路没回来，入口就一直是关的。
         syncGrip()
         window.rootViewController?.view.frame = bounds
-        paintBar()
 
         // 面板正在上面的时候换了页面（比如通知中心拉下来又弹回去），
         // layout 是唯一会被叫到的地方，顺手把可见性对齐一次。
         syncOverlayVisibility()
 
-        // 位置和尺寸一起报。0.0.49 起竖条的长宽是两个滑块，日志里必须能看见
-        // 改完之后实际生效的点数 —— 否则「还是不灵敏」时没法区分「滑块没生效」
-        // 和「生效了但位置不对」。
-        let percent = Int((config.barY).rounded())
-        let sizeKey = Int(m.barWidth * 10) * 100_000 + Int(m.barHeight * 10)
-        if percent != laidOutPercent || sizeKey != laidOutMetrics {
-            laidOutPercent = percent
-            laidOutMetrics = sizeKey
-            Log.write("ring: bar position " + String(percent)
-                      + "% of the screen height (right edge) size="
-                      + String(Int(m.barWidth.rounded())) + "x"
-                      + String(Int(m.barHeight.rounded())) + "pt pad="
-                      + String(Int(m.padWidth.rounded())) + "x"
-                      + String(Int(m.padHeight.rounded()))
-                      // 0.1.8 — 呼盘命中区一起报：`claim=10x326 at y=606` 是
-                      // 「贴右缘 × 底部 35 %」的实测值，判据在日志里自证。
-                      // 0.1.16 — `halo` 段删掉（光环已撤），整段合成**一个**长
-                      // 格式串：` claim=` 只有 7 字节，会被编成立即数，二进制里
-                      // grep 不到（audit 断言就抓了个空）。
-                      + String(format: " claim=%.0fx%.0f at y=%.0f",
-                               stripWidth, stripRect(in: bounds).height,
-                               stripRect(in: bounds).minY))
-        }
-    }
-
-    /// Where the strip's centre sits, as the operator's percentage of the
-    /// screen height. The pad's half-height is the clamp, not the strip's: a
-    /// bar at 0 % must still be reachable, and the thing the finger lands on is
-    /// the pad.
-    private func barCentreY(in bounds: CGRect) -> CGFloat {
-        let half = metrics(in: bounds).padHeight / 2
-        let y = bounds.height * config.barY / 100
-        return Swift.min(bounds.maxY - half, Swift.max(half, y))
-    }
-
-    // MARK: - Summon bar
-
-    private func addBar() {
-        guard let host = window?.rootViewController?.view else { return }
-
-        // The pad is the target, the bar is the paint job. 46 pt of pad means a
-        // thumb that lands half an inch from the edge still finds it; the pad is
-        // flush with the screen edge so nothing has to be aimed at.
-        let pad = BarPad(frame: .zero)
-        pad.backgroundColor = .clear
-        // 0.1.7 — **竖条从这一刻起只负责「画」，不接收任何触摸。**
+        // 0.1.24 — **呼盘几何改成无条件报一次（按值去重）。**
         //
-        // 原来这块垫子是 40×212 的隐形命中区，还挂着 tap（点一下开/关圆盘）与
-        // pan（按住拖动）。用户 Aevon(94) 第 1 条报的就是它：「当你点击全屏应用
-        // 的操作是会误触圆盘触发」—— 40 pt 宽几乎盖掉了右缘一整条，卡片里点右边
-        // 任何位置都可能落进来。整条逻辑搬到 `rawBar`（应用层 sendEvent）与
-        // `edgePad`（贴边 14 pt 的系统边缘滑动）之后，这里只留像素。
-        pad.isUserInteractionEnabled = false
-        pad.onDown = nil
-        host.addSubview(pad)
-        barPad = pad
-
-        let bar = UIView(frame: .zero)
-        bar.isUserInteractionEnabled = false
-        bar.layer.cornerRadius = metrics(in: window?.bounds ?? UIScreen.main.bounds).barWidth / 2
-        bar.layer.cornerCurve = .continuous
-        bar.clipsToBounds = true
-        pad.addSubview(bar)
-        self.bar = bar
-
-        // The adaptive half. A `UIVisualEffectView` is the only thing in UIKit
-        // that answers "what colour is behind me" without a screenshot: it
-        // samples the backdrop and keeps a readable contrast over a white page,
-        // a black page and a photograph alike. The border in `paintBar` is the
-        // fallback for the cases where a backdrop is unavailable.
-        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
-        blur.isUserInteractionEnabled = false
-        blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        bar.addSubview(blur)
-        barBlur = blur
-
-        paintBar()
+        // 竖条没了，`bar position …` 那条自带 `claim=` 的日志也跟着没了。可
+        // 「热区到底在哪」是后续每一轮排查的第一句问话，必须留在日志里：
+        // `claim=18x326 at y=606` 就是「贴右缘 18 pt × 底部 35 %」的实测值，
+        // 判据在日志里自证，不靠记忆。
+        let claim = stripRect(in: bounds)
+        let claimKey = Int(claim.minY) * 1000 + Int(claim.height)
+        if claimKey != laidOutMetrics {
+            laidOutMetrics = claimKey
+            Log.write(String(format: "ring: edge claim=%.0fx%.0f at y=%.0f bottom-35%%",
+                             stripWidth, claim.height, claim.minY))
+        }
     }
 
     /// 0.0.55 — 右缘那条「贴边左滑呼盘」的触摸带（移植旧版 V0.3.28 AevonEdgeBandOnly328）。
@@ -852,20 +706,20 @@ final class RingHost: NSObject {
     /// 与插件。这一条同时把 0.1.6 那个「卡片里点右侧任意位置误触」的根也压住了：
     /// 命中区只有右下角这一块 14 × 326。
     private func stripRect(in bounds: CGRect) -> CGRect {
-        // 0.1.19 — 默认**整条右缘**。竖条 0.5 s 就淡出之后，它原本还兼着
-        // 「带子在这儿」这个路标；路标没了，只剩底部 35 % 的带子等于让用户
-        // 靠猜 —— 上半段划上去连 `pad down` 都不会有（那一截根本不归我们），
-        // 看起来就是「触发条隐藏后呼不出圆盘」。整条边都认之后，拇指贴在右缘
-        // 任何位置往左划都能开。
+        // 0.1.24 — **定稿在「底部往上 35 %」，不再有整条右缘这一档。**
         //
-        // 开关 `!ring.fulledge` 关掉即回到 0.1.18 的「底部 35 %」：某些页面
-        // 右缘要留给他自己的返回手势时，这是唯一能退回去的档。
-        if config.fullEdge {
-            let top = bounds.minY + edgeTopInset
-            let bottom = bounds.maxY - edgeBottomInset
-            return CGRect(x: bounds.maxX - stripWidth, y: top,
-                          width: stripWidth, height: Swift.max(0, bottom - top))
-        }
+        // 时间线：0.1.8~0.1.18 一直是底部 35 %；0.1.19 因为竖条淡出后失去路标，
+        // 用户「隐藏触发条之后呼不出圆盘」，才放到整条右缘。0.1.23 换到应用层
+        // `sendEvent` 之后通道终于通了，Aevon(107) 的 13 次呼盘全部成功，但用户
+        // 随即指出「右侧全部能触发」——**这正是 0.1.8 就记下的那条代价**：
+        // 整条右缘和左滑返回插件抢同一片地。
+        //
+        // 现在竖条整体下线（用户原话「干脆直接移除触发条」），路标问题不存在了，
+        // 于是回到 35 %：屏幕中上部整条让给系统与应用自己的返回手势，只有拇指
+        // 自然垂落的那一段归我们。
+        //
+        // Aevon(107) 的落点分布正好落在这一档里（y = 434/567/655/666/694/704/
+        // 716/723/725/726/728/737，932 的 65 % = 606，主力在 655~737）。
         let h = bounds.height * edgeHeightPercent / 100
         return CGRect(x: bounds.maxX - stripWidth,
                       y: bounds.maxY - h,
@@ -912,7 +766,7 @@ final class RingHost: NSObject {
         syncGrip()
     }
 
-    /// 0.1.6 — 竖条与右缘带的触摸开关，唯一来源。
+    /// 0.1.6 — 右缘带的触摸开关，唯一来源（0.1.24 起竖条已不在，只剩这一条带）。
     ///
     /// 之前是三处各写一遍：`layout()` 按 `AevonRingGrip.cardUp` 写、`openPanel()`
     /// 关一次、面板 `onClose` 再写回。三个写点排在一起看不出问题，可它们之间
@@ -924,13 +778,11 @@ final class RingHost: NSObject {
     /// 现在按事实现算，并且挂在 0.4 s 那条 tick 上：任何一次状态来不及恢复，
     /// 下一个 tick 都会把它纠正回来。
     func syncGrip() {
-        // 0.1.6 — 竖条的地盘也一起对齐。`layout()` 里有 `bounds.width > 0` 的早退，
+        // 0.1.6 — 带的几何也一起对齐。`layout()` 里有 `bounds.width > 0` 的早退，
         // 窗口尺寸还没到位时那一拍不会写 `summonRect`，留一个 `.zero` 在里面就等于
-        // 「条子看得见、按下去不算我的」。这里每 tick 补一次，代价是一次 CGRect 赋值。
+        // 「带子看得见、按下去不算我的」。这里每 tick 补一次，代价是一次 CGRect 赋值。
         //
-        // 0.1.7 — 写的是**贴边条带**，不是那块 40×212 的视觉垫子。垫子现在只是画
-        // （`addBar`），拿它当「浮窗的环要让开的地盘」会白让掉 40 pt 宽的一条，
-        // 卡片的右缘环在那里整块失效。
+        // 0.1.7 — 写的是**贴边条带**，不是那块 40×212 的视觉垫子（垫子 0.1.24 已删）。
         if let window = window, window.bounds.width > 0 {
             AevonRingGrip.summonRect = stripRect(in: window.bounds)
         }
@@ -943,7 +795,6 @@ final class RingHost: NSObject {
         }
         let panel = AevonAppPanel.current != nil
         let card = FloatHost.anyCardUp
-        let barOn = !panel
         // 0.1.10 — **不再是 `!panel && !card`。**
         //
         // 0.0.55 关掉这条带是因为「卡片右下角拖拽的手会先落进带子里」。那是
@@ -956,28 +807,20 @@ final class RingHost: NSObject {
         //（日志 `ring: grip armed bar=1 edge=0 card=1`：卡片在屏 → 带子闭嘴 →
         // 右缘左滑整条落到 App 进程，SpringBoard 连事件都收不到）。
         let edgeOn = !panel
-        // 0.1.7 — 视觉垫子永远不接触摸。触摸只有两个入口：`rawBar`（应用层）与
-        // `edgePad`（贴边 14 pt）。这一行是 0.1.6 那个「开关唯一归口」的兑现：
-        // 三处各写一遍的老写法（layout / openPanel / onClose）全撤之后，这里是
-        // 唯一还会碰它的地方。
-        if barPad?.isUserInteractionEnabled != false {
-            barPad?.isUserInteractionEnabled = false
-        }
+        // 0.1.6 那个「开关唯一归口」的兑现：三处各写一遍的老写法（layout /
+        // openPanel / onClose）全撤之后，这里是唯一还会碰它的地方。
         if edgePad?.isUserInteractionEnabled != edgeOn {
             edgePad?.isUserInteractionEnabled = edgeOn
         }
-        guard barOn != gripLoggedBar || edgeOn != gripLoggedEdge else { return }
-        gripLoggedBar = barOn
+        guard edgeOn != gripLoggedEdge else { return }
         gripLoggedEdge = edgeOn
         // 一整条字面量前缀（不是拼接）：审计要在二进制里 grep 到它。
-        Log.write("ring: grip armed bar=" + (barOn ? "1" : "0")
-                  + " edge=" + (edgeOn ? "1" : "0")
+        Log.write("ring: grip armed edge=" + (edgeOn ? "1" : "0")
                   + " card=" + (card ? "1" : "0")
                   + " panel=" + (panel ? "1" : "0"))
     }
 
     /// 上一次写进日志的开关值，只用来去重。
-    private var gripLoggedBar = true
     private var gripLoggedEdge = true
 
     /* ⛔ 0.1.23 — **呼盘判定搬到 `UIApplication.sendEvent:` 上。**
@@ -1096,8 +939,9 @@ final class RingHost: NSObject {
         case .began:
             edgeAt = CACurrentMediaTime()
             barHeld = true
-            // 0.1.18 — 热区的可见层已经撤了，改由竖条「亮 0.5 s」给同一份反馈。
-            revealBar()
+            /* 0.1.24 — 竖条已经下线，这里不再有「亮 0.5 s」那一下。
+             * 整个屏幕在这一刻起不再有任何常驻或闪现的标记 —— 用户要的就是这个。
+             */
             /* 0.1.20 — **僵尸盘先清掉，再开盘。**
              *
              * 0.1.19 的写法是「`presented` 非 nil 就把它当成在屏上的盘，只喂跟手」。
@@ -1121,14 +965,14 @@ final class RingHost: NSObject {
                 }
                 expanded = true
                 AevonRingMenu.presentTracking(in: host, at: point, source: "edge")
-                // 0.1.19 — 带上带子的高度：整条右缘 ≈ 全高，退回 35 % 时只有
-                // 底部那一段。下一次「划了没反应」一读这行就知道手指那条高度
-                // 到底在不在带子里。
+                // 0.1.24 — 带子的高度一起报。热区定稿在「底部往上 35 %」之后，
+                // 这一行是「手指那条高度到底在不在带子里」的唯一判据：
+                // 430×932 上应当是 `band=18x326`，起点 y ≥ 606。
                 Log.write("ring: edge swipe open at "
                           + String(format: "%.0f,%.0f", point.x, point.y)
                           + " band=" + String(format: "%.0f", stripWidth)
                           + "x" + String(format: "%.0f", stripRect(in: window.bounds).height)
-                          + (config.fullEdge ? " full-edge" : " bottom-35%"))
+                          + " bottom-35%")
             }
 
         case .moved:
@@ -1159,125 +1003,15 @@ final class RingHost: NSObject {
         }
     }
 
-    /// The disc hides the bar while it is open and asks for it back on the way
-    /// down (`AevonRingGrip.setVisible(true)` in dismiss). Kept on the pad, not
-    /// on the bar: alpha on the pad fades both without touching the material's
-    /// own alpha.
-    private func setGripVisible(_ visible: Bool) {
-        guard let pad = barPad else { return }
-        // 0.1.7 — 这里**不再**把 `isUserInteractionEnabled` 写回 true。
-        //
-        // 0.1.6 及以前这一行是「圆盘收起后把竖条交还给手指」。竖条现在只是画
-        // （见 `addBar`），触摸全在 `rawBar` / `edgePad` 上；写回 true 等于把那块
-        // 40×212 的隐形命中区又长回来，卡片里点右侧重新开始误触圆盘。
-        UIView.animate(withDuration: 0.18) {
-            pad.alpha = visible ? 1 : 0.72
-        }
-    }
-
-    /// 0.0.44 — the strip has to be visible on whatever is behind it, and the
-    /// answer is no longer a guessed pair of colours.
-    ///
-    /// The material supplies the fill; this supplies the edge. On a light page
-    /// the material is a pale haze and needs a dark hairline; on a dark one it
-    /// is a grey mist and needs the light one. That is one property write per
-    /// layout pass, and it is what keeps the strip off the "invisible, therefore
-    /// broken" list that the dot spent six versions on.
-    private func paintBar() {
-        guard let bar = bar else { return }
-        let dark = window?.traitCollection.userInterfaceStyle == .dark
-        if UIAccessibility.isReduceTransparencyEnabled {
-            // No backdrop to sample: fall back to the dot's own recipe rather
-            // than to an invisible strip.
-            barBlur?.alpha = 0
-            bar.backgroundColor = UIColor.white.withAlphaComponent(dark ? 0.66 : 0.88)
-            bar.layer.borderColor = UIColor.black.withAlphaComponent(dark ? 0.50 : 0.45).cgColor
-        } else {
-            barBlur?.alpha = 1
-            bar.backgroundColor = .clear
-            bar.layer.borderColor = (dark ? UIColor.white : UIColor.black)
-                .withAlphaComponent(0.32).cgColor
-        }
-        bar.layer.borderWidth = 0.5
-        // 0.1.18 — 不再常显：画完就进入「亮 0.5 s → 淡出」（见 `revealBar`）。
-        revealBar()
-    }
-
-    /// 0.1.18 — 竖条亮 0.5 s 再淡出。
-    ///
-    /// 为什么是「亮一下」而不是「一直不显示」：竖条是这块地上唯一看得见的东西，
-    /// 完全不给像素的话，用户永远不知道呼盘从哪儿开始（热区可见层这一版已经按
-    /// Aevon(104) 第 3 条撤掉了）。亮 0.5 s 足够看清位置，又不会挡住右侧内容。
-    ///
-    /// 重复调用是安全的：先取消上一个定时器再重新计时，连续呼盘时不会出现
-    /// 「上一次的淡出把这一次的亮起抹掉」。
-    private func revealBar() {
-        guard let bar = bar else { return }
-        barFadeTimer?.invalidate()
-        bar.alpha = 1
-        let timer = Timer(timeInterval: barShowFor, repeats: false) { [weak self] _ in
-            guard let self = self, let bar = self.bar else { return }
-            UIView.animate(withDuration: 0.25) { bar.alpha = 0 }
-            Log.write("ring: bar faded out (auto hide 0.5 s)")
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        barFadeTimer = timer
-    }
-
-    @objc private func toggle() {
-        if expanded { collapse() } else { expand() }
-    }
-
-    /// 按住拖动（0.0.45）。
-    ///
-    /// 这条路从头到尾只有一根手指：落指 → 圆盘从这一点长出来 → 报告每一次移动
-    /// → 抬手定生死。**没有任何一步替用户做决定**：
-    ///
-    ///   · 停在竖条上不动 → 圆盘开着（看门狗被 `barHeld` 挡住）；
-    ///   · 向左划到某个图标 → 那个图标高亮（跳起回落的关键帧是圆盘自己的）；
-    ///   · 抬手在图标上 → 打开浮窗；抬手在盘外 / 间隙 → 收起。
-    ///
-    /// 这三条不是这里写的规则，是 `AevonRingMenu.handlePointerEnded` 原本的语义
-    /// （V0.2.18 AevonRingCloseOnLiftV218），这里只是把手指接上去。
-    @objc private func handleBarPan(_ gesture: UIPanGestureRecognizer) {
-        guard let window = window, let host = window.rootViewController?.view else { return }
-        let point = gesture.location(in: window)
-
-        switch gesture.state {
-        case .began:
-            barHeld = true
-            if let menu = AevonRingMenu.presented {
-                // 圆盘已经开着（点一下开的那种），这根手指直接接管它。
-                menu.beginRemoteTracking(at: point, source: "bar")
-            } else {
-                expanded = true
-                AevonRingMenu.presentTracking(in: host, at: point, source: "bar")
-                Log.write("ring: held open at "
-                          + String(format: "%.0f,%.0f", point.x, point.y)
-                          + " (\(AevonRingStore.bundleIDs().count) apps)")
-            }
-
-        case .changed:
-            AevonRingMenu.presented?.remoteMoved(to: point, source: "bar")
-
-        case .ended, .cancelled, .failed:
-            barHeld = false
-            expanded = false
-            guard let menu = AevonRingMenu.presented else { return }
-            if gesture.state == .ended {
-                // 权威抬手：不受 0.12 秒通道交换闸影响（V0.3.16）。
-                menu.remoteLift(at: point, source: "bar")
-            } else {
-                // 手势被系统抢断 = 这根手指的去向不由我们决定了，收起最安全。
-                menu.remoteCancelled(source: "bar")
-            }
-            Log.write("ring: bar released at "
-                      + String(format: "%.0f,%.0f", point.x, point.y))
-
-        default:
-            break
-        }
-    }
+    /* ⛔ 0.1.24 — 竖条那一套方法整段删除：
+     *   `setGripVisible`（圆盘开合时调竖条透明度）
+     *   `paintBar`（自适应配色 + 0.5 pt 描边）
+     *   `revealBar`（亮 0.5 s 再淡出）
+     *   `toggle`（点竖条开合）
+     *   `handleBarPan`（按住竖条拖动）
+     * 它们全都要么读写 `bar`/`barBlur`/`barPad`，要么只服务「点竖条」这条入口。
+     * 呼盘现在只有一条路：右缘左滑（`edgeTouch` / `EdgeSwipePad`）。
+     */
 
     // MARK: - 0.1.10 应用层触摸入口已整条撤除（母版路线）
     //
@@ -1297,7 +1031,7 @@ final class RingHost: NSObject {
     // 又一次把它加回来。
 
 
-    /// 0.0.49 — 把竖条那一层重新插回窗口栈顶。
+    /// 0.0.49 — 把这一层重新插回窗口栈顶。
     ///
     /// Aevon(47) #3 的现象是「注销后第一次非常灵敏，锁屏一次之后就不容易触发」。
     /// 条子的位置、长度、宽度都没变（日志里 `size=` 一直是同一组数），变的只有
@@ -1306,19 +1040,22 @@ final class RingHost: NSObject {
     /// 却不算我们的。所以每次解锁 / 回到前台，把 level 抬一格再放回去：UIKit 在
     /// 每次 level 变化时都会把窗口重新插进窗口栈，这一下就是置顶，而且不重建
     /// 窗口、不碰 rootViewController、不丢已经挂上的手势。
+    ///
+    /// 0.1.24 — 竖条没了，但这条**必须留着**：它保护的是窗口本身（呼叫垫的命中
+    /// 依赖它在上层），不是那根可见的条子。
     private func raiseWindow() {
         guard let window = window, !window.isHidden else { return }
         let level = window.windowLevel
         window.windowLevel = UIWindow.Level(rawValue: level.rawValue + 1)
         window.windowLevel = level
         window.isHidden = false
-        Log.write("ring: bar layer put back on top (level="
+        Log.write("ring: host layer put back on top (level="
                   + String(Int(level.rawValue)) + ")")
     }
 
     // MARK: - 0.0.45 系统面板豁免
 
-    /// 锁屏 / 控制中心 / 通知中心 —— 竖条在这三处不出现（Aevon(43) #3）。
+    /// 锁屏 / 控制中心 / 通知中心 —— 呼盘带在这三处不出现（Aevon(43) #3）。
     ///
     /// 窗口层级（statusBar + 1）已经把这三种面板留在上面，但「没被盖住」不等于
     /// 「不该显示」：控制中心是半屏、锁屏是另一套 UI，竖条浮在上面既难看也没有
@@ -1474,7 +1211,7 @@ final class RingHost: NSObject {
     }
 
     private func syncOverlayVisibility() {
-        guard let pad = barPad else { return }
+        guard let pad = edgePad else { return }
         // 0.0.47 — 一次判真不算数。
         //
         // Aevon(45) #1 是「有时会无法触发，需要多次点击或滑动」。这个定时器就是
@@ -1501,14 +1238,12 @@ final class RingHost: NSObject {
         if keyboard != kbLogged {
             kbLogged = keyboard
             Log.write(keyboard
-                      ? "ring: keyboard up, summon bar and edge pad stepped aside"
-                      : "ring: keyboard gone, summon bar and edge pad back")
+                      ? "ring: keyboard up, edge band stepped aside"
+                      : "ring: keyboard gone, edge band back")
         }
         let hidden = (overlayStrikes >= 2 || keyboard) && !barHeld
-        // 0.1.17 — **竖条本体和呼盘垫也一起藏。** 三者是同一块地：只藏触摸层
-        // 会得到「看得见、按不到」，只藏视觉层会得到「看不见、按得到」，两种
-        // 都比不藏更糟。藏起来之后这一根手指落在键盘上，键盘照常收。
-        bar?.isHidden = hidden
+        // 0.1.24 — 只剩呼盘垫这一层要藏（竖条已下线）。藏起来之后这一根手指
+        // 落在键盘上，键盘照常收。
         edgePad?.isHidden = hidden
         // 0.1.19 — **谁把呼盘垫关掉的，日志里必须看得见。**
         // 隐藏的视图不参与命中，它一旦被藏住，「划了没反应」和「带子不在这儿」
@@ -1525,19 +1260,19 @@ final class RingHost: NSObject {
         pad.isHidden = hidden
         // 0.0.49 — 面板刚退下去，正是窗口栈最不可靠的时刻：顺手把这一层放回顶上，
         // 免得「看得见但按不到」。
-        // 0.1.18 — 回来的时候也亮一下竖条：竖条现在 0.5 s 就淡出，用户从「键盘
-        // 刚收」这一刻起需要一次「入口回来了」的确认，否则屏上什么都没有。
+        // 0.1.24 — 竖条没了，回来时只剩 `raiseWindow()` 这一件事可做：面板刚退
+        // 下去，正是窗口栈最不可靠的时刻，把这一层放回顶上是「看得见也按得到」
+        // 的唯一保证。
         if !hidden {
             raiseWindow()
-            revealBar()
         }
         // 键盘与系统面板分开报：混成一句之后，「按不出来」就分不清是哪条路关的。
         // 键盘那两条已由上面的 `keyboard up / gone` 覆盖，这里只报面板这一条 ——
         // 0.1.16 及以前这里用的是同一个 `overlayStrikes` 判，结果「shown」几乎
         // 永远打不出来（收起时 strikes 已经归 0 了）。
         if keyboard { return }
-        Log.write("ring: summon bar " + (hidden ? "hidden (system overlay up)"
-                                                 : "shown (system overlay gone)"))
+        Log.write("ring: edge band " + (hidden ? "hidden (system overlay up)"
+                                               : "shown (system overlay gone)"))
     }
 
     // MARK: - Disc (AevonRingMenu, 1:1)
@@ -1858,21 +1593,13 @@ final class EdgeSwipePad: UIView {
 
 /// The window must never be the hit target. Returning nil for itself makes
 /// every point that no subview claims fall through to SpringBoard below.
-/// 0.0.47 — 落指就先报一声的触摸垫。
-///
-/// 「触发不灵敏」有两种事实：手指没落到垫子上，或者落上了但没被当成手势（手势
-/// 仲裁、被别的窗口拿走、垫子被藏起来）。垫子在 `touchesBegan` 报一次，日志就能
-/// 把这两种分开 —— 在此之前三轮里它们长得一模一样。
-final class BarPad: UIView {
-    var onDown: ((CGPoint) -> Void)?
-
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if let touch = touches.first {
-            onDown?(touch.location(in: superview))
-        }
-        super.touchesBegan(touches, with: event)
-    }
-}
+/* ⛔ 0.1.24 — `BarPad` 删除。它存在的唯一理由是「竖条的垫子上落指就报一声」
+ * （`ring: pad down at …` 那行证词的原产地）。竖条下线之后没有任何地方再构造它，
+ * 留着就是一个永远不执行的类。
+ *
+ * 注意 `ring: pad down` 这行证词**没有消失** —— `EdgeSwipePad.onDown` 现在负责它，
+ * 位置在 `addEdgePad()` 里。
+ */
 
 private final class PassthroughWindow: UIWindow {
     /* ⛔ 0.1.22 — **呼盘判定搬到窗口的 `sendEvent` 上。**

@@ -38,39 +38,15 @@ struct RingConfig {
     /// nobody can see is not a feature.
     var desktop: Bool = true
 
-    /// 0.0.44 — where the summon strip sits, in percent of the screen height
-    /// (0 = top edge, 100 = bottom edge, 50 = the middle). A percentage rather
-    /// than a point for the same reason the old grip stored a fraction: the
-    /// same number means the same place after a rotation.
-    var barY: CGFloat = 50
-
-    /// 0.0.49 — 竖条的长度，按**屏幕高度的百分比**存（默认 6 %）。
+    /// 0.1.24 — **`barY` / `barLength` / `barWidth` / `fullEdge` 四个字段全部删除。**
     ///
-    /// Aevon(47) #3 asked whether the "hard to trigger after locking" problem
-    /// was about length and width. It is not (see `RingHost.raiseWindow`), but
-    /// the operator wants the shape in his own hands, so both became settings.
-    /// A percentage rather than points so the strip keeps its proportion on a
-    /// 932 pt phone and on an 844 pt one, and after a rotation.
-    var barLength: CGFloat = 6
-
-    /// 0.0.49 — 竖条的宽度，按**40 pt 的百分比**存（默认 20 % ⇒ 8 pt）。
+    /// 它们只喂 `RingHost.metrics()` 与 `stripRect()` 里那条整条右缘的分支，而
+    /// 竖条整体下线、热区定稿在「贴右缘 18 pt × 底部 35 %」之后，两边都没有
+    /// 读取方了。留着字段会让 `settings-manifest.json` 里的对账继续把它们算成
+    /// 「已接通」，而实际上没有任何控件能改到它们 —— 账面上对、行为上是死的。
     ///
-    /// 40 pt is the ceiling on purpose: the strip lives on the screen edge where
-    /// pages have their own tap targets (back, list rows, sliders), and a wider
-    /// strip would start stealing them. So the UI shows a percentage and the
-    /// code never lets the result exceed 40 pt.
-    var barWidth: CGFloat = 20
-
-    /// 0.1.19 — 呼盘热区是否覆盖**整条右缘**（默认开）。
-    ///
-    /// 0.1.18 把竖条改成「亮 0.5 s 就淡出」之后，用户的第一反应是
-    /// 「触发条隐藏后无法通过手势呼出圆盘」—— 竖条不只是个按钮，它同时是
-    /// **「带子在这儿」的唯一视觉路标**。路标没了，手指就不知道该贴哪一段划；
-    /// 而带子只有底部 35 %，上半段划上去连 `pad down` 都不会有，看起来像失效。
-    ///
-    /// 现在默认整条右缘（上下各留 8 / 12 pt 让开状态栏与 home 条），划哪儿都算；
-    /// 留一个开关是为了「某些页面右缘要留给它自己的返回手势」这种局面对得上账。
-    var fullEdge: Bool = true
+    /// 用户 Aevon(107) 的原话：「右侧全部能触发，改为底部向上 35 %，避免和左滑
+    /// 返回插件冲突」「干脆直接移除触发条」。既然只有一个正确答案，就不设开关。
 
     /// 0.1.19 — 展开后固定，对应母版的 `AutoPin`（「自锁::展开后立即固定」）。
     ///
@@ -100,9 +76,7 @@ struct RingConfig {
     static let mirroredKeys: Set<String> = [
         "Radius", "IconWidth", "RotationAngle", "Star",
         "DampingFraction", "CustomSpringAnimation", "VIBRATE", "INTENSITY",
-        "Speed", "!ring.desktop", "!ring.barY",
-        "!ring.barLength", "!ring.barWidth",
-        "!ring.fulledge", "!ring.autopin",
+        "Speed", "!ring.desktop", "!ring.autopin",
     ]
 
     // MARK: Reading
@@ -138,10 +112,6 @@ struct RingConfig {
         config.intensity = clamp(number("INTENSITY", 0.7), 0.10, 1.0)
         config.speed = clamp(number("Speed", 1), 0.2, 2.0)
         config.desktop = flag("!ring.desktop", true)
-        config.barY = clamp(number("!ring.barY", 50), 0, 100)
-        config.barLength = clamp(number("!ring.barLength", 6), 4, 20)
-        config.barWidth = clamp(number("!ring.barWidth", 20), 10, 100)
-        config.fullEdge = flag("!ring.fulledge", true)
         config.autoPin = false   // 0.1.20：跟手已撤，本版一律不固定（见 `autoPin` 字段注释）
         return config
     }
@@ -169,10 +139,6 @@ struct RingConfig {
             "Speed": Double(speed),
             "summary": summary,
             "desktop": desktop,
-            "barY": Double(barY),
-            "barLength": Double(barLength),
-            "barWidth": Double(barWidth),
-            "fullEdge": fullEdge,
             "autoPin": autoPin,
             "writtenAt": Date().timeIntervalSince1970,
         ]
@@ -208,10 +174,6 @@ struct RingConfig {
         config.intensity = clamp(number("INTENSITY", 0.7), 0.10, 1.0)
         config.speed = clamp(number("Speed", 1), 0.2, 2.0)
         config.desktop = flag("desktop", true)
-        config.barY = clamp(number("barY", 50), 0, 100)
-        config.barLength = clamp(number("barLength", 6), 4, 20)
-        config.barWidth = clamp(number("barWidth", 20), 10, 100)
-        config.fullEdge = flag("fullEdge", true)
         config.autoPin = false   // 0.1.20：同 `load()`，忽略存盘值
         return config
     }

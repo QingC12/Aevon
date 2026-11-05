@@ -4735,6 +4735,132 @@ static void AevonMiniSwallowNote(BOOL began) {
 
 static IMP AevonOriginalUISendEvent = NULL;
 
+/* ⛔ 0.1.24 — **右缘呼盘：应用侧把同一根手指也收走。**
+ *
+ * 为什么 SpringBoard 那边吞了不够。Aevon(107) 里 13 次呼盘全部成功、`app touch`
+ * 20 次、inset 5~12 全在带内 —— 通道是通的。但用户报「右侧滑动时会触发应用内的
+ * 滑动操作」，日志里酷安那一片 `page state after change pager` 就是它。
+ *
+ * 原因是进程模型，不是判据：这根手指由 backboardd **分别**投递给 SpringBoard 和
+ * 前台 App，两边各拿各的一份。SpringBoard 的 `sendEvent` 吞掉的只是它自己那份，
+ * App 那份一条不少 —— 它的 `UIPanGestureRecognizer` / 侧滑返回照常跑完。
+ *
+ * 所以这里补上 App 侧的那一半。判据与宿主侧同源（贴右缘 18 pt × 底部 35 %、
+ * `|dx| >= |dy| * 0.7`），只是**起判点从 8 pt 提前到 3 pt**：
+ *
+ *   · 3 pt 判成左滑 ⇒ 这根手指归我们，从 began 起全吞；
+ *   · 3 pt 判成别的东西（竖向 / 向右）⇒ 立刻把扣住的 began 还回去，之后一条不碰；
+ *   · 一直没判出来（原地不动）⇒ 抬手时把 began + ended 一起还回去，点击照常。
+ *
+ * 为什么必须提前到 3 pt：`UIPanGestureRecognizer` 和 `UIScrollView` 的 pan 都在
+ * 10 pt 左右 recognize。留在 8 pt 就正好把「能不能动」的判决让给了它们 —— 那
+ * 8 pt 的轨迹足够让应用决定「这是一次滚动」。3 pt 时它们还在 .possible。
+ *
+ * 代价写在这里：贴右缘划的**竖向**手势会丢掉最前面 3 pt 的轨迹。补发之后应用
+ * 从原点重新开始跟，用户感觉不到；换来的是一条「不再穿透到应用」的右缘。
+ */
+static CGPoint AevonEdgeOrigin = { 0, 0 };
+static BOOL AevonEdgeWatching = NO;
+static BOOL AevonEdgeOwned = NO;
+/// 被扣住的那一拍 `began`。判成不是左滑就要还回去，否则应用永远等不到落指。
+static UIEvent *AevonEdgeHeld = nil;
+static int AevonEdgeNotes = 0;
+
+static void AevonEdgeDrop(void) {
+#if !__has_feature(objc_arc)
+    [AevonEdgeHeld release];
+#endif
+    AevonEdgeHeld = nil;
+}
+
+static void AevonEdgeKeep(UIEvent *event) {
+    AevonEdgeDrop();
+#if !__has_feature(objc_arc)
+    AevonEdgeHeld = [event retain];
+#else
+    AevonEdgeHeld = event;
+#endif
+}
+
+/// 这一根手指是不是从「右缘底部 35 %」起手的。
+///
+/// 读 `UIScreen.mainScreen.bounds` 而不是窗口：这段代码在每一个 App 进程里跑，
+/// 而 App 自己的窗口可能被 transform / 分屏挪过。屏幕尺寸是这个判定唯一需要的
+/// 参照 —— **只读，不写**（0.0.65 / 0.0.67 的教训是「改」它，不是「读」它）。
+static BOOL AevonEdgeInBand(CGPoint p) {
+    CGSize size = [UIScreen mainScreen].bounds.size;
+    if (size.width < 1.0 || size.height < 1.0) return NO;
+    return p.x >= size.width - 18.0 && p.y >= size.height * 0.65;
+}
+
+/// 返回 YES = 这一拍不往上派发。`*replay` 为 YES 表示「扣住的那一拍该还回去」。
+static BOOL AevonEdgeTake(UIEvent *event, BOOL *replay) {
+    NSSet *touches = [event allTouches];
+    // 多指：呼盘只认单指。已经扣住的那一拍必须还回去，否则应用少半截事件。
+    if (touches.count != 1) {
+        AevonEdgeWatching = NO;
+        AevonEdgeOwned = NO;
+        *replay = YES;
+        return NO;
+    }
+    UITouch *touch = [touches anyObject];
+    CGPoint p = [touch locationInView:nil];
+    UITouchPhase phase = touch.phase;
+
+    if (phase == UITouchPhaseBegan) {
+        if (!AevonEdgeInBand(p)) {
+            AevonEdgeWatching = NO;
+            return NO;
+        }
+        AevonEdgeWatching = YES;
+        AevonEdgeOwned = NO;
+        AevonEdgeOrigin = p;
+        AevonEdgeKeep(event);
+        if (AevonEdgeNotes < 20) {
+            AevonEdgeNotes += 1;
+            char line[128];
+            snprintf(line, sizeof(line), "app: edge touch at %.0f,%.0f held\n", p.x, p.y);
+            AevonAppLogWrite(line);
+        }
+        return YES;   // 先扣住，判明方向再说
+    }
+
+    if (!AevonEdgeWatching) return NO;
+    CGFloat dx = p.x - AevonEdgeOrigin.x;
+    CGFloat dy = p.y - AevonEdgeOrigin.y;
+
+    if (phase == UITouchPhaseMoved || phase == UITouchPhaseStationary) {
+        if (AevonEdgeOwned) return YES;
+        // 3 pt 就够定方向：向左、且横向不输给竖向 * 0.7（单手拇指是斜划）。
+        if (dx <= -3.0 && fabs(dx) >= fabs(dy) * 0.7) {
+            AevonEdgeOwned = YES;
+            AevonEdgeDrop();      // 归我们了，那半截 began 作废
+            return YES;
+        }
+        // 认输要决定性：向右走够 16 pt，或者竖向占优走够 16 pt。
+        if (dx >= 16.0 || (fabs(dy) >= 16.0 && fabs(dy) > fabs(dx))) {
+            AevonEdgeWatching = NO;
+            *replay = YES;
+            return NO;
+        }
+        return YES;               // 还没判出来，继续扣着
+    }
+
+    if (phase == UITouchPhaseEnded || phase == UITouchPhaseCancelled) {
+        BOOL owned = AevonEdgeOwned;
+        AevonEdgeWatching = NO;
+        AevonEdgeOwned = NO;
+        if (owned) {
+            AevonEdgeDrop();
+            return YES;
+        }
+        // 原地不动就抬手 = 点击：began 和这一拍一起还回去，tap 照常识别。
+        *replay = YES;
+        return NO;
+    }
+    return NO;
+}
+
 static void AevonAppSendEvent(id self, SEL _cmd, UIEvent *event) {
     if (AevonOriginalUISendEvent == NULL) return;
     // 只拦触摸事件。远程控制、运动事件这些和停靠无关，原样放行。
@@ -4747,9 +4873,24 @@ static void AevonAppSendEvent(id self, SEL _cmd, UIEvent *event) {
     for (UITouch *touch in touches) {
         if (touch.phase == UITouchPhaseBegan) { began = YES; break; }
     }
+    // 停靠小窗优先：用户看得见的那块先拿手指。
     if (AevonMiniDocked(began)) {
         AevonMiniSwallowNote(began);
         return;
+    }
+    // 0.1.24 — 右缘呼盘：同一根手指在 App 这一份也要收走。
+    BOOL replay = NO;
+    if (AevonEdgeTake(event, &replay)) return;
+    if (replay && AevonEdgeHeld != nil) {
+        UIEvent *held = AevonEdgeHeld;
+        AevonEdgeHeld = nil;
+#if !__has_feature(objc_arc)
+        [held retain];   // 重放期间不被 autorelease pool 收走
+#endif
+        ((void (*)(id, SEL, UIEvent *))AevonOriginalUISendEvent)(self, _cmd, held);
+#if !__has_feature(objc_arc)
+        [held release];
+#endif
     }
     ((void (*)(id, SEL, UIEvent *))AevonOriginalUISendEvent)(self, _cmd, event);
 }

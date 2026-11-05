@@ -137,16 +137,6 @@ final class PanelController: PSListController {
         if key == "@ring.star" {
             return "收藏随圆盘本体移交旧版实现（0.0.42），不再单独计数"
         }
-        if key == "@ring.grip" {
-            // 0.0.44 — the bar's place on the screen, straight out of the
-            // snapshot the host reads, so this row and the strip cannot disagree.
-            let config = RingConfig.loadRuntime()
-            let percent = Int(config.barY.rounded())
-            // 0.0.49 — 这一行同时报长与宽，滑块拖完不用去桌面数像素。
-            let length = Int(config.barLength.rounded())
-            let width = Int((40 * config.barWidth / 100).rounded())
-            return "屏幕高度的 \(percent)%（右侧贴边竖条 · 长 \(length)% / \(width)pt）"
-        }
         return super.readPreferenceValue(specifier)
     }
 
@@ -171,11 +161,6 @@ final class PanelController: PSListController {
 
     @objc func editApps(_ specifier: PSSpecifier) {
         RingActions.editApps(from: self)
-    }
-
-    @objc func resetGrip(_ specifier: PSSpecifier) {
-        RingActions.resetGrip(from: self)
-        refreshSummaryRow()
     }
 
     /// 窗口与场景 · 探针. Runs in SpringBoard, not here: see SceneActions.
@@ -203,12 +188,12 @@ final class PanelController: PSListController {
     /// Keys driven by a slider. A drag produces a value per touch event, so
     /// these are coalesced; a switch produces exactly one and is written at
     /// once.
+    /// 0.1.24 — 竖条那三个键（`!ring.barY` / `!ring.barLength` / `!ring.barWidth`）
+    /// 随滑块一起下线。表里留一个已经不存在的滑块名，只是让 `setPreferenceValue`
+    /// 每次多查一次集合。
     private static let sliderKeys: Set<String> = [
         "Radius", "IconWidth", "RotationAngle", "LastIconAngle",
-        "DampingFraction", "INTENSITY", "Speed", "!ring.barY",
-        // 0.0.49 — 竖条的长与宽。加在这里才会走「合并写入 + 一次 Darwin 通知」
-        // 的那条路：漏一个，拖动滑块就会每帧写一次 ring.plist。
-        "!ring.barLength", "!ring.barWidth",
+        "DampingFraction", "INTENSITY", "Speed",
     ]
 
     private var lastWrite = Date.distantPast
@@ -258,7 +243,7 @@ final class PanelController: PSListController {
             guard let row = element as? PSSpecifier,
                   let key = row.property(forKey: "key") as? String else { continue }
             if key == "@ring.summary" || key == "@ring.host"
-                || key == "@ring.apps" || key == "@ring.grip" {
+                || key == "@ring.apps" {
                 if responds(to: NSSelectorFromString("reloadSpecifier:")) {
                     _ = perform(NSSelectorFromString("reloadSpecifier:"), with: row)
                 } else {

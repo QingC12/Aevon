@@ -314,32 +314,33 @@ def build_panel(panel_id, title, intro, items):
                       "action": "previewRing:", "defaults": DOMAIN})
 
         # 桌面承载：0.0.6 起 RingHost 把同一个 RingView 挂到桌面右下角。
-        # 这两个 key 不属于母本 81 键，所以加 "!" 前缀单独记账。
+        # 这个 key 不属于母本 81 键，所以加 "!" 前缀单独记账。
+        #
+        # 0.1.24 — 竖条整体下线（用户 Aevon(107)：「既然现在改为依赖右缘左滑
+        # 触发圆盘，干脆直接移除触发条」）。这一组只剩「装不装」这一个开关了，
+        # 文案也不再提竖条。
         specs.append({"cell": "PSGroupCell", "label": "桌面",
-                      "footerText": "开启后屏幕右侧贴边出现一条小竖条（8x56pt，颜色取自它背后的画面）。"
-                                    "点它呼出旧版圆盘：点图标启动 App，按住圆心 1 秒旋转，"
-                                    "抬手落在盘外或图标间隙收起，再点竖条也能收。"})
-        specs.append({"cell": "PSSwitchCell", "label": "桌面显示竖条",
+                      "footerText": "开启后圆盘挂在桌面上，靠屏幕右缘的左滑手势呼出：" 
+                                    "手指贴着右边框、在屏幕**下部 35%**之内向左划，"
+                                    "圆盘就从固定点展开。点图标启动 App，按住圆心 1 秒旋转，"
+                                    "抬手落在盘外或图标间隙收起。"})
+        specs.append({"cell": "PSSwitchCell", "label": "桌面显示圆盘",
                       "key": "!ring.desktop", "default": True, "defaults": DOMAIN})
         specs.append({"cell": "PSTitleValueCell", "label": "桌面状态",
                       "key": "@ring.host", "default": "—", "defaults": DOMAIN})
 
-        # 0.1.19 — 呼盘手势开关。Aevon(104) 第 4 条把竖条改成「亮 0.5 s 就淡出」
-        # 之后，竖条同时失去了「带子在这儿」这个路标；用户随即报「触发条隐藏后无法
-        # 通过手势呼出圆盘」。所以热区默认放到整条右缘。
+        # 0.1.24 — 呼盘手势的说明（没有开关了）。
         #
-        # 0.1.20 — 「展开后固定（AutoPin）」那一组**删掉**：跟手整条撤了（用户
-        # Aevon(105)：跟手做不出来，恢复固定位置），AutoPin 剩下的「抬手不收起」
-        # 只会让盘赖在屏上、下一次贴边划把它拖来拖去。字段还在结构体里（默认
-        # false），设置项不再给用户 —— 留一个开了也不生效的开关比没有更糟。
+        # 0.1.19 加的「热区覆盖整条右缘」开关在这一版删掉：Aevon(107) 证明整条
+        # 右缘能呼出，但用户随即指出「依旧是右侧全部能触发」，要求改回底部 35%
+        # 以避免与左滑返回插件冲突。既然只有一个正确答案，就不再给用户一个
+        # 会让他自己踩坑的开关。
         specs.append({"cell": "PSGroupCell", "label": "呼盘手势",
-                      "footerText": "竖条亮 0.5 秒就淡出，它原本还兼着「带子在这儿」的"
-                                    "路标。所以热区默认是**整条右缘、贴边 18 pt**：手指贴在"
-                                    "右缘任何高度向左划都能呼出圆盘（上下各让开一点点）。"
-                                    "如果某个页面右缘要留给他自己的返回手势，关掉它，"
-                                    "热区就退回屏幕底部 35%。"})
-        specs.append({"cell": "PSSwitchCell", "label": "热区覆盖整条右缘",
-                      "key": "!ring.fulledge", "default": True, "defaults": DOMAIN})
+                      "footerText": "手指贴着右边框、在屏幕**底部往上 35%** 之内"
+                                    "（约 y ≥ 屏幕高度 65% 的位置）向左划，圆盘就展开。"
+                                    "上半段整条让给系统与应用自己的返回手势，互不干扰。"
+                                    "触发条已移除，屏上不再显示任何常驻标记；"
+                                    "键盘弹出时这 35% 也一起让路。"})
 
         # App 侧激活态桥：浮窗里的内容能不能点，取决于 App 自己是否认为
         # 自己在前台。这一项装在一个独立注入点里（只注入 UIKit，不碰桌面），
@@ -365,40 +366,14 @@ def build_panel(panel_id, title, intro, items):
         specs.append({"cell": "PSButtonCell", "label": "编辑应用（添加 / 删除 / 排序）",
                       "action": "editApps:", "defaults": DOMAIN})
 
-        # 竖条位置：0.0.44 起位置是这一条滑块，不再是「拖到哪算哪」——
-        # 拖动位置要靠人自己发现，滑块就在设置里，还能读出百分比。
-        specs.append({"cell": "PSGroupCell", "label": "竖条位置",
-                      "footerText": "圆盘由屏幕右侧贴边的小短竖条呼出：点一下，"
-                                    "或者从竖条向左滑一下。下面的滑块决定竖条在屏幕上的高度，"
-                                    "单位是屏幕高度的百分比（0 顶部 / 100 底部），"
-                                    "拖动时桌面上的竖条会跟着走，横竖屏按同一比例还原。"})
-        specs.append({"cell": "PSSliderCell", "label": "位置（屏幕高度 %）",
-                      "key": "!ring.barY", "default": 50.0,
-                      "min": 0.0, "max": 100.0, "showValue": True, "defaults": DOMAIN})
-        specs.append({"cell": "PSTitleValueCell", "label": "当前位置",
-                      "key": "@ring.grip",
-                      "default": "屏幕高度的 50%（右侧贴边竖条）", "defaults": DOMAIN})
-        specs.append({"cell": "PSButtonCell", "label": "竖条回到屏幕中央",
-                      "action": "resetGrip:", "defaults": DOMAIN})
-
-        # 0.0.49 — 竖条的长与宽（Aevon(47) #3 直接要求加的两个滑块）。
-        # 两个都是百分比：长度按屏幕高度算，宽度按 40 pt 算。宽度上限写死在
-        # 40 pt —— 竖条贴在屏幕右缘，那里有页面自己的点击目标。
-        specs.append({"cell": "PSGroupCell", "label": "竖条大小",
-                      "footerText": "长度按屏幕高度的百分比算（4–20%，默认 6%，"
-                                    "本机约 37–186 pt）。宽度按 40 pt 的百分比算"
-                                    "（10–100%，默认 20% ⇒ 8 pt），上限就是 40 pt："
-                                    "竖条贴在屏幕右缘，再宽就会挡住页面自己的点击"
-                                    "（返回、列表行、滑条）。0.1.18 起竖条不再常显："
-                                    "挂载 / 改设置 / 呼盘成功时亮 0.5 秒后自动淡出，"
-                                    "触摸区（贴边 18 pt）一直有效、不受影响。"
-                                    "改完立刻生效，不用注销。"})
-        specs.append({"cell": "PSSliderCell", "label": "长度（屏幕高度 %）",
-                      "key": "!ring.barLength", "default": 6.0,
-                      "min": 4.0, "max": 20.0, "showValue": True, "defaults": DOMAIN})
-        specs.append({"cell": "PSSliderCell", "label": "宽度（40 pt 的 %）",
-                      "key": "!ring.barWidth", "default": 20.0,
-                      "min": 10.0, "max": 100.0, "showValue": True, "defaults": DOMAIN})
+        # 0.1.24 — 「竖条位置」「竖条大小」两组全部删除。
+        #
+        # 它们控制的东西（`!ring.barY` / `!ring.barLength` / `!ring.barWidth`）
+        # 只喂 `RingHost.metrics()`，而那个函数这一版整个下线了。留一组调不出
+        # 任何反应的滑块比没有更糟：用户会以为「竖条还在，只是调不出来」。
+        #
+        # 呼盘几何现在只有一个来源（`stripRect`：贴右缘 18 pt × 底部 35%），
+        # 没有可调项，也就不需要任何控件。
 
         # 0.1.18 — 热区可见层撤除（Aevon(104) 第 3 条：「移除屏幕右侧的手势热区
         # 可见性…它不会占用大部分屏幕右侧的内容，不需要修改了」）。
@@ -495,9 +470,9 @@ def build_root(panel_items, wired):
 
     items.append({"cell": "PSGroupCell", "label": "关于",
                   "footerText": f"Aevon {VERSION} · Swift · arm64e · 8 个面板全部可进入。"
-                                f"承载形状：旧版圆盘 1:1 移入——点右侧竖条呼出，划过跳跃、"
+                                f"承载形状：旧版圆盘 1:1 移入——右缘左滑呼出，划过跳跃、"
                                 f"阻尼旋转、逐点展开全是本体；应用在编辑器里增删排序"
-                                f"（上限 36，含截图 / 录屏动作槽），竖条位置在面板里用滑块调。"
+                                f"（上限 36，含截图 / 录屏动作槽）。"
                                 f"其余面板的开关写入域、随对应功能落地。"
                                 f"所有改动只写 {DOMAIN}，不触碰系统文件。"})
 
@@ -585,7 +560,7 @@ def main():
         "明确放弃": [{"key": k, "cn": c, "why": w} for k, c, w in DROPPED],
         # 不属于母本 81 键的 Aevon 自有开关，单独记账，避免它们混进复刻进度。
         "自有项": [
-            {"key": "!ring.desktop", "cn": "桌面显示竖条", "cell": "switch",
+            {"key": "!ring.desktop", "cn": "桌面显示圆盘", "cell": "switch",
              "default": True, "wired": True},
             {"key": "@ring.host", "cn": "桌面状态", "cell": "title", "wired": True},
             {"key": "@ring.summary", "cn": "当前承载", "cell": "title", "wired": True},

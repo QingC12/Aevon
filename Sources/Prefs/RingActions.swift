@@ -37,23 +37,4 @@ enum RingActions {
         Log.write("prefs: open app list")
     }
 
-    /// 0.0.44 — 「竖条回到屏幕中央」. The strip's height is a slider now, so a
-    /// reset is one default written back and the same snapshot write every other
-    /// ring control goes through: the host reads the file, not this process's
-    /// copy of the domain.
-    static func resetGrip(from controller: UIViewController) {
-        UserDefaults(suiteName: Aevon.domain)?.set(50.0, forKey: "!ring.barY")
-        let config = RingConfig.load()
-        let ok = config.writeSnapshot()
-        notifyPost(Aevon.notePrefs)
-        Log.write("prefs: bar position 50" + (ok ? "" : " (snapshot write failed)") )
-        if !ok {
-            let sheet = UIAlertController(title: "复位失败",
-                                          message: "圆盘配置文件 \(Aevon.ringPath) 写不进去，"
-                                                 + "请检查该目录权限。",
-                                          preferredStyle: .alert)
-            sheet.addAction(UIAlertAction(title: "好", style: .default, handler: nil))
-            controller.present(sheet, animated: true)
-        }
-    }
 }

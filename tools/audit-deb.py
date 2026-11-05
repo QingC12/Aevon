@@ -411,48 +411,38 @@ def main():
             bad("ring: no !ring.desktop switch — the desktop host cannot be turned off")
         elif "editApps:" not in actions:
             bad("ring: no editApps: row — apps cannot be added, removed or sorted")
-        elif "resetGrip:" not in actions:
-            bad("ring: no resetGrip: row — a grip dragged off screen could not be recovered")
-        elif "@ring.apps" not in keys or "@ring.grip" not in keys:
-            bad("ring: the app list / grip position has no live row")
-        elif "!ring.barY" not in keys:
-            bad("ring: no !ring.barY slider — the summon bar's height cannot be set")
+        elif "@ring.apps" not in keys:
+            bad("ring: the app list has no live row")
+        elif "resetGrip:" in actions or "@ring.grip" in keys:  # gone
+            # 0.1.24 — 竖条下线，`@ring.grip`（位置读数）与 `resetGrip:`（回中）
+            # 一起删。它们读写的 `barY` 字段已经不在 `RingConfig` 里，留着就是
+            # 一个点下去会崩的行。
+            bad("ring: @ring.grip / resetGrip: are back — the summon bar is gone, "
+                "they would read a field that no longer exists")
+        elif "!ring.barY" in keys or "!ring.barLength" in keys \
+                or "!ring.barWidth" in keys:
+            # 0.1.24 — 竖条下线，三个滑块跟着删。**再出现就是回归**：那意味着
+            # `RingConfig` 的字段又长回来了，而 `metrics()` 早已不存在，滑到任何
+            # 位置都不会有任何反应 —— 一个调不出东西的控件比没有更糟。
+            bad("ring: the summon bar sliders are back in the panel — 0.1.24 removed "
+                "the bar, a slider that writes a key nothing reads is a lie")
+        elif "!ring.fulledge" in keys:
+            # 0.1.24 — 热区定稿在「贴右缘 18 pt × 底部 35 %」。留一个能把它改成
+            # 整条右缘的开关，等于把 0.1.19~0.1.23 那段「和左滑返回插件抢地盘」
+            # 的坑原样留给用户。
+            bad("ring: !ring.fulledge is back — 0.1.24 froze the band at the bottom "
+                "35 %, the full-edge档 is exactly what caused the plugin clash")
         elif "!ring.appHook" not in keys:
             bad("ring: no !ring.appHook switch — an app-side bridge that cannot be "
                 "turned off is a bridge with no way back")
         else:
-            bar = [i for i in ring_items if i.get("key") == "!ring.barY"]
-            if not bar or bar[0].get("cell") != "PSSliderCell":
-                bad("ring: !ring.barY is not a slider — a percentage needs a range")
-            elif not (bar[0].get("min") == 0.0 and bar[0].get("max") == 100.0):
-                bad("ring: !ring.barY range is not 0…100 — the row says percent")
-            elif not bar[0].get("showValue"):
-                bad("ring: !ring.barY does not show its value — 实时百分比 is the point")
-            else:
-                # 0.0.49 — 竖条的长与宽各一条滑块（Aevon(47) #3 直接要求的）。
-                length = [i for i in ring_items if i.get("key") == "!ring.barLength"]
-                width = [i for i in ring_items if i.get("key") == "!ring.barWidth"]
-                if not length or length[0].get("cell") != "PSSliderCell":
-                    bad("ring: no !ring.barLength slider — the bar length cannot be set")
-                elif not (length[0].get("min") == 4.0 and length[0].get("max") == 20.0):
-                    bad("ring: !ring.barLength range is not 4…20 % — the row says percent")
-                elif not length[0].get("showValue"):
-                    bad("ring: !ring.barLength does not show its value")
-                elif not width or width[0].get("cell") != "PSSliderCell":
-                    bad("ring: no !ring.barWidth slider — the bar width cannot be set")
-                elif not (width[0].get("min") == 10.0 and width[0].get("max") == 100.0):
-                    bad("ring: !ring.barWidth range is not 10…100 % of 40 pt")
-                elif not width[0].get("showValue"):
-                    bad("ring: !ring.barWidth does not show its value")
-                else:
-                    ok("ring: 旧版圆盘, live summary, preview, apps, grip reset, "
-                       "bar position / length / width sliders, desktop switch, "
-                       "app-side bridge switch")
+            ok("ring: 旧版圆盘, live summary, preview, apps, grip reset, desktop "
+               "switch, app-side bridge switch (bar sliders and !ring.fulledge gone)")
 
     for token in (b"RingPreviewController", b"openPanel:",
-                  b"PanelController", b"previewRing:", b"editApps:", b"resetGrip:",
+                  b"PanelController", b"previewRing:", b"editApps:",
                   b"AppListController", b"AppPickerController",
-                  b"prefs: open app list", b"prefs: bar position 50",
+                  b"prefs: open app list",
                   b"AevonRingEditorCell", b"AevonRingAddCell",
                   b"_applicationIconImageForBundleIdentifier:"):
         if token not in prefs:
@@ -469,11 +459,14 @@ def main():
     # in CI while looking fine locally. tools/push-gate.py enforces the length.
     dylib_early = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
     for token in (b"RingHost", b"ring: hosted on desktop", b"LSApplicationWorkspace",
-                  b"ring: bar position ", b"ring: expanded (",
-                  # 0.0.45 — 竖条的两种呼出与面板豁免，各自一行日志字面量。
-                  # 「按住呼出」是这版的核心改动：没有这一行，圆盘就还是
-                  # 0.0.44 那种「手指抬起后才出现」的形态。
-                  b"ring: held open at ", b"ring: bar released at ",
+                  # 0.1.24 — `ring: bar position ` 随竖条一起下线。替它的是
+                  # `ring: edge claim=`：竖条那行原本自带 `claim=` 段，是「热区在
+                  # 哪儿」的唯一读数；竖条没了，这条读数必须自己站出来，否则下一
+                  # 份日志连「带子在不在底部 35 %」都答不出。
+                  b"ring: edge claim=", b"ring: expanded (",
+                  # 0.0.45 的 `ring: held open at ` / `ring: bar released at ` 两条
+                  # 在 0.1.24 撤掉：它们只由 `handleBarPan`（按住竖条拖动）打印，
+                  # 而那个手势随竖条一起删了。
                   # 0.1.7 — `ring: bar touch at ` 已经下线：竖条那块 40×212 的
                   # 视觉垫子不再接收触摸（用户 Aevon(94)「点击全屏应用的操作会
                   # 误触圆盘」「移除点击触发圆盘，只保留左滑」）。那一行是
@@ -511,13 +504,11 @@ def main():
                   # 证明「键盘起来 → 让路」这条链真的跑过；只有第一条而没有后两条，
                   # 就是「装上了但收不到心跳」（App 侧没编译进通道）。
                   b"ring: keyboard watch armed (lease 3.0 s)",
-                  b"ring: keyboard up, summon bar and edge pad stepped aside",
-                  b"ring: keyboard gone, summon bar and edge pad back",
+                  b"ring: keyboard up, edge band stepped aside",
+                  b"ring: keyboard gone, edge band back",
                   # 0.1.18 — 键盘「收起」那条独立通道（Aevon(104) 第 1 条要求
                   # 「关键盘后立即出现」）。宿主侧注册它、App 侧发它，两边各断言一次。
                   b"com.aevon.kb.off",
-                  # 0.1.18 — 竖条「亮 0.5 s 后自动淡出」（Aevon(104) 第 4 条）。
-                  b"ring: bar faded out (auto hide 0.5 s)",
                   # 0.1.18 — 圆心跟手（Aevon(104) 第 2 条）。这条标记在
                   # `AevonRingMenu.applyAnchor` 的日志里，没有它就说明「圆心还是
                   # 固定 215,699」。
@@ -552,7 +543,7 @@ def main():
                   b"AevonRingEdgeTouch",
                   # 窗口丢了场景 ⇒ 触摸永远送不进来（能合成、能看见、收不到）。
                   b"ring: window lost its scene, touches will not be delivered",
-                  b"ring: bar layer put back on top (level=",
+                  b"ring: host layer put back on top (level=",
                   b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",
                   # 0.0.42 — the ported disc must be in the dylib. These tags are
@@ -570,12 +561,18 @@ def main():
     # 二进制里：只要还能 grep 到，就说明那层淡青色底纹还挂在宿主视图上，
     # 用户会在桌面上又看见它。
     for gone in (b"ring: hot zone shown",                 # gone
-                 b"ring: hot zone hidden (switch off)"):  # gone
+                 b"ring: hot zone hidden (switch off)",   # gone
+                 # 0.1.24 — 竖条整体下线（Aevon(107)：「干脆直接移除触发条」）。
+                 # 下面三条都属于它：淡出动画、按住拖动、点它开合。任何一条还能
+                 # 在二进制里 grep 到，就说明有个可见的东西又回到了屏幕上。
+                 b"ring: bar faded out (auto hide 0.5 s)",  # gone
+                 b"ring: held open at ",                     # gone
+                 b"ring: bar released at "):                 # gone
         if gone in dylib_early:
-            bad(f"host: {gone.decode()} still in Aevon.dylib — the hot zone overlay "
-                "was removed in 0.1.18, it must not be drawn any more")
+            bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "
+                "back (hot zone 0.1.18 / summon bar 0.1.24)")
         else:
-            ok(f"host: {gone.decode()} gone (hot zone overlay removed, 0.1.18)")
+            ok(f"host: {gone.decode()} gone (removed layer stayed removed)")
     # The app list moved from the file store to the old plugin's snapshot store
     # (UserDefaults suite + RingAppsSnapshot, V0.0.31 semantics kept verbatim).
     if b"RingAppsSnapshot" not in dylib_early:
@@ -584,9 +581,9 @@ def main():
     # 0.0.44 — the grip dot is gone and so is layout.plist: the bar's height is
     # a preference, so what has to be in the dylib is the line that proves the
     # host read it.
-    if b"ring: bar position " not in dylib_early:
-        bad("host: the summon bar never reports its position — the slider would "
-            "move a bar this file cannot prove exists")
+    if b"ring: edge claim=" not in dylib_early:
+        bad("host: the edge band never reports its geometry — nothing in the log "
+            "would say where the 18 pt / bottom-35 % strip actually sits")
     # 0.0.68 — the hosted mark is **diagnostic only** now. 0.0.67 made it the
     # sole hosted test on the app side and handed it a "re-layout every window"
     # job; the mark is a cross-process file read that a sandboxed app may not be
@@ -905,6 +902,10 @@ def main():
                       # 「关键盘后立即出现」）。不发它，桌面只能等 3 秒租约过期。
                       b"com.aevon.kb.off",
                       b"app: keyboard up (bridge)",
+                      # 0.1.24 — 应用侧右缘吞手指（Aevon(107)：「右侧滑动时会触发
+                      # 应用内的滑动操作」）。SpringBoard 吞掉的是它自己那一份，
+                      # App 一份不少 —— 这一行证明 App 侧的闸门真的装上了。
+                      b"app: edge touch at ",
                       b"setContentOffset:"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")
@@ -1159,12 +1160,13 @@ def main():
                   b"ring: center panel -> app chooser (",
                   b"ring: app chooser gone (",
                   # 0.1.6 — **圆盘入口的唯一开关与它的自愈**。
-                  #   `ring: grip armed bar=…` 是竖条 / 右缘带两个触摸开关的现算
-                  #   结果，每变一次写一行（`card=` 是此刻还有没有卡，`panel=` 是
-                  #   应用面板在不在）。用户 Aevon(94) 报「右侧呼不出圆盘、打不开
-                  #   悬浮窗」，就是这两个开关被某条没走完的路径关死了。这一行
-                  #   出现在启动后不久 = 开关有归口；一直不出现 = 一次都没变过。
-                  b"ring: grip armed bar=",
+                  #   `ring: grip armed edge=…` 是右缘带触摸开关的现算结果，每变一次
+                  #   写一行（`card=` 是此刻还有没有卡，`panel=` 是应用面板在不在）。
+                  #   用户 Aevon(94) 报「右侧呼不出圆盘、打不开悬浮窗」，就是这个开关
+                  #   被某条没走完的路径关死了。这一行出现在启动后不久 = 开关有归口；
+                  #   一直不出现 = 一次都没变过。
+                  #   0.1.24 — `bar=` 那段随竖条删除，只剩 `edge=`。
+                  b"ring: grip armed edge=",
                   # 0.1.7 — 三条新证据（Aevon(94)）：
                   #   `win: undock read last main frame ` = 升窗用的是**上一次主窗的
                   #     实际 frame**（`FloatHost.lastMainFrame`），不再读按边存的百分比。
