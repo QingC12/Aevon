@@ -5141,7 +5141,11 @@ static BOOL AevonBandTake(UIEvent *event) {
     //
     // 一次手势读一次偏好域，代价是一次 cfprefsd 往返（亚毫秒），换掉的是整条
     // 通道对「通知什么时候到」的依赖。
-    if (touch.phase == UITouchPhaseBegan) AevonBandReload();
+    //
+    // 只在「这张卡片已经上报过」时才读（`AevonBandOn`）：桌面上没有卡片时这条
+    // 判断对全机二十来个进程都是白花，而那些进程的每一次点击都要经过这里。
+    // 从「没有」变成「有」仍然由通知那条路负责 —— 它每次都读。
+    if (touch.phase == UITouchPhaseBegan && AevonBandOn) AevonBandReload();
     // 0.1.35 — **锁在任何一拍都算数。**
     //
     // 0.1.34 只在 `.began` 判一次锁，而锁是跨进程送来的：界面上手指落下时，
