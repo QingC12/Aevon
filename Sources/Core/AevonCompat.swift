@@ -276,8 +276,10 @@ enum AevonRingGrip {
     /// 自己拼触摸语义：`sendEvent` 只看得到单个事件，看不到「这根手指整段归谁」，
     /// 于是出现了半截序列 / 假点击 / 孤儿帧（Aevon(94)~(97) 那几轮的全部门）。
     ///
-    /// 0.1.10 按母版重做：呼出只走 `RingHost` 那个 `UIPanGestureRecognizer`，
-    /// 由 `UIGestureRecognizerDelegate` 判方向，UIKit 保证「整根消费或整根放行」。
+    /// 0.1.11 — 呼出只走 `RingHost` 的 `EdgeSwipePad`：它自己收 `touchesBegan`
+    /// 一族、自己累积位移，够左才弹盘。0.1.10 那版把判据放在
+    /// `gestureRecognizerShouldBegin` 里，被 UIKit 的调用时机卡死（那一拍
+    /// `translation` 只有 10 pt，门槛却是 12），Aevon(98) 一个盘都呼不出来。
     /// 窗口被压住的顾虑用母版同款办法解决 —— 每次解锁/回前台把窗口 level 抬一格
     /// 再放回（见 `raiseWindow`），不靠事件通道兜底。
 

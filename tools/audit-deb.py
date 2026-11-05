@@ -480,10 +480,17 @@ def main():
                   # `BarPad.onDown` 的探针，跟着一起撤；现在落指只有 `bar raw down`
                   # 那一条（贴边 14 pt，带 strip= 读数）。
                   # 0.1.10 — `ring: bar raw down at ` 随 `rawBar` 一起删掉：
-                  # 呼出不再走 `-[UIApplication sendEvent:]`，改由 `edgePad` 上的
-                  # `UIPanGestureRecognizer` + `UIGestureRecognizerDelegate` 仲裁
-                  #（母版 Stheno 同款）。代替它的是下面这条「我们主动放行」的证词。
+                  # 呼出不再走 `-[UIApplication sendEvent:]`。
+                  # 0.1.11 — `ring: strip refuse dx=` 留用（仍是「这一下不算呼盘」
+                  # 的证词），但不再来自 `gestureRecognizerShouldBegin`，而是
+                  # `EdgeSwipePad.onReject`。0.1.10 那条 `UIPanGestureRecognizer` +
+                  # delegate 的路已被真机日志判死（translation 只有 10 pt，门槛 12
+                  # 永远够不到 ⇒ Aevon(98) 一个盘都呼不出来）。
                   b"ring: strip refuse dx=",
+                  # 0.1.11 — 落指就报一声：这条是「手指真的落到右缘 14 pt 上了」
+                  # 的唯一证词。以后「呼不出」先看它有没有：没有 ⇒ 就是几何没覆盖
+                  # 或 pad 被别人盖住；有但没有 `edge swipe open at` ⇒ 是判据问题。
+                  b"ring: edge swipe armed at ",
                   b"ring: bar layer put back on top (level=",
                   b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",
