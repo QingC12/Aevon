@@ -4593,9 +4593,15 @@ static void AevonMiniObserve(void) {
 /// 系统的深色和浅色切换」）。
 static void AevonStyleApply(BOOL dark) {
     UIUserInterfaceStyle style = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
-    for (UIWindow *window in [UIApplication sharedApplication].windows) {
-        if (window.overrideUserInterfaceStyle != style) {
-            window.overrideUserInterfaceStyle = style;
+    // 0.1.30 — `UIApplication.sharedApplication.windows` 从 iOS 15 起弃用，CI 是
+    // `-Werror`，一处弃用就整包构建失败（run 42004172613）。改从已连接的场景取
+    // 窗口：拿到的仍是同一批窗口，只是换成官方现行入口。
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (window.overrideUserInterfaceStyle != style) {
+                window.overrideUserInterfaceStyle = style;
+            }
         }
     }
 }
