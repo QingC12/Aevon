@@ -1695,6 +1695,21 @@ zStackParticipantDidChange:
         keep = {
             if stopped { return }
             beat += 1
+            // 0.1.35 — 手指在宿主手里时，这一拍整段让路。
+            //
+            // 200 ms 一拍的那一堆读数全在主线程上：`reapplyPlacement` 要一次
+            // scene settings、`AevonSystemCovered()` 打三个单例、`AevonContentStateOf`
+            // 与 `AevonSceneLevel` 再各取一次。它们单独都不贵，但拖动把同一根
+            // 主线程占满的时候，每 200 ms 插一次就是可感的顿一下 —— 用户说的
+            // 「好多了，但依旧不流畅」。手势最多一秒（见 `FloatHost.liveUntil`），
+            // 让路一秒不会漏掉任何需要及时反应的事：掉画会在 1 秒后照常接上，
+            // 而这一秒里本来就不该有一次写 settings。
+            if FloatHost.gestureLive {
+                if !stopped {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { keep() }
+                }
+                return
+            }
             // 0.0.55 — 空闲熄屏的续命拍。放在节拍最前面：这一条与画面、与
             // settings 都没有关系，后面的任何一个 guard 都不该把它挡掉。
             if Date().timeIntervalSince(idleAt) >= 20 {
@@ -1721,6 +1736,13 @@ zStackParticipantDidChange:
                 deadBeats = 0
                 // 不等下面那套「fg 不等于 1 才推」的存量判断：解锁后我们要的是
                 // 一次**主动**的重新接上，而不是再等一拍看系统脸色。
+                //
+                // 0.1.35 — 这一句就是 2026-11-05 18:31 那次安全模式的位置。
+                // `AevonPushForeground` 里读一个已经释放的 settings（根因与修法
+                // 写在那个函数开头）。这里补上死亡标记：万一它还是死在这，
+                // 下一次启动会看到 `win: previous run died at WIN-PUSH` 并把推前台
+                // 整条禁掉 —— 少一个功能，好过一次安全模式。
+                if !marked { mark("WIN-PUSH"); marked = true }
                 _ = AevonPushForeground(scene)
                 _ = AevonWakeScene(scene)
                 host.reviveCanvas()

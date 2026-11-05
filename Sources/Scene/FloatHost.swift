@@ -502,7 +502,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 见 `AevonMiniDocked`）。主窗那条矩形必须撤掉，否则 App 里那一片会一直
         // 归宿主 —— 用户点它没反应，而屏幕上根本没有卡片在那儿。
         bandReported = .null
-        if !bundle.isEmpty { AevonAppBandSet(bundle, .null, .zero) }
+        if !bundle.isEmpty { _ = AevonAppBandSet(bundle, .null, .zero) }
     }
 
     // MARK: - 0.1.27 停靠收缩（整层 transform，不逐帧改画面）
@@ -735,6 +735,24 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 真几何留到抬手那一拍一次落地（`settleLive`）。画布尺寸在整场手势里不变，
     /// App 从头到尾不知道窗口被搬过 —— 这也正是 0.0.65 给缩放定的口径。
     private var liveFrame: CGRect?
+
+    /// 0.1.35 — 「这几毫秒里屏幕上有一根手指在给宿主用」。
+    ///
+    /// 保活时钟那 200 ms 一拍是主线程上的活：`reapplyPlacement` 读 scene
+    /// settings、`AevonSystemCovered()` 打三个单例、`AevonContentStateOf` 与
+    /// `AevonSceneLevel` 各一次取值。稳态看不出来，可它偏偏落在拖动的每一帧
+    /// 之间 —— 用户报的「好多了但依旧不流畅」就出在这里：每 200 ms 抢一次
+    /// 主线程，而拖动正在用这条主线程。
+    ///
+    /// 用**时间戳**而不是计数：手势被系统抢走、卡片中途关掉、`dragEnd` 没走到，
+    /// 任何一个漏减都会让时钟永久停摆；时间戳自己会过期。一秒 ≫ 一次最长拖动，
+    /// 又短到不会被误当成「一直在拖」。
+    private static var liveUntil: CFTimeInterval = 0
+
+    /// 现在是不是有一根手指在我们手里。保活时钟见到它就只做重排、别的全让路。
+    static var gestureLive: Bool {
+        CACurrentMediaTime() < liveUntil
+    }
 
     /// 0.1.34 — 「解锁了，给这张卡一次重来的机会」。
     ///
@@ -1483,7 +1501,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.1.29 — 四边热区的矩形也要撤。卡片没了而 App 还被扣着一片区域，
         // 就是「这个 App 有一块点不动」—— 这条通道唯一会伤到用户的失败模式。
         bandReported = .null
-        if !bundle.isEmpty { AevonAppBandSet(bundle, .null, .zero) }
+        if !bundle.isEmpty { _ = AevonAppBandSet(bundle, .null, .zero) }
         grip = nil
         shield = nil
         awaitingFrame = false
@@ -2053,6 +2071,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 下面 `resizeStart = card.frame` 会把它当锚点，于是第一次移动跳一下。
         settleEnter()
         liveFrame = nil
+        // 0.1.35 — 手势期间让保活时钟让路（见 `liveUntil`），并把这层光晕
+        // 先栅格化一次。光晕是一个带 `shadowPath` 的模糊层，尺寸比卡片还大一圈；
+        // 每帧改它的 `transform` ⇒ Core Animation 每帧重算一次阴影路径再模糊一遍，
+        // 这是拖动里最贵的一笔，而且它纯粹是装饰。栅格化之后那一层只在开始时
+        // 算一次，之后按变换缩放 —— 视觉一模一样，开销变成一次 blit。
+        FloatHost.liveUntil = CACurrentMediaTime() + 1.0
+        glow?.layer.shouldRasterize = true
+        glow?.layer.rasterizationScale = window?.screen.scale ?? 3
         zone = zoneFor(start)
         panStep = .zero
         // 0.0.99 — 闸门不在这里归零：长按有可能比这一拍晚成立。清点在
@@ -2095,6 +2121,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// resized by this very gesture and their rulers stretch.
     private func dragMove(total: CGPoint, velocity: CGPoint) {
         guard let card = card, let window = window else { return }
+        FloatHost.liveUntil = CACurrentMediaTime() + 1.0
         let dx = total.x - panStep.x
         let dy = total.y - panStep.y
         panStep = total
@@ -2216,6 +2243,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private func settleLive() {
         guard let target = liveFrame, let card = card else { return }
         liveFrame = nil
+        // 0.1.35 — 手势结束，光晕退回按需重画（栅格化会冻结旧尺寸的阴影，
+        // 而这一拍正要改尺寸，留着就是一圈糊的边）。
+        glow?.layer.shouldRasterize = false
         card.transform = .identity
         card.bounds = CGRect(origin: .zero, size: target.size)
         card.center = CGPoint(x: target.midX, y: target.midY)
@@ -2239,6 +2269,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // return，逐个加只会漏掉一条，而漏掉的那一条会让 App 一直吞触摸
         // （对面还有 3 秒租约兜底，但那是保险，不是常态）。
         defer { if !bundle.isEmpty { AevonAppBandLock(bundle, false) } }
+        // 0.1.35 — 手势到此为止：让保活时钟立刻恢复，光晕也不再冻结成位图
+        // （没动过的那几条 return 也走这里 —— 否则那一次栅格化会一直留着）。
+        FloatHost.liveUntil = 0
+        glow?.layer.shouldRasterize = false
         // 0.1.34 — 先把这一场手势的变换落回真几何，后面每一处 `card.frame`
         // 才读到的是落点而不是派生值。（没动过就什么都不做。）
         settleLive()
@@ -3041,15 +3075,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     func reportBand() {
         guard let card = card, window != nil, miniFrame == nil, !bundle.isEmpty else {
             bandReported = .null
-            if !bundle.isEmpty { AevonAppBandSet(bundle, .null, .zero) }
+            if !bundle.isEmpty { _ = AevonAppBandSet(bundle, .null, .zero) }
             return
         }
         let shape = bandRect(for: card)
         if !bandReported.isNull && shape.frame == bandReported { return }
         bandReported = shape.frame
-        AevonAppBandSet(bundle, shape.frame, card.frame)
+        // 0.1.35 — `cast` 是这一条广播到了几个进程。它必须 > 1（卡片 + 桌面上
+        // 那个全屏 App）；只有 1 说明 `SBApplicationController` 没取到运行列表，
+        // 那么下一份日志里的 `app: band touch at` 仍会是 0，一眼就能对上。
+        let cast = AevonAppBandSet(bundle, shape.frame, card.frame)
         Log.write("win: band report " + size(shape.frame.size)
-                  + " at " + point(shape.frame.origin))
+                  + " at " + point(shape.frame.origin)
+                  + " cast=" + String(cast))
     }
 
     private var bandReported: CGRect = .null

@@ -961,6 +961,10 @@ def main():
                       # 下一份日志能直接分开，不用再猜。
                       b"app: band note from host",
                       b"app: band prefs on=",
+                      # 0.1.35 — 判不中的时候把坐标与两个矩形写下来。V111 里
+                      # `app: band touch at` 是 0，而带子的值明明是对的 ⇒ 分不出
+                      # 「这一拍没进来」还是「进来了被几何否掉」。有这一行就分得开。
+                      b"app: band miss at ",
                       # 0.1.29 — 深浅色的应用侧观察者。
                       b"com.aevon.style.",
                       b"setContentOffset:"):

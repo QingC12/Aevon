@@ -4935,6 +4935,8 @@ static volatile int AevonBandOn = 0;
 static BOOL AevonBandWatching = NO;
 static int AevonBandNotes = 0;
 static int AevonBandProof = 0;
+/// 0.1.35 — 几何判不中的次数。第一次能回答「进来了但被否掉」而不是「没进来」。
+static int AevonBandRejects = 0;
 /// 0.1.34 — 「这根手指归宿主」。拖动 / 缩放期间为 1（见 `AevonAppBandLock`）。
 static volatile int AevonBandLock = 0;
 /// 上面那把锁是什么时候打开的（3 秒租约，见 `AevonBandHeld`）。
@@ -5095,15 +5097,41 @@ static BOOL AevonBandTake(UIEvent *event) {
     NSSet *touches = [event allTouches];
     if (touches.count != 1) { AevonBandWatching = NO; return NO; }
     UITouch *touch = [touches anyObject];
+    // 0.1.35 — **锁在任何一拍都算数。**
+    //
+    // 0.1.34 只在 `.began` 判一次锁，而锁是跨进程送来的：界面上手指落下时，
+    // App 这一份 `touchesBegan` 早就走完了，通知再快也在它后面。于是
+    // `AevonBandWatching` 被钉死在 NO，后面每一拍 `moved` 都走「不认领 ⇒ 原样
+    // 送进去」—— 宿主在搬卡片，App 在跟着滚。用户的原话就是「百分百触发全屏
+    // APP 内的操作」，因为那一整个手势都漏了出去。
+    //
+    // 锁是「这根手指归宿主」的权威说法，它一旦为真，这一根从头到尾都不该到
+    // App 手里。放在 phase 判断之前，代价是一次整数读。
+    if (AevonBandHeld()) {
+        AevonBandWatching = YES;
+        return YES;
+    }
     if (touch.phase == UITouchPhaseBegan) {
-        // 0.1.34 — 宿主正在拖 / 缩放这张卡：这一根从落指起就归它，连卡片内部
-        // 也算（那块在拖的时候不是「App 的画面」，是被搬着的一张图）。
-        if (AevonBandHeld()) {
-            AevonBandWatching = YES;
-            return YES;
-        }
         CGPoint p = [touch locationInView:nil];
-        if (!AevonBandHolds(p)) { AevonBandWatching = NO; return NO; }
+        if (!AevonBandHolds(p)) {
+            AevonBandWatching = NO;
+            // 0.1.35 — 判不中的时候把**为什么**写下来。上一份日志里
+            // `app: band touch at` 是 0，而这条带子的值明明是对的（`app: band
+            // prefs on=1 band=368x536 at 23,185`），分不出是「这一拍没进来」
+            // 还是「进来了但被几何否掉」。每个进程前 8 条，够对一次位置。
+            if (AevonBandOn && AevonBandRejects < 8) {
+                AevonBandRejects += 1;
+                char line[160];
+                snprintf(line, sizeof(line),
+                         "app: band miss at %.0f,%.0f outer=%.0fx%.0f@%.0f,%.0f hole=%.0fx%.0f\n",
+                         p.x, p.y,
+                         AevonBandOuter.size.width, AevonBandOuter.size.height,
+                         AevonBandOuter.origin.x, AevonBandOuter.origin.y,
+                         AevonBandHole.size.width, AevonBandHole.size.height);
+                AevonAppLogWrite(line);
+            }
+            return NO;
+        }
         AevonBandWatching = YES;
         if (AevonBandNotes < 20) {
             AevonBandNotes += 1;

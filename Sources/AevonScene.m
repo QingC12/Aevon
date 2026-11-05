@@ -728,18 +728,40 @@ NSInteger AevonPushForeground(id scene) {
     long attempt = AevonPushTried;
     SEL settingsSel = sel_registerName("settings");
     id current = nil;
+    // 0.1.35 — **类名在拿到的当下就抄走，之后一辈子不再碰 `current`。**
+    //
+    // 2026-11-05 18:31:31 的安全模式就是这一行：`[scene settings]` 返回的是
+    // +0（autoreleased）对象，而我们下面用三条路把新 settings 写进同一个
+    // scene —— 系统落盘时会把旧的那一份释放掉。`current` 只是一个不带所有权的
+    // 指针，于是后面那句 `class_getName(object_getClass(current))` 读到的
+    // 是一块已经回收的内存（崩溃报告：`EXC_BAD_ACCESS / SIGBUS 0x105`，
+    // faulting frame `object_getClass +28` ← `AevonPushForeground +500`，
+    // 寄存器 x2 还停在 `__NSCFBoolean`，正是上一个 `AevonFlagOf` 留下的）。
+    //
+    // 结论：凡是「写完之后还要读一眼」的量，必须在写之前抄成自己的值。
+    // 类名进栈上缓冲，前后台状态进两个 int，`current` 从写入那一刻起不再出现。
+    char settingsName[96] = "nil";
+    int wasFront = -1;
+    int wasBack = -1;
     if ([scene respondsToSelector:settingsSel]) {
         current = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
+        if (current != nil) {
+            const char *name = class_getName(object_getClass(current));
+            if (name != NULL) {
+                snprintf(settingsName, sizeof(settingsName), "%s", name);
+            }
+            wasFront = AevonFlagOf(current, "isForeground");
+            wasBack = AevonFlagOf(current, "isBackgrounded");
+        }
     }
 
     // Delta first. Round 14 of the mother ship settled this: a write that
     // changes nothing still costs a re-layout, and a re-layout is a flicker.
     // A scene already in front gets no write at all, and the caller is told so
     // with 3 rather than 0 — "nothing to do" and "no door" are different facts.
-    if (AevonFlagOf(current, "isForeground") == 1 && AevonFlagOf(current, "isBackgrounded") == 0) {
+    if (wasFront == 1 && wasBack == 0) {
         if (attempt < 8) {
-            AevonRawTrace("push", "front, no write settings=%s",
-                          current != nil ? class_getName(object_getClass(current)) : "nil");
+            AevonRawTrace("push", "front, no write settings=%s", settingsName);
         }
         AevonInPush = 0;
         return 4;
@@ -764,13 +786,13 @@ NSInteger AevonPushForeground(id scene) {
         } else if (AevonDeactManager != nil) {
             id manager = AevonDeactManager;
             SEL amendSel = NSSelectorFromString(@"amendSceneSettings:forScene:");
-            if ([manager respondsToSelector:amendSel]) {
+            if (candidate != nil && [manager respondsToSelector:amendSel]) {
                 Method method = class_getInstanceMethod(object_getClass(manager), amendSel);
                 const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
                 unsigned int arguments = method != NULL ? method_getNumberOfArguments(method) : 0;
                 if (encoding != NULL && encoding[0] == 'v' && arguments == 4) {
                     ((void (*)(id, SEL, id, id))objc_msgSend)(manager, amendSel,
-                                                              candidate != nil ? candidate : current,
+                                                              candidate,
                                                               scene);
                     path = 2;
                 }
@@ -783,10 +805,11 @@ NSInteger AevonPushForeground(id scene) {
         AevonPushPath = path;
     }
     if (attempt < 8) {
-        AevonRawTrace("push", "path=%ld wrote=%d fg=%d settings=%s", path,
-                      inlineWrite ? 1 : 0,
-                      AevonFlagOf(candidate != nil ? candidate : current, "isForeground"),
-                      current != nil ? class_getName(object_getClass(current)) : "nil");
+        // 0.1.35 — 这里以前读的是 `current`，也就是崩溃点（见函数开头那段）。
+        // 现在只报**写之前**抄下来的那份读数：它描述的正是「系统原来是怎样」，
+        // 而这一行本来就是给下一次读日志的人看这个的。
+        AevonRawTrace("push", "path=%ld wrote=%d wasf=%d settings=%s", path,
+                      inlineWrite ? 1 : 0, wasFront, settingsName);
     }
     AevonInPush = 0;
     return path;
@@ -1960,7 +1983,7 @@ static BOOL AevonBandLocked = NO;
 /// 所以这一版不赌：值走偏好域（系统为跨进程传值准备的那条，不依赖容器），
 /// 名字固定成 `com.aevon.band.<bundle>`（两端精确匹配，不依赖通配）。文件那条
 /// 留着当兜底。App 侧新增两行证词把「通知到没到」和「值读到没」分开。
-static void AevonBandPublish(NSString *bundleID) {
+static void AevonBandPublish(NSString *bundleID, BOOL owner) {
     if (bundleID.length == 0) return;
     BOOL off = CGRectIsNull(AevonBandShown) || AevonBandShown.size.width < 1
                || AevonBandShown.size.height < 1;
@@ -1977,13 +2000,17 @@ static void AevonBandPublish(NSString *bundleID) {
     CFStringRef app = (__bridge CFStringRef)bundleID;
     CFPreferencesSetAppValue(CFSTR("AevonBand"), (__bridge CFStringRef)body, app);
     CFPreferencesSynchronize(app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
-    NSString *dir = AevonAppContainer(bundleID);
-    if (dir != nil) {
-        NSString *path = [dir stringByAppendingPathComponent:@"tmp/aevon-band"];
-        if (off) {
-            [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
-        } else {
-            [body writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    // 容器那条兜底只给卡片自己那个 App 做：`AevonAppContainer` 要过一次
+    // LSApplicationProxy 加目录扫描，广播时对每个前台 App 都做一次就是白花。
+    if (owner) {
+        NSString *dir = AevonAppContainer(bundleID);
+        if (dir != nil) {
+            NSString *path = [dir stringByAppendingPathComponent:@"tmp/aevon-band"];
+            if (off) {
+                [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+            } else {
+                [body writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+            }
         }
     }
     NSString *name = [NSString stringWithFormat:@"com.aevon.band.%@", bundleID];
@@ -1991,13 +2018,84 @@ static void AevonBandPublish(NSString *bundleID) {
                                          (__bridge CFStringRef)name, NULL, NULL, true);
 }
 
-void AevonAppBandSet(NSString *bundleID, CGRect band, CGRect hole) {
-    if (bundleID.length == 0) return;
-    AevonBandOwner = [bundleID copy];
+/// 0.1.35 — **这条带子必须发给「真正会收到那根手指的进程」，不是卡片里的那个。**
+///
+/// V111 的日志把这件事揭开了：`app: band note from host` 29 条、`app: band
+/// prefs on=1 band=368x536 at 23,185` 33 条 —— 通道完全通了，矩形与宿主
+/// `win: band report` 一字不差；可 `app: band touch at` 仍然是 **0**。
+///
+/// 也就是说：拿着正确矩形的那个进程，一次都没收到过触摸。收触摸的是**全屏
+/// 那个 App** —— 用户开卡时桌面上还有一个满屏 App 在跑（这正是他每一份日志都
+/// 在描述的场景：「在全屏应用中打开悬浮后…」）。backboardd 把同一根手指分别
+/// 投给 SpringBoard 与**当前前台**进程，而卡片里的 App 只是「scene 被我们
+/// 推到前台」，它并不在触摸投递的名单上。
+///
+/// 所以广播：卡片那个 + 所有正在运行的 App。写偏好域对这几个 bundle 各一次，
+/// 每次只多一次 cfprefsd 往返；不这么做，这条通道在真机上就是永远 0。
+static NSArray *AevonBandRunningBundles(void) {
+    Class cls = NSClassFromString(@"SBApplicationController");
+    if (cls == Nil) return nil;
+    SEL shared = NSSelectorFromString(@"sharedInstanceIfExists");
+    if (![cls respondsToSelector:shared]) return nil;
+    id controller = ((id (*)(id, SEL))objc_msgSend)(cls, shared);
+    if (controller == nil) return nil;
+    SEL running = NSSelectorFromString(@"runningApplications");
+    if (![controller respondsToSelector:running]) return nil;
+    id apps = ((id (*)(id, SEL))objc_msgSend)(controller, running);
+    if (apps == nil) return nil;
+    NSMutableArray *out = [NSMutableArray array];
+    id list = apps;
+    if ([apps respondsToSelector:NSSelectorFromString(@"allObjects")]) {
+        list = ((id (*)(id, SEL))objc_msgSend)(apps, NSSelectorFromString(@"allObjects"));
+    }
+    if (![list respondsToSelector:NSSelectorFromString(@"count")]) return out;
+    SEL countSel = NSSelectorFromString(@"count");
+    NSUInteger count = ((NSUInteger (*)(id, SEL))objc_msgSend)(list, countSel);
+    if (count == 0 || count > 64) return out;
+    SEL objectAt = NSSelectorFromString(@"objectAtIndex:");
+    if (![list respondsToSelector:objectAt]) return out;
+    SEL bundleSel = NSSelectorFromString(@"bundleIdentifier");
+    for (NSUInteger i = 0; i < count; i++) {
+        id app = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(list, objectAt, i);
+        if (app == nil || ![app respondsToSelector:bundleSel]) continue;
+        NSString *bid = ((id (*)(id, SEL))objc_msgSend)(app, bundleSel);
+        if ([bid isKindOfClass:[NSString class]] && bid.length > 0) [out addObject:bid];
+    }
+    return out;
+}
+
+/// 上一次真写过的那一批（撤销时要逐个撤，否则留在某个 App 里就是一块死区）。
+static NSMutableArray *AevonBandReached = nil;
+
+static NSArray *AevonBandTargets(NSString *bundleID, BOOL includeReached) {
+    NSMutableArray *list = [NSMutableArray array];
+    if (bundleID.length > 0) [list addObject:bundleID];
+    NSArray *running = AevonBandRunningBundles();
+    for (NSString *bid in running) {
+        if (![list containsObject:bid]) [list addObject:bid];
+    }
+    if (includeReached) {
+        for (NSString *bid in AevonBandReached) {
+            if (![list containsObject:bid]) [list addObject:bid];
+        }
+    }
+    return list;
+}
+
+NSInteger AevonAppBandSet(NSString *bundleID, CGRect band, CGRect hole) {
+    if (AevonBandOwner == nil || ![AevonBandOwner isEqualToString:bundleID ?: @""]) {
+        AevonBandOwner = [bundleID copy];
+    }
     AevonBandShown = band;
     AevonBandHoleShown = hole;
     AevonBandLocked = NO;
-    AevonBandPublish(bundleID);
+    BOOL off = CGRectIsNull(band) || band.size.width < 1 || band.size.height < 1;
+    NSArray *list = AevonBandTargets(bundleID, off);
+    for (NSString *bid in list) {
+        AevonBandPublish(bid, [bid isEqualToString:bundleID]);
+    }
+    AevonBandReached = off ? nil : [list mutableCopy];
+    return (NSInteger)list.count;
 }
 
 /// 0.1.34 — 「这根手指归宿主管辖」。
@@ -2008,12 +2106,17 @@ void AevonAppBandSet(NSString *bundleID, CGRect band, CGRect hole) {
 /// 抬手，于是留在屏幕上。
 ///
 /// 宿主一开拖就打开这把锁：App 侧收到即清一次高亮、并且整根吞到抬手为止。
+///
+/// 0.1.35 — 锁同样要广播。拿着这份状态却收不到触摸，等于没写。
 void AevonAppBandLock(NSString *bundleID, BOOL locked) {
-    if (bundleID.length == 0) return;
-    if (AevonBandOwner != nil && ![AevonBandOwner isEqualToString:bundleID]) return;
+    if (AevonBandOwner != nil && bundleID.length > 0
+        && ![AevonBandOwner isEqualToString:bundleID]) return;
     if (AevonBandLocked == locked) return;
     AevonBandLocked = locked;
-    AevonBandPublish(bundleID);
+    NSArray *list = AevonBandTargets(bundleID, YES);
+    for (NSString *bid in list) {
+        AevonBandPublish(bid, [bid isEqualToString:bundleID]);
+    }
 }
 
 // MARK: - 0.1.29 深浅色 → 应用侧

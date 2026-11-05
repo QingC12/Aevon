@@ -203,7 +203,12 @@ int AevonAppMiniFlagsClearAll(void);
 /// 0.1.34 — 数据改走 `CFPreferences`（宿主写目标 App 的域，App 读自己的域），
 /// 通知名固定成 `com.aevon.band.<bundle>`，两端精确匹配。传 `CGRectNull` 表示
 /// 「没有主窗，撤掉」。调用点是每一次手势结束 / 布局落定，不是每帧。
-void AevonAppBandSet(NSString *_Nullable bundleID, CGRect band, CGRect hole);
+///
+/// 0.1.35 — **返回写给了几个进程**。V111 的日志把上一版的缺口指出来了：
+/// 值只写给了卡片里的那个 App，而真正接到那根手指的是**全屏那个 App** ——
+/// 它一条都没有，所以 `app: band touch at` 一直是 0、手势百分百透传。现在广播
+/// 到「卡片 + 所有正在运行的 App」，这个返回值就是「发给了几家」，写进日志。
+NSInteger AevonAppBandSet(NSString *_Nullable bundleID, CGRect band, CGRect hole);
 
 /// 0.1.34 — 「这根手指归宿主」：拖动 / 缩放开始时打开，抬手关掉。
 ///
