@@ -366,13 +366,17 @@ final class RingHost: NSObject {
         // 0.0.48 — 竖条的触摸垫位置交给浮窗那一侧。浮窗的手指入口在应用层就
         // 把环上的触摸吃掉了，环的右半边正好压在这里；没有这条线，卡片开着时
         // 点竖条会被当成拖浮窗（见 AevonRingGrip.summonRect）。
-        AevonRingGrip.summonRect = barPad?.frame ?? .zero
+        //
+        // 0.1.7 — 交出去的是**贴边 14 pt 那条带**（与 `rawBar` 的认领范围同一个），
+        // 不再是 40×212 的视觉垫子：垫子只是画，拿它当让路地盘会让卡片右缘的环
+        // 白瞎 40 pt。
+        AevonRingGrip.summonRect = stripRect(in: bounds)
         // 0.0.55 — 右缘带：贴右缘 15 pt，从底部往上 35 %。卡片在屏时收回触摸
         //（`AevonRingGrip.cardUp`），否则右下角拖卡片的手会先落进带子里。
-        let edgeH = bounds.height * edgeHeightPercent / 100
-        edgePad?.frame = CGRect(x: bounds.maxX - edgeWidth,
-                                y: bounds.maxY - edgeH,
-                                width: edgeWidth, height: edgeH)
+        //
+        // 0.1.7 — 整条带子换成「贴右缘 × 全高」的那一条（`stripRect`），竖条那块
+        // 40×212 的垫子从这一刻起**只是画**，不接触摸（见 `addBar`）。
+        edgePad?.frame = stripRect(in: bounds)
         // 0.1.6 — 开关只有一个来源（`syncGrip`）。原来这里直接写
         // `!AevonRingGrip.cardUp`，那是第三个各写一遍的地方：布局写一次、开卡关一次、
         // 面板关回调再写一次，任何一条路没回来，入口就一直是关的。
@@ -421,29 +425,15 @@ final class RingHost: NSObject {
         // flush with the screen edge so nothing has to be aimed at.
         let pad = BarPad(frame: .zero)
         pad.backgroundColor = .clear
-        pad.isUserInteractionEnabled = true
-        pad.onDown = { [weak self] point in
-            guard let self = self, self.padProbe < 20 else { return }
-            self.padProbe += 1
-            Log.write("ring: bar touch at " + String(format: "%.0f,%.0f", point.x, point.y)
-                      + " #" + String(self.padProbe))
-        }
-        pad.addGestureRecognizer(UITapGestureRecognizer(target: self,
-                                                        action: #selector(toggle)))
-        // 0.0.45 — 滑动呼出改成**按住拖动**，这是 Aevon(43) #5 的原话：
-        // 「旧版圆盘的逻辑是滑动时出现圆盘，手指没有离开屏幕时圆盘不会自动收起，
-        //   手指离开屏幕时会自动关闭圆盘」。
+        // 0.1.7 — **竖条从这一刻起只负责「画」，不接收任何触摸。**
         //
-        // 0.0.44 用的是 `UISwipeGestureRecognizer`，它只在**手指抬起时**才识别
-        // 成功 —— 也就是说圆盘是在手指离开之后才出现的，此后没有任何东西在喂它，
-        // 于是「按住不放也不收」从物理上就不可能。`UIPanGestureRecognizer` 从
-        // 落指那一刻就开始报，正好把整根手指交给圆盘（presentTracking 一族）。
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleBarPan(_:)))
-        pan.maximumNumberOfTouches = 1
-        // 不做方向过滤。竖条只有 40x112，落在这块面积上的触摸本来就是给它的；
-        // 反过来，「先往下再往左」的斜滑很常见，方向闸门只会把这类真实的拖动
-        // 判成失败（而失败后这根手指就再也不会被重新考虑）。
-        pad.addGestureRecognizer(pan)
+        // 原来这块垫子是 40×212 的隐形命中区，还挂着 tap（点一下开/关圆盘）与
+        // pan（按住拖动）。用户 Aevon(94) 第 1 条报的就是它：「当你点击全屏应用
+        // 的操作是会误触圆盘触发」—— 40 pt 宽几乎盖掉了右缘一整条，卡片里点右边
+        // 任何位置都可能落进来。整条逻辑搬到 `rawBar`（应用层 sendEvent）与
+        // `edgePad`（贴边 14 pt 的系统边缘滑动）之后，这里只留像素。
+        pad.isUserInteractionEnabled = false
+        pad.onDown = nil
         host.addSubview(pad)
         barPad = pad
 
@@ -469,7 +459,7 @@ final class RingHost: NSObject {
         paintBar()
     }
 
-    /// 0.0.55 — 右缘那条「贴边左滑呼盘」的带子（移植旧版 V0.3.28 AevonEdgeBandOnly328）。
+    /// 0.0.55 — 右缘那条「贴边左滑呼盘」的触摸带（移植旧版 V0.3.28 AevonEdgeBandOnly328）。
     ///
     /// 为什么不是 `UIPanGestureRecognizer`：旧版自建腿用的就是系统那个
     /// `UIScreenEdgePanGestureRecognizer`（`edges = .right`），它自己只认「从屏幕
@@ -478,6 +468,14 @@ final class RingHost: NSObject {
     ///
     /// 它和竖条的 `barPad` 是两块互不相干的地盘：竖条在屏幕高度 50 % 附近，
     /// 这条在底部 35 %，各挂各的识别器，谁都不改谁的帧。
+    ///
+    /// 0.1.7 — **改成贴右缘、全高、14 pt 的一条，并且这是唯一还接触摸的那一块。**
+    ///
+    /// 用户 Aevon(94) 第 1 条把习惯说清楚了：「我更加喜欢手势贴近右侧屏幕和边框
+    /// 边缘向左滑动触发圆盘」。原来这条只占底部 35 %，而竖条的 pad 是 40×212 的
+    /// 隐形大块、还带点击 —— 于是「在卡片里点右侧」会呼出圆盘、「在别处左滑」又
+    /// 落不到这条带上。现在几何只有一个：右缘 14 pt × 全高（让开顶部 10 pt 状态栏
+    /// 与底部 12 pt home 条），条子上只有「从屏幕边缘起手 + 向左划」这一种手势。
     private func addEdgePad() {
         guard let host = window?.rootViewController?.view else { return }
         let pad = UIView(frame: .zero)
@@ -488,8 +486,23 @@ final class RingHost: NSObject {
         pan.edges = .right
         pan.maximumNumberOfTouches = 1
         pad.addGestureRecognizer(pan)
+        // 0.1.7 — 点击识别器不挂。用户明确要求「移除点击触发圆盘，只保留左滑」。
         host.addSubview(pad)
         edgePad = pad
+    }
+
+    /// 0.1.7 — 呼盘的手势条：贴右缘、全高。唯一一处几何定义。
+    private let stripWidth: CGFloat = 14
+    /// 0.1.7 — 认作「左滑」的最小横向位移。
+    private let ringSwipe: CGFloat = 12
+
+    private func stripRect(in bounds: CGRect) -> CGRect {
+        let top: CGFloat = 10      // 状态栏下拉
+        let bottom: CGFloat = 12   // home 条
+        return CGRect(x: bounds.maxX - stripWidth,
+                      y: top,
+                      width: stripWidth,
+                      height: Swift.max(0, bounds.height - top - bottom))
     }
 
     /// 0.0.55 — 浮窗开/关时同步右缘带能不能接触摸。
@@ -522,15 +535,23 @@ final class RingHost: NSObject {
         // 0.1.6 — 竖条的地盘也一起对齐。`layout()` 里有 `bounds.width > 0` 的早退，
         // 窗口尺寸还没到位时那一拍不会写 `summonRect`，留一个 `.zero` 在里面就等于
         // 「条子看得见、按下去不算我的」。这里每 tick 补一次，代价是一次 CGRect 赋值。
-        if let pad = barPad, pad.frame.width > 0, pad.frame.height > 0 {
-            AevonRingGrip.summonRect = pad.frame
+        //
+        // 0.1.7 — 写的是**贴边条带**，不是那块 40×212 的视觉垫子。垫子现在只是画
+        // （`addBar`），拿它当「浮窗的环要让开的地盘」会白让掉 40 pt 宽的一条，
+        // 卡片的右缘环在那里整块失效。
+        if let window = window, window.bounds.width > 0 {
+            AevonRingGrip.summonRect = stripRect(in: window.bounds)
         }
         let panel = AevonAppPanel.current != nil
         let card = FloatHost.anyCardUp
         let barOn = !panel
         let edgeOn = !panel && !card
-        if barPad?.isUserInteractionEnabled != barOn {
-            barPad?.isUserInteractionEnabled = barOn
+        // 0.1.7 — 视觉垫子永远不接触摸。触摸只有两个入口：`rawBar`（应用层）与
+        // `edgePad`（贴边 14 pt）。这一行是 0.1.6 那个「开关唯一归口」的兑现：
+        // 三处各写一遍的老写法（layout / openPanel / onClose）全撤之后，这里是
+        // 唯一还会碰它的地方。
+        if barPad?.isUserInteractionEnabled != false {
+            barPad?.isUserInteractionEnabled = false
         }
         if edgePad?.isUserInteractionEnabled != edgeOn {
             edgePad?.isUserInteractionEnabled = edgeOn
@@ -561,6 +582,10 @@ final class RingHost: NSObject {
             // 卡片在屏：这条带闭嘴（它与浮窗外侧手势环在右下角重叠）。
             // 0.1.6 — 判据改成现算，见 `FloatHost.anyCardUp`。
             guard !FloatHost.anyCardUp else { return }
+            // 0.1.7 — **只认向左划**。`UIScreenEdgePanGestureRecognizer` 只保证
+            // 「从右缘起手」，方向它不管；不判这一下，从右缘往右/上下划也会呼盘。
+            // 位移取的是 gesture 的累计平移，`.began` 时约 10 pt，符号是可靠的。
+            guard gesture.translation(in: window).x < 0 else { return }
             let now = CACurrentMediaTime()
             guard now - edgeAt > edgeInterval else { return }
             edgeAt = now
@@ -603,7 +628,11 @@ final class RingHost: NSObject {
     /// own alpha.
     private func setGripVisible(_ visible: Bool) {
         guard let pad = barPad else { return }
-        pad.isUserInteractionEnabled = true
+        // 0.1.7 — 这里**不再**把 `isUserInteractionEnabled` 写回 true。
+        //
+        // 0.1.6 及以前这一行是「圆盘收起后把竖条交还给手指」。竖条现在只是画
+        // （见 `addBar`），触摸全在 `rawBar` / `edgePad` 上；写回 true 等于把那块
+        // 40×212 的隐形命中区又长回来，卡片里点右侧重新开始误触圆盘。
         UIView.animate(withDuration: 0.18) {
             pad.alpha = visible ? 1 : 0.72
         }
@@ -693,97 +722,114 @@ final class RingHost: NSObject {
 
     // MARK: - 0.0.49 竖条的应用层触摸
 
-    /// 竖条的手指，来源是 `-[UIApplication sendEvent:]`（见 `AevonRingGrip.barTouch`）。
+    /// 贴右缘那一条的手指，来源是 `-[UIApplication sendEvent:]`（见 `AevonRingGrip.barTouch`）。
     ///
     /// `phase` 用 UITouchPhase 的数值：0 began / 1 moved / 3 ended / 4 cancelled。
-    /// 返回 true = 这条事件被竖条吃掉，不再往下传（也不再有 UIKit 识别器参与）。
+    /// 返回 true = 这条事件被这条带子吃掉，不再往下传（也不再有 UIKit 识别器参与）。
     ///
-    /// 语义与 `handleBarPan` 完全一致，一个字都没改：
-    ///   · 落指 → 圆盘从这一点长出来；
-    ///   · 手指在屏幕上 → 圆盘跟着走，`barHeld` 挡住看门狗；
-    ///   · 抬手在图标上 → 打开浮窗；抬手在盘外 → 收起。
+    /// 0.1.7 — **语义整条换掉，按用户 Aevon(94) 第 1 条**：
     ///
-    /// 唯一的补充是「短按」：这条路吃掉了事件，识别器不会响，所以原来由
-    /// UITapGestureRecognizer 负责的「点一下开 / 再点一下关」在这里补：
-    /// 手指没怎么动就抬手，按 `toggle()` 的语义处理。
+    ///   「圆盘触发条区域中当你点击全屏应用的操作是会误触圆盘触发。并且向左滑动时
+    ///     也会误触发全屏 app 内的应用操作。…… 并且移除点击触发圆盘的功能，只保留
+    ///     左滑触发圆盘。」
+    ///
+    /// 旧的语义是「落在 40×212 垫子上就开（按住拖动）」+「短按 = 点一下开/关」。
+    /// 垫子 40 pt 宽几乎盖住右缘一整条，卡片里点右侧任何位置都会呼出圆盘；短按那
+    /// 一支更是纯粹的多余手势。
+    ///
+    /// 新语义只有一条：
+    ///   · 落指**必须在贴右缘 14 pt 的条带里**（`stripRect`）—— 之外的点击一律
+    ///     放行，App 该干嘛干嘛；
+    ///   · 条带内落指先**吞住**（不然 UIKit 那两条识别器会抢，卡片的环也会抢），
+    ///     但**不弹盘**；
+    ///   · 手指**向左**移过 `ringSwipe`（12 pt）且横向占优，才在那一刻把圆盘从起点
+    ///     长出来，随后跟随；
+    ///   · 抬手：认过方向 → `remoteLift` 定生死；没认过方向（= 一次点击）→
+    ///     **什么都不做**。点击触发圆盘那条路从这一版起不存在。
     func rawBar(phase: Int, at point: CGPoint, stamp: TimeInterval) -> Bool {
         guard let window = window, let host = window.rootViewController?.view else { return false }
         // 0.0.56 — 面板在屏时，应用层这条入口也要闭嘴。竖条和右缘带的视图触摸
         // 已经关了，但这条路走的是 `-[UIApplication sendEvent:]`，不经过视图 ——
         // 少了这一句，面板上滑一下就会从面板底下长出一个圆盘。
         guard AevonAppPanel.current == nil else { return false }
-        // 只在两种情况下接管：手指落在垫子上，或者这根手指已经在驱动圆盘了。
-        // 圆盘是「点一下」开着的时候，盘面上的触摸交给圆盘自己的窗口。
-        let onPad = AevonRingGrip.summonRect.contains(point)
-        guard barHeld || (onPad && AevonRingMenu.presented == nil) else { return false }
 
-        switch phase {
-        case 0:
-            rawDownAt = point
-            rawMovedFar = false
-            rawOpenedHere = (AevonRingMenu.presented == nil)
-            barHeld = true
-            if let menu = AevonRingMenu.presented {
-                menu.beginRemoteTracking(at: point, source: "bar")
-            } else {
-                expanded = true
-                AevonRingMenu.presentTracking(in: host, at: point, source: "bar")
-            }
-            if barProbe < 20 {
-                barProbe += 1
-                Log.write("ring: bar raw down at "
-                          + String(format: "%.0f,%.0f", point.x, point.y)
-                          + " pad=" + String(format: "%.0f,%.0f",
-                                             AevonRingGrip.summonRect.minX,
-                                             AevonRingGrip.summonRect.minY)
-                          + " #" + String(barProbe))
-            }
-            return true
-
-        case 1:
-            guard barHeld else { return false }
-            if abs(point.x - rawDownAt.x) + abs(point.y - rawDownAt.y) > 6 {
-                rawMovedFar = true
-            }
-            AevonRingMenu.presented?.remoteMoved(to: point, source: "bar")
-            return true
-
-        case 3, 4:
-            guard barHeld else { return false }
-            barHeld = false
-            let held = rawMovedFar
-            let openedHere = rawOpenedHere
-            rawMovedFar = false
-            guard let menu = AevonRingMenu.presented else {
-                expanded = false
+        if stripHeld {
+            switch phase {
+            case 0:
+                // 第二条通道把同一根手指的 began 又送了一次（Aevon(58) 的成对日志）。
+                // 手已经在手里了，保持原状，别再开一次。
+                return true
+            case 1:
+                let dx = point.x - rawDownAt.x
+                let dy = point.y - rawDownAt.y
+                // 方向确认只在第一次过线时做一次。
+                if !barTracked, dx <= -ringSwipe, abs(dx) >= abs(dy) {
+                    barTracked = true
+                    if let menu = AevonRingMenu.presented {
+                        menu.beginRemoteTracking(at: point, source: "edge")
+                    } else {
+                        AevonRingMenu.presentTracking(in: host, at: rawDownAt, source: "edge")
+                    }
+                    Log.write("ring: edge swipe open at "
+                              + String(format: "%.0f,%.0f", rawDownAt.x, rawDownAt.y)
+                              + " band=" + String(format: "%.0f", stripWidth))
+                }
+                if barTracked {
+                    AevonRingMenu.presented?.remoteMoved(to: point, source: "edge")
+                }
+                return true
+            case 3, 4:
+                stripHeld = false
+                barHeld = false
+                let tracked = barTracked
+                barTracked = false
+                guard let menu = AevonRingMenu.presented else { return true }
+                if !tracked {
+                    // 一次点击（或一次纵向滚动）：用户要求点击不触发圆盘，
+                    // 所以这里既不开也不关，静默收尾。
+                    return true
+                }
+                if phase == 4 {
+                    menu.remoteCancelled(source: "edge")
+                    Log.write("ring: edge swipe cancelled by the system")
+                } else {
+                    menu.remoteLift(at: point, source: "edge")
+                    Log.write("ring: edge swipe released at "
+                              + String(format: "%.0f,%.0f", point.x, point.y))
+                }
+                return true
+            default:
                 return true
             }
-            if phase == 4 {
-                expanded = false
-                menu.remoteCancelled(source: "bar")
-                Log.write("ring: bar raw cancelled by the system")
-                return true
-            }
-            if held {
-                expanded = false
-                menu.remoteLift(at: point, source: "bar")
-            } else if openedHere {
-                // 短按 = 点一下竖条。跟踪式呈现换成常驻式，和 `expand()` 一样。
-                AevonRingMenu.dismissCurrent()
-                expanded = false
-                expand()
-                Log.write("ring: bar raw tapped open")
-            } else {
-                expanded = false
-                collapse()
-                Log.write("ring: bar raw tapped closed")
-            }
-            return true
-
-        default:
-            return barHeld
         }
+
+        // 新的一根手指：只认贴边条带里的落指。
+        guard phase == 0 else { return false }
+        guard stripRect(in: window.bounds).contains(point) else { return false }
+        rawDownAt = point
+        stripHeld = true
+        barHeld = true          // 看门狗（`hasActiveGripTouch`）与右侧遮罩都读它
+        barTracked = false
+        if barProbe < 20 {
+            barProbe += 1
+            Log.write("ring: bar raw down at "
+                      + String(format: "%.0f,%.0f", point.x, point.y)
+                      + " strip=" + String(format: "%.0f", stripWidth)
+                      + " #" + String(barProbe))
+        }
+        return true
     }
+
+    /// 0.1.7 — 这一根手指已经确认是「左滑」并且圆盘已经长出来了。
+    private var barTracked = false
+
+    /// 0.1.7 — `rawBar` 自己那根手指的状态。
+    ///
+    /// 不能复用 `barHeld`：那是 UIKit 那条边缘 pan（`handleEdgePan`）的状态，
+    /// 也是圆盘看门狗 `hasActiveGripTouch` 的读数。两个入口在同一根手指上互相
+    /// 覆盖，就会出现「pan 已经接管、rawBar 还把 moved 吃掉」这种僵局 ——
+    /// 圆盘长出来之后不再跟手。`barHeld` 现在只是它的镜像。
+    private var stripHeld = false
 
     /// 0.0.49 — 把竖条那一层重新插回窗口栈顶。
     ///

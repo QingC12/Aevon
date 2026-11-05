@@ -78,6 +78,26 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private static var mainIndex = 0
     static let slotCap = 11
 
+    /// 0.1.7 — **「上一个主悬浮窗」的几何**，升窗时唯一的落点来源。
+    ///
+    /// 0.1.5 让升窗去读 `CardLayout.loadRuntime()`（按边记忆：`left` / `right` 两组
+    /// 归一化坐标）。那份记忆有两个毛病，合起来就是用户 Aevon(94) 第 2 条
+    /// 「还原成主悬浮窗时的位置还是在变，每一个都不一样」：
+    ///
+    ///   1. **按边记忆**：`remember` 按卡片此刻在屏幕左半还是右半决定写 `left` 还是
+    ///      `right`，而 `plan` 读的是 `placement.edge` 那一边 —— 同一张卡被拖到左
+    ///      半边之后，下一次升窗就跳到 `left` 那份完全不同的坐标上；
+    ///   2. **只在拖动结束时写**：中间任何一次拖动的落点都会把记忆改掉。
+    ///
+    /// Aevon(94) 的实测就是这个形状：同一串升窗操作里有 23,210（16 次）、
+    /// 23,199（2 次）、23,201、65,218 四个不同落点，全部对得上当时最后一次
+    /// `card remembered …` 的百分比，而不是「刚才那个主窗在哪」。
+    ///
+    /// 用户要的是**一个确定的东西**：你刚才那张主卡在哪儿、多大，点小窗升回来就是
+    /// 那儿、那么大。所以这里记一帧**实际 frame**（不是百分比、不分边），在「主窗
+    /// 被降级」和「新主窗建好」两处各写一次，升窗直接用它。
+    static var lastMainFrame: CGRect?
+
     private static func ensureSlots() {
         if slots.isEmpty { slots = (0..<slotCap).map { _ in FloatHost() } }
     }
@@ -315,6 +335,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 「小窗现在在哪」。在这里覆盖它，取消停靠就会回到一个小窗尺寸。
         followContent()
         installShield()
+        // 0.1.7 — **停靠小窗里那块画面不再接触摸。**
+        //
+        // 用户第四次报「点小窗依旧会触发应用内的操作」。Aevon(94) 的证据把范围压到
+        // 了一处：`win: mini touch down=N eaten=N near=0` —— 我们在 `sendEvent` 里
+        // 每一下都吞了，App 却还是动了。也就是说这条触摸**同时**被送到了承载的
+        // App（remote scene 的画面在窗口服务器眼里是独立的一块），我们吞掉的只是
+        // SpringBoard 这一份。
+        //
+        // 所以从承载面本身下手：小窗的定义就是「不可操作」（母本 `SingleTapMinimize`），
+        // 整块画面不参与命中，触摸只会落到我们这张卡和它上面的 shield 上。升回主窗
+        // 时在 `performUndock` 里恢复。
+        content?.isUserInteractionEnabled = false
+        Log.write("win: mini touch lock content=0")
         // 0.1.0 — 停靠小窗没有手势环。`syncGrip` 会按新尺寸重算环，摆完必须把
         // 它收起：环是「可操作」的意思，而小窗的定义就是不可操作。
         syncGrip()
@@ -809,6 +842,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let frame = plan.frame
 
         let card = UIView(frame: frame)
+        // 0.1.7 — 新开的这张就是主窗，它的几何就是「上一个主悬浮窗」的基准。
+        FloatHost.lastMainFrame = frame
         // 0.0.81 — 画布装不满卡片时（哔哩哔哩竖版：430×932 按高等比缩进 5:3），
         // 两边会各露出一条。留透明就是把桌面透进来，看上去像卡片没画完；填黑
         // 是「这一页之外」的通用答案，和播放器留边同一套观感。画布正好是 5:3
@@ -1856,6 +1891,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     ///  · `manual = false`（被新主窗挤下去）→ 永远从右列开始填，填满才往左。
     private func applyMini(side: CardLayout.Edge, manual: Bool, into column: Bool? = nil) {
         guard let card = card, window != nil else { return }
+        // 0.1.7 — 缩之前先把这张主窗的实际几何记下来（升窗的唯一落点来源，
+        // 见 `lastMainFrame`）。必须写在 `claimDock` / `relayoutDocked` 之前：
+        // 那两步会把 frame 改成小窗的 98x163。
+        FloatHost.lastMainFrame = card.frame
         // 展开前的 frame 只记一次：已经停靠过就不再覆盖，否则「取消停靠」会回到
         // 上一次的小窗尺寸，而不是回到大卡片。
         if miniFrame == nil { miniFrame = card.frame }
@@ -2484,10 +2523,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 升上来的大小不一样，看着像没记住任何东西。走 `plan` 之后它们同一份。
         let bounds = window.bounds
         let planned = plan(in: bounds, source: natural)
-        card.frame = clamped(planned.frame, in: bounds)
+        // 0.1.7 — 落点用「上一个主悬浮窗的真实 frame」，不再读按边存的百分比。
+        // 见 `lastMainFrame`：那一份会被拖动改写、还会按左右半边分两套，于是每一次
+        // 升窗落在哪儿都不一定。这里用的是上一次主窗**实际**在哪，所以每一次都一样，
+        // 而且等于用户刚放下的那张卡。
+        let base = FloatHost.lastMainFrame ?? planned.frame
+        card.frame = clamped(base, in: bounds)
+        FloatHost.lastMainFrame = card.frame
+        Log.write("win: undock read last main frame "
+                  + point(card.frame.origin) + " " + size(card.frame.size))
         followContent()
         shield?.removeFromSuperview()
         shield = nil
+        // 0.1.7 — 画面重新可操作（小窗那条锁在 `placeDock` 里上）。
+        content?.isUserInteractionEnabled = true
         // 0.1.0 — 环回来。停靠时 `placeDock` 把它收起了，取消停靠必须放出来，
         // 否则「点小窗升成主窗」之后这张卡就再也没有边的热区了。
         grip?.isHidden = false

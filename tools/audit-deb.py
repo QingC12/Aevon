@@ -474,7 +474,11 @@ def main():
                   # 「按住呼出」是这版的核心改动：没有这一行，圆盘就还是
                   # 0.0.44 那种「手指抬起后才出现」的形态。
                   b"ring: held open at ", b"ring: bar released at ",
-                  b"ring: bar touch at ",
+                  # 0.1.7 — `ring: bar touch at ` 已经下线：竖条那块 40×212 的
+                  # 视觉垫子不再接收触摸（用户 Aevon(94)「点击全屏应用的操作会
+                  # 误触圆盘」「移除点击触发圆盘，只保留左滑」）。那一行是
+                  # `BarPad.onDown` 的探针，跟着一起撤；现在落指只有 `bar raw down`
+                  # 那一条（贴边 14 pt，带 strip= 读数）。
                   # 0.0.49 — 竖条的第二个入口（应用层触摸）与解锁后的窗口置顶。
                   # 前者没有这一行，就分不清「没摸到」和「摸到了但窗口被压住」；
                   # 后者是 Aevon(47) 「锁屏一次后不灵敏」的直接对策。
@@ -1063,6 +1067,18 @@ def main():
                   #   悬浮窗」，就是这两个开关被某条没走完的路径关死了。这一行
                   #   出现在启动后不久 = 开关有归口；一直不出现 = 一次都没变过。
                   b"ring: grip armed bar=",
+                  # 0.1.7 — 三条新证据（Aevon(94)）：
+                  #   `win: undock read last main frame ` = 升窗用的是**上一次主窗的
+                  #     实际 frame**（`FloatHost.lastMainFrame`），不再读按边存的百分比。
+                  #     用户报「还原成主悬浮窗时的位置每一个都不一样」，这一行给出每一次
+                  #     的真实落点，前后两次该完全相同。
+                  #   `win: mini touch lock content=0` = 停靠小窗把那块承载画面设成不
+                  #     接触摸。第四次报「点小窗依旧触发应用内的操作」的最后一道闸。
+                  #   `ring: edge swipe cancelled by the system` = 贴边左滑被系统抢断
+                  #     的分支（与 `released` 分开，抬手与中断不再混为一谈）。
+                  b"win: undock read last main frame ",
+                  b"win: mini touch lock content=0",
+                  b"ring: edge swipe cancelled by the system",
                   # 白图标过滤：一条汇总（kept / dropped 与四个理由各多少），
                   # 外加每个被丢掉的白图标的名字（前 20 个）。只看汇总分不清
                   # 「删掉的是几个白图标」还是「删掉了半屏正常 App」。
