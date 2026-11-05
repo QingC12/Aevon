@@ -510,6 +510,12 @@ def main():
                   # 开关只是个装饰」。
                   b"ring: hot zone shown",
                   b"ring: hot zone hidden (switch off)",
+                  # 0.1.17 — 键盘避让的三条证词。第一条证明观察者装上了，后两条
+                  # 证明「键盘起来 → 让路」这条链真的跑过；只有第一条而没有后两条，
+                  # 就是「装上了但收不到心跳」（App 侧没编译进通道）。
+                  b"ring: keyboard watch armed (lease 3.0 s)",
+                  b"ring: keyboard up, summon bar and edge pad stepped aside",
+                  b"ring: keyboard gone, summon bar and edge pad back",
                   b"ring: bar layer put back on top (level=",
                   b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",
@@ -845,6 +851,11 @@ def main():
                       b"transition h=%.0f last=%.0f full=%.0f",
                       b"watch first",
                       b"viewWillTransitionToSize:withTransitionCoordinator:",
+                      # 0.1.17 — 键盘在屏的上报通道。软键盘属于应用进程，桌面
+                      # 那侧收不到任何系统通知；没有这个字符串，`ring: keyboard
+                      # up` 就永远不会出现，而用户看到的是「打字时仍然误触」。
+                      b"com.aevon.kb.up",
+                      b"app: keyboard up (bridge)",
                       b"setContentOffset:"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")

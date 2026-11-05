@@ -64,6 +64,9 @@
 #import <UIKit/UIKit.h>
 // 0.1.9 — 停靠标记的 Darwin 通知通道，见下面 `AevonMiniObserve`。
 #import <CoreFoundation/CoreFoundation.h>
+// 0.1.17 — 键盘租约心跳（`AevonKbObserve`）用 dispatch source，不用 NSTimer：
+// 它跑在低优先级队列上，键盘没开的时候一次都不触发。
+#import <dispatch/dispatch.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 
@@ -4577,9 +4580,94 @@ static void AevonMiniObserve(void) {
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
 }
 
+// MARK: - 0.1.17 键盘在屏（应用侧发送，桌面侧接收）
+//
+// 软键盘在 iOS 15+ 由前台应用这一侧承载：SpringBoard 的进程里既没有键盘窗口，
+// 也收不到 `UIKeyboardWillShowNotification`。所以「键盘开着吗」这件事只能由 App
+// 进程报上去，桌面那侧用**租约**判定（3 s，见 `RingHost.keyboardUp`）。
+//
+// 为什么不用文件：容器找不着的 App 写不进文件（0.1.9 的停靠标记踩过，25 个进程
+// 一次都没装上）。Darwin 通知是系统级的，不需要任何沙盒权限。
+//
+// 为什么每秒续一次：键盘在屏期间每秒 post 一次 `com.aevon.kb.up`，桌面只记
+// 「最后一次听到的时间」。App 被杀 / 切走 / 收起那条通知丢了，最多 3 秒触发区
+// 就自己回来 —— 不会像写死的布尔那样一旦卡住就永久失灵。
+//
+// 为什么只看 `keyboardWillChangeFrame`：它一次覆盖弹出、换输入法（高度变化）、
+// 收起（endFrame 落到屏幕之下）三种情况；`WillShow` / `WillHide` 的组合在第三方
+// 键盘上会漏掉高度变化。
+//
+// 高度门槛 40 pt：任何真实键盘都比它高，而 `inputAccessoryView` 那种一条工具栏
+// 不该被当成「键盘挡住右下角」。
+
+static volatile int AevonKbOn = 0;
+static dispatch_source_t AevonKbTimer = NULL;
+/// timer 当前是不是跑着的。`dispatch_resume` / `dispatch_suspend` 必须成对，
+/// 用一个显式状态记，比靠 `AevonKbOn` 猜安全。
+static volatile int AevonKbTimerRunning = 0;
+
+static void AevonKbPost(void) {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.aevon.kb.up"), NULL, NULL, true);
+}
+
+/// 心跳只在键盘在屏时跑。
+///
+/// 不这么写的话，这个 dylib 装进 250 个进程、每个进程一个每秒唤醒的 timer ——
+/// 键盘一年也用不到几次的功能，代价是全天候的电。挂起时一次都不醒。
+static void AevonKbArm(BOOL on) {
+    if (AevonKbTimer == NULL) return;
+    if (on && !AevonKbTimerRunning) {
+        AevonKbTimerRunning = 1;
+        dispatch_resume(AevonKbTimer);
+    } else if (!on && AevonKbTimerRunning) {
+        AevonKbTimerRunning = 0;
+        dispatch_suspend(AevonKbTimer);
+    }
+}
+
+static void AevonKbEvaluate(NSDictionary *info) {
+    NSValue *value = info[UIKeyboardFrameEndUserInfoKey];
+    if (value == nil) return;
+    CGRect frame = [value CGRectValue];
+    CGFloat screenHeight = UIScreen.mainScreen.bounds.size.height;
+    BOOL on = frame.size.height > 40.0 && frame.origin.y < screenHeight - 1.0;
+    if (on == (AevonKbOn != 0)) {
+        // 状态没变也要续一次：键盘一直开着的时候，租约靠这一点续命。
+        if (on) AevonKbPost();
+        return;
+    }
+    AevonKbOn = on ? 1 : 0;
+    AevonKbArm(on);
+    if (on) AevonKbPost();
+    AevonRawNote(on ? "app: keyboard up (bridge)\n"
+                    : "app: keyboard gone (bridge)\n");
+}
+
+/// 构造函数里调一次。观察者与心跳都只在**真的弹过键盘**之后才有开销。
+static void AevonKbObserve(void) {
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    [center addObserverForName:UIKeyboardWillChangeFrameNotification
+                        object:nil
+                         queue:nil
+                    usingBlock:^(NSNotification *note) {
+        AevonKbEvaluate(note.userInfo);
+    }];
+    AevonKbTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                          dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0));
+    if (AevonKbTimer == NULL) return;
+    dispatch_source_set_timer(AevonKbTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)NSEC_PER_SEC),
+                              NSEC_PER_SEC, NSEC_PER_SEC / 10);
+    dispatch_source_set_event_handler(AevonKbTimer, ^{
+        if (AevonKbOn) AevonKbPost();
+    });
+    // **不 resume。** `dispatch_source_create` 出来就是挂起态，键盘第一次起来时
+    // 由 `AevonKbArm(YES)` 放行；在那之前这个进程一次都不醒。
+}
+
 /// 此刻是不是停靠小窗。两条通道取或：通知（实时、租约 2.5 s）优先，文件兜冷启动。
-static BOOL AevonMiniDockedNow(void) {
-    if (AevonMiniLeaseOn) {
+static BOOL AevonMiniDockedNow(void) {    if (AevonMiniLeaseOn) {
         if (CFAbsoluteTimeGetCurrent() - AevonMiniLeaseAt < AevonMiniLeaseSpan) return YES;
         // 租约过期 = 心跳断了（宿主没了）或 off 丢了。自己收回，绝不让 App 僵死。
         AevonMiniLeaseOn = 0;
@@ -4709,6 +4797,9 @@ static void AevonAppBoot(void) {
     // 0.1.9 — 通知通道的观察者。注册在 `sendEvent` 之前之后都行，但必须早于第一次
     // 触摸；构造函数是唯一有保证的时机。
     AevonMiniObserve();
+    // 0.1.17 — 键盘在屏的那一声。软键盘属于应用这一侧，桌面要等这里报才知道
+    // （见上面 `AevonKbObserve`）。
+    AevonKbObserve();
 
     // Both getters, both chained: a process that is not hosted keeps the
     // system's answers byte for byte.

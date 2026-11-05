@@ -39,6 +39,10 @@
 //
 
 import UIKit
+// 0.1.17 — 键盘通道走 `CFNotificationCenterGetDarwinNotifyCenter()`。UIKit 会间接
+// 带进 CoreFoundation，但这里显式写出来：跨进程通知是本文件唯一依赖 CF 的地方，
+// 以后换 import 顺序时不该靠运气。
+import CoreFoundation
 
 final class RingHost: NSObject {
 
@@ -123,6 +127,24 @@ final class RingHost: NSObject {
     private var overlayTimer: Timer?
     private var overlayCheckedAt: CFTimeInterval = 0
     private var overlayUp = false
+
+    /// 0.1.17 — 键盘在屏。**信号来自应用进程**（见 `AevonAppHook.m` 的
+    /// `AevonKbObserve`）：软键盘在 iOS 15+ 属于前台应用那一侧，SpringBoard
+    /// 的进程里既没有键盘窗口、也收不到 `UIKeyboardWillShow`，所以这一侧只能
+    /// 等 App 进程报。
+    ///
+    /// 通道是 Darwin 通知 `com.aevon.kb.up`，**租约 3 秒**：App 在键盘在屏期间
+    /// 每秒续一次，桌面这一侧只记「最后一次听到的是什么时候」。这样 App 被杀、
+    /// 或者切走时那条「收起」没送到，最多 3 秒触发区就自己回来 —— 不像写死的
+    /// 布尔那样一旦卡住就永久失灵（0.1.8 的停靠标记踩过这个坑）。
+    private var kbAt: CFTimeInterval = 0
+    /// 上一次写进日志的键盘状态，只在变化时说话。
+    private var kbLogged = false
+    /// Darwin 观察者的裸指针，`stop()` 要按同一个人注销。
+    private var kbObserver: UnsafeMutableRawPointer?
+    /// 租约时长。1 秒心跳 + 3 秒租约 = 丢两条心跳才判死，够宽松。
+    private let kbLease: CFTimeInterval = 3.0
+    private static let kbNoteName = "com.aevon.kb.up" as CFString
     /// 0.0.47 — 连续两次判真才隐藏。见 `syncOverlayVisibility`。
     private var overlayStrikes = 0
     /// 0.0.47 — 垫子上落过几次手指。前 20 次写进日志，用来分开「没落上」与
@@ -254,6 +276,7 @@ final class RingHost: NSObject {
         addEdgePad()
         layout()
         startOverlayWatch()
+        startKeyboardWatch()
         syncOverlayVisibility()
         seedStore()
 
@@ -279,6 +302,7 @@ final class RingHost: NSObject {
 
         overlayTimer?.invalidate()
         overlayTimer = nil
+        stopKeyboardWatch()
         AevonRingGrip.activeTouchHandler = nil
         barHeld = false
         overlayStrikes = 0
@@ -647,28 +671,20 @@ final class RingHost: NSObject {
         edgePad = pad
     }
 
-    /// 0.1.16 — 呼盘命中区的贴边列宽。唯一一处几何定义。**用户定值：10 pt。**
+    /// 0.1.17 — 呼盘命中区的贴边列宽。唯一一处几何定义。**用户定值：12 pt。**
     ///
-    /// 一路的量：0.1.13 = 24、0.1.15 = 40（另加 108×248 的光环宽区），0.1.16 = 10。
+    /// 一路的量：0.1.13 = 24、0.1.15 = 40（另加 108×248 的光环宽区）、0.1.16 = 10、
+    /// 0.1.17 = 12。
     ///
-    /// 40 + 光环那一版（Aevon(102) 真机日志）证明了两件相反的事：
+    /// Aevon(103) 的真机日志证明 10 pt 这边已经到边了：25 次落指 **25 次全开**
+    /// （判据零失败），但 inset 分布是 `4:1 / 7:3 / 8:3 / 9:11 / 10:7` ——
+    /// **18 次挤在 9 和 10**，也就是说用户每次都贴着这条线的边界落指，再往里
+    /// 一点就掉出去了。用户的原话是「窄了很多，灵敏度也下降了」，要求 +2。
     ///
-    /// - 正面：带宽确实不再是瓶颈。96 次落指的 inset 从上一版清一色 3/4/5 摊到
-    ///   5~81，63 次划动**全部**开盘，其中 inset 32 / 55 / 66 / 73 / 77 / 81 各有
-    ///   一次成功 —— 那是光环在接住「没对准抓手的手」，单手不用再顶到物理边缘。
-    /// - 反面：40 pt 列 + 108 宽光环在视觉上是一大块（热区可见之后尤其明显），
-    ///   而**这块地一旦认领，应用就拿不到这一根手指**（窗口在上层，没有「先收下
-    ///   再还回去」）。用户据此把触发区手动收到 10 pt：宁可难一点，也不要吃掉
-    ///   右侧的按钮与滚动。
-    ///
-    /// ⚠️ **已知代价，写在这里以免下一版当成 bug 查**。按上一轮 63 次成功样本的
-    /// 起点 inset 重算，10 pt 能接住的只有 `≤10` 那 46 次；`11~13` 10 次、`17`
-    /// 1 次、`32` 1 次、`55/66/73/77/81` 5 次全部落到带外（还给应用）。也就是说
-    /// 同一批操作的成功数会从 63 掉到 46（96 次落指里 46 次开盘，约 48 %），剩下
-    /// 50 次不开里有 33 次本来就是零位移的点击。若下份日志显示 `inset` 堆在
-    /// 11~14 而 `open` 明显变少，那是这个值加撤掉光环的直接后果，不是判据坏了
-    /// —— 到时候按实测回调到 12~14，别猜。
-    private let stripWidth: CGFloat = 10
+    /// 12 的依据不是手感，是这条分布：中位 9、最大值正好 10，说明「够得着的
+    /// 习惯落点」在 9 上下浮动 ±2；12 把这段浮动的上沿包进来，又不会回到 24/40
+    /// 那种「认领一大片、应用拿不到手指」的老毛病。
+    private let stripWidth: CGFloat = 12
     /// 0.1.11 — 「认作左滑的最小横向位移」这个常量搬进了 `EdgeSwipePad.openDistance`
     /// （10 pt）。原来这里是 12 并且用于 `gestureRecognizerShouldBegin`，那一拍
     /// `translation` 只有 10 pt 上下，12 永远够不到 —— 就是 Aevon(98)「呼不出」的死因。
@@ -1132,6 +1148,57 @@ final class RingHost: NSObject {
         overlayTimer = timer
     }
 
+    // MARK: - 0.1.17 键盘在屏（信号来自应用进程）
+
+    /// 注册 Darwin 观察者。
+    ///
+    /// 回调**不碰 UI**：它可能在任意线程被投递，只把时间戳搬到主线程，真正的
+    /// 显隐由 0.4 s 的 tick 统一做 —— 和系统面板共用一个出口，就不会出现
+    /// 「两条路各藏一半」。
+    private func startKeyboardWatch() {
+        stopKeyboardWatch()
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let observer = Unmanaged.passUnretained(self).toOpaque()
+        CFNotificationCenterAddObserver(center, observer, RingHost.kbCallback,
+                                        RingHost.kbNoteName, nil, .deliverImmediately)
+        kbObserver = observer
+        Log.write("ring: keyboard watch armed (lease 3.0 s)")
+    }
+
+    private func stopKeyboardWatch() {
+        guard let observer = kbObserver else { return }
+        CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                           UnsafeRawPointer(observer),
+                                           RingHost.kbNoteName, nil)
+        kbObserver = nil
+        kbAt = 0
+        kbLogged = false
+    }
+
+    /// `CFNotificationCallback` 是 C 函数指针，不能捕获上下文 —— 用不捕获的
+    /// 静态闭包 + `Unmanaged` 把 `self` 递进来。
+    ///
+    /// ⚠️ 第二个参数是 `UnsafeMutableRawPointer?`，而 `fromOpaque` 收的是
+    /// `UnsafeRawPointer` —— Swift 不会隐式转，必须先包一层（0.1.16 的
+    /// `CFNotificationCenterRemoveObserver` 同理）。
+    private static let kbCallback: CFNotificationCallback = { _, raw, _, _, _ in
+        guard let raw = raw else { return }
+        Unmanaged<RingHost>.fromOpaque(UnsafeRawPointer(raw)).takeUnretainedValue().keyboardBeat()
+    }
+
+    /// 应用进程说「键盘还在」。只记时间，下一次 tick 才动视图。
+    private func keyboardBeat() {
+        DispatchQueue.main.async { [weak self] in
+            self?.kbAt = CACurrentMediaTime()
+        }
+    }
+
+    /// 租约内听到过心跳 ⇒ 键盘在屏。3 秒没听到就自己判收起：App 被杀、切走、
+    /// 或者「收起」那条通知丢在通道上，触发区最多僵 3 秒。
+    private var keyboardUp: Bool {
+        return kbAt > 0 && CACurrentMediaTime() - kbAt < kbLease
+    }
+
     private func syncOverlayVisibility() {
         guard let pad = barPad else { return }
         // 0.0.47 — 一次判真不算数。
@@ -1147,15 +1214,37 @@ final class RingHost: NSObject {
         } else {
             overlayStrikes = 0
         }
-        let hidden = overlayStrikes >= 2 && !barHeld
+        // 0.1.17 — 键盘走同一条出口，但**不参与两次判真**：应用那边已经是
+        // 「键盘确实起来了」之后才报的，再延迟 0.4 秒只会让用户先误触一两下
+        // 删除键。Aevon(103) 的原话：「键盘打开时，右侧触发区必须让路，
+        // 不然容易误触」。
+        let keyboard = keyboardUp
+        if keyboard != kbLogged {
+            kbLogged = keyboard
+            Log.write(keyboard
+                      ? "ring: keyboard up, summon bar and edge pad stepped aside"
+                      : "ring: keyboard gone, summon bar and edge pad back")
+        }
+        let hidden = (overlayStrikes >= 2 || keyboard) && !barHeld
         // 0.1.15 — 热区跟着垫子一起藏：系统面板（通知中心 / 控制中心）拉下来时，
         // 那块青色底纹会浮在面板上面，看着像我们的 bug。
         hotView?.isHidden = hidden || !config.hotZone
-        guard pad.isHidden != hidden else { return }
+        // 0.1.17 — **竖条本体和呼盘垫也一起藏。** 三者是同一块地：只藏触摸层
+        // 会得到「看得见、按不到」，只藏视觉层会得到「看不见、按得到」，两种
+        // 都比不藏更糟。藏起来之后这一根手指落在键盘上，键盘照常收。
+        bar?.isHidden = hidden
+        edgePad?.isHidden = hidden
+        let wasHidden = pad.isHidden
+        guard wasHidden != hidden else { return }
         pad.isHidden = hidden
         // 0.0.49 — 面板刚退下去，正是窗口栈最不可靠的时刻：顺手把这一层放回顶上，
         // 免得「看得见但按不到」。
         if !hidden { raiseWindow() }
+        // 键盘与系统面板分开报：混成一句之后，「按不出来」就分不清是哪条路关的。
+        // 键盘那两条已由上面的 `keyboard up / gone` 覆盖，这里只报面板这一条 ——
+        // 0.1.16 及以前这里用的是同一个 `overlayStrikes` 判，结果「shown」几乎
+        // 永远打不出来（收起时 strikes 已经归 0 了）。
+        if keyboard { return }
         Log.write("ring: summon bar " + (hidden ? "hidden (system overlay up)"
                                                  : "shown (system overlay gone)"))
     }
