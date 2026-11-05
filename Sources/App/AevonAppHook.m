@@ -5437,14 +5437,14 @@ static void AevonKbLog(const char *line) {
 /// 0.1.44 加 `scene`：Aevon(117) 的 `app: geom early` 显示承载时
 /// `scene=430x717`（屏是 430x932），键盘是在这个 717 高的画布里排的 ——
 /// 「只露一条工具栏」很可能出在这里，不是出在屏幕尺寸上。
-static void AevonKbLeadNote(double h, double screen, double kbwin, double scene,
+static void AevonKbLeadNote(double h, double screen, double full, double kbwin, double scene,
                             double out, int took) {
     if (AevonKbLeadNotes >= 12) return;
     AevonKbLeadNotes += 1;
-    char line[240];
+    char line[260];
     snprintf(line, sizeof(line),
-             "kb: lead h=%.1f screen=%.1f kbwin=%.1f scene=%.1f -> %.1f took=%d\n",
-             h, screen, kbwin, scene, out, took);
+             "kb: lead h=%.1f screen=%.1f full=%.1f kbwin=%.1f scene=%.1f -> %.1f took=%d\n",
+             h, screen, full, kbwin, scene, out, took);
     AevonKbLog(line);
 }
 
@@ -5504,11 +5504,14 @@ static BOOL AevonKbHostGate(void) {
 }
 
 /// 母本 0x5284 的原式：`(原值 × 屏幕高 ÷ 键盘窗高) × 1.0 + 键盘窗高 − 屏幕高`。
-/// 原值本来就是整屏基准时，这个式子算回来还是原值（不抖动）；只有宿主把场景
-/// 缩小过，它才会被放大回整屏。1.0 是母本的 `_heightFraction` 缺省值。
+/// 1.0 是母本的 `_heightFraction` 缺省值。
 ///
-/// 只往「变大」的方向走：算出来比原值小、或者超出屏幕高，就退回「键盘窗自己的
-/// 高度」，再不行就原样返回。宁可不动，也不把键盘算成一个负数高度。
+/// 0.1.44 真机证明这个式子在本机退化成原值：`screen` 与 `kbwin` 都是 932，第一项
+/// 等于原值，后面的 `+932−932` 又抵消。所以 0.1.45 起 `屏幕高` 取「承载场景的高」
+/// （717），并另算一条无缩放时的平移式，两条取大。见函数体中段的说明。
+///
+/// 只往「变大」的方向走：算出来比原值小、或者超出场景高，就不采用。宁可不动，
+/// 也不把键盘算成一个负数高度。
 static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BOOL ignore) {
     double answer = ((double (*)(id, SEL, id, BOOL *, BOOL))AevonOrigIntersection)(self, _cmd,
                                                                                   scene, isLocal, ignore);
@@ -5531,24 +5534,59 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
         }
         return answer;
     }
-    CGFloat screenHeight = AevonKbNativeBounds(nil).size.height;
+    CGFloat fullHeight = AevonKbNativeBounds(nil).size.height;
     CGFloat keyboardHeight = ((UIView *)window).bounds.size.height;
     CGFloat sceneHeight = -1;
     if ([scene isKindOfClass:[UIWindowScene class]]) {
         sceneHeight = ((UIWindowScene *)scene).coordinateSpace.bounds.size.height;
     }
+    // 0.1.45 — 母本式里的 `屏幕高` 到底是什么。
+    //
+    // 真机（Aevon(118)，0.1.44）把四个数打出来了：
+    //   kb: lead h=74.0 screen=932.0 kbwin=932.0 scene=717.0 -> 932.0 took=2
+    // `screen` 与 `kbwin` 相等 ⇒ `h×screen÷kbwin` 这一项等于 `h`，整个式子退化成
+    // 原值，只能走兜底返回 932 —— 也就是说换算一次都没生效。
+    //
+    // 母本的 `screenH` 之所以不是整屏：它还装了 `UIScreen -bounds`（0x567c），在有
+    // 卡片时返回 `[scene _boundsForInterfaceOrientation:]`，也就是**承载场景的
+    // bounds 430×717**。那条钩子会改掉 App 的整个布局基准（0.1.42 的黑屏路径），
+    // 这里不装 —— 直接在键盘求值这一刻取调用方 scene 的高度，效果等价，副作用为零。
+    CGFloat screenHeight = (sceneHeight > 40 && sceneHeight < fullHeight - 8)
+                         ? sceneHeight : fullHeight;
     if (screenHeight < 1 || keyboardHeight < 40) return answer;
-    double lifted = (answer * screenHeight / keyboardHeight) + keyboardHeight - screenHeight;
+    // 两个式子取大的那个，各自都只往「变大」的方向走：
+    //
+    //   ① 母本原式 `h×screenH÷kbWinH + kbWinH − screenH` —— 适用于「场景是被缩放
+    //      过的坐标系」（scene 宽 ≠ 屏宽）。本机不是这种：日志里屏宽 430、场景宽
+    //      也 430，说明只是被裁短，没有缩放 ⇒ 这一项会把 h 缩小到 0.769 倍，
+    //      算出来偏小（101 → 292.7）。
+    //   ② 平移式 `h + (kbWinH − screenH)` —— 无缩放、只是场景比屏矮时精确。
+    //      同一个数代入：101 + (932 − 717) = 316，而键盘真实高度就是
+    //      932 − 616 = 316（h=101 表示键盘顶边落在场景内 616 处）。两个独立算法
+    //      互相印证，所以本机的正确值是 316，不是 292.7。
+    //
+    // 取大者 = 两种场景都不吃亏；上限是场景高（键盘不可能比它所在的场景还高）。
+    double scaled = (answer * screenHeight / keyboardHeight) + keyboardHeight - screenHeight;
+    double shifted = answer + (keyboardHeight - screenHeight);
+    double lifted = answer;
     int took = 0;
-    if (isfinite(lifted) && lifted > answer + 0.5 && lifted <= screenHeight) {
+    if (isfinite(scaled) && scaled > lifted + 0.5 && scaled <= screenHeight) {
+        lifted = scaled;
         took = 1;
-    } else if (keyboardHeight > answer + 0.5 && keyboardHeight <= screenHeight) {
-        lifted = keyboardHeight;             // 兜底：键盘窗自己的高度就是它该占的高度
-        took = 2;
-    } else {
-        lifted = answer;
     }
-    AevonKbLeadNote(answer, screenHeight, keyboardHeight, sceneHeight, lifted, took);
+    if (isfinite(shifted) && shifted > lifted + 0.5 && shifted <= screenHeight) {
+        lifted = shifted;
+        took = 3;
+    }
+    if (took == 0) {
+        // 两条都不成立才退兜底：键盘窗自己的高度（不超过场景高）。
+        double fallback = keyboardHeight <= screenHeight ? keyboardHeight : screenHeight;
+        if (fallback > answer + 0.5) {
+            lifted = fallback;
+            took = 2;
+        }
+    }
+    AevonKbLeadNote(answer, screenHeight, fullHeight, keyboardHeight, sceneHeight, lifted, took);
     return lifted;
 }
 
