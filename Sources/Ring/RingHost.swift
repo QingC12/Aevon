@@ -144,13 +144,17 @@ final class RingHost: NSObject {
     private var kbObserver: UnsafeMutableRawPointer?
     /// 租约时长。1 秒心跳 + 3 秒租约 = 丢两条心跳才判死，够宽松。
     private let kbLease: CFTimeInterval = 3.0
-    /// 0.1.17 — 通道名。
+    /// 0.1.17 — 通道名。**两个类型，别合并。**
     ///
-    /// **不能写成 `"..." as CFString`**：`CFNotificationCenterAddObserver` 的
-    /// name 参数要的是 `CFNotificationName?`，而它是 `CF_TYPED_ENUM` 导入出来的
-    /// 独立结构体，不是 `CFString` 的别名 —— 0.1.17 第一次推送就在这里编译失败
-    /// （`RingHost.swift:1172: cannot convert value of type 'CFString' to expected
-    /// argument type 'CFNotificationName?'`）。必须走它自己的构造器。
+    /// 同一对 API 的 name 参数签名不一样，这是 CoreFoundation 的历史遗留：
+    ///   · `CFNotificationCenterAddObserver` 要 `CFString?`；
+    ///   · `CFNotificationCenterRemoveObserver` 要 `CFNotificationName?`。
+    /// 而 `CFNotificationName` 是 `CF_TYPED_ENUM` 导入的独立结构体，不是 `CFString`
+    /// 的别名。0.1.17 连续两次推在这一行上：第一次只给 `CFString`，Add 编过了、
+    /// Remove 报 `cannot convert 'CFString' to 'CFNotificationName?'`；第二次全换成
+    /// `CFNotificationName`，Remove 编过了、Add 反着报 `cannot convert
+    /// 'CFNotificationName' to 'CFString?'`。两个常量各规各位。
+    private static let kbNoteText = "com.aevon.kb.up" as CFString
     private static let kbNoteName = CFNotificationName("com.aevon.kb.up" as CFString)
     /// 0.0.47 — 连续两次判真才隐藏。见 `syncOverlayVisibility`。
     private var overlayStrikes = 0
@@ -1167,7 +1171,7 @@ final class RingHost: NSObject {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         let observer = Unmanaged.passUnretained(self).toOpaque()
         CFNotificationCenterAddObserver(center, observer, RingHost.kbCallback,
-                                        RingHost.kbNoteName, nil, .deliverImmediately)
+                                        RingHost.kbNoteText, nil, .deliverImmediately)
         kbObserver = observer
         Log.write("ring: keyboard watch armed (lease 3.0 s)")
     }
