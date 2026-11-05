@@ -144,7 +144,14 @@ final class RingHost: NSObject {
     private var kbObserver: UnsafeMutableRawPointer?
     /// 租约时长。1 秒心跳 + 3 秒租约 = 丢两条心跳才判死，够宽松。
     private let kbLease: CFTimeInterval = 3.0
-    private static let kbNoteName = "com.aevon.kb.up" as CFString
+    /// 0.1.17 — 通道名。
+    ///
+    /// **不能写成 `"..." as CFString`**：`CFNotificationCenterAddObserver` 的
+    /// name 参数要的是 `CFNotificationName?`，而它是 `CF_TYPED_ENUM` 导入出来的
+    /// 独立结构体，不是 `CFString` 的别名 —— 0.1.17 第一次推送就在这里编译失败
+    /// （`RingHost.swift:1172: cannot convert value of type 'CFString' to expected
+    /// argument type 'CFNotificationName?'`）。必须走它自己的构造器。
+    private static let kbNoteName = CFNotificationName("com.aevon.kb.up" as CFString)
     /// 0.0.47 — 连续两次判真才隐藏。见 `syncOverlayVisibility`。
     private var overlayStrikes = 0
     /// 0.0.47 — 垫子上落过几次手指。前 20 次写进日志，用来分开「没落上」与
