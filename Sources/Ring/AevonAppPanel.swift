@@ -146,6 +146,11 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
         if let existing = current {
             // 已经有面板在屏上：直接撤掉再建新的。走 `dismiss` 的话要等 0.24 s
             // 的收起动画，那一下点击会变成「没反应」。
+            //
+            // 0.1.6 — **先把 `onClose` 叫一遍再摘**。原来这里直接置 nil，宿主的
+            // 恢复逻辑（圆盘竖条 / 右缘带的触摸开关）就跟着这次替换一起消失，
+            // 之后右侧再也呼不出圆盘，只能重启桌面。
+            existing.onClose?("replaced")
             existing.onClose = nil
             existing.onPick = nil
             existing.searchField.resignFirstResponder()

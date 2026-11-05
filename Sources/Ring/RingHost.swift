@@ -373,7 +373,10 @@ final class RingHost: NSObject {
         edgePad?.frame = CGRect(x: bounds.maxX - edgeWidth,
                                 y: bounds.maxY - edgeH,
                                 width: edgeWidth, height: edgeH)
-        edgePad?.isUserInteractionEnabled = !AevonRingGrip.cardUp
+        // 0.1.6 — 开关只有一个来源（`syncGrip`）。原来这里直接写
+        // `!AevonRingGrip.cardUp`，那是第三个各写一遍的地方：布局写一次、开卡关一次、
+        // 面板关回调再写一次，任何一条路没回来，入口就一直是关的。
+        syncGrip()
         window.rootViewController?.view.frame = bounds
         paintBar()
 
@@ -495,8 +498,56 @@ final class RingHost: NSObject {
     /// 边缘带还开着，右下角的手会先落进带子里 —— 守卫里那句 `cardUp` 能拦住
     /// 呼盘，拦不住「这根手指已经被吃掉」。
     func setEdgeActive(_ active: Bool) {
-        edgePad?.isUserInteractionEnabled = active
+        // 0.1.6 — 参数留着只为不改调用方；真正写下去的值由 `syncGrip()` 现算。
+        //
+        // `closeCard` 里那句 `setEdgeActive(true)` 在 `clearHosted` **之前**跑，
+        // 那一刻停靠小窗的宿主还在，按参数照写就会把带宽重新压到小窗上。现算
+        // 就没有这个先后问题：问的是「此刻还有没有卡」。
+        _ = active
+        syncGrip()
     }
+
+    /// 0.1.6 — 竖条与右缘带的触摸开关，唯一来源。
+    ///
+    /// 之前是三处各写一遍：`layout()` 按 `AevonRingGrip.cardUp` 写、`openPanel()`
+    /// 关一次、面板 `onClose` 再写回。三个写点排在一起看不出问题，可它们之间
+    /// 只要有一条路没走到 —— 面板被 `present` 的「换一个新的」那条路直接摘掉
+    /// （那条路不回调 `onClose`）、卡片在两次布局之间开合、关主窗时小窗还留着 ——
+    /// 就会留下一个**关死的入口**，直到重启桌面。用户看到的就是「右侧呼不出
+    /// 圆盘」。
+    ///
+    /// 现在按事实现算，并且挂在 0.4 s 那条 tick 上：任何一次状态来不及恢复，
+    /// 下一个 tick 都会把它纠正回来。
+    func syncGrip() {
+        // 0.1.6 — 竖条的地盘也一起对齐。`layout()` 里有 `bounds.width > 0` 的早退，
+        // 窗口尺寸还没到位时那一拍不会写 `summonRect`，留一个 `.zero` 在里面就等于
+        // 「条子看得见、按下去不算我的」。这里每 tick 补一次，代价是一次 CGRect 赋值。
+        if let pad = barPad, pad.frame.width > 0, pad.frame.height > 0 {
+            AevonRingGrip.summonRect = pad.frame
+        }
+        let panel = AevonAppPanel.current != nil
+        let card = FloatHost.anyCardUp
+        let barOn = !panel
+        let edgeOn = !panel && !card
+        if barPad?.isUserInteractionEnabled != barOn {
+            barPad?.isUserInteractionEnabled = barOn
+        }
+        if edgePad?.isUserInteractionEnabled != edgeOn {
+            edgePad?.isUserInteractionEnabled = edgeOn
+        }
+        guard barOn != gripLoggedBar || edgeOn != gripLoggedEdge else { return }
+        gripLoggedBar = barOn
+        gripLoggedEdge = edgeOn
+        // 一整条字面量前缀（不是拼接）：审计要在二进制里 grep 到它。
+        Log.write("ring: grip armed bar=" + (barOn ? "1" : "0")
+                  + " edge=" + (edgeOn ? "1" : "0")
+                  + " card=" + (card ? "1" : "0")
+                  + " panel=" + (panel ? "1" : "0"))
+    }
+
+    /// 上一次写进日志的开关值，只用来去重。
+    private var gripLoggedBar = true
+    private var gripLoggedEdge = true
 
     /// 右缘的滑动。语义与竖条那条完全一致（落指 → 圆盘从这一点长出来 → 跟随 →
     /// 抬手定生死），只是入口不同：竖条要**按住它**，这里只要**贴着右缘往左划**。
@@ -508,7 +559,8 @@ final class RingHost: NSObject {
         switch gesture.state {
         case .began:
             // 卡片在屏：这条带闭嘴（它与浮窗外侧手势环在右下角重叠）。
-            guard !AevonRingGrip.cardUp else { return }
+            // 0.1.6 — 判据改成现算，见 `FloatHost.anyCardUp`。
+            guard !FloatHost.anyCardUp else { return }
             let now = CACurrentMediaTime()
             guard now - edgeAt > edgeInterval else { return }
             edgeAt = now
@@ -799,7 +851,11 @@ final class RingHost: NSObject {
     private func startOverlayWatch() {
         overlayTimer?.invalidate()
         let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
-            self?.syncOverlayVisibility()
+            guard let self = self else { return }
+            self.syncOverlayVisibility()
+            // 0.1.6 — 同一个 tick 顺手把两个入口的开关对齐一次。它是「关死的
+            // 入口」唯一的自愈路径：不依赖任何一条回调按时回来。
+            self.syncGrip()
         }
         RunLoop.main.add(timer, forMode: .common)
         overlayTimer = timer
@@ -926,8 +982,12 @@ final class RingHost: NSObject {
         AevonRingMenu.dismissCurrent()
         expanded = false
         barHeld = false
-        barPad?.isUserInteractionEnabled = false
-        edgePad?.isUserInteractionEnabled = false
+        // 0.1.6 — 先起面板再关入口，然后统一 `syncGrip()`。
+        //
+        // 原来这两行写在 `present` **之前**（那时还判断不出「面板在屏」），
+        // 而恢复只挂在面板的 `onClose` 上 —— `present` 的「已经有一个面板」
+        // 那条路会把旧面板的 `onClose` 置 nil 直接摘掉，恢复逻辑跟着一起没了，
+        // 从此右侧按不出圆盘。现在开关是现算的，谁摘掉面板都不影响它。
         Log.write("ring: center panel -> app chooser (" + String(RingIcons.catalogue().count) + " apps)")
         AevonAppPanel.present(in: host,
                               onPick: { [weak self] bundleID in
@@ -935,10 +995,10 @@ final class RingHost: NSObject {
                               },
                               onClose: { [weak self] reason in
                                   guard let self = self else { return }
-                                  self.barPad?.isUserInteractionEnabled = true
-                                  self.edgePad?.isUserInteractionEnabled = !AevonRingGrip.cardUp
+                                  self.syncGrip()
                                   Log.write("ring: app chooser gone (" + reason + "), grip back")
                               })
+        syncGrip()
     }
 }
 

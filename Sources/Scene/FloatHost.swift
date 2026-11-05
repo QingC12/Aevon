@@ -144,6 +144,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return host.bundle
     }
 
+    /// 0.1.6 — 屏幕上还有没有任何一块卡（大卡或停靠小窗都算）。
+    ///
+    /// 圆盘的右缘带（`RingHost.edgePad`）要和「卡片在屏」这件事对齐：卡片贴右缘
+    /// 时，拖卡片底角的手会先落进那 15 pt 带宽里。0.0.55 起它读的是
+    /// `AevonRingGrip.cardUp` —— 一个只在 `openCard` / `closeCard` 写两笔的静态
+    /// 布尔值。关主窗而留下停靠小窗时，`closeCard` 无条件把它写成 false（见
+    /// SceneProbe 那一行），于是**小窗还在屏上、右缘带却重新开了**，带宽压在小窗
+    /// 上，点小窗那一下就变成呼圆盘 —— 用户报的「点了没反应 / 透传」里有一份是它。
+    ///
+    /// 这里按槽现算，不存状态：任何时候问都等于此刻的事实。
+    static var anyCardUp: Bool {
+        ensureSlots()
+        return slots.contains { $0.window != nil }
+    }
+
     /// 新主窗该住哪个槽：当前槽空着就给它，否则找另一个空槽；两个都满返回 nil。
     ///
     /// 返回 nil 是 V1 唯一的「拒绝服务」出口（屏幕上已经有一主一停两窗）。日志会说
@@ -1974,10 +1989,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// `-[UIApplication sendEvent:]` 是唯一一个「不管命中哪个窗口都会经过」的
     /// 入口，所以浮窗的四个边从这里拿手指，不再指望某个窗口被问到。
     func rawTouch(phase: Int, at screen: CGPoint, stamp: TimeInterval) -> Bool {
-        // 竖条先问一次（0.0.49）。它自己知道自己的地盘，不在地盘里就回 false，
-        // 不影响下面任何一行；卡片开着时先问它，正是为了「换 App 的路不被浮窗
-        // 的环堵死」。
-        if AevonRingGrip.barTouch(phase: phase, at: screen, stamp: stamp) { return true }
+        // 0.1.6 — 竖条那一次问**搬到 `AevonFloatTouch`**（见文件末尾），不在这里。
+        //
+        // 0.0.49~0.1.5 它在这是第一句，而唯一的调用方是 `touchEntry` ——
+        // `touchEntry` 只能由 `touchOrder` 里的宿主触发。0.1.5 把 `touchOrder`
+        // 改成「只收 `window != nil` 的槽」，于是**屏幕上没有卡片时列表是空的**，
+        // 这句话一次都不会执行：竖条在应用层的入口整条消失，只剩 `barPad` 上
+        // 那两个 UIKit 识别器 —— 而那个入口之所以存在，正是因为识别器在真机上
+        // 不可靠（Aevon(47) #3「锁屏一次之后就不容易触发」）。
+        //
+        // 用户的话：「你把右侧呼出圆盘的手势取消了，呼不出圆盘，无法打开悬浮窗」。
+        // 圆盘成了进不去的门，后面四条自然一条都测不了。
+        //
+        // 搬到调用方之后，它和「屏幕上有没有卡」彻底解耦：卡片一张都没有时也照问。
         guard let card = card, let window = window else {
             // 卡片在手势中途被关掉：这一路已经把 began 吞了，收尾也必须吞，否则
             // UIKit 会收到一根它从没见过的手指的结束事件。
@@ -2870,6 +2894,16 @@ final class BandRoot: UIView {
 public func AevonFloatTouch(_ phase: Int32, _ x: Double, _ y: Double, _ stamp: Double) -> Int32 {
     let point = CGPoint(x: CGFloat(x), y: CGFloat(y))
     let when = TimeInterval(stamp)
+    // 0.1.6 — **竖条先问，而且不管屏幕上有没有卡都问。**
+    //
+    // 这句话 0.0.49~0.1.5 在 `rawTouch` 的第一行。`rawTouch` 只由 `touchOrder`
+    // 里的宿主触发，而 0.1.5 的 `touchOrder` 只收「有窗口的槽」—— 没有卡片时
+    // 它是空数组，于是竖条的应用层入口整条消失，右侧呼不出圆盘（用户 Aevon(94)）。
+    //
+    // 放在这里还有第二个好处：竖条永远排在所有卡片之前。停靠小窗贴着右缘排下来
+    // 时可能盖住竖条那块 46x112 的垫子，先问竖条 = 用户按在条子上就一定是呼圆盘，
+    // 不会被某张小窗当成「点小窗升主窗」。
+    if AevonRingGrip.barTouch(phase: Int(phase), at: point, stamp: when) { return 1 }
     for host in FloatHost.touchOrder {
         if host.touchEntry(phase: Int(phase), at: point, stamp: when) { return 1 }
     }

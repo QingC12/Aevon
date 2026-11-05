@@ -1056,6 +1056,13 @@ def main():
                   b"panel: panel closed (",
                   b"ring: center panel -> app chooser (",
                   b"ring: app chooser gone (",
+                  # 0.1.6 — **圆盘入口的唯一开关与它的自愈**。
+                  #   `ring: grip armed bar=…` 是竖条 / 右缘带两个触摸开关的现算
+                  #   结果，每变一次写一行（`card=` 是此刻还有没有卡，`panel=` 是
+                  #   应用面板在不在）。用户 Aevon(94) 报「右侧呼不出圆盘、打不开
+                  #   悬浮窗」，就是这两个开关被某条没走完的路径关死了。这一行
+                  #   出现在启动后不久 = 开关有归口；一直不出现 = 一次都没变过。
+                  b"ring: grip armed bar=",
                   # 白图标过滤：一条汇总（kept / dropped 与四个理由各多少），
                   # 外加每个被丢掉的白图标的名字（前 20 个）。只看汇总分不清
                   # 「删掉的是几个白图标」还是「删掉了半屏正常 App」。
