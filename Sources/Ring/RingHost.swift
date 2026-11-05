@@ -63,26 +63,29 @@ final class RingHost: NSObject {
     /// while the strip itself stays 8 pt of visible width.
     private var barPad: UIView?
 
-    /// 0.1.15 — 呼盘热区的可见层。
+    /// 0.1.18 — 竖条「亮一下就藏」的定时器。
     ///
-    /// 用户 Aevon(101) 原话：「把触发热区设为可见性，以便我们清晰地知道」。
-    /// 前几轮的问题都是同一类：热区在哪儿只有源码知道 —— 用户只能靠「划中没划中」
-    /// 反推，我这边只能靠 `pad down` 的 `inset` 反推，两边都在猜。画出来之后，
-    /// 「够不着」从一句描述变成一件看得见的事。
+    /// 用户 Aevon(104) 第 4 条：「右侧的触发条会一直显示，改为 0.5 秒后自动隐藏或者
+    /// 直接不显示，但是手势热区依旧存在」。所以藏的是**像素**，不是触摸：`bar`
+    /// 只是 `barPad` 里的一个 `isUserInteractionEnabled = false` 的视图，呼盘靠的是
+    /// `edgePad`（贴边 12 pt），两者互不相干 —— 竖条淡到 0 之后照样能划出圆盘。
     ///
-    /// 常态极淡（填充 8 %、1.5 pt 虚线描边），够看清边界又不挡应用；呼盘成功那一下
-    /// 闪到 22 % 并在 0.5 s 内淡回，等于每次成功都给一次位置确认。
-    /// `config.hotZone` 关掉就整层隐藏 —— 它不接收触摸，也不参与命中判定。
-    private var hotView: UIView?
-    private var hotShape: CAShapeLayer?
-    /// 连续呼盘时后一次闪不能把前一次的恢复提前触发（否则第二次闪立刻被抹）。
-    private var hotFlash = 0
-    /// 上一次的热区显隐状态。只在**变化**时写日志 —— `layout()` 在旋转、滑块
-    /// 拖动、切换页面时都会被叫到，每次写一行会把日志淹掉。
-    private var hotLogged: Bool?
-    /// 热区配色。青绿：屏幕上没有哪个系统控件用它当主色，不会和页面自己的
-    /// 高亮混淆；两条填充/描边各一处定义，`flashHotZone` 只改 alpha。
-    private let hotTint = UIColor.systemTeal
+    /// 每次重新布局（挂载、改设置、旋转、呼盘成功）都亮 0.5 s 再淡出：既回答了
+    /// 「竖条还在不在」，又不会在桌面上常驻一根看不懂的白条。
+    private var barFadeTimer: Timer?
+    private let barShowFor: CFTimeInterval = 0.5
+
+    /// 0.1.18 — **热区可见层整条撤除**（0.1.15 ~ 0.1.17 曾在这里画一层淡青色底纹）。
+    ///
+    /// 用户 Aevon(104) 原话：「移除屏幕右侧的手势热区可见性（其实上一版的 10 pt 时
+    /// 从屏幕右侧的边框处左滑时 95 % 会触发也挺好，它不会占用大部分屏幕右侧的内容，
+    /// 不需要修改了）」。0.1.15 画它是为了把「够不着」变成看得见的事，目的达到了
+    /// （Aevon(102) 33 次点击、Aevon(103) 0 次点击 —— 「要划不要点」已经学会），
+    /// 代价是右侧常驻一条青色底纹挡住内容。现在撤掉，判定几何（`stripWidth` 12 pt）
+    /// 一个数都不动：**画的不再画，认的还照认**。
+    ///
+    /// 撤掉的还有 `hotFlash` / `hotLogged` / `hotTint` 与 `RingConfig.hotZone`
+    /// —— 留着不用会被 CI 的 `-Werror` 抓（unused variable）。
 
     /// Strip geometry. 8 x 56 reads as a handle rather than a control, and it
     /// is 4x the dot's target area without covering an icon.
@@ -154,8 +157,14 @@ final class RingHost: NSObject {
     /// Remove 报 `cannot convert 'CFString' to 'CFNotificationName?'`；第二次全换成
     /// `CFNotificationName`，Remove 编过了、Add 反着报 `cannot convert
     /// 'CFNotificationName' to 'CFString?'`。两个常量各规各位。
-    private static let kbNoteText = "com.aevon.kb.up" as CFString
-    private static let kbNoteName = CFNotificationName("com.aevon.kb.up" as CFString)
+    ///
+    /// 0.1.18 — 一条通道变两条：`kb.up`（在屏，每秒续租）与 `kb.off`（收起，一次性）。
+    /// 0.1.17 只有 up，收起只能等 3 秒租约过期（用户 Aevon(104)：「关掉键盘后它还要
+    /// 1 秒左右才出现」）。四条常量各管一处，同样不能合并。
+    private static let kbUpText = "com.aevon.kb.up" as CFString
+    private static let kbUpName = CFNotificationName("com.aevon.kb.up" as CFString)
+    private static let kbOffText = "com.aevon.kb.off" as CFString
+    private static let kbOffName = CFNotificationName("com.aevon.kb.off" as CFString)
     /// 0.0.47 — 连续两次判真才隐藏。见 `syncOverlayVisibility`。
     private var overlayStrikes = 0
     /// 0.0.47 — 垫子上落过几次手指。前 20 次写进日志，用来分开「没落上」与
@@ -283,7 +292,6 @@ final class RingHost: NSObject {
         // 理由见文件末尾 `gestureRecognizerShouldBegin` 上方那段。
 
         addBar()
-        addHotZone()
         addEdgePad()
         layout()
         startOverlayWatch()
@@ -313,6 +321,8 @@ final class RingHost: NSObject {
 
         overlayTimer?.invalidate()
         overlayTimer = nil
+        // 0.1.18 — 下次 `start()` 从慢档开始，别继承上一轮「藏起来」的快档。
+        overlayFastTick = false
         stopKeyboardWatch()
         AevonRingGrip.activeTouchHandler = nil
         barHeld = false
@@ -327,17 +337,14 @@ final class RingHost: NSObject {
         bar?.removeFromSuperview()
         barPad?.removeFromSuperview()
         edgePad?.removeFromSuperview()
-        // 0.1.15 — 热区层也要拆，否则「关了再开」会在宿主视图上堆叠两层底纹，
-        // 后一层还绑着旧的 config 与旧的 claimRects。
-        hotView?.removeFromSuperview()
+        // 0.1.18 — 竖条那个「亮一下就藏」的定时器也要拆：宿主关了还在烧，
+        // 而且它捕获的是旧 `bar`，下次 `start()` 会淡掉新竖条。
+        barFadeTimer?.invalidate()
+        barFadeTimer = nil
         bar = nil
         barBlur = nil
         barPad = nil
         edgePad = nil
-        hotView = nil
-        hotShape = nil
-        hotFlash = 0
-        hotLogged = nil
         window?.isHidden = true
         window = nil
         Log.write("ring: removed from desktop (switch off)")
@@ -470,8 +477,8 @@ final class RingHost: NSObject {
         // 贴边那一列，光环已撤）。
         // 外接矩形里剩下的角**不属于我们**，由 `EdgeSwipePad.point(inside:)` 退回给应用。
         edgePad?.frame = claimBounds(in: bounds)
-        // 0.1.15 — 可见的就是判定的那一组矩形（同一个 `claimRects`）。
-        updateHotZone(in: bounds)
+        // 0.1.18 — 热区可见层撤掉了（Aevon(104) 第 3 条）：认的几何不变，
+        // 只是不再往桌面上画那条淡青底纹。
         // 0.1.6 — 开关只有一个来源（`syncGrip`）。原来这里直接写
         // `!AevonRingGrip.cardUp`，那是第三个各写一遍的地方：布局写一次、开卡关一次、
         // 面板关回调再写一次，任何一条路没回来，入口就一直是关的。
@@ -695,6 +702,13 @@ final class RingHost: NSObject {
     /// 12 的依据不是手感，是这条分布：中位 9、最大值正好 10，说明「够得着的
     /// 习惯落点」在 9 上下浮动 ±2；12 把这段浮动的上沿包进来，又不会回到 24/40
     /// 那种「认领一大片、应用拿不到手指」的老毛病。
+    ///
+    /// 0.1.18 — **这个数就此定稿，不再动。** Aevon(104) 的原话是：「其实上一版的
+    /// 10 pt 时从屏幕右侧的边框处左滑时 95 % 会触发也挺好…默认 12 pt 也可以」。
+    /// 同一份日志（16 次落指、**16 次全开**、0 次拒绝、inset 9~12）也证明 12 是
+    /// 刚好包住习惯落点的那一档，既没有「够不着」也没有「吃掉太多右侧内容」。
+    /// 这一版起判定几何冻结：要改的是**别的**东西（出现延迟、圆心位置、可见性），
+    /// 不是这里。
     private let stripWidth: CGFloat = 12
     /// 0.1.11 — 「认作左滑的最小横向位移」这个常量搬进了 `EdgeSwipePad.openDistance`
     /// （10 pt）。原来这里是 12 并且用于 `gestureRecognizerShouldBegin`，那一拍
@@ -740,98 +754,6 @@ final class RingHost: NSObject {
         let rects = claimRects(in: bounds)
         guard let first = rects.first else { return .zero }
         return rects.dropFirst().reduce(first) { $0.union($1) }
-    }
-
-    // MARK: - 热区可见层（0.1.15）
-
-    /// 把「手指落在这儿才算呼盘」的那块地画出来（0.1.16 起只有贴边一条）。
-    ///
-    /// 它不参与任何判定：`isUserInteractionEnabled = false`，命中仍然只由
-    /// `EdgeSwipePad.point(inside:)` 按 `claimRects` 决定。**画的和判的必须是
-    /// 同一组矩形**（都走 `claimRects`），否则这块半透明色块就成了第二个真相，
-    /// 用户按着它划却呼不出盘，比不画更糟。
-    private func addHotZone() {
-        guard let host = window?.rootViewController?.view else { return }
-        let view = UIView(frame: .zero)
-        view.isUserInteractionEnabled = false
-        view.backgroundColor = .clear
-        view.isHidden = true
-        let shape = CAShapeLayer()
-        shape.fillColor = UIColor.clear.cgColor
-        shape.strokeColor = UIColor.clear.cgColor
-        view.layer.addSublayer(shape)
-        // 0.1.15 — 必须加在宿主视图**最上面**才看得见（host 的第 0 层是承载应用的
-        // 容器，画在它下面等于画进抽屉里）。代价是它会盖住竖条，所以紧接着把
-        // 竖条垫子提回顶层：抓手必须浮在色块之上，「热区在哪」和「抓在哪」才分得开。
-        host.addSubview(view)
-        if let pad = barPad { host.bringSubviewToFront(pad) }
-        hotView = view
-        hotShape = shape
-    }
-
-    private func aevonHotColor(_ alpha: CGFloat) -> CGColor {
-        return hotTint.withAlphaComponent(alpha).cgColor
-    }
-
-    private func restoreHotZoneColors() {
-        guard let shape = hotShape else { return }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        shape.fillColor = aevonHotColor(0.08)
-        shape.strokeColor = aevonHotColor(0.45)
-        CATransaction.commit()
-    }
-
-    /// 呼盘成功那一下闪一下：确认「就是这块地」。
-    private func flashHotZone() {
-        guard config.hotZone, let shape = hotShape,
-              let view = hotView, !view.isHidden else { return }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        shape.fillColor = aevonHotColor(0.22)
-        shape.strokeColor = aevonHotColor(0.90)
-        CATransaction.commit()
-        hotFlash += 1
-        let token = hotFlash
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            // 这 0.5 s 里又闪了一次 ⇒ 交给后一次的收尾，别提前把亮度压回去。
-            guard let self = self, self.hotFlash == token else { return }
-            self.restoreHotZoneColors()
-        }
-    }
-
-    /// 布局 / 设置变化时重画。开关关掉就整层隐藏，不留残余像素。
-    private func updateHotZone(in bounds: CGRect) {
-        guard let view = hotView, let shape = hotShape else { return }
-        guard config.hotZone, bounds.width > 0 else {
-            view.isHidden = true
-            if hotLogged != false {
-                hotLogged = false
-                Log.write("ring: hot zone hidden (switch off)")
-            }
-            return
-        }
-        view.isHidden = false
-        if hotLogged != true {
-            hotLogged = true
-            Log.write("ring: hot zone shown")
-        }
-        view.frame = bounds
-        let path = UIBezierPath()
-        for rect in claimRects(in: bounds) {
-            // 0.1.16 — 圆角跟着宽度收（10 pt 宽的列用 14 会被钳成 5，显式算出来
-            // 免得以后调宽度时圆角看起来忽大忽小）。
-            path.append(UIBezierPath(roundedRect: rect,
-                                     cornerRadius: Swift.min(14, rect.width / 2)))
-        }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        shape.frame = view.bounds
-        shape.path = path.cgPath
-        shape.lineWidth = 1.5
-        shape.lineDashPattern = [5, 4]
-        CATransaction.commit()
-        restoreHotZoneColors()
     }
 
     /// 0.0.55 — 浮窗开/关时同步右缘带能不能接触摸。
@@ -930,8 +852,10 @@ final class RingHost: NSObject {
         case .began:
             edgeAt = CACurrentMediaTime()
             barHeld = true
-            // 0.1.15 — 热区闪一下：成功呼盘的同时给一次「位置确认」。
-            flashHotZone()
+            // 0.1.18 — 热区的可见层已经撤了，改由竖条「亮 0.5 s」给同一份反馈：
+            // 手指是在这条竖条附近呼出圆盘的（圆盘圆心也会跟到这个落点上，
+            // 见 `AevonRingMenu.pendingAnchor`）。
+            revealBar()
             if let menu = AevonRingMenu.presented {
                 menu.beginRemoteTracking(at: point, source: "edge")
             } else {
@@ -1007,7 +931,29 @@ final class RingHost: NSObject {
                 .withAlphaComponent(0.32).cgColor
         }
         bar.layer.borderWidth = 0.5
+        // 0.1.18 — 不再常显：画完就进入「亮 0.5 s → 淡出」（见 `revealBar`）。
+        revealBar()
+    }
+
+    /// 0.1.18 — 竖条亮 0.5 s 再淡出。
+    ///
+    /// 为什么是「亮一下」而不是「一直不显示」：竖条是这块地上唯一看得见的东西，
+    /// 完全不给像素的话，用户永远不知道呼盘从哪儿开始（热区可见层这一版已经按
+    /// Aevon(104) 第 3 条撤掉了）。亮 0.5 s 足够看清位置，又不会挡住右侧内容。
+    ///
+    /// 重复调用是安全的：先取消上一个定时器再重新计时，连续呼盘时不会出现
+    /// 「上一次的淡出把这一次的亮起抹掉」。
+    private func revealBar() {
+        guard let bar = bar else { return }
+        barFadeTimer?.invalidate()
         bar.alpha = 1
+        let timer = Timer(timeInterval: barShowFor, repeats: false) { [weak self] _ in
+            guard let self = self, let bar = self.bar else { return }
+            UIView.animate(withDuration: 0.25) { bar.alpha = 0 }
+            Log.write("ring: bar faded out (auto hide 0.5 s)")
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        barFadeTimer = timer
     }
 
     @objc private func toggle() {
@@ -1112,9 +1058,16 @@ final class RingHost: NSObject {
     ///
     /// 0.35 秒缓存：这个查询每次要过 3 个单例 + 最多 6 次 KVC，而调用点是 0.4
     /// 秒一次的定时器 —— 缓存把「面板刚好在这个 tick 里打开」的延迟压到看不出来。
-    private var systemOverlayUp: Bool {
+    ///
+    /// 0.1.18 — 加 `fresh`：**藏起来的时候不吃缓存。** 用户 Aevon(104) 第 1 条是
+    /// 「返回桌面时它会在 1 秒内出现，减少这个 1 秒的时间」。那 1 秒的两段里有一段
+    /// 就是这条缓存：面板已经走了，采样还捏着上一次「在上面」的读数，得等它过期。
+    /// 只在藏起来时跳缓存 —— 那时 tick 是 0.2 s，一秒 5 次单例查询，代价可接受；
+    /// 而「早一点显示」永远比「晚一点显示」安全（显示早了只是多一条可见的带子，
+    /// 显示晚了是「划了没反应」）。
+    private func systemOverlayUp(fresh: Bool) -> Bool {
         let now = CACurrentMediaTime()
-        if now - overlayCheckedAt < 0.35 { return overlayUp }
+        if !fresh && now - overlayCheckedAt < 0.35 { return overlayUp }
         overlayCheckedAt = now
         overlayUp = computeSystemOverlay()
         return overlayUp
@@ -1146,9 +1099,24 @@ final class RingHost: NSObject {
         return value.boolValue
     }
 
+    /// 0.1.18 — tick 有两档速度。
+    ///
+    /// 「返回桌面后 1 秒才出现」的另一半来源就是 tick 周期：显示要等下一个 tick
+    /// 才被发现，最坏 0.4 s。**藏起来的时候**改成 0.2 s（那时每秒 5 次单例查询，
+    /// 可以接受），出现延迟压到 0.2 s 以内；**显示着的时候**仍然 0.4 s，不为一块
+    /// 看不见的地方烧 CPU。换档只在状态变化时发生，`rescheduleOverlayWatch` 自己
+    /// 去重（同一个档位重复调用直接返回）。
+    private var overlayFastTick = false
+
     private func startOverlayWatch() {
+        rescheduleOverlayWatch(fast: false)
+    }
+
+    private func rescheduleOverlayWatch(fast: Bool) {
+        guard overlayTimer == nil || fast != overlayFastTick else { return }
+        overlayFastTick = fast
         overlayTimer?.invalidate()
-        let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: fast ? 0.2 : 0.4, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             self.syncOverlayVisibility()
             // 0.1.6 — 同一个 tick 顺手把两个入口的开关对齐一次。它是「关死的
@@ -1163,24 +1131,29 @@ final class RingHost: NSObject {
 
     /// 注册 Darwin 观察者。
     ///
-    /// 回调**不碰 UI**：它可能在任意线程被投递，只把时间戳搬到主线程，真正的
-    /// 显隐由 0.4 s 的 tick 统一做 —— 和系统面板共用一个出口，就不会出现
-    /// 「两条路各藏一半」。
+    /// 回调**不碰 UI**：它可能在任意线程被投递，只把时间戳搬到主线程。
+    /// 0.1.18 — 搬到主线程之后**立刻**对齐一次显隐，不再等 0.4 s 那个 tick 来
+    /// 收货：用户 Aevon(104) 第 1 条就是要这一点（「关键盘后立即出现」）。
+    /// 两条通道走同一个出口（`syncOverlayVisibility`），不会出现「两条路各藏一半」。
     private func startKeyboardWatch() {
         stopKeyboardWatch()
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         let observer = Unmanaged.passUnretained(self).toOpaque()
-        CFNotificationCenterAddObserver(center, observer, RingHost.kbCallback,
-                                        RingHost.kbNoteText, nil, .deliverImmediately)
+        CFNotificationCenterAddObserver(center, observer, RingHost.kbUpCallback,
+                                        RingHost.kbUpText, nil, .deliverImmediately)
+        CFNotificationCenterAddObserver(center, observer, RingHost.kbOffCallback,
+                                        RingHost.kbOffText, nil, .deliverImmediately)
         kbObserver = observer
         Log.write("ring: keyboard watch armed (lease 3.0 s)")
     }
 
     private func stopKeyboardWatch() {
         guard let observer = kbObserver else { return }
-        CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
-                                           UnsafeRawPointer(observer),
-                                           RingHost.kbNoteName, nil)
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterRemoveObserver(center, UnsafeRawPointer(observer),
+                                           RingHost.kbUpName, nil)
+        CFNotificationCenterRemoveObserver(center, UnsafeRawPointer(observer),
+                                           RingHost.kbOffName, nil)
         kbObserver = nil
         kbAt = 0
         kbLogged = false
@@ -1192,15 +1165,37 @@ final class RingHost: NSObject {
     /// ⚠️ 第二个参数是 `UnsafeMutableRawPointer?`，而 `fromOpaque` 收的是
     /// `UnsafeRawPointer` —— Swift 不会隐式转，必须先包一层（0.1.16 的
     /// `CFNotificationCenterRemoveObserver` 同理）。
-    private static let kbCallback: CFNotificationCallback = { _, raw, _, _, _ in
+    private static let kbUpCallback: CFNotificationCallback = { _, raw, _, _, _ in
         guard let raw = raw else { return }
         Unmanaged<RingHost>.fromOpaque(UnsafeRawPointer(raw)).takeUnretainedValue().keyboardBeat()
     }
 
-    /// 应用进程说「键盘还在」。只记时间，下一次 tick 才动视图。
+    /// 0.1.18 — 单独的「收起」回调。同一个观察者挂两条通知，靠回调分叉而不是
+    /// 比较 `name`：`CFNotificationName` 的相等要过 `CFEqual`，多一层类型换算
+    /// 就多一个编译期的坑，两条不捕获的闭包是更省事的写法。
+    private static let kbOffCallback: CFNotificationCallback = { _, raw, _, _, _ in
+        guard let raw = raw else { return }
+        Unmanaged<RingHost>.fromOpaque(UnsafeRawPointer(raw)).takeUnretainedValue().keyboardGone()
+    }
+
+    /// 应用进程说「键盘还在」：续租，然后**立刻**对齐显隐（把触发区藏掉）。
     private func keyboardBeat() {
         DispatchQueue.main.async { [weak self] in
-            self?.kbAt = CACurrentMediaTime()
+            guard let self = self else { return }
+            self.kbAt = CACurrentMediaTime()
+            self.syncOverlayVisibility()
+        }
+    }
+
+    /// 应用进程说「键盘收了」：租约清零，然后立刻对齐（把触发区还回来）。
+    ///
+    /// 这里是 0.1.18 相对 0.1.17 的关键一处：以前收起只能等 3 秒租约自然过期，
+    /// 用户看到的就是「键盘已经下去了，触发条还要等一下才回来」。
+    private func keyboardGone() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.kbAt = 0
+            self.syncOverlayVisibility()
         }
     }
 
@@ -1215,12 +1210,17 @@ final class RingHost: NSObject {
         // 0.0.47 — 一次判真不算数。
         //
         // Aevon(45) #1 是「有时会无法触发，需要多次点击或滑动」。这个定时器就是
-        // 那个「有时」：`systemOverlayUp` 是 0.35 秒缓存的单次采样，转场里读到
+        // 那个「有时」：`systemOverlayUp` 是缓存的单次采样，转场里读到
         // 一次「面板在上面」，`pad.isHidden` 就置真 —— 而隐藏的视图不参与命中，
         // 这一段时间里按上去什么都不会发生。两次连续判真才藏（0.4 秒一 tick，
         // 缓存 0.35 秒，两次采样互相独立），并且手指还在垫子上（`barHeld`）时
         // 一律不藏。
-        if systemOverlayUp && !barHeld {
+        //
+        // 0.1.18 — 藏起来的时候每次采样都跳过缓存（见 `systemOverlayUp(fresh:)`）。
+        // 严格来说两次采样就不再「互相独立」了（0.2 s 一 tick），所以藏的门槛不放：
+        // 仍然是两次判真。显示那边反过来 —— 一次判假就够，早显示是安全的。
+        let wasHidden = pad.isHidden
+        if systemOverlayUp(fresh: wasHidden) && !barHeld {
             overlayStrikes = Swift.min(overlayStrikes + 1, 2)
         } else {
             overlayStrikes = 0
@@ -1237,20 +1237,23 @@ final class RingHost: NSObject {
                       : "ring: keyboard gone, summon bar and edge pad back")
         }
         let hidden = (overlayStrikes >= 2 || keyboard) && !barHeld
-        // 0.1.15 — 热区跟着垫子一起藏：系统面板（通知中心 / 控制中心）拉下来时，
-        // 那块青色底纹会浮在面板上面，看着像我们的 bug。
-        hotView?.isHidden = hidden || !config.hotZone
         // 0.1.17 — **竖条本体和呼盘垫也一起藏。** 三者是同一块地：只藏触摸层
         // 会得到「看得见、按不到」，只藏视觉层会得到「看不见、按得到」，两种
         // 都比不藏更糟。藏起来之后这一根手指落在键盘上，键盘照常收。
         bar?.isHidden = hidden
         edgePad?.isHidden = hidden
-        let wasHidden = pad.isHidden
+        // tick 速度跟着「藏没藏」换档：藏着的时候快（早点显示），显示着的时候慢。
+        rescheduleOverlayWatch(fast: hidden)
         guard wasHidden != hidden else { return }
         pad.isHidden = hidden
         // 0.0.49 — 面板刚退下去，正是窗口栈最不可靠的时刻：顺手把这一层放回顶上，
         // 免得「看得见但按不到」。
-        if !hidden { raiseWindow() }
+        // 0.1.18 — 回来的时候也亮一下竖条：竖条现在 0.5 s 就淡出，用户从「键盘
+        // 刚收」这一刻起需要一次「入口回来了」的确认，否则屏上什么都没有。
+        if !hidden {
+            raiseWindow()
+            revealBar()
+        }
         // 键盘与系统面板分开报：混成一句之后，「按不出来」就分不清是哪条路关的。
         // 键盘那两条已由上面的 `keyboard up / gone` 覆盖，这里只报面板这一条 ——
         // 0.1.16 及以前这里用的是同一个 `overlayStrikes` 判，结果「shown」几乎

@@ -505,17 +505,23 @@ def main():
                   # 格式串也随之消失，改断言 `claim` 段的尾部：仍是同一个长格式串，
                   # 只是参数少了三个。留着旧断言 = audit 直接 MISS。
                   b" claim=%.0fx%.0f at y=%.0f",
-                  # 0.1.15 — 热区可见层（Aevon(101)：把触发热区设为可见性）。
-                  # 有这两行说明热区层真的随设置显隐了；没有就是「设置里那个
-                  # 开关只是个装饰」。
-                  b"ring: hot zone shown",
-                  b"ring: hot zone hidden (switch off)",
+                  # 0.1.18 — 热区可见层撤除（Aevon(104) 第 3 条：「移除屏幕右侧的
+                  # 手势热区可见性」）。两条旧断言反过来用：不能再出现在二进制里。
                   # 0.1.17 — 键盘避让的三条证词。第一条证明观察者装上了，后两条
                   # 证明「键盘起来 → 让路」这条链真的跑过；只有第一条而没有后两条，
                   # 就是「装上了但收不到心跳」（App 侧没编译进通道）。
                   b"ring: keyboard watch armed (lease 3.0 s)",
                   b"ring: keyboard up, summon bar and edge pad stepped aside",
                   b"ring: keyboard gone, summon bar and edge pad back",
+                  # 0.1.18 — 键盘「收起」那条独立通道（Aevon(104) 第 1 条要求
+                  # 「关键盘后立即出现」）。宿主侧注册它、App 侧发它，两边各断言一次。
+                  b"com.aevon.kb.off",
+                  # 0.1.18 — 竖条「亮 0.5 s 后自动淡出」（Aevon(104) 第 4 条）。
+                  b"ring: bar faded out (auto hide 0.5 s)",
+                  # 0.1.18 — 圆心跟手（Aevon(104) 第 2 条）。这条标记在
+                  # `AevonRingMenu.applyAnchor` 的日志里，没有它就说明「圆心还是
+                  # 固定 215,699」。
+                  b"AevonRingAnchorFollowV118",
                   b"ring: bar layer put back on top (level=",
                   b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",
@@ -530,6 +536,16 @@ def main():
         if token not in dylib_early:
             bad(f"host: {token.decode(errors='replace')} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")
+    # 0.1.18 — 热区可见层是**删掉**的，不是「默认关」。两条旧标记必须真的不在
+    # 二进制里：只要还能 grep 到，就说明那层淡青色底纹还挂在宿主视图上，
+    # 用户会在桌面上又看见它。
+    for gone in (b"ring: hot zone shown",                 # gone
+                 b"ring: hot zone hidden (switch off)"):  # gone
+        if gone in dylib_early:
+            bad(f"host: {gone.decode()} still in Aevon.dylib — the hot zone overlay "
+                "was removed in 0.1.18, it must not be drawn any more")
+        else:
+            ok(f"host: {gone.decode()} gone (hot zone overlay removed, 0.1.18)")
     # The app list moved from the file store to the old plugin's snapshot store
     # (UserDefaults suite + RingAppsSnapshot, V0.0.31 semantics kept verbatim).
     if b"RingAppsSnapshot" not in dylib_early:
@@ -855,6 +871,9 @@ def main():
                       # 那侧收不到任何系统通知；没有这个字符串，`ring: keyboard
                       # up` 就永远不会出现，而用户看到的是「打字时仍然误触」。
                       b"com.aevon.kb.up",
+                      # 0.1.18 — 「收起」那条独立通道（Aevon(104) 第 1 条：
+                      # 「关键盘后立即出现」）。不发它，桌面只能等 3 秒租约过期。
+                      b"com.aevon.kb.off",
                       b"app: keyboard up (bridge)",
                       b"setContentOffset:"):
             if token not in bridge:

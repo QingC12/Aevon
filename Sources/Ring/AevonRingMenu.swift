@@ -436,6 +436,11 @@ final class AevonRingMenu: UIView {
     /// 圆心纵向位置（占屏幕高度比例）
     private static let verticalRatio: CGFloat = 0.75
 
+    /// 0.1.18 — 本次呼盘的落点，由 `presentTracking` 塞进来、`present(in:)` 取走。
+    /// 静态是为了在 `AevonRingMenu` 实例创建之前就把值递进去（几何是在 `reload()`
+    /// 里一次算完的，没有第二次布局机会）。
+    private static var pendingAnchor: CGPoint?
+
     private let dimView = UIView()
     private let trackLayer = CAShapeLayer()
     private let centerButton = UIButton(type: .custom)
@@ -474,6 +479,9 @@ final class AevonRingMenu: UIView {
     private var displayVelocity: CGFloat = 0
     private var displayLink: CADisplayLink?
     private var ringCenter: CGPoint = .zero
+    /// 0.1.18 — 这一盘的落点（nil = 老行为：水平正中、纵向 75%）。
+    /// 只在 `present(in:)` 里赋值一次，之后整局不变 —— 用户要的是「跟手出现然后固定」。
+    private var anchor: CGPoint?
     private var isDismissing = false
 
     /* V0.3.20（AevonFrameProbeV320，性能包 P6）：本轮展开期间的**帧率自证**。
@@ -499,6 +507,18 @@ final class AevonRingMenu: UIView {
     private var pointerLastEventAt: CFTimeInterval = 0
     /// 这根手指是否进过圆盘范围（区分「唤出圆盘那一下」和「进盘后拖出去取消」）
     private var pointerEverInsideRing = false
+
+    /// 0.1.18 — 这根手指**动过没有**（够不够 12 pt 的死区）。
+    ///
+    /// 圆心跟手之后，呼盘那一点就落在盘里：Aevon(104) 的落点 (390,740) 距新圆心
+    /// (296,740) 只有 94 pt，正压在「外圈 108 ± 容差 31」这条带上 —— 展开那一拍
+    /// 就会高亮右侧某个图标，抬手（哪怕只是想看看）就把它打开了。
+    ///
+    /// 所以「从边缘划出来」的那根手指要先动过 12 pt 才允许高亮；直接落在盘上的
+    /// 手指（`source == "local"`，点图标就是他本意）不受这条限制，一点即选。
+    private var hoverArmed = true
+    private var hoverOrigin: CGPoint = .zero
+    private static let hoverDeadband: CGFloat = 12
 
     /// 手指是否**还压在屏上**（V0.2.18 / AevonRingFingerDownV218）。
     ///
@@ -531,6 +551,10 @@ final class AevonRingMenu: UIView {
 
     static func present(in host: UIView) {
         if let existing = current {
+            // 0.1.18 — 这条早退不建盘，`pendingAnchor` 不能留在静态里过夜：
+            // 下一次 `present(in:)`（面板 / 预览那条路，anchor 本来该是 nil）
+            // 会莫名其妙地被摆到上一次的落点上。
+            AevonRingMenu.pendingAnchor = nil
             existing.dismiss()
             return
         }
@@ -538,6 +562,12 @@ final class AevonRingMenu: UIView {
         /* V0.3.18（AevonSpringUnifyV318）：阻尼比在展开这一刻读一次，之后整局复用。
          * 滑条改动要下次呼盘才生效 —— 这是刻意的：逐帧读 prefs 是跨进程 IPC。 */
         menu.hoverZ = AevonSpring.userDampingFraction()
+        /* 0.1.18 — 圆心跟手：`presentTracking` 把落点塞进 `pendingAnchor`，这里
+         * 在 `reload()`（真正算半径与图标位置的地方）之前吃掉它。
+         * 用完立刻清空 —— 下一条 `present(in:)`（比如面板那条路）不能再拿上一次
+         * 的落点去摆盘。 */
+        menu.anchor = AevonRingMenu.pendingAnchor
+        AevonRingMenu.pendingAnchor = nil
         host.addSubview(menu)
         host.bringSubviewToFront(menu)
         current = menu
@@ -565,6 +595,15 @@ final class AevonRingMenu: UIView {
     static func presentTracking(in host: UIView, at point: CGPoint,
                                 source: String) -> AevonRingMenu? {
         if current != nil { return nil }
+        /* 0.1.18 — **圆心跟着呼盘的那个落点走**（用户 Aevon(104) 第 2 条：
+         * 「圆盘的出现位置可以向右移动一点，因为现在在屏幕中心朝下，圆盘展开时
+         * 右手拇指不容易触摸到圆盘最左侧图标（也可以改为不在固定点出现，而是像
+         * stheno 母版那样跟随手指移动，然后固定）」）。
+         *
+         * 固定圆心 215,699 时，最左侧图标在 x≈87 —— 拇指从右缘伸过来要跨 300 pt，
+         * 这就是「够不到最左边」的全部原因。跟手之后圆心落在拇指附近，整个环
+         * 跟着右移；外沿由 `applyAnchor` 夹进屏幕，图标不会被推出边。 */
+        AevonRingMenu.pendingAnchor = point
         present(in: host)
         guard let menu = current else { return nil }
         menu.beginRemoteTracking(at: point, source: source)
@@ -807,11 +846,36 @@ final class AevonRingMenu: UIView {
 
     private func computeGeometry() {
         // 圆心固定：水平正中，纵向 75%（用户 2026-10-22 第二次要求）
+        //
+        // 0.1.18 — 这**只是第一遍**：`applyAnchor` 会在 `ringRadii` 算完之后把圆心
+        // 挪到这次呼盘的落点上。分两拍是因为 `maxRadius`（决定每圈半径）要读
+        // `ringCenter`，而夹落点又要知道最大半径 —— 两件事互相依赖。
         ringCenter = CGPoint(x: bounds.midX, y: bounds.height * AevonRingMenu.verticalRatio)
 
         centerButton.center = ringCenter
         centerGradient.frame = centerButton.bounds
         layoutHub()
+    }
+
+    /// 0.1.18 — 把圆心夹进屏幕（外沿 = 最外圈半径 + 图标半宽 + 6 pt 余量）。
+    ///
+    /// 必须在 `ringRadii` 算完之后调（那时才知道这一盘到底多大），并且必须在
+    /// `drawRingTracks()` / `layoutIcons()` 之前 —— 那两个函数都按 `ringCenter`
+    /// 落笔，晚一步就会得到「轨道跟手、图标不动」的半截盘。
+    ///
+    /// 屏幕装不下这一盘（外沿 × 2 > 短边）时退回固定圆心：与其把半径压到看不清，
+    /// 不如承认这一台放不下「拇指当圆心」。
+    private func applyAnchor() {
+        guard let target = anchor else { return }
+        let outer = (ringRadii.max() ?? 62) + AevonRingMenu.iconSize / 2 + 6
+        guard bounds.width > outer * 2, bounds.height > outer * 2 else { return }
+        let x = Swift.min(Swift.max(target.x, outer), bounds.width - outer)
+        let y = Swift.min(Swift.max(target.y, outer), bounds.height - outer)
+        ringCenter = CGPoint(x: x, y: y)
+        AevonLog.info("[圆盘] 圆心跟手 ("
+            + String(format: "%.0f,%.0f", target.x, target.y) + " → "
+            + String(format: "%.0f,%.0f", x, y) + "，外沿 " + String(Int(outer))
+            + "pt）（AevonRingAnchorFollowV118）")
     }
 
     /// V0.2.11（AevonRingHubFitV211）：心圆底盘 + 四宫格图标的尺寸与位置。
@@ -933,6 +997,8 @@ final class AevonRingMenu: UIView {
         // 由内到外依次填圈：容量按总数动态分配（外圈一定比内圈多）
         ringCounts = AevonRingMenu.distribution(for: bundleIDs.count)
         ringRadii = radii(forCounts: ringCounts)
+        // 0.1.18 — 半径有了，才夹得住落点；夹完再落笔（轨道 / 图标都在下面）。
+        applyAnchor()
 
         var cursor = 0
         for (ringIndex, count) in ringCounts.enumerated() {
@@ -1332,7 +1398,10 @@ final class AevonRingMenu: UIView {
         pointerEverInsideRing = isInsideRingArea(point)
         // 新手指落下来，重新允许「按住圆心 1 秒」切换模式
         centerHoldSuppressed = false
-        if rotating {
+        // 0.1.18 — 见 `hoverArmed`：呼盘那根手指先不许高亮，动过 12 pt 再说。
+        hoverArmed = (source == "local")
+        hoverOrigin = point
+        if rotating || !hoverArmed {
             setHovered(nil)
         } else {
             setHovered(icon(at: point))
@@ -1364,6 +1433,11 @@ final class AevonRingMenu: UIView {
         pointerLastEventAt = CACurrentMediaTime()
         isFingerDown = true
         if isInsideRingArea(point) { pointerEverInsideRing = true }
+        // 0.1.18 — 走够死区才解锁高亮（呼盘那根手指）。
+        if !hoverArmed,
+           hypot(point.x - hoverOrigin.x, point.y - hoverOrigin.y) >= AevonRingMenu.hoverDeadband {
+            hoverArmed = true
+        }
         /* V0.3.23（AevonRingUnfoldV323）：**跟手**。
          * 拖动曲线只增不减（`max`）—— 手指往回撤时盘面不会跟着缩，
          * 否则「划过头再修一下」会让 21 个图标整体往回抽，比不跟手更难看。 */
@@ -1388,7 +1462,7 @@ final class AevonRingMenu: UIView {
             }
             setHovered(nil)
         } else {
-            setHovered(icon(at: point))
+            setHovered(hoverArmed ? icon(at: point) : nil)
         }
         // 手指离开圆心就解除「刚切换过」的抑制，也取消还没到 1 秒的计时
         if !isInsideCenter(point) { centerHoldSuppressed = false }
@@ -1453,7 +1527,9 @@ final class AevonRingMenu: UIView {
         }
 
         // ② 选择模式：落在图标上就开窗
-        if let icon = icon(at: point) {
+        // 0.1.18 — `hoverArmed == false`（呼盘那根手指一动没动）= 他只是想看看，
+        // 这一下按「未选中」处理，不能让「展开就松手」变成「打开了一个 App」。
+        if hoverArmed, let icon = icon(at: point) {
             setHovered(nil)
             activate(icon)
             return

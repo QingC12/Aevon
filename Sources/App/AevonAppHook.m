@@ -4611,6 +4611,17 @@ static void AevonKbPost(void) {
                                          CFSTR("com.aevon.kb.up"), NULL, NULL, true);
 }
 
+/// 0.1.18 — 「键盘收了」单独一条通道。
+///
+/// 0.1.17 只发 up：桌面那一侧靠 3 秒租约自然过期才知道键盘没了，用户 Aevon(104)
+/// 第 1 条的原话是「避让键盘后，键盘关闭时他也需要 1 秒左右才会出现…关键盘后立即
+/// 出现」。收起是一个**离散事件**，不该靠租约去猜 —— 发一条 off，桌面立刻把触发区
+/// 还回来；App 被杀、切走、通知丢了这些情况仍然由租约兜底（最多 3 秒）。
+static void AevonKbPostOff(void) {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.aevon.kb.off"), NULL, NULL, true);
+}
+
 /// 心跳只在键盘在屏时跑。
 ///
 /// 不这么写的话，这个 dylib 装进 250 个进程、每个进程一个每秒唤醒的 timer ——
@@ -4639,7 +4650,12 @@ static void AevonKbEvaluate(NSDictionary *info) {
     }
     AevonKbOn = on ? 1 : 0;
     AevonKbArm(on);
-    if (on) AevonKbPost();
+    if (on) {
+        AevonKbPost();
+    } else {
+        // 0.1.18 — 收起要**立刻**告诉桌面，不等租约过期。
+        AevonKbPostOff();
+    }
     AevonRawNote(on ? "app: keyboard up (bridge)\n"
                     : "app: keyboard gone (bridge)\n");
 }

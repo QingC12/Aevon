@@ -61,12 +61,12 @@ struct RingConfig {
     /// code never lets the result exceed 40 pt.
     var barWidth: CGFloat = 20
 
-    /// 0.1.15 — 把右缘呼盘热区画出来（默认开）。
+    /// 0.1.18 — `hotZone` 已删除（热区可见层整条撤除，Aevon(104) 第 3 条）。
     ///
-    /// Aevon(101) 原话：「把触发热区设为可见性，以便我们清晰地知道」。默认开是
-    /// 有意的：默认关的话，用户第一次遇到「单手够不着」时还是只能猜；看得见边界
-    /// 才知道是手没到、还是被别的窗口吃了。看熟了在设置里关掉即可。
-    var hotZone: Bool = true
+    /// 0.1.15 加它是为了把「够不着」变成看得见的事，这个目的在 Aevon(102)/(103)
+    /// 两轮里已经达到（33 次点击 → 0 次点击）；代价是右侧常驻一条淡青底纹。
+    /// 用户明确要求移除，于是连同键 `!ring.hotzone`、设置项、绘制层一起删，
+    /// 判定几何（贴边 12 pt）不变。
 
     /// Every key whose change has to be mirrored to ring.plist. One list, so a
     /// new ring control cannot be added to the UI and forgotten here.
@@ -74,7 +74,7 @@ struct RingConfig {
         "Radius", "IconWidth", "RotationAngle", "Star",
         "DampingFraction", "CustomSpringAnimation", "VIBRATE", "INTENSITY",
         "Speed", "!ring.desktop", "!ring.barY",
-        "!ring.barLength", "!ring.barWidth", "!ring.hotzone",
+        "!ring.barLength", "!ring.barWidth",
     ]
 
     // MARK: Reading
@@ -113,7 +113,6 @@ struct RingConfig {
         config.barY = clamp(number("!ring.barY", 50), 0, 100)
         config.barLength = clamp(number("!ring.barLength", 6), 4, 20)
         config.barWidth = clamp(number("!ring.barWidth", 20), 10, 100)
-        config.hotZone = flag("!ring.hotzone", true)
         return config
     }
 
@@ -143,7 +142,6 @@ struct RingConfig {
             "barY": Double(barY),
             "barLength": Double(barLength),
             "barWidth": Double(barWidth),
-            "hotZone": hotZone,
             "writtenAt": Date().timeIntervalSince1970,
         ]
     }
@@ -181,9 +179,6 @@ struct RingConfig {
         config.barY = clamp(number("barY", 50), 0, 100)
         config.barLength = clamp(number("barLength", 6), 4, 20)
         config.barWidth = clamp(number("barWidth", 20), 10, 100)
-        // 0.1.15 — 老版本写下的 snapshot 没有这个键，fallback 必须与 `load()` 一致
-        // （true），否则升级上来第一眼就看不见热区，用户以为这一版没做。
-        config.hotZone = flag("hotZone", true)
         return config
     }
 
