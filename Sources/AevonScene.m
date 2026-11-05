@@ -1771,6 +1771,72 @@ NSString *AevonAppLogPathOf(NSString *bundleID) {
     return [dir stringByAppendingPathComponent:@"tmp/aevon-app.log"];
 }
 
+/// 0.1.8 — 停靠标记的落点：App 容器里的 `tmp/aevon-mini`。
+///
+/// 取不到容器返回 nil（此时 App 侧读不到文件 ⇒ 判成「不是小窗」，行为与旧版一致，
+/// 不会把主窗的触摸吃掉）。
+static NSString *AevonAppMiniFlagPath(NSString *bundleID) {
+    NSString *dir = AevonAppContainer(bundleID);
+    if (dir == nil) return nil;
+    return [dir stringByAppendingPathComponent:@"tmp/aevon-mini"];
+}
+
+/// 0.1.8 — 标记名单。桌面进程崩掉时，App 容器里的标记不会被撤掉，那个 App
+/// 从此收不到任何触摸（用户看到的是「这个 App 点不动了」）。所以写标记时顺手
+/// 记一笔，下次启动按名单清干净。
+static NSString *AevonMiniArmedPath(void) {
+    return @"/var/mobile/Library/Logs/Aevon/mini-armed.txt";
+}
+
+/// 0.1.8 — 写 / 删停靠标记。见 `Aevon-Bridging-Header.h` 里那段说明。
+///
+/// 写在 `placeDock`（降级成小窗）与 `performUndock`（升回主窗）、拆窗三处。
+/// 调用频率是「一次停靠一次」，用文件而不是常驻内存，是因为跨进程只有文件这
+/// 一条确定可用的路。
+BOOL AevonAppMiniFlagSet(NSString *bundleID, BOOL mini) {
+    NSString *path = AevonAppMiniFlagPath(bundleID);
+    if (path == nil) return NO;
+    if (!mini) {
+        [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+        return YES;
+    }
+    NSData *mark = [@"1\n" dataUsingEncoding:NSUTF8StringEncoding];
+    if (![mark writeToFile:path atomically:YES]) return NO;
+    NSString *armed = AevonMiniArmedPath();
+    NSFileManager *manager = [NSFileManager defaultManager];
+    [manager createDirectoryAtPath:[armed stringByDeletingLastPathComponent]
+       withIntermediateDirectories:YES attributes:nil error:NULL];
+    NSData *line = [[bundleID stringByAppendingString:@"\n"]
+                    dataUsingEncoding:NSUTF8StringEncoding];
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:armed];
+    if (handle == nil) {
+        [line writeToFile:armed atomically:YES];
+    } else {
+        @try {
+            [handle seekToEndOfFile];
+            [handle writeData:line];
+            [handle closeFile];
+        } @catch (__unused NSException *exception) {
+        }
+    }
+    return YES;
+}
+
+/// 0.1.8 — 启动时把上一次留下的标记全撤掉。返回清掉的个数（写进启动日志）。
+int AevonAppMiniFlagsClearAll(void) {
+    NSString *armed = AevonMiniArmedPath();
+    NSString *text = [NSString stringWithContentsOfFile:armed
+                                               encoding:NSUTF8StringEncoding
+                                                  error:NULL];
+    int count = 0;
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        if (line.length == 0) continue;
+        if (AevonAppMiniFlagSet(line, NO)) count += 1;
+    }
+    if (armed != nil) [[NSFileManager defaultManager] removeItemAtPath:armed error:NULL];
+    return count;
+}
+
 /// 0.1.2 — 同一趟读取，但把原文交还给调用者。
 ///
 /// Aevon(90) 的教训：抖音在自己的日志里写了 8 条 `app: hang`，宿主每 2 秒把它们

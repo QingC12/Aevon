@@ -4479,6 +4479,113 @@ static void AevonInstallHangWatch(void) {
 }
 
 
+// MARK: - 0.1.8 停靠小窗的触摸闸门
+//
+// Aevon(95) 第 1 条，用户的原话：「吸附小窗快速点击时依旧会触发小窗应用内点击
+// （尤其是抬手时他才会触发）」。
+//
+// 「抬手才触发」这句话本身就是判据。UIKit 发一次点击是在 `touchesEnded` 那一拍，
+// 所以 App 收到的是**一根完整的手指**：began → moved → ended。也就是说它绕过了
+// 宿主侧那条 `sendEvent` 闸门（那一侧 `mini touch down=N eaten=N` 一直是相等的，
+// 它吞掉的是 SpringBoard 自己的那一份）。
+//
+// 三条已经试过、都不行的路，写在这里是为了下一轮不要再走：
+//   · `content.isUserInteractionEnabled = false`（0.1.7）—— 承载视图不参与命中，
+//     但那份投递根本不经过承载视图的 hit-test；
+//   · `shield`（UIControl）—— 只存在于宿主窗口里，宿主窗口对触摸是穿透的；
+//   · 几何判据 —— 停靠时 App 的 scene 一直是 430x717，只有承载视图被 transform
+//     缩放，App 自己看不出「我被缩小了」。日志里 `app: geom late scene=430x717`
+//     在停靠之后照样出现。
+//
+// 所以闸门必须装在 App 自己的进程里，而它需要知道自己此刻是不是被停靠了 ——
+// 这件事只有宿主知道，通道是 App 容器里的 `tmp/aevon-mini`（宿主写、App 读，
+// 与 `aevon-app.log` 相反方向，两个方向都已在真机上验证可用）。
+//
+// 边界：只在**停靠状态**下吞，升回主窗那一拍宿主就把标记删了，所以「升窗后触摸
+// 立刻还原」不受影响。文件读不到 = 不是小窗 = 行为与旧版逐字相同。
+
+/// 停靠标记的路径。沙盒里 `NSTemporaryDirectory()` 是唯一保证可写的位置，
+/// 宿主按同一规则写（见 `AevonAppMiniFlagSet`）。
+static BOOL AevonMiniDockedNow(void) {
+    static char path[PATH_MAX];
+    static int ready = 0;
+    if (!ready) {
+        ready = 1;
+        NSString *tmp = NSTemporaryDirectory();
+        if (tmp.length > 0) {
+            snprintf(path, sizeof(path), "%s",
+                     [[tmp stringByAppendingPathComponent:@"aevon-mini"]
+                      fileSystemRepresentation]);
+        }
+    }
+    if (path[0] == '\0') return NO;
+    struct stat info;
+    return stat(path, &info) == 0 && info.st_size > 0;
+}
+
+/// 0.2 s 缓存。`sendEvent:` 是热路径，一次手势里会有几十条事件；但标记是随
+/// 「用户点了小窗」变化的，所以**按下的那一拍强制重读**（一次手势只有一次），
+/// 同一根手指的后续事件走缓存。
+static BOOL AevonMiniDocked(BOOL force) {
+    static CFAbsoluteTime stamp = 0;
+    static BOOL answer = NO;
+    if (!force) {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (stamp > 0 && now - stamp < 0.2) return answer;
+    }
+    stamp = CFAbsoluteTimeGetCurrent();
+    answer = AevonMiniDockedNow();
+    return answer;
+}
+
+static int AevonMiniSwallowDowns = 0;
+static int AevonMiniSwallowEvents = 0;
+static int AevonMiniSwallowLines = 0;
+static CFAbsoluteTime AevonMiniSwallowAt = 0;
+
+/// 每秒一行证词，与宿主侧 `win: mini touch down=` 对齐。
+/// 这一行出现 ⇒ 漏的那份投递**确实**经过 App 的 `sendEvent:`，闸门装对了地方；
+/// 一行都不出现而用户仍被点到 ⇒ 它连 `UIApplication` 都不经过，下一手只能往
+/// `_UIApplicationHandleEventFromEventQueue` 上走。
+static void AevonMiniSwallowNote(BOOL began) {
+    if (began) AevonMiniSwallowDowns += 1;
+    AevonMiniSwallowEvents += 1;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (AevonMiniSwallowAt == 0) { AevonMiniSwallowAt = now; return; }
+    if (now - AevonMiniSwallowAt < 1.0) return;
+    int downs = AevonMiniSwallowDowns;
+    int events = AevonMiniSwallowEvents;
+    AevonMiniSwallowDowns = 0;
+    AevonMiniSwallowEvents = 0;
+    AevonMiniSwallowAt = now;
+    if (downs == 0 || AevonMiniSwallowLines >= 20) return;
+    AevonMiniSwallowLines += 1;
+    char line[160];
+    snprintf(line, sizeof(line), "app: mini touch swallowed down=%d ev=%d\n", downs, events);
+    AevonAppLogWrite(line);
+}
+
+static IMP AevonOriginalUISendEvent = NULL;
+
+static void AevonAppSendEvent(id self, SEL _cmd, UIEvent *event) {
+    if (AevonOriginalUISendEvent == NULL) return;
+    // 只拦触摸事件。远程控制、运动事件这些和停靠无关，原样放行。
+    NSSet *touches = [event allTouches];
+    if (touches.count == 0) {
+        ((void (*)(id, SEL, UIEvent *))AevonOriginalUISendEvent)(self, _cmd, event);
+        return;
+    }
+    BOOL began = NO;
+    for (UITouch *touch in touches) {
+        if (touch.phase == UITouchPhaseBegan) { began = YES; break; }
+    }
+    if (AevonMiniDocked(began)) {
+        AevonMiniSwallowNote(began);
+        return;
+    }
+    ((void (*)(id, SEL, UIEvent *))AevonOriginalUISendEvent)(self, _cmd, event);
+}
+
 /// 0.0.90 — 每个进程一行证词。
 ///
 /// Aevon(80) 两次「只剩白色光晕」只能靠 `geom early/late` 出现两对来反推
@@ -4524,6 +4631,16 @@ static void AevonAppBoot(void) {
                  AevonProbeMainOnly, AevonProbeQuietNow(),
                  b != nil ? [b UTF8String] : "-");
         AevonRawNote(mode);
+    }
+
+    // 0.1.8 — 停靠小窗的触摸闸门（见上面那一整段）。装在 App 自己的进程里，
+    // 因为漏的那一份投递只经过这里。装不上不算错：行为退回旧版（会透传），
+    // 日志里没有 `app: mini touch swallowed` 就说明这条路没通。
+    Method sendEvent = class_getInstanceMethod([UIApplication class],
+                                               sel_registerName("sendEvent:"));
+    if (sendEvent != NULL) {
+        AevonOriginalUISendEvent = method_getImplementation(sendEvent);
+        method_setImplementation(sendEvent, (IMP)AevonAppSendEvent);
     }
 
     // Both getters, both chained: a process that is not hosted keeps the

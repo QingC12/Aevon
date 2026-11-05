@@ -758,6 +758,13 @@ def main():
                       # 这一行让「一直在和它对着干」第一次有读数。
                       b"video bounce n=%d",
                       b"app: boot pid=%d",
+                      # 0.1.8 — App 侧闸门的证词（Aevon(95) 第 1 条）。停靠状态下
+                      # App 自己的 `sendEvent:` 吞掉整条事件表：`down` = 吞掉的按下
+                      # 数，`ev` = 吞掉的事件数。这行出现 ⇒ 漏的那一份投递确实经过
+                      # App 的 UIApplication；一行都没有而用户仍被点到 ⇒ 它连
+                      # UIApplication 都不经过，下一手要往 `_UIApplicationHandleEvent-
+                      # FromEventQueue` 上走。
+                      b"app: mini touch swallowed down=%d ev=%d",
                       # 0.0.91 — 死因证词。signal handler 只做 open/write/close
                       # （崩溃现场不能碰 NSString/stdio），`step=` 说死在哪个函数里；
                       # 异常那一路带名字与原因。`alive t=` 是被托管期间每秒一行：
@@ -1079,6 +1086,13 @@ def main():
                   b"win: undock read last main frame ",
                   b"win: mini touch lock content=0",
                   b"ring: edge swipe cancelled by the system",
+                  # 0.1.8 — 停靠标记（Aevon(95) 第 1 条：点小窗仍触发 App 内点击，
+                  # 而且是抬手那一拍）。宿主把「你被停靠了」写进 App 自己的沙盒，
+                  # App 侧的 `-[UIApplication sendEvent:]` 读它并吞掉整条事件表。
+                  #   这三行缺任何一条都等于「这一版没有新证据」：
+                  #   宿主写标记 / 启动时按名单清（崩了也不留死标记）/ App 真的吞了。
+                  b"win: mini flag armed ",
+                  b"boot mini flags cleared ",
                   # 白图标过滤：一条汇总（kept / dropped 与四个理由各多少），
                   # 外加每个被丢掉的白图标的名字（前 20 个）。只看汇总分不清
                   # 「删掉的是几个白图标」还是「删掉了半屏正常 App」。

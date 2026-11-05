@@ -374,8 +374,9 @@ final class RingHost: NSObject {
         // 0.0.55 — 右缘带：贴右缘 15 pt，从底部往上 35 %。卡片在屏时收回触摸
         //（`AevonRingGrip.cardUp`），否则右下角拖卡片的手会先落进带子里。
         //
-        // 0.1.7 — 整条带子换成「贴右缘 × 全高」的那一条（`stripRect`），竖条那块
-        // 40×212 的垫子从这一刻起**只是画**，不接触摸（见 `addBar`）。
+        // 0.1.7 — 整条带子换成 `stripRect` 那一条，竖条那块 40×212 的垫子从这一刻
+        // 起**只是画**，不接触摸（见 `addBar`）。0.1.8 起 `stripRect` 的高度又回到
+        // 底部 35 %（全高会和左滑返回插件抢整条右缘，见那个函数上的注释）。
         edgePad?.frame = stripRect(in: bounds)
         // 0.1.6 — 开关只有一个来源（`syncGrip`）。原来这里直接写
         // `!AevonRingGrip.cardUp`，那是第三个各写一遍的地方：布局写一次、开卡关一次、
@@ -401,7 +402,13 @@ final class RingHost: NSObject {
                       + String(Int(m.barWidth.rounded())) + "x"
                       + String(Int(m.barHeight.rounded())) + "pt pad="
                       + String(Int(m.padWidth.rounded())) + "x"
-                      + String(Int(m.padHeight.rounded())))
+                      + String(Int(m.padHeight.rounded()))
+                      // 0.1.8 — 呼盘命中区一起报：`strip=14x326 at y=606` 就是
+                      // 「贴右缘 14 pt × 底部 35 %」的实测值，判据在日志里自证。
+                      + " strip="
+                      + String(format: "%.0fx%.0f at y=%.0f",
+                               stripWidth, stripRect(in: bounds).height,
+                               stripRect(in: bounds).minY))
         }
     }
 
@@ -491,18 +498,27 @@ final class RingHost: NSObject {
         edgePad = pad
     }
 
-    /// 0.1.7 — 呼盘的手势条：贴右缘、全高。唯一一处几何定义。
+    /// 0.1.7 — 呼盘的手势条：贴右缘。唯一一处几何定义。
     private let stripWidth: CGFloat = 14
     /// 0.1.7 — 认作「左滑」的最小横向位移。
     private let ringSwipe: CGFloat = 12
 
+    /// 0.1.8 — 高度回到「从底部往上 35 %」（`edgeHeightPercent`）。
+    ///
+    /// 0.1.7 把它做成了全高（让开顶 10、底 12），本意是「贴边哪一段左滑都能呼盘」，
+    /// 真机结果是**和左滑返回插件抢整条右缘**：Aevon(95) 第 2 条原话「现在屏幕右侧
+    /// 整个边缘向左滑动都会触发圆盘，不会触发 app 内的操作，但是它和我安装的左滑
+    /// 返回插件冲突」。右滑返回在全高每一段都要用，圆盘只需要一个够得着的角落。
+    ///
+    /// 所以高度收回 35 %，位置在底部 —— 拇指自然够得到，屏幕中上部整条让给系统
+    /// 与插件。这一条同时把 0.1.6 那个「卡片里点右侧任意位置误触」的根也压住了：
+    /// 命中区只有右下角这一块 14 × 326。
     private func stripRect(in bounds: CGRect) -> CGRect {
-        let top: CGFloat = 10      // 状态栏下拉
-        let bottom: CGFloat = 12   // home 条
+        let h = bounds.height * edgeHeightPercent / 100
         return CGRect(x: bounds.maxX - stripWidth,
-                      y: top,
+                      y: bounds.maxY - h,
                       width: stripWidth,
-                      height: Swift.max(0, bounds.height - top - bottom))
+                      height: Swift.max(0, h))
     }
 
     /// 0.0.55 — 浮窗开/关时同步右缘带能不能接触摸。

@@ -348,6 +348,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 时在 `performUndock` 里恢复。
         content?.isUserInteractionEnabled = false
         Log.write("win: mini touch lock content=0")
+        // 0.1.8 — 告诉 App 进程「你被停靠了」（Aevon(95) 第 1 条）。
+        //
+        // 0.1.7 的 `isUserInteractionEnabled = false` 也没用：用户的原话是「快速点击
+        // 时依旧会触发小窗应用内点击，尤其是抬手时才触发」。抬手才响 = App 收到的是
+        // 一份**完整**的点按（began…ended），它自己按 UIKit 的规矩在 ended 那一拍
+        // 派发。那份投递不经过我们的承载视图，也不经过 SpringBoard 的 `sendEvent:`。
+        //
+        // 所以标记要落到 App 自己的容器里，由 App 侧的 `-[UIApplication sendEvent:]`
+        // 读（见 `AevonAppHook.m` 的 `AevonAppSendEvent`）。
+        setMiniFlag(true)
         // 0.1.0 — 停靠小窗没有手势环。`syncGrip` 会按新尺寸重算环，摆完必须把
         // 它收起：环是「可操作」的意思，而小窗的定义就是不可操作。
         syncGrip()
@@ -355,6 +365,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 遮罩必须盖在画面之上、且吃掉整张卡片 —— 用户要的是「点小窗任何位置都
         // 还原成主窗，且不要透传到 App 里」。
         if let shield = shield { card.bringSubviewToFront(shield) }
+    }
+
+    /// 0.1.8 — 停靠标记的本地缓存。文件只在**状态变化**时写一次：`placeDock`
+    /// 每次重排都会跑（停靠、取消停靠、拆窗都会触发 `relayoutDocked`），每一格
+    /// 都写一次文件既慢，也会把日志糊成一片。
+    private var miniFlagged = false
+
+    /// 0.1.8 — 把「我被停靠成小窗」这件事告诉 App 进程（见 `AevonAppMiniFlagSet`）。
+    private func setMiniFlag(_ mini: Bool) {
+        guard miniFlagged != mini else { return }
+        miniFlagged = mini
+        let ok = AevonAppMiniFlagSet(bundle, mini)
+        Log.write((mini ? "win: mini flag armed " : "win: mini flag cleared ")
+                  + (bundle.isEmpty ? "-" : bundle)
+                  + (ok ? "" : " (no container)"))
     }
 
     /// 把当前主窗缩成停靠小窗。主窗位置**不动**：`mainIndex` 不在这里换，
@@ -1113,6 +1138,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         glow?.removeFromSuperview()
         glow = nil
         card?.removeFromSuperview()
+        // 0.1.8 — 拆窗也要撤标记：留在 App 容器里等于那个 App 以后再也收不到触摸。
+        setMiniFlag(false)
         grip = nil
         shield = nil
         awaitingFrame = false
@@ -2537,6 +2564,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         shield = nil
         // 0.1.7 — 画面重新可操作（小窗那条锁在 `placeDock` 里上）。
         content?.isUserInteractionEnabled = true
+        // 0.1.8 — 标记必须在几何恢复之后立刻撤掉：留在里面等于「App 永远收不到触摸」。
+        setMiniFlag(false)
         // 0.1.0 — 环回来。停靠时 `placeDock` 把它收起了，取消停靠必须放出来，
         // 否则「点小窗升成主窗」之后这张卡就再也没有边的热区了。
         grip?.isHidden = false

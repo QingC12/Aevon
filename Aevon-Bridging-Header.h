@@ -148,6 +148,32 @@ NSString *_Nullable AevonDrainAppLogText(NSString *_Nullable bundleID, long cap)
 /// 那份文件在哪。取不到容器返回 nil —— 日志里要能区分「没写」和「没找到」。
 NSString *_Nullable AevonAppLogPathOf(NSString *_Nullable bundleID);
 
+/// 0.1.8 — 停靠标记：宿主往 **App 自己的沙盒** 里写一个字节，App 侧读它。
+///
+/// Aevon(95) 第 1 条：点停靠小窗时 App 里还是会触发一次点击，而且**在抬手那一拍**。
+/// 我们这一侧 `sendEvent` 每一下都吞了（`mini touch down=N eaten=N`），说明送进
+/// App 进程的是**另一份**触摸，绕过了 SpringBoard 的事件派发。
+///
+/// 三条已经试过、都不行的路：`content.isUserInteractionEnabled = false`（承载视图
+/// 不参与命中，但那份投递不经过它）、`shield`（只存在于宿主窗口里）、几何判据
+/// （停靠时 App 的 scene 一直是 430x717，只有承载视图被 transform 缩放，App 自己
+/// 看不出「我被缩小了」）。
+///
+/// 唯一还剩的一层是 App 自己的 `-[UIApplication sendEvent:]`。它要知道自己此刻
+/// 是不是被停靠成小窗 —— 这件事只能由宿主告诉它。通道用 App 容器里的一个文件：
+/// 宿主能写（非沙盒），App 能读自己的 `NSTemporaryDirectory()`，两个方向都已被
+/// `aevon-app.log` 证明可用。
+///
+/// `AevonAppMiniFlagSet(bundle, YES)` 写 `1`，`NO` 删除文件。返回是否真的写成了
+/// （容器找不到 = NO，此时日志里要有痕迹，不然分不清「没开」和「没写成」）。
+BOOL AevonAppMiniFlagSet(NSString *_Nullable bundleID, BOOL mini);
+
+/// 0.1.8 — 启动时按名单撤掉上一次留下的停靠标记，返回清掉的个数。
+///
+/// 桌面进程崩掉 / 被强杀时，App 容器里的标记会留着 —— 那个 App 从此收不到
+/// 任何触摸，用户看到的是「这个 App 点不动了」。构造函数第一拍调用一次。
+int AevonAppMiniFlagsClearAll(void);
+
 /// 0.0.72 — 把 scene 的尺寸真正动一下再还回去，幅度由调用者给。
 ///
 /// 只改承载视图的 bounds 不会让 App 重排：视图变了、scene 没变。冷启的抖音

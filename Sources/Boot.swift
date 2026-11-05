@@ -78,6 +78,11 @@ public func AevonStart() {
 
     Log.write("boot ok: version \(Aevon.version), pid \(getpid())")
 
+    // 0.1.8 — 上一次留下的停靠标记。桌面进程崩掉时标记会留在 App 容器里，那个
+    // App 从此收不到触摸；这一拍按名单清干净。个数写进启动日志，下次看日志就能
+    // 分清「没清过」和「清了几条」。
+    Log.write("boot mini flags cleared \(AevonAppMiniFlagsClearAll())")
+
     // 0.0.48 — 浮窗的手指入口。装在 `-[UIApplication sendEvent:]` 上，理由写在
     // AevonScene.m 那一段的注释里：四份日志证明「窗口会不会被问到」不可靠，而
     // 这个方法是每一个触摸都必经的地方。装不上就只是退回旧行为，不会弄坏触摸。
