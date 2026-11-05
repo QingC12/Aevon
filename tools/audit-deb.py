@@ -1207,6 +1207,18 @@ def main():
                   #     `inside` 那一支的事件。
                   b"win: level %.0f -> %.0f %@",
                   b"win: mini miss at ",
+                  # 0.1.5 — 四条新证据（Aevon(93)）：
+                  #   `win: zone top ignored at ` = 顶部环带上被拒绝的按下。顶部从
+                  #     0.1.5 起不是把手（第 1 条：`zone=top` 认领 16 次、真的搬走
+                  #     卡片 5 次）。这行出现 = 门在生效；一次都没有 = 用户没再误戳。
+                  #   `win: mini lift deferred ` = 点小窗之后**下一拍**才升降。
+                  #     它必须是 `card undocked` 的**前一行**：倒过来就说明又在
+                  #     `sendEvent` 里面改窗口层级了（第 4 条的修法）。
+                  #   `win: card undocked … mem=NN%` = 升主窗用的尺寸来自**全局记忆**
+                  #     而不是这张卡停靠前的 frame（第 3 条）。五张卡该是同一个百分比。
+                  b"win: zone top ignored at ",
+                  b"win: mini lift deferred ",
+                  b"win: card undocked ",
                   # 0.0.69 — 三条新的行为证据，缺一条就说明这一轮有一件事没落地：
                   #   · `long press corner, already default` = 长按在默认尺寸上真的
                   #     什么都不做（Aevon(59) 的第一条）；

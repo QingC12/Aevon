@@ -96,15 +96,35 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return slots
     }
 
-    /// 手指该先问谁：主窗，然后是其余还活着的槽（0.1.0）。
+    /// 手指该先问谁：**停靠小窗在前，主窗在后**（0.1.5）。
+    ///
+    /// 0.1.0~0.1.4 是「主窗永远第一个」（为了不让小窗按槽号顺序抢走主窗手势）。
+    /// 那条纪律漏了一个情形，用户 Aevon(93) 第 2 条报的就是它：
+    ///
+    ///   主窗被拖到左右边缘、**压在一张停靠小窗上**时，主窗那侧的手势环
+    ///   （`ringHolds`，卡片外 `reach` ≈ 51 pt）正好盖住小窗。主窗先被问、
+    ///   先认领 ⇒ 用户点在小窗上的那一下变成了「主窗的环带」，小窗永远拿不到
+    ///   那一下，升不回主窗。
+    ///
+    /// 先问小窗不会有反作用：小窗只在自己那块矩形（含 6 pt 容忍带）里认领，
+    /// 落在外面就回 false，主窗照旧拿到它该拿的环带 —— 认领范围是矩形对矩形，
+    /// 谁先问谁就赢在重叠区，而重叠区按用户的裁决归小窗。
     ///
     /// 顺序不为空的槽不参与 —— 它们的 `window` 是 nil，`rawTouch` 第一句就会
     /// 早退，排进来只是白跑一遍。
     static var touchOrder: [FloatHost] {
         ensureSlots()
         let main = slots[mainIndex]
-        var order: [FloatHost] = [main]
-        for (index, slot) in slots.enumerated() where index != mainIndex && slot.window != nil {
+        var order: [FloatHost] = []
+        // 主窗自己也可能停靠着（`mainIndex` 不随降级更新），所以判据是 `onMini`
+        // 而不是「不等于 mainIndex」：真正的大卡片永远排在最后一个。
+        for slot in slots where slot.window != nil && slot.onMini {
+            order.append(slot)
+        }
+        if main.window != nil && !main.onMini {
+            order.append(main)
+        }
+        for slot in slots where slot.window != nil && !slot.onMini && slot !== main {
             order.append(slot)
         }
         return order
@@ -461,6 +481,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 是「卡片外面到底有没有触摸进到 SpringBoard」—— 0.0.44-0.0.47 四轮里唯一
     /// 始终分不开的问题。
     private var rawSeen = 0
+    /// 0.1.5 — 顶部环带上被忽略的按下数（前 8 条写日志）。顶部从 0.1.5 起不是
+    /// 把手，这一行是「用户还在往那里戳」的唯一证据（见 `rawTouch` case 0）。
+    private var rawTopIgnored = 0
     private var rawPress: DispatchWorkItem?
 
     private let cardWidth: CGFloat = 320
@@ -1620,6 +1643,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             if zone.isBottomSide {
                 return
             }
+            // 0.1.5 — 顶部不是把手（Aevon(93) 第 1 条）。这里是识别器那条兜底路
+            // 的闸：`rawTouch` 已经不再认领 `.top`，但 `GripView` 上的
+            // UIPanGestureRecognizer 仍然可能在卡片外那一条上成立 —— 两条路必须
+            // 给同一个答案，否则「原始触摸关了、识别器还在搬窗口」。
+            if zone == .top {
+                return
+            }
             var frame = card.frame
             frame.origin.x += dx
             frame.origin.y += dy
@@ -1641,6 +1671,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 并不是这里的放行条件 —— 就算长按成立了，那两格的动作用长按本身已经
         // 做完了（复位 / 待落的横屏），抬手这一拍不该再叠一次移动。
         if zone.isBottomSide {
+            gateReset()
+            return
+        }
+        // 0.1.5 — 顶部不是把手：这一拍什么都没发生，不该写 `card moved to`，
+        // 更不该把「桌上原来的位置」覆盖成记忆（Aevon(93) 里 5 次误拖就是这么
+        // 把位置改掉的）。
+        if zone == .top {
             gateReset()
             return
         }
@@ -1985,10 +2022,32 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 掉进下面主窗那条路 —— App 会收到一根它从没见过的手指的收尾事件
             // （「半根手指」的老毛病）。这里只保证**同一根手指**收完，下一根手指
             // 的第一拍 `miniTouch` 会把 `miniTapEaten` 重新判成 false。
-            rawActive = false
-            rawPress?.cancel()
-            rawPress = nil
-            return miniTouch(phase: phase, local: local)
+            // 0.1.5 — **没被小窗认领时要能继续走主窗这条路**。
+            //
+            // 0.1.1~0.1.4 这里直接 `return miniTouch(...)`：只要这张卡停靠着
+            // （`miniFrame != nil`），它自己那一侧的环带就**整块失效** ——
+            // `miniTouch` 回 false 之后没有再往下判的机会。Aevon(93) 里主窗被
+            // 拖到小窗旁边时那一侧拖不动，一半是这个。
+            //
+            // 现在的语义分三种：
+            //   · 小窗认领了（`miniTouch` 回 true）⇒ 吞掉，主窗状态清干净；
+            //   · 不是按下（phase ≠ 0）⇒ 上一根手指的余波，`miniTapEaten` 说了算，
+            //     绝不掉进主窗那条路（App 会收到一根它从没见过的手指的收尾）；
+            //   · 按下但落在小窗外面 ⇒ 这一根手指不是小窗的，清掉标记继续往下走。
+            if miniTouch(phase: phase, local: local) {
+                rawActive = false
+                rawPress?.cancel()
+                rawPress = nil
+                return true
+            }
+            if phase != 0 { return miniTapEaten }
+            miniTapOn = false
+            miniTapEaten = false
+            // 0.1.5 — **停靠着就到此为止**：小窗只有「点按升主窗」这一个手势
+            // （母本 `SingleTapMinimize` 的「不可操作」）。少了这一行，落在小窗
+            // 外面一点点（超出 6 pt 容忍带）的按下会继续掉进主窗那条路，把这张
+            // 小窗当成大卡片拖着走 —— `miniFrame` 非 nil 时它自己的环带也是坏的。
+            if miniFrame != nil { return false }
         }
         switch phase {
         case 0:
@@ -2004,6 +2063,23 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 竖条的地盘也不抢：卡片开着的时候换 App 的路不能被我自己的环堵死。
             guard !AevonRingGrip.summonRect.contains(screen) else { return false }
             guard ringHolds(local, size: card.bounds.size) else { return false }
+            // 0.1.5 — **顶部那一条不再是把手**（Aevon(93) 第 1 条）。
+            //
+            // `zoneFor` 把 `y < 0` 判成 `.top`，而 `dragMove` 的非缩放分支对
+            // `.top` 没有闸门 ⇒ 卡片上方那一条环带是「轻滑就跟着走」。Aevon(93)
+            // 里它被认领 16 次、真的把卡片拖走 5 次（`zone=top at 341,-37`
+            // → `card moved to 36,188`）：用户从卡片顶边往上滑想滚内容，
+            // 滑到卡片外面那一下就变成「搬窗口」。
+            //
+            // 五格图里没有顶部这一格：移动是两侧（长按 0.25 s）和底中（轻滑）。
+            // 顶部留着**只让系统手势过**（状态栏下拉），我们自己一格都不认。
+            if zoneFor(local) == .top {
+                if rawTopIgnored < 8 {
+                    rawTopIgnored += 1
+                    Log.write("win: zone top ignored at " + point(local))
+                }
+                return false
+            }
             rawActive = true
             rawStart = screen
             rawLast = screen
@@ -2157,6 +2233,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 否则手指落在小窗**外面**也会被当成「已经认领」，之后它的移动全被吃。
             miniTapOn = false
             miniTapEaten = false
+            // 0.1.5 — **已经升回主窗的卡不再认领。**
+            //
+            // `miniTapEaten` 从现在起要活到下一根手指（见 case 3），而升窗之后
+            // `card.bounds` 已经是那张 347×578 的大卡片 —— 少了这道门，下一根
+            // 手指按在主窗里就会被 `inside` 判成「点在小窗上」，整块主窗的触摸
+            // 全被吃掉。停靠状态是这一支唯一的入场券。
+            guard miniFrame != nil else { return false }
             // 手指在小窗外面：不认领，原样放行（屏幕别处该干嘛干嘛）。
             // 0.1.4 — 但「外面一点点」要认领：`miniSlop` 那 6 pt 不是装饰，
             // 它是 Aevon(92) 里「透传还在、可 down 与 eaten 却全相等」的唯一出口。
@@ -2207,7 +2290,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             let claimed = miniTapOn
             let eaten = miniTapEaten
             miniTapOn = false
-            miniTapEaten = false
+            // 0.1.5 — **这里不再清 `miniTapEaten`**。
+            //
+            // 0.1.3/0.1.4 在抬手那一拍把它清成 false，而 `undock` 又把
+            // `miniFrame` 清成 nil —— 于是这一根手指余下的任何一拍（UIKit 在
+            // ended 之后还会补 `stationary`，或者取消路径晚到）都会掉进主窗
+            // 那条路、`rawActive` 又是 false、于是**原样放行给 App**。
+            // 那正是用户三次报的「点小窗还原成主窗时，App 里被点了一下」。
+            //
+            // 标记只在下一根手指的 `case 0` 清零（那里会重新判定），一次认领
+            // 就一直吃到这根手指彻底走完。
             // 认领过的手指，抬起一律吞掉（哪怕中途滑出了小窗）。
             guard eaten else { return false }
             guard claimed else { return true }
@@ -2216,10 +2308,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             undock()
             return true
         case 4:
-            let eaten = miniTapEaten
-            miniTapOn = false
-            miniTapEaten = false
-            return eaten
+            // 0.1.5 — 与 `case 3` 同理：取消也不清标记，留给下一根手指的
+            // `case 0` 重新判定。清在这里等于把余下的收尾放给 App。
+            return miniTapEaten
         default:
             // 2 = 静止。这一拍什么都不该发生，也什么都不能改。
             return miniTapEaten
@@ -2296,8 +2387,37 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         shield = view
     }
 
+    /// 0.1.5 — 「点小窗升主窗」**只在下一拍 runloop 动手**。
+    ///
+    /// 这里排队的不是一个几何动作，而是一整套结构手术：换 `windowLevel`、
+    /// 把另一张卡缩成小窗（改它的 frame、换档、装 shield、推 scene 的
+    /// settings.frame）、改自己的 frame、改画面的 `content.transform`。
+    ///
+    /// 而调用点全在 `-[UIApplication sendEvent:]` 里面（`rawTouch` → case 3 →
+    /// `miniTouch` → 这里）。UIKit 此刻正持有这根手指的完整状态在派发事件，
+    /// 中途把窗口层级和视图树换掉，它派发的「目标窗口」与返回后看到的层级就
+    /// 对不上了 —— 用户三次报的「点小窗还原成主窗时，App 里也被点了一下」正是
+    /// 这个形状。`requestClose` 从 0.0.54 起就是排队做的，这里是同一条纪律。
+    ///
+    /// 排队也让 `miniTouch` 的返回值更干净：抬手那一拍先**完整吞掉**、`sendEvent`
+    /// 正常返回，下一拍再升降。
     @objc private func undock() {
-        guard let card = card, let window = window, let saved = miniFrame else { return }
+        guard miniFrame != nil, !liftPending else { return }
+        liftPending = true
+        Log.write("win: mini lift deferred " + bundle)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.liftPending = false
+            self.performUndock()
+        }
+    }
+
+    /// 0.1.5 — 「已经排了一次升降」的闩。没有它，同一拍里两条路（识别器 +
+    /// 原始触摸）各排一次，第二遍会在一张已经是主窗的卡上再跑一次手术。
+    private var liftPending = false
+
+    private func performUndock() {
+        guard let card = card, let window = window, miniFrame != nil else { return }
         miniFrame = nil
         // 0.1.4 — 先抬层再改几何：反过来会有一帧「大卡片已经铺开、但还在小窗层」
         // 的画面，那正是用户报的「主窗被新小窗压住」（见 `mainLevel`）。
@@ -2328,7 +2448,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         if let index = FloatHost.slotIndex(of: self) {
             FloatHost.mainIndex = index
         }
-        card.frame = clamped(saved, in: window.bounds)
+        // 0.1.5 — **尺寸与位置都读全局记忆**，不再用 `miniFrame`。
+        //
+        // `miniFrame` 是「这张卡自己停靠之前长什么样」。用户的原话是：还原成
+        // 主悬浮窗时的尺寸应该是**上一个主悬浮窗**的尺寸（含位置），而不是它
+        // 吸附成小窗之前自己的那个。这也是母本的口径：`mfMainCardScale` /
+        // `mfMainCardPosX/Y` 是全局唯一的一份，不按 App 各存。
+        //
+        // 差别在真机上很明显：Aevon(93) 里五张卡分别回 347×578 / 319×532 /
+        // 312×520 / 301×501 / 318×530 —— 几何还是「各回各的」，所以点不同小窗
+        // 升上来的大小不一样，看着像没记住任何东西。走 `plan` 之后它们同一份。
+        let bounds = window.bounds
+        let planned = plan(in: bounds, source: natural)
+        card.frame = clamped(planned.frame, in: bounds)
         followContent()
         shield?.removeFromSuperview()
         shield = nil
@@ -2340,7 +2472,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                   + " at " + point(card.frame.origin)
                   + " promoted=" + bundle
                   + " col=" + (column == nil ? "none" : (column! ? "L" : "R"))
-                  + " replaced=" + replaced)
+                  + " replaced=" + replaced
+                  + String(format: " mem=%.0f%%", CardLayout.loadRuntime().heightFraction * 100))
         FloatHost.relayoutDocked()
     }
 
