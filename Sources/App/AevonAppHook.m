@@ -4988,11 +4988,17 @@ static int AevonBandNotes = 0;
 static int AevonBandProof = 0;
 /// 0.1.35 — 几何判不中的次数。第一次能回答「进来了但被否掉」而不是「没进来」。
 static int AevonBandRejects = 0;
-/// 0.1.36 — 「靠锁吞掉」的证词预算。
+/// 0.1.39 — 「起手落在环带里，但还没归宿主」的证词预算。
+static int AevonBandWatches = 0;
+/// 0.1.39 — 这一根手指起手时落在环带里（**只是候选**，不等于归宿主）。
 ///
-/// 0.1.35 的日志里 `app: band touch at` 是 0 而用户仍然看到 App 亮了一行 ——
-/// 锁那条路一句证词都没有，于是「是锁吞的」和「根本没进来」在日志上一样。
-static int AevonBandLockLogs = 0;
+/// 0.1.37/0.1.38 把「起手落在环带里」直接当成「归宿主」，于是整条环带 54 pt
+/// 变成死区：用户在卡片周围的 App 画面上点一下、滑一下，全被吞掉，两边都没
+/// 反应。用户的原话是「部分 App 的手势失效，无法点击，滑动」。候选与接管必须
+/// 分开：候选只说明「等会儿可能轮到宿主」，接管要等宿主真的开口（那把锁）。
+static int AevonBandCandidate = 0;
+/// 0.1.39 — 候选期间主动读过几次锁。前 8 拍够用，之后交给通知。
+static int AevonBandPeeks = 0;
 /// 0.1.36 — 擦高亮的那一次还排在主队列上（防止一串通知把遍历排成好几遍）。
 static volatile int AevonBandClearing = 0;
 /// 0.1.34 — 「这根手指归宿主」。拖动 / 缩放期间为 1（见 `AevonAppBandLock`）。
@@ -5016,7 +5022,12 @@ static CFStringRef AevonBandApp = NULL;
 /// 找不到 / 内容不完整 ⇒ 关掉（宁可不吞，也不能让一块区域死掉）。
 static void AevonBandReload(void) {
     if (AevonBandApp == NULL) { AevonBandOn = 0; return; }
-    CFPreferencesSynchronize(AevonBandApp, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    // 0.1.39 — **不再 `CFPreferencesSynchronize`。**
+    //
+    // 这一句会把整个偏好域同步刷盘，而它原来挂在每次触摸的起手上（见下面
+    // `AevonBandTake` 的旧注释）。全机所有 App 的每一次点击都要过这条路径，
+    // 那就是用户这一版报的「让手机卡顿」。读值不需要刷盘：宿主的写已经在
+    // 自己的进程里提交过，cfprefsd 手上就是最新的。
     // 这个文件是 MRC（Theos 默认不开 ARC），所以不碰 `CFBridgingRelease`：
     // 取出来的 CF 值自己释放，中间只用一块栈上的 C 字符串。
     CFStringRef value = CFPreferencesCopyAppValue(CFSTR("AevonBand"), AevonBandApp);
@@ -5074,6 +5085,31 @@ static void AevonBandReload(void) {
                  AevonBandOuter.origin.x, AevonBandOuter.origin.y, (int)AevonBandLock);
         AevonAppLogWrite(line);
     }
+}
+
+/// 0.1.39 — 只读「锁」这一个数，不动几何、不写日志。
+///
+/// 起手那一拍现在放行了（见 `AevonBandTake`），「归不归宿主」就完全由宿主那把
+/// 锁说了算。Darwin 通知通常十几毫秒就到，但拖动开始后的头一两拍移动事件可能
+/// 抢在通知前面 —— 那时读一次偏好域就能接上，而不是整场手势都漏给 App。
+///
+/// 只有「起手落在环带里」的手势才会走到这里（`AevonBandCandidate`），而且最多
+/// 前 8 拍；普通点击一次都不读。
+static void AevonBandPeekLock(void) {
+    if (AevonBandApp == NULL) { AevonBandLock = 0; return; }
+    CFStringRef value = CFPreferencesCopyAppValue(CFSTR("AevonBand"), AevonBandApp);
+    if (value == NULL) { AevonBandLock = 0; return; }
+    char text[128] = {0};
+    Boolean read = CFStringGetCString(value, text, sizeof(text) - 1, kCFStringEncodingUTF8);
+    CFRelease(value);
+    if (!read) return;
+    double v[9] = {0};
+    int got = sscanf(text, "%lf %lf %lf %lf %lf %lf %lf %lf %lf",
+                     &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8]);
+    if (got < 9) { AevonBandLock = 0; return; }
+    BOOL locked = (v[8] >= 0.5);
+    if (locked) AevonBandLockAt = CFAbsoluteTimeGetCurrent();
+    AevonBandLock = locked ? 1 : 0;
 }
 
 /// 0.1.36 — 把 App 里已经亮起来的那一项擦掉。
@@ -5179,80 +5215,88 @@ static BOOL AevonBandHolds(CGPoint p) {
 
 static BOOL AevonBandTake(UIEvent *event) {
     NSSet *touches = [event allTouches];
-    if (touches.count != 1) { AevonBandWatching = NO; return NO; }
-    UITouch *touch = [touches anyObject];
-    // 0.1.36 — 起手这一拍**自己读一次**，不等通知。
-    //
-    // 真机上 `.began` 与宿主那一份是同时到的：宿主刚落指、`dragBegin` 才把
-    // 几何和锁写进偏好域，那封 Darwin 通知还在路上。0.1.35 只认通知带过来的
-    // 值，于是这一拍用的是**上一次**上报的矩形 —— 用户刚把卡片拖到别处、立刻
-    // 上滑关闭时，旧矩形里的「卡片内部」正好盖住现在这根手指，判成「归 App」，
-    // 漏出去点亮一行。日志里 `app: band prefs band=430x713 at 0,182` 与紧随其
-    // 后的 `band touch` 为 0，就是这一拍的时差。
-    //
-    // 一次手势读一次偏好域，代价是一次 cfprefsd 往返（亚毫秒），换掉的是整条
-    // 通道对「通知什么时候到」的依赖。
-    //
-    // 只在「这张卡片已经上报过」时才读（`AevonBandOn`）：桌面上没有卡片时这条
-    // 判断对全机二十来个进程都是白花，而那些进程的每一次点击都要经过这里。
-    // 从「没有」变成「有」仍然由通知那条路负责 —— 它每次都读。
-    if (touch.phase == UITouchPhaseBegan && AevonBandOn) AevonBandReload();
-    // 0.1.35 — **锁在任何一拍都算数。**
-    //
-    // 0.1.34 只在 `.began` 判一次锁，而锁是跨进程送来的：界面上手指落下时，
-    // App 这一份 `touchesBegan` 早就走完了，通知再快也在它后面。于是
-    // `AevonBandWatching` 被钉死在 NO，后面每一拍 `moved` 都走「不认领 ⇒ 原样
-    // 送进去」—— 宿主在搬卡片，App 在跟着滚。用户的原话就是「百分百触发全屏
-    // APP 内的操作」，因为那一整个手势都漏了出去。
-    //
-    // 锁是「这根手指归宿主」的权威说法，它一旦为真，这一根从头到尾都不该到
-    // App 手里。放在 phase 判断之前，代价是一次整数读。
-    if (AevonBandHeld()) {
-        // 0.1.36 — 这一条路以前一句证词都没有。下一份日志要能回答「是谁吞的」：
-        // 锁（`app: band hold`）还是几何（`app: band touch at … held`）。
-        if (touch.phase == UITouchPhaseBegan && AevonBandLockLogs < 8) {
-            AevonBandLockLogs += 1;
-            CGPoint p = [touch locationInView:nil];
-            char line[96];
-            snprintf(line, sizeof(line), "app: band hold at %.0f,%.0f\n", p.x, p.y);
-            AevonAppLogWrite(line);
-        }
-        AevonBandWatching = YES;
-        return YES;
+    if (touches.count != 1) {
+        AevonBandWatching = NO;
+        AevonBandCandidate = 0;
+        return NO;
     }
+    UITouch *touch = [touches anyObject];
+
+    // 0.1.39 — **起手这一拍不吞。**
+    //
+    // 0.1.37/0.1.38 在 `.began` 直接按几何定案：落点在外环 54 pt 的带子里就算
+    // 「归宿主」，`return YES`。问题是那条环带**盖在全屏 App 的画面上** ——
+    // 用户在卡片周围点一下、滑一下，这一整根就被吞了，宿主又只在真的拖动 /
+    // 上滑时才有动作，于是两边都没反应。日志（Aevon(113)）里那段
+    // `com.mlgm.ilog` 连着十条 `band touch at 229,225 held` 全是这样丢的，
+    // 用户的原话是「部分 App 的手势失效，无法点击，滑动」。
+    //
+    // 所以起手只**记候选**（`AevonBandCandidate`），不接管。接管的条件只有一个：
+    // 宿主自己开口说「这根归我」—— 也就是那把锁。
     if (touch.phase == UITouchPhaseBegan) {
         CGPoint p = [touch locationInView:nil];
-        if (!AevonBandHolds(p)) {
-            AevonBandWatching = NO;
+        BOOL inside = AevonBandHolds(p);
+        AevonBandCandidate = inside ? 1 : 0;
+        AevonBandWatching = NO;
+        AevonBandPeeks = 0;
+        if (inside) {
+            if (AevonBandWatches < 8) {
+                AevonBandWatches += 1;
+                char line[160];
+                snprintf(line, sizeof(line),
+                         "app: band touch at %.0f,%.0f watch\n", p.x, p.y);
+                AevonAppLogWrite(line);
+            }
+        } else if (AevonBandOn && AevonBandRejects < 8) {
             // 0.1.35 — 判不中的时候把**为什么**写下来。上一份日志里
             // `app: band touch at` 是 0，而这条带子的值明明是对的（`app: band
             // prefs on=1 band=368x536 at 23,185`），分不出是「这一拍没进来」
             // 还是「进来了但被几何否掉」。每个进程前 8 条，够对一次位置。
-            if (AevonBandOn && AevonBandRejects < 8) {
-                AevonBandRejects += 1;
-                char line[160];
-                snprintf(line, sizeof(line),
-                         "app: band miss at %.0f,%.0f outer=%.0fx%.0f@%.0f,%.0f hole=%.0fx%.0f\n",
-                         p.x, p.y,
-                         AevonBandOuter.size.width, AevonBandOuter.size.height,
-                         AevonBandOuter.origin.x, AevonBandOuter.origin.y,
-                         AevonBandHole.size.width, AevonBandHole.size.height);
-                AevonAppLogWrite(line);
-            }
-            return NO;
+            AevonBandRejects += 1;
+            char line[160];
+            snprintf(line, sizeof(line),
+                     "app: band miss at %.0f,%.0f outer=%.0fx%.0f@%.0f,%.0f hole=%.0fx%.0f\n",
+                     p.x, p.y,
+                     AevonBandOuter.size.width, AevonBandOuter.size.height,
+                     AevonBandOuter.origin.x, AevonBandOuter.origin.y,
+                     AevonBandHole.size.width, AevonBandHole.size.height);
+            AevonAppLogWrite(line);
         }
+        // 放行：这一根先按 App 自己的意思走。Tap 会在抬手时正常触发；真的
+        // 拖动 / 上滑由下面几拍在锁到手后接管。
+        return NO;
+    }
+
+    if (!AevonBandWatching) {
+        if (!AevonBandCandidate) return NO;
+        // 候选期间主动读几次锁：Darwin 通知通常十几毫秒就到，但拖动开始后的
+        // 头一两拍移动事件可能抢在它前面。只在前 8 拍读，之后完全靠通知。
+        if (AevonBandPeeks < 8) {
+            AevonBandPeeks += 1;
+            AevonBandPeekLock();
+        }
+        if (!AevonBandHeld()) return NO;
+        // 宿主开口了：这一根从这一刻起归它。App 刚才已经收到 `.began`（可能
+        // 亮了一行），这里把那一拍点亮的擦掉，后面的 `moved` / `ended` 全吞。
         AevonBandWatching = YES;
         if (AevonBandNotes < 20) {
             AevonBandNotes += 1;
+            CGPoint p = [touch locationInView:nil];
             char line[160];
             snprintf(line, sizeof(line), "app: band touch at %.0f,%.0f held\n", p.x, p.y);
             AevonAppLogWrite(line);
         }
-        return YES;
+        if (!AevonBandClearing) {
+            AevonBandClearing = 1;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AevonBandDropAllHighlights();
+                AevonBandClearing = 0;
+            });
+        }
     }
-    if (!AevonBandWatching) return NO;
     if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
         AevonBandWatching = NO;
+        AevonBandCandidate = 0;
     }
     return YES;
 }

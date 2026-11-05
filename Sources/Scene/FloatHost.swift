@@ -2111,8 +2111,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 手里那份矩形停在**上一次抬手**的位置。而这一拍正要开始搬卡片：几何
         // 与锁一起发，对面读到的「卡片内部」就是这张卡片现在的样子。`reportBand`
         // 自己带判重，没变就什么都不写。
+        //
+        // 0.1.39 — **几何照发，锁不发。** 落指时还不知道这根手指是「点一下」还是
+        // 「搬卡片」，这时上锁就等于把整条环带判给宿主，而宿主对一次点按什么
+        // 都不做（见 `bandLocked`）。锁推迟到 `dragMove` / 长按。
         reportBand()
-        if !bundle.isEmpty { AevonAppBandLock(bundle, true) }
+        bandLocked = false
     }
 
     /// 0.0.65 — 一行说清这次缩放用的是哪块画布。0.0.64 的 `mode=` 撤了：
@@ -2131,6 +2135,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private func dragMove(total: CGPoint, velocity: CGPoint) {
         guard let card = card, let window = window else { return }
         FloatHost.liveUntil = CACurrentMediaTime() + 1.0
+        // 0.1.39 — 第一条真的移动到了：宿主从这一刻起才接管这一根手指。
+        lockBand()
         let dx = total.x - panStep.x
         let dy = total.y - panStep.y
         panStep = total
@@ -2277,7 +2283,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.1.34 — 抬手就解开 App 那把锁。这里同样是 `defer`：下面有六条
         // return，逐个加只会漏掉一条，而漏掉的那一条会让 App 一直吞触摸
         // （对面还有 3 秒租约兜底，但那是保险，不是常态）。
-        defer { if !bundle.isEmpty { AevonAppBandLock(bundle, false) } }
+        //
+        // 0.1.39 — 只解自己真的上过的那把（`bandLocked`）。点按根本就没上锁，
+        // 这时写一个 `0` 出去只是多一次跨进程广播。
+        defer { unlockBand() }
         // 0.1.35 — 手势到此为止：让保活时钟立刻恢复，光晕也不再冻结成位图
         // （没动过的那几条 return 也走这里 —— 否则那一次栅格化会一直留着）。
         FloatHost.liveUntil = 0
@@ -2779,13 +2788,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             rawPress = nil
             if phase == 4 {
                 Log.write("win: raw touch cancelled by the system")
+                endLiveWithoutDrag()
                 return true
             }
             let total = CGPoint(x: screen.x - rawStart.x, y: screen.y - rawStart.y)
             if rawMoved {
                 dragEnd(total: total, velocity: rawVelocity)
-            } else if zone == .left || zone == .right {
-                dock(zone: zone)
+            } else {
+                // 0.1.39 — 这一根没走到 `dragEnd`（点按 / 长按）。锁与保活让路
+                // 必须在同一处收口：长按是宿主动作，可能已经上过锁，而点按
+                // 根本没上过（见 `bandLocked`）。两侧轻滑照旧停靠。
+                endLiveWithoutDrag()
+                if zone == .left || zone == .right {
+                    dock(zone: zone)
+                }
             }
             return true
         default:
@@ -2795,6 +2811,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     private func rawPressFired() {
         guard rawActive, !rawMoved, let window = window else { return }
+        // 0.1.39 — 长按成立 = 宿主真的要这根手指了（复位 / 横屏 / 开闸）。
+        // 点按不上锁，长按上；这一条是「点按能点、长按归宿主」的分界线。
+        lockBand()
         // 0.1.0 — 「恢复默认尺寸」从右下角搬到它内侧那一格（Aevon(88) 第 2 条）。
         // 角格现在整格是裸滑缩放，长按在那里什么都不做。
         if zone == .bottomRightSide {
@@ -3125,6 +3144,40 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     static let bandRim: CGFloat = 6
 
     private var bandReported: CGRect = .null
+
+    /// 0.1.39 — 这一场手势里，宿主有没有真的开口说「这根归我」。
+    ///
+    /// 0.1.37/0.1.38 是**落指即上锁**（`dragBegin` 末尾）。而 App 侧收到锁就把
+    /// 整根吞掉，于是「在卡片周围的环带里点一下」也归了宿主 —— 宿主自己又只在
+    /// 真的拖动 / 上滑时才有动作，那一下点击就这么没了（用户报的「无法点击」）。
+    ///
+    /// 现在锁推迟到**第一次真的动起来**（`dragMove` / 长按成立）才上：点按不上，
+    /// 拖不动也不上，只有宿主确实要接管时才上。`dragEnd` 与抬手那拍各自兜底
+    /// 解锁，任何一条路漏了都还有 3 秒租约。
+    private var bandLocked = false
+
+    /// 0.1.39 — 第一次真的动起来时把「归宿主」这件事告诉 App 进程。
+    private func lockBand() {
+        guard !bandLocked, !bundle.isEmpty else { return }
+        bandLocked = true
+        AevonAppBandLock(bundle, true)
+    }
+
+    private func unlockBand() {
+        guard bandLocked, !bundle.isEmpty else { return }
+        bandLocked = false
+        AevonAppBandLock(bundle, false)
+    }
+
+    /// 0.1.39 — 这一根没走到 `dragEnd` 时的收口（点按 / 长按 / 系统取消）。
+    ///
+    /// `dragBegin` 已经做了两件「要等抬手才还」的事：设置 `liveUntil` 让保活
+    /// 时钟让路、把光晕栅格化。`dragEnd` 会把两件都还原，可点按根本走不到那里。
+    private func endLiveWithoutDrag() {
+        unlockBand()
+        FloatHost.liveUntil = 0
+        glow?.layer.shouldRasterize = false
+    }
 
     /// The way out of 停靠小窗: a tap anywhere on its picture. The scene view
     /// would swallow that tap and forward it to the app, so a transparent shield
