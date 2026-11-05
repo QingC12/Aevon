@@ -269,20 +269,17 @@ enum AevonRingGrip {
     /// 的时候点竖条会被当成「拖浮窗」—— 换 App 的路就被自己的浮窗堵死了。
     static var summonRect: CGRect = .zero
 
-    /// 0.0.49 — 竖条自己的手指入口，同样是应用层那条路。
+    /// 0.1.10 — 竖条的应用层手指入口（`barTouchHandler` / `barTouch`）已删。
     ///
-    /// Aevon(47) #3：注销后第一次非常灵敏，锁屏一次之后就不容易触发了。竖条的
-    /// 可见性、位置、尺寸都没有变，变的只有窗口栈 —— 锁屏 → 解锁会让 SpringBoard
-    /// 重新排一遍窗口，我们那一层可能被一个**透明但会接触摸**的窗口压住：条子还
-    /// 看得见（上面那层是透明的），按下去却不算我们的。
+    /// 它曾让 `-[UIApplication sendEvent:]` 把落在条子上的手指直接交给 RingHost，
+    /// 用来绕开「锁屏后窗口栈重排、条子看得见按不到」。代价是整条呼出链都变成
+    /// 自己拼触摸语义：`sendEvent` 只看得到单个事件，看不到「这根手指整段归谁」，
+    /// 于是出现了半截序列 / 假点击 / 孤儿帧（Aevon(94)~(97) 那几轮的全部门）。
     ///
-    /// 所以竖条也不再依赖「我的窗口在最上面」：`-[UIApplication sendEvent:]` 把
-    /// 落在垫子上的手指直接交给 RingHost，和浮窗环走同一条路。返回 true 表示这条
-    /// 事件已被竖条吃掉，不再往下传。
-    static var barTouchHandler: ((Int, CGPoint, TimeInterval) -> Bool)?
-    static func barTouch(phase: Int, at point: CGPoint, stamp: TimeInterval) -> Bool {
-        return barTouchHandler?(phase, point, stamp) ?? false
-    }
+    /// 0.1.10 按母版重做：呼出只走 `RingHost` 那个 `UIPanGestureRecognizer`，
+    /// 由 `UIGestureRecognizerDelegate` 判方向，UIKit 保证「整根消费或整根放行」。
+    /// 窗口被压住的顾虑用母版同款办法解决 —— 每次解锁/回前台把窗口 level 抬一格
+    /// 再放回（见 `raiseWindow`），不靠事件通道兜底。
 
     /// 0.0.55 — 浮窗（卡片）此刻在屏上。由 SceneProbe 在开卡/关卡时写。
     ///

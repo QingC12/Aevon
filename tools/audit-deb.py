@@ -479,10 +479,11 @@ def main():
                   # 误触圆盘」「移除点击触发圆盘，只保留左滑」）。那一行是
                   # `BarPad.onDown` 的探针，跟着一起撤；现在落指只有 `bar raw down`
                   # 那一条（贴边 14 pt，带 strip= 读数）。
-                  # 0.0.49 — 竖条的第二个入口（应用层触摸）与解锁后的窗口置顶。
-                  # 前者没有这一行，就分不清「没摸到」和「摸到了但窗口被压住」；
-                  # 后者是 Aevon(47) 「锁屏一次后不灵敏」的直接对策。
-                  b"ring: bar raw down at ",
+                  # 0.1.10 — `ring: bar raw down at ` 随 `rawBar` 一起删掉：
+                  # 呼出不再走 `-[UIApplication sendEvent:]`，改由 `edgePad` 上的
+                  # `UIPanGestureRecognizer` + `UIGestureRecognizerDelegate` 仲裁
+                  #（母版 Stheno 同款）。代替它的是下面这条「我们主动放行」的证词。
+                  b"ring: strip refuse dx=",
                   b"ring: bar layer put back on top (level=",
                   b"hidden (system overlay up)",
                   b"(first run, editable in Settings)",
@@ -1103,9 +1104,10 @@ def main():
                   #   日志里看到 `(notify only)` 就说明「文件不成、通知成了」。
                   b" notify only, no file",
                   b" notify and file",
-                  # 0.1.9 — 圆盘在屏时的全屏触摸接管（Aevon(96) 第 1 条）。没有这一行
-                  # 就分不清「圆盘收不到手指」和「收到了但喂错了通道」。
-                  b"ring: disc touch down at ",
+                  # 0.1.10 — `ring: disc touch down at ` 也删了。圆盘在屏时的触摸
+                  # 不再靠应用层那条通道喂（`AevonRingMenu` 自己重写了
+                  # `touchesBegan/Moved/Ended/Cancelled`，挂在 host 上本来就在命中链里），
+                  # 所以这条探针随 `rawBar` 一起撤。
                   # 白图标过滤：一条汇总（kept / dropped 与四个理由各多少），
                   # 外加每个被丢掉的白图标的名字（前 20 个）。只看汇总分不清
                   # 「删掉的是几个白图标」还是「删掉了半屏正常 App」。

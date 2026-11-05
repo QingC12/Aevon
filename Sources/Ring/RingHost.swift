@@ -110,14 +110,12 @@ final class RingHost: NSObject {
     /// 0.0.49 — 上一次写进日志的尺寸（宽×10、长×10 拼成的整数），只用来去重。
     private var laidOutMetrics = 0
 
-    /// 0.0.49 — 走应用层那条路时这根手指的状态。
-    private var rawDownAt: CGPoint = .zero
-    private var rawMovedFar = false
-    private var rawOpenedHere = false
-    private var barProbe = 0
+    /// 0.1.10 — 应用层那条路（`rawBar`）撤除后，它的四个状态一起删掉：
+    /// `rawDownAt` / `rawMovedFar` / `rawOpenedHere` / `barProbe`，以及只服务于
+    /// 它的 `discProbe`。留着不用会被 CI 的 `-Werror` 抓（unused variable）。
 
-    /// 0.1.9 — 圆盘在屏时落在盘面（全屏）上的手指，取证计数。
-    private var discProbe = 0
+    /// 0.1.10 — `gestureRecognizerShouldBegin` 拒绝过几次（前 20 次写日志）。
+    private var stripProbe = 0
 
     /// 0.0.55 — 右缘左滑呼盘的触摸带。旧版 `AevonRingGrip.bandRect` 的同一套几何：
     /// 贴右缘 15 pt 宽 × 屏幕底部 35 % 高。旧版在这台 17.3.1 上做过 49 次 hold
@@ -203,12 +201,9 @@ final class RingHost: NSObject {
         AevonRingGrip.activeTouchHandler = { [weak self] in
             self?.barHeld ?? false
         }
-        // 0.0.49 — 竖条的手指入口。和浮窗环一样走 `-[UIApplication sendEvent:]`：
-        // 锁屏一次之后窗口栈会被重排，我们这一层可能被一个透明窗压住，条子还
-        // 看得见、按下去却不算我们的。这条路过的是事件，不是窗口，压不住。
-        AevonRingGrip.barTouchHandler = { [weak self] phase, point, stamp in
-            self?.rawBar(phase: phase, at: point, stamp: stamp) ?? false
-        }
+        // 0.1.10 — 这里原本还有一条 `AevonRingGrip.barTouchHandler`（应用层
+        // sendEvent 入口）。整条撤掉了：呼出只走 `edgePad` 上的识别器，
+        // 理由见文件末尾 `gestureRecognizerShouldBegin` 上方那段。
 
         addBar()
         addEdgePad()
@@ -240,7 +235,6 @@ final class RingHost: NSObject {
         overlayTimer?.invalidate()
         overlayTimer = nil
         AevonRingGrip.activeTouchHandler = nil
-        AevonRingGrip.barTouchHandler = nil
         barHeld = false
         overlayStrikes = 0
         padProbe = 0
@@ -486,15 +480,39 @@ final class RingHost: NSObject {
     /// 隐形大块、还带点击 —— 于是「在卡片里点右侧」会呼出圆盘、「在别处左滑」又
     /// 落不到这条带上。现在几何只有一个：右缘 14 pt × 全高（让开顶部 10 pt 状态栏
     /// 与底部 12 pt home 条），条子上只有「从屏幕边缘起手 + 向左划」这一种手势。
+    /// 0.1.10 — **触发区按母版重做：不碰 `sendEvent`，全部交给 UIKit 手势仲裁。**
+    ///
+    /// 母版（Stheno）的呼出链只有一句：hook 系统手势识别器（`SBGrabberTongue` /
+    /// `SBReachabilityGestureRecognizer` / `SBFluidSwitcherScreenEdgePanGestureRecognizer`），
+    /// 在识别器回调里做业务。它从不自己判事件流 —— 二进制里 `sendEvent` 一条都没有，
+    /// 只有完整的 `UIGestureRecognizerDelegate` 协议（`shouldReceiveTouch` /
+    /// `shouldBegin` / `shouldBeRequiredToFailBy` / `shouldRecognizeSimultaneously`）。
+    ///
+    /// 为什么这才是对的：`UIGestureRecognizer` 的语义是**要么整序列消费、要么整序列
+    /// 放行**。识别成功 → UIKit 自动给下层发 `touchesCancelled`，App 不会执行任何
+    /// 操作；识别失败 → 完整序列还给 App，App 照常响应。中间没有「半截态」，
+    /// 也就不存在「began 被吞、ended 漏给 App」这类假点击/孤儿帧。
+    ///
+    /// Aevon 从 0.0.49 到 0.1.9 的十几次「透传」全部是自建通道的债：`sendEvent:`
+    /// 里按坐标判、自己维护 `stripHeld`/`miniTapEaten` 状态机、还要手工补
+    /// 「抬手未达阈值就整根放行」。这一版把这条路整个撤掉。
     private func addEdgePad() {
         guard let host = window?.rootViewController?.view else { return }
         let pad = UIView(frame: .zero)
         pad.backgroundColor = .clear
         pad.isUserInteractionEnabled = true
-        let pan = UIScreenEdgePanGestureRecognizer(target: self,
-                                                   action: #selector(handleEdgePan(_:)))
-        pan.edges = .right
+        let pan = UIPanGestureRecognizer(target: self,
+                                         action: #selector(handleEdgePan(_:)))
         pan.maximumNumberOfTouches = 1
+        // 三道闸：起手位置由 pad 自己的 14 pt 宽负责（hitTest），方向与节流在
+        // delegate 的 `gestureRecognizerShouldBegin` 里判，判别权完全交给 UIKit。
+        pan.delegate = self
+        // 识别成功 ⇒ 下层（承载的 App）收到 `touchesCancelled`，这是正规 Cancel 语义，
+        // 母版靠的正是这一条，不需要我们给 App 发任何广播。
+        pan.cancelsTouchesInView = true
+        // 不延迟投递：延迟会让 App 的点击晚一拍，观感上像「卡」。
+        pan.delaysTouchesBegan = false
+        pan.delaysTouchesEnded = false
         pad.addGestureRecognizer(pan)
         // 0.1.7 — 点击识别器不挂。用户明确要求「移除点击触发圆盘，只保留左滑」。
         host.addSubview(pad)
@@ -564,7 +582,18 @@ final class RingHost: NSObject {
         let panel = AevonAppPanel.current != nil
         let card = FloatHost.anyCardUp
         let barOn = !panel
-        let edgeOn = !panel && !card
+        // 0.1.10 — **不再是 `!panel && !card`。**
+        //
+        // 0.0.55 关掉这条带是因为「卡片右下角拖拽的手会先落进带子里」。那是
+        // 自建触摸区的年代：进了带子就等于被吞，卡片的拖动直接没了。
+        //
+        // 换成手势识别器之后这条顾虑不成立了 —— 方向不达标（纵向拖、斜着拖）
+        // `gestureRecognizerShouldBegin` 返回 false，UIKit 把**整根**序列还给
+        // 卡片，拖动一点不受影响。反过来，卡片在屏时这条带必须开着：用户 Aevon(97)
+        // 第 1 条「从右侧屏幕边缘向左滑触发全屏 App 内操作」就是它被关掉造成的
+        //（日志 `ring: grip armed bar=1 edge=0 card=1`：卡片在屏 → 带子闭嘴 →
+        // 右缘左滑整条落到 App 进程，SpringBoard 连事件都收不到）。
+        let edgeOn = !panel
         // 0.1.7 — 视觉垫子永远不接触摸。触摸只有两个入口：`rawBar`（应用层）与
         // `edgePad`（贴边 14 pt）。这一行是 0.1.6 那个「开关唯一归口」的兑现：
         // 三处各写一遍的老写法（layout / openPanel / onClose）全撤之后，这里是
@@ -593,21 +622,20 @@ final class RingHost: NSObject {
     /// 抬手定生死），只是入口不同：竖条要**按住它**，这里只要**贴着右缘往左划**。
     ///
     /// 旧版的经验值原样保留：带内不看方向、移动就召唤，0.6 s 节流。
-    @objc private func handleEdgePan(_ gesture: UIScreenEdgePanGestureRecognizer) {
+    @objc private func handleEdgePan(_ gesture: UIPanGestureRecognizer) {
         guard let window = window, let host = window.rootViewController?.view else { return }
         let point = gesture.location(in: window)
         switch gesture.state {
         case .began:
-            // 卡片在屏：这条带闭嘴（它与浮窗外侧手势环在右下角重叠）。
-            // 0.1.6 — 判据改成现算，见 `FloatHost.anyCardUp`。
-            guard !FloatHost.anyCardUp else { return }
-            // 0.1.7 — **只认向左划**。`UIScreenEdgePanGestureRecognizer` 只保证
-            // 「从右缘起手」，方向它不管；不判这一下，从右缘往右/上下划也会呼盘。
-            // 位移取的是 gesture 的累计平移，`.began` 时约 10 pt，符号是可靠的。
-            guard gesture.translation(in: window).x < 0 else { return }
-            let now = CACurrentMediaTime()
-            guard now - edgeAt > edgeInterval else { return }
-            edgeAt = now
+            // 0.1.10 — 走到这一步说明 delegate 已经把方向、节流、面板、圆盘状态
+            // 全判过了（`gestureRecognizerShouldBegin` 返回 true）。
+            //
+            // 旧写法在这里还有三条 `guard ... else { return }`：卡片在屏、方向不为左、
+            // 节流没到。那三条的问题是**识别器已经 `.began`（触摸已经被它消费），
+            // handler 却直接返回** —— 圆盘不出来，App 拿到的是 cancelled，用户看到
+            // 的就是「滑了没反应、App 还被点了一下」。判据前移到 shouldBegin 之后，
+            // 这里没有任何早退分支：进得来就一定弹盘。
+            edgeAt = CACurrentMediaTime()
             barHeld = true
             if let menu = AevonRingMenu.presented {
                 menu.beginRemoteTracking(at: point, source: "edge")
@@ -630,11 +658,15 @@ final class RingHost: NSObject {
             guard let menu = AevonRingMenu.presented else { return }
             if gesture.state == .ended {
                 menu.remoteLift(at: point, source: "edge")
+                Log.write("ring: edge swipe released at "
+                          + String(format: "%.0f,%.0f", point.x, point.y))
             } else {
+                // 0.1.10 — 这条日志原来在 `rawBar` 的 phase 4 里，随那条路一起
+                // 搬到这里：系统抢断（来电、控制中心、别的识别器优先）时要有证词，
+                // 否则「滑到一半圆盘没了」和「我们自己的 bug」分不开。
                 menu.remoteCancelled(source: "edge")
+                Log.write("ring: edge swipe cancelled by the system")
             }
-            Log.write("ring: edge swipe released at "
-                      + String(format: "%.0f,%.0f", point.x, point.y))
 
         default:
             break
@@ -739,153 +771,21 @@ final class RingHost: NSObject {
         }
     }
 
-    // MARK: - 0.0.49 竖条的应用层触摸
+    // MARK: - 0.1.10 应用层触摸入口已整条撤除（母版路线）
+    //
+    // 0.0.49~0.1.9 这里曾有一条 `rawBar(phase:at:stamp:)`：由 `-[UIApplication
+    // sendEvent:]` 喂进来，自己按坐标判是不是落在右缘、自己维护 `stripHeld` /
+    // `barTracked` / `rawMovedFar` 状态机、自己决定哪一相位吞哪一相位放行。
+    //
+    // 那条路是所有「透传 / 半截 / 假点击」的来源：`sendEvent` 只有一个事件的
+    // 视野，没有「这根手指整段归谁」的概念 —— began 吞了、moved 放行、ended 再吞，
+    // App 那边看到的就是一根残缺的手指。
+    //
+    // 0.1.10 起呼出入口只剩 `edgePad` 上的 `UIPanGestureRecognizer` + delegate
+    // （见 `gestureRecognizerShouldBegin`）：满足条件就整根消费、不满足就整根还给
+    // App，UIKit 负责保证序列完整。这条注释留着是为了让后来的人知道「这里曾经
+    // 有过什么、为什么删」，而不是又一次把它加回来。
 
-    /// 贴右缘那一条的手指，来源是 `-[UIApplication sendEvent:]`（见 `AevonRingGrip.barTouch`）。
-    ///
-    /// `phase` 用 UITouchPhase 的数值：0 began / 1 moved / 3 ended / 4 cancelled。
-    /// 返回 true = 这条事件被这条带子吃掉，不再往下传（也不再有 UIKit 识别器参与）。
-    ///
-    /// 0.1.7 — **语义整条换掉，按用户 Aevon(94) 第 1 条**：
-    ///
-    ///   「圆盘触发条区域中当你点击全屏应用的操作是会误触圆盘触发。并且向左滑动时
-    ///     也会误触发全屏 app 内的应用操作。…… 并且移除点击触发圆盘的功能，只保留
-    ///     左滑触发圆盘。」
-    ///
-    /// 旧的语义是「落在 40×212 垫子上就开（按住拖动）」+「短按 = 点一下开/关」。
-    /// 垫子 40 pt 宽几乎盖住右缘一整条，卡片里点右侧任何位置都会呼出圆盘；短按那
-    /// 一支更是纯粹的多余手势。
-    ///
-    /// 新语义只有一条：
-    ///   · 落指**必须在贴右缘 14 pt 的条带里**（`stripRect`）—— 之外的点击一律
-    ///     放行，App 该干嘛干嘛；
-    ///   · 条带内落指先**吞住**（不然 UIKit 那两条识别器会抢，卡片的环也会抢），
-    ///     但**不弹盘**；
-    ///   · 手指**向左**移过 `ringSwipe`（12 pt）且横向占优，才在那一刻把圆盘从起点
-    ///     长出来，随后跟随；
-    ///   · 抬手：认过方向 → `remoteLift` 定生死；没认过方向（= 一次点击）→
-    ///     **什么都不做**。点击触发圆盘那条路从这一版起不存在。
-    func rawBar(phase: Int, at point: CGPoint, stamp: TimeInterval) -> Bool {
-        guard let window = window, let host = window.rootViewController?.view else { return false }
-        // 0.0.56 — 面板在屏时，应用层这条入口也要闭嘴。竖条和右缘带的视图触摸
-        // 已经关了，但这条路走的是 `-[UIApplication sendEvent:]`，不经过视图 ——
-        // 少了这一句，面板上滑一下就会从面板底下长出一个圆盘。
-        guard AevonAppPanel.current == nil else { return false }
-
-        if stripHeld {
-            switch phase {
-            case 0:
-                // 第二条通道把同一根手指的 began 又送了一次（Aevon(58) 的成对日志）。
-                // 手已经在手里了，保持原状，别再开一次。
-                return true
-            case 1:
-                let dx = point.x - rawDownAt.x
-                let dy = point.y - rawDownAt.y
-                // 方向确认只在第一次过线时做一次。
-                if !barTracked, dx <= -ringSwipe, abs(dx) >= abs(dy) {
-                    barTracked = true
-                    if let menu = AevonRingMenu.presented {
-                        menu.beginRemoteTracking(at: point, source: "edge")
-                    } else {
-                        AevonRingMenu.presentTracking(in: host, at: rawDownAt, source: "edge")
-                    }
-                    Log.write("ring: edge swipe open at "
-                              + String(format: "%.0f,%.0f", rawDownAt.x, rawDownAt.y)
-                              + " band=" + String(format: "%.0f", stripWidth))
-                }
-                if barTracked {
-                    AevonRingMenu.presented?.remoteMoved(to: point, source: "edge")
-                }
-                return true
-            case 3, 4:
-                stripHeld = false
-                barHeld = false
-                let tracked = barTracked
-                barTracked = false
-                guard let menu = AevonRingMenu.presented else { return true }
-                if !tracked {
-                    // 一次点击（或一次纵向滚动）：用户要求点击不触发圆盘，
-                    // 所以这里既不开也不关，静默收尾。
-                    return true
-                }
-                if phase == 4 {
-                    menu.remoteCancelled(source: "edge")
-                    Log.write("ring: edge swipe cancelled by the system")
-                } else {
-                    menu.remoteLift(at: point, source: "edge")
-                    Log.write("ring: edge swipe released at "
-                              + String(format: "%.0f,%.0f", point.x, point.y))
-                }
-                return true
-            default:
-                return true
-            }
-        }
-
-        // 0.1.9 — 圆盘在屏时它是**模态的**（全屏暗化 + 抬手未选中就收起），但它的
-        // 触摸一条都收不到：宿主窗口对触摸是穿透的，`AevonRingMenu` 自己的
-        // `touchesBegan` 从来没被调用过。此前手指落在盘面上滑动，整条漏给下面的
-        // App —— 用户 Aevon(96) 第 1 条「圆盘打开期间手指在圆盘中滑动时会触发
-        // 应用内的滑动」。所以应用层把圆盘期间的**全屏**触摸接过来，按三条远程
-        // 通道喂给圆盘（点图标 / 圆心开面板 / 盘外收起全在 `handlePointerEnded`）。
-        //
-        // 为什么是全屏而不是「盘面那个圆」：圆盘开着时它把整屏压暗了 28 %，
-        // 语义上就是模态；盘外的落指本来就该走「抬手未选中 → 收起」这一条，
-        // 不该同时点到下面的 App。
-        if let menu = AevonRingMenu.presented {
-            switch phase {
-            case 0:
-                if !menu.isPointerActive {
-                    menu.beginRemoteTracking(at: point, source: "disc")
-                    if discProbe < 20 {
-                        discProbe += 1
-                        Log.write("ring: disc touch down at "
-                                  + String(format: "%.0f,%.0f", point.x, point.y)
-                                  + " #" + String(discProbe))
-                    }
-                }
-                return true
-            case 1:
-                menu.remoteMoved(to: point, source: "disc")
-                return true
-            case 3:
-                menu.remoteLift(at: point, source: "disc")
-                return true
-            case 4:
-                menu.remoteCancelled(source: "disc")
-                return true
-            default:
-                return true
-            }
-        }
-
-        // 新的一根手指：只认贴边条带里的落指。
-        guard phase == 0 else { return false }
-        guard stripRect(in: window.bounds).contains(point) else { return false }
-        rawDownAt = point
-        stripHeld = true
-        barHeld = true          // 看门狗（`hasActiveGripTouch`）与右侧遮罩都读它
-        barTracked = false
-        if barProbe < 20 {
-            barProbe += 1
-            Log.write("ring: bar raw down at "
-                      + String(format: "%.0f,%.0f", point.x, point.y)
-                      + " strip=" + String(format: "%.0f", stripWidth)
-                      + " #" + String(barProbe))
-        }
-        return true
-    }
-
-    /// 0.1.7 — 这一根手指已经确认是「左滑」并且圆盘已经长出来了。
-    private var barTracked = false
-
-    /// 0.1.7 — `rawBar` 自己那根手指的状态。
-    ///
-    /// 不能复用 `barHeld`：那是 UIKit 那条边缘 pan（`handleEdgePan`）的状态，
-    /// 也是圆盘看门狗 `hasActiveGripTouch` 的读数。两个入口在同一根手指上互相
-    /// 覆盖，就会出现「pan 已经接管、rawBar 还把 moved 吃掉」这种僵局 ——
-    /// 圆盘长出来之后不再跟手。`barHeld` 现在只是它的镜像。
-    private var stripHeld = false
 
     /// 0.0.49 — 把竖条那一层重新插回窗口栈顶。
     ///
@@ -1101,6 +1001,66 @@ final class RingHost: NSObject {
                                   Log.write("ring: app chooser gone (" + reason + "), grip back")
                               })
         syncGrip()
+    }
+}
+
+// MARK: - 0.1.10 手势仲裁（母版路线）
+
+/// 母版（Stheno）的呼出正确性全部来自这里：**把「这根手势算谁的」交给 UIKit**。
+///
+/// `Stheno.dylib` 0.1.23 的字符串证据（本次亲自扫的）：
+///
+///     gestureRecognizer:shouldReceiveTouch:
+///     gestureRecognizer:shouldReceiveEvent:
+///     gestureRecognizer:shouldReceivePress:
+///     gestureRecognizerShouldBegin:
+///     gestureRecognizer:shouldBeRequiredToFailByGestureRecognizer:
+///     gestureRecognizer:shouldRequireFailureOfGestureRecognizer:
+///     gestureRecognizer:shouldRecognizeSimultaneouslyWithGestureRecognizer:
+///     touchesCancelled:withEvent:
+///
+/// 而 `sendEvent` **一条都没有** —— 它从不自己判事件流。三种闸门分工是：
+/// 谁来接收（shouldReceiveTouch）、这一下算不算（shouldBegin）、跟别的识别器
+/// 谁先谁后（require/fail）。剩下的交给 UIKit 状态机。
+///
+/// Aevon 只补前两条：起手地盘与方向/节流。**不达标的做法是返回 false**，
+/// UIKit 会把整根序列还给下层 App —— 这正是「不误触 App」与「不留半截」同时
+/// 成立的原因。旧写法在 `.began` 里 `guard ... else { return }`：识别器已经
+/// 消费了触摸，handler 却不做事，App 拿到的是 cancelled，用户看到「滑了没反应」。
+extension RingHost: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ gesture: UIGestureRecognizer,
+                           shouldReceive touch: UITouch) -> Bool {
+        // 面板在屏：右缘整条让给面板自己（0.0.56 的语义，从 sendEvent 搬到这里）。
+        guard AevonAppPanel.current == nil else { return false }
+        return true
+    }
+
+    func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+        guard let pan = gesture as? UIPanGestureRecognizer, let window = window else { return false }
+        guard AevonAppPanel.current == nil else { return false }
+        // 圆盘已经在屏：这一下不是「呼出」，返回 false 让序列原样往下走 —— 圆盘
+        // 自己挂在 host 上、重写了 `touchesBegan` 一族，触摸自然归它。
+        guard AevonRingMenu.presented == nil else { return false }
+        let t = pan.translation(in: window)
+        // 方向：向左且横向占优（用户 Aevon(94) 的口径「贴右缘向左滑」）。
+        //
+        // 不达标**返回 false**：UIKit 把整根序列还给下层 App（完整 began…ended），
+        // App 照常响应、不会拿到残缺手指。这条日志是「我们主动放行」的证词 ——
+        // 以后用户说「App 动了」，先看它是 `strip refuse`（放行，正常）还是
+        // 一条都没有（那才是真的漏了）。
+        guard t.x <= -ringSwipe, abs(t.x) >= abs(t.y) else {
+            if stripProbe < 20 {
+                stripProbe += 1
+                Log.write("ring: strip refuse dx=" + String(format: "%.0f", t.x)
+                          + " dy=" + String(format: "%.0f", t.y)
+                          + " #" + String(stripProbe))
+            }
+            return false
+        }
+        // 连击节流：旧实现判完直接 return（吞了但不做事），这里返回 false 让
+        // 整根序列还给 App，两件事同时成立。
+        guard CACurrentMediaTime() - edgeAt > edgeInterval else { return false }
+        return true
     }
 }
 

@@ -307,22 +307,30 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     /// 重新摆所有停靠小窗。每次停靠 / 取消 / 拆窗之后都调一次 ——
     /// 尺寸固定之后它不再是「跨档才跑」，而是「位置永远等于 行号 × 行高」。
-    static func relayoutDocked() {
+    /// - Parameter animated: 升窗补位时传 true，让其余小窗**滑**上去一格。
+    ///
+    ///   0.1.10 — 用户 Aevon(97) 第 2 条：「点击了小窗 1 回到主悬浮窗时，234 变成
+    ///   123 时，只有内容在变，而没有出现卡片的上移动作动画」。
+    ///
+    ///   根因就是这里：`placeDock` 里 `card.frame = ...` 是硬赋值，UIKit 没有
+    ///   任何一帧过渡。而小窗的框几乎不可见（只有画面），所以肉眼看到的是
+    ///   「内容跳了一格、卡片没动」。加动画之后框和画面一起走。
+    static func relayoutDocked(animated: Bool = false) {
         ensureSlots()
         guard dockRight.isEmpty == false || dockLeft.isEmpty == false else { return }
         let probe = dockRight.first ?? dockLeft.first
         let bounds = probe?.window?.bounds ?? UIScreen.main.bounds
         let metrics = dockMetrics(in: bounds)
         for (row, host) in dockRight.enumerated() {
-            host.placeDock(right: true, row: row, metrics: metrics)
+            host.placeDock(right: true, row: row, metrics: metrics, animated: animated)
         }
         for (row, host) in dockLeft.enumerated() {
-            host.placeDock(right: false, row: row, metrics: metrics)
+            host.placeDock(right: false, row: row, metrics: metrics, animated: animated)
         }
     }
 
     /// 把这一格摆到指定列的第 `row` 行。只改几何，不碰内容。
-    private func placeDock(right: Bool, row: Int, metrics: DockMetrics) {
+    private func placeDock(right: Bool, row: Int, metrics: DockMetrics, animated: Bool = false) {
         guard let card = card, let window = window else { return }
         let width = metrics.width
         let height = metrics.height
@@ -330,7 +338,23 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 行号 × (窗高 + 缝)，起点再让出上留 —— 这两项缺一个就会要么贴顶、
         // 要么窗与窗紧挨。
         let y = metrics.top + CGFloat(row) * (height + metrics.gap)
-        card.frame = CGRect(x: x, y: y, width: width, height: height)
+        let target = CGRect(x: x, y: y, width: width, height: height)
+        // 0.1.10 — 只有「尺寸不变、只是换行」时才动画。
+        //
+        // 尺寸变化（刚被降级那一张，从大卡片缩成小窗）不在这里动画：它的画面
+        // 要重算 `content.transform`，两者放在同一个动画块里会出现「框缩完、
+        // 画面还在旧尺寸」的中间帧 —— 那正是 0.0.22 黑屏那一类事故的形状。
+        // 补位只是平移，尺寸一动没动，动画是安全的。
+        let sameSize = abs(card.bounds.width - width) < 0.5
+            && abs(card.bounds.height - height) < 0.5
+        if animated && sameSize && card.frame != target {
+            UIView.animate(withDuration: 0.26, delay: 0,
+                           options: [.curveEaseOut, .beginFromCurrentState]) {
+                card.frame = target
+            }
+        } else {
+            card.frame = target
+        }
         // `miniFrame` **不动**：它记的是「取消停靠要回到的那个大卡片」，不是
         // 「小窗现在在哪」。在这里覆盖它，取消停靠就会回到一个小窗尺寸。
         followContent()
@@ -2628,7 +2652,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                   + " col=" + (column == nil ? "none" : (column! ? "L" : "R"))
                   + " replaced=" + replaced
                   + String(format: " mem=%.0f%%", CardLayout.loadRuntime().heightFraction * 100))
-        FloatHost.relayoutDocked()
+        // 0.1.10 — 补位要看得见：传 true 让后面每一格滑上去一格（用户 Aevon(97) 第 2 条）。
+        // 只有升窗这条路传 true：停靠、拆窗、复位这些地方画面上本来就在变，
+        // 再叠一层位移动画只会让「点了之后要等一下」的感觉更重。
+        FloatHost.relayoutDocked(animated: true)
     }
 
     // MARK: - geometry
@@ -3024,16 +3051,15 @@ final class BandRoot: UIView {
 public func AevonFloatTouch(_ phase: Int32, _ x: Double, _ y: Double, _ stamp: Double) -> Int32 {
     let point = CGPoint(x: CGFloat(x), y: CGFloat(y))
     let when = TimeInterval(stamp)
-    // 0.1.6 — **竖条先问，而且不管屏幕上有没有卡都问。**
+    // 0.1.10 — 竖条那一声 `AevonRingGrip.barTouch` **删掉了**。
     //
-    // 这句话 0.0.49~0.1.5 在 `rawTouch` 的第一行。`rawTouch` 只由 `touchOrder`
-    // 里的宿主触发，而 0.1.5 的 `touchOrder` 只收「有窗口的槽」—— 没有卡片时
-    // 它是空数组，于是竖条的应用层入口整条消失，右侧呼不出圆盘（用户 Aevon(94)）。
+    // 它从 0.0.49 起就在这条通道上，用户 Aevon(97) 明确要求「不要按照旧版本
+    // Aevon 手势制作，现在使用母版触发区手势从新制作」。母版（Stheno）的呼出
+    // 只走 `UIGestureRecognizer` + delegate（它二进制里连 `sendEvent` 都没有），
+    // 圆盘的呼出入口现在只剩 `RingHost` 那个 `UIPanGestureRecognizer`。
     //
-    // 放在这里还有第二个好处：竖条永远排在所有卡片之前。停靠小窗贴着右缘排下来
-    // 时可能盖住竖条那块 46x112 的垫子，先问竖条 = 用户按在条子上就一定是呼圆盘，
-    // 不会被某张小窗当成「点小窗升主窗」。
-    if AevonRingGrip.barTouch(phase: Int(phase), at: point, stamp: when) { return 1 }
+    // 这条函数从此只服务浮窗（主窗五格手势 / 停靠小窗）。左滑呼盘不再需要它，
+    // 也就不再可能出现「began 被这里吞了、moved 漏给 App」那种半截序列。
     for host in FloatHost.touchOrder {
         if host.touchEntry(phase: Int(phase), at: point, stamp: when) { return 1 }
     }
