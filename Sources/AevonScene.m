@@ -1889,6 +1889,39 @@ int AevonAppMiniFlagsClearAll(void) {    NSString *armed = AevonMiniArmedPath();
     return count;
 }
 
+// MARK: - 0.1.31 系统界面盖着吗
+
+/// `sharedInstanceIfExists`，取不到就是 nil。
+static id AevonShared(NSString *className) {
+    Class meta = NSClassFromString(className);
+    if (meta == Nil) return nil;
+    SEL sel = NSSelectorFromString(@"sharedInstanceIfExists");
+    if (![meta respondsToSelector:sel]) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(meta, sel);
+}
+
+/// 只取 NSNumber 型的布尔，别的一律当 NO。`valueForKey:` 碰到没有的键会抛，
+/// 所以先 `respondsToSelector:`。
+static BOOL AevonBoolOf(id object, NSString *key) {
+    if (object == nil) return NO;
+    if (![object respondsToSelector:NSSelectorFromString(key)]) return NO;
+    id value = [object valueForKey:key];
+    return [value isKindOfClass:[NSNumber class]] && [value boolValue];
+}
+
+/// 0.1.31 — 锁屏 / 通知中心 / 控制中心是不是正盖在屏幕上。
+///
+/// 三个单例与 `RingHost.computeSystemOverlay` 同一组判据，只是那边是 private：
+/// 右缘那条带早就靠它让开了，卡片这一层一直没跟。
+BOOL AevonSystemCovered(void) {
+    if (AevonBoolOf(AevonShared(@"SBLockScreenManager"), @"isUILocked")) return YES;
+    id cover = AevonShared(@"SBCoverSheetPresentationManager");
+    if (AevonBoolOf(cover, @"isPresented") || AevonBoolOf(cover, @"isVisible")) return YES;
+    id center = AevonShared(@"SBControlCenterController");
+    if (AevonBoolOf(center, @"isVisible") || AevonBoolOf(center, @"isPresented")) return YES;
+    return NO;
+}
+
 // MARK: - 0.1.29 主窗四边热区 → 应用侧
 
 /// 0.1.29 — 主窗手势环的矩形，交给 App 进程做「同一根手指也收走」。
@@ -1922,8 +1955,27 @@ void AevonAppBandSet(NSString *bundleID, CGRect band, CGRect hole) {
             [body writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         }
     }
-    // 通知只当「去读那个文件」的铃铛，不带数据。
-    NSString *name = [NSString stringWithFormat:@"com.aevon.band.%@", bundleID];
+    // 0.1.31 — 数据不再只靠文件，**同时编进通知名**。
+    //
+    // V109 的日志把这条通道判了：`win: band report` 50 条、`app: band touch at`
+    // 0 条，而同一份日志里 `win: mini flag armed … notify only, no file` 反复
+    // 出现 —— `AevonAppContainer` 在目标 App 上取不到容器，文件根本没写进去，
+    // App 侧读到的永远是空，`AevonBandOn` 恒为 0，四边手势于是 100 % 透传。
+    //
+    // 文件那条留着（未沙盒进程仍是一步到位），但名字这一条才是保命的：Darwin
+    // 通知不需要任何沙盒权限，名字长度也没有实际限制。格式：
+    //   com.aevon.band.<bundle>.<x>_<y>_<w>_<h>_<hx>_<hy>_<hw>_<hh>
+    //   com.aevon.band.<bundle>.null                     ← 撤掉这一片
+    NSString *name;
+    if (CGRectIsNull(band) || band.size.width < 1 || band.size.height < 1) {
+        name = [NSString stringWithFormat:@"com.aevon.band.%@.null", bundleID];
+    } else {
+        name = [NSString stringWithFormat:
+                @"com.aevon.band.%@.%.0f_%.0f_%.0f_%.0f_%.0f_%.0f_%.0f_%.0f",
+                bundleID,
+                band.origin.x, band.origin.y, band.size.width, band.size.height,
+                hole.origin.x, hole.origin.y, hole.size.width, hole.size.height];
+    }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          (__bridge CFStringRef)name,
                                          NULL, NULL, true);

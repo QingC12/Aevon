@@ -4934,6 +4934,8 @@ static CGRect AevonBandHole  = {{0, 0}, {0, 0}};
 static volatile int AevonBandOn = 0;
 static BOOL AevonBandWatching = NO;
 static int AevonBandNotes = 0;
+/// 0.1.31 — 自己那一串通知名的前缀（`com.aevon.band.<bundle>.`），构造时算一次。
+static NSString *AevonBandHead = nil;
 
 /// 读一次文件。找不到 / 内容不完整 ⇒ 关掉（宁可不吞，也不能让一块区域死掉）。
 static void AevonBandReload(void) {
@@ -4957,19 +4959,58 @@ static void AevonBandReload(void) {
 
 static void AevonBandNote(CFNotificationCenterRef __unused center,
                           void *__unused observer,
-                          CFStringRef __unused name,
+                          CFStringRef name,
                           const void *__unused object,
                           CFDictionaryRef __unused userInfo) {
-    AevonBandReload();
+    // 0.1.31 — 这一条现在要看名字，因为矩形已经编进名字里了。
+    //
+    // 为什么要走名字：V109 的日志里 `win: band report` 有 50 条，`app: band
+    // touch at` 一条都没有。同一份日志里 `win: mini flag armed … notify only,
+    // no file` 反复出现 —— 宿主**取不到 App 容器**，数据文件根本没写进去，App
+    // 那边 `AevonBandReload` 每次都读空，`AevonBandOn` 恒为 0，于是四边手势
+    // 100 % 透传。文件这条路在目标 App 上就是不通的。
+    if (name == NULL || AevonBandHead == nil) return;
+    // 注册的 name 是 NULL（收下全系统的 Darwin 通知），所以先比前 16 个字符。
+    // 用 UTF-16 直接比，不建 NSString、不做 C 字符串转换 —— 这个回调会被系统里
+    // 每一条通知叫醒，第一条判断必须便宜。
+    CFIndex length = CFStringGetLength(name);
+    if (length < 16) return;
+    UniChar head[16];
+    CFStringGetCharacters(name, CFRangeMake(0, 16), head);
+    static const char *prefix = "com.aevon.band.";
+    size_t cut = strlen(prefix);
+    for (size_t i = 0; i < cut; i++) {
+        if (head[i] != (UniChar)prefix[i]) return;
+    }
+    NSString *raw = (__bridge NSString *)name;
+    if (![raw hasPrefix:AevonBandHead]) return;
+    NSString *tail = [raw substringFromIndex:AevonBandHead.length];
+    if ([tail isEqualToString:@"null"]) {
+        AevonBandOn = 0;
+        return;
+    }
+    double v[8] = {0};
+    int got = sscanf(tail.UTF8String, "%lf_%lf_%lf_%lf_%lf_%lf_%lf_%lf",
+                     &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
+    if (got != 8) {
+        // 老格式（名字不带数据）：退回读文件。
+        AevonBandReload();
+        return;
+    }
+    AevonBandOuter = CGRectMake((CGFloat)v[0], (CGFloat)v[1], (CGFloat)v[2], (CGFloat)v[3]);
+    AevonBandHole = CGRectMake((CGFloat)v[4], (CGFloat)v[5], (CGFloat)v[6], (CGFloat)v[7]);
+    AevonBandOn = (AevonBandOuter.size.width >= 1 && AevonBandOuter.size.height >= 1);
 }
 
 static void AevonBandObserve(void) {
     NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
     if (bundle.length == 0) return;
-    NSString *name = [NSString stringWithFormat:@"com.aevon.band.%@", bundle];
+    // 0.1.31 — 名字精确匹配这条路走不通了：矩形是运行时才知道的数字，App 侧
+    // 预知不到。注册 NULL = 收下所有 Darwin 通知，回调里用前 16 个字符筛掉
+    // 别人家的。代价是每条系统通知都叫醒一次，所以那个判断必须是几个整数比较。
+    AevonBandHead = [NSString stringWithFormat:@"com.aevon.band.%@.", bundle];
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
-                                    NULL, AevonBandNote,
-                                    (__bridge CFStringRef)name, NULL,
+                                    NULL, AevonBandNote, NULL, NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
     // 构造函数可能晚于第一份数据（宿主先开卡、App 进程后起），先读一次。
     AevonBandReload();

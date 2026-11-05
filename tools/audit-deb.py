@@ -582,13 +582,17 @@ def main():
                   b"win: exit shrink ",
                   # 0.1.29 — 四条新证词，各对应一条用户要求：
                   #   `corner fixed`   圆角按档位固定（不再随尺寸比例）
-                  #   `lift bounce`    小窗升主窗也弹
                   #   `band report`    主窗四边热区交给 App 进程
                   #   `style `         系统深浅色变了（桌面侧接住并转发）
+                  # 0.1.31 — `lift bounce` 换成 `lift one shot`：升窗不再「长完再弹」，
+                  # 改成一条从当前尺寸到目标的曲线（见 `AevonMotion.lift`）。
                   b"win: corner fixed main=",
-                  b"win: lift bounce ",
+                  b"win: lift one shot ",
                   b"win: band report ",
-                  b"win: style follow "):
+                  b"win: style follow ",
+                  # 0.1.31 — 锁屏 / 通知中心 / 控制中心盖上来时整层让开，
+                  # 以及恢复显示后那一次「把承载面动一下」。
+                  b"win: system cover "):
         if token not in dylib_early:
             bad(f"host: {token.decode(errors='replace')} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")

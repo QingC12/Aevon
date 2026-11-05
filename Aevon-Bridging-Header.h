@@ -210,6 +210,15 @@ void AevonAppBandSet(NSString *_Nullable bundleID, CGRect band, CGRect hole);
 /// 重设一遍。只改样式，不改几何，不会让 App 重新布局。
 void AevonAppStyleNotify(NSString *_Nullable bundleID, BOOL dark);
 
+/// 0.1.31 — 锁屏 / 通知中心 / 控制中心是不是正盖在屏幕上。
+///
+/// 判据是 SpringBoard 自己的三个单例（`SBLockScreenManager.isUILocked`、
+/// `SBCoverSheetPresentationManager.isPresented/isVisible`、
+/// `SBControlCenterController.isVisible`），与右缘那条带用的是同一组，只是那条
+/// 在 `RingHost` 里是 private。卡片层要靠它整层让开 —— 用户报的是「主悬浮窗和
+/// 停靠小窗会出现在控制中心、通知中心、锁屏解锁后没上滑的那个页面上」。
+BOOL AevonSystemCovered(void);
+
 /// 0.0.72 — 把 scene 的尺寸真正动一下再还回去，幅度由调用者给。
 ///
 /// 只改承载视图的 bounds 不会让 App 重排：视图变了、scene 没变。冷启的抖音

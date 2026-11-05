@@ -1733,6 +1733,12 @@ zStackParticipantDidChange:
                     }
                 }
             }
+            // 0.1.31 — 系统界面（锁屏 / 通知中心 / 控制中心）盖上来时整层让开。
+            //
+            // 这一条每拍都问，判定本身是三个 `sharedInstanceIfExists` + KVC，
+            // 代价与上面那几个读数同级；真正动窗口只在翻转那一拍（`setSystemCovered`
+            // 自己判重），所以稳定期没有额外开销。
+            FloatHost.setSystemCovered(AevonSystemCovered())
             // 0.0.50 — 画面本身的两个读数。`fg` 是我们自己写进去的，切换 App
             // 时它不变；`contentState` 才是「现在有没有画」，`level` 是母本那
             // 三件套里的第二件。Aevon(48) 的四份日志里 fg 一次没掉过，所以黑

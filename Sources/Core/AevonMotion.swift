@@ -219,4 +219,57 @@ enum AevonMotion {
     }
 
     private static var announcedEnter = false
+
+    // MARK: - 升窗（小窗 → 主窗）
+
+    /// 0.1.31 — 升窗**一条曲线**，不再「长完了再弹一下」。
+    ///
+    /// 0.1.29 是两段：几何先用母本那套过阻尼 spring 长到主窗尺寸（0.27 s），
+    /// 落定之后 `bounceAfterLift` 再从 0.74 弹到 1。用户原话：「看着很别扭。
+    /// 长大后再弹一下，修复一下。」—— 眼睛读到的是两个动作，不是一次过渡。
+    ///
+    /// 现在起点就是**小窗此刻的真实尺寸**（`from` = 小窗视觉尺寸 / 目标尺寸），
+    /// 终点 1，中间不换手。方向也是对的：卡片一路上涨，只在末尾轻轻过冲一点
+    /// 再落定，这就是「长大带着弹性」，不是「长完再补一下」。
+    ///
+    /// 阻尼没有沿用入场的 0.42：入场是 0.74→1（行程 26 %），过冲 23 % 落在
+    /// 1.06；升窗起点约 0.32（行程 68 %），同样 0.42 会冲到 1.16 —— 卡片比目标
+    /// 大 16 %，那就不是「弹一下」而是「胀一下」。0.62 的过冲约 8 %，峰值 1.05，
+    /// 在屏幕上刚好是一次可见的收尾。
+    static let liftDuration: TimeInterval = 0.38
+    static let liftDamping: CGFloat = 0.62
+
+    @discardableResult
+    static func lift(_ views: [UIView], from scale: CGFloat, center: CGPoint?,
+                     completion: (() -> Void)? = nil) -> Bool {
+        guard depth == 0 else {
+            outside {
+                _ = AevonMotion.lift(views, from: scale, center: center, completion: completion)
+            }
+            return false
+        }
+        if !announcedLift {
+            announcedLift = true
+            Log.write(String(format: "win: lift one shot %.2f->1.00 t=%.2f zeta=%.2f",
+                             scale, liftDuration, liftDamping))
+        }
+        let start = Swift.min(1, Swift.max(0.05, scale))
+        for view in views {
+            view.transform = CGAffineTransform(scaleX: start, y: start)
+        }
+        UIView.animate(withDuration: liftDuration, delay: 0,
+                       usingSpringWithDamping: liftDamping,
+                       initialSpringVelocity: 0,
+                       options: [.beginFromCurrentState, .allowUserInteraction],
+                       animations: {
+                           for view in views { view.transform = .identity }
+                           if let spot = center {
+                               for view in views { view.center = spot }
+                           }
+                       },
+                       completion: { _ in completion?() })
+        return true
+    }
+
+    private static var announcedLift = false
 }
