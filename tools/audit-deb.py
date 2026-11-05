@@ -563,7 +563,15 @@ def main():
                   #
                   # 反过来说：这条 MISS，就说明升窗 / 停靠 / 复位里至少有一条路
                   # 又回到了「硬写几何、没有过渡」的老样子。
-                  b"win: motion spring response="):
+                  b"win: motion spring response=",
+                  # 0.1.27 — 停靠收缩（Aevon(108)：「吸附时翻转一下」）。
+                  #
+                  # `dock flight` 打在这张卡开始缩的那一拍，`dock landed` 打在
+                  # `transform` 交回 `bounds` 的那一拍。两条必须成对：只有 flight
+                  # 没有 landed ⇒ 落地的完成回调没接上，那一张会永远停在「缩到
+                  # 一半」的样子（点它、升窗都会露出马脚）。所以一起断言。
+                  b"win: dock flight ",
+                  b"win: dock landed "):
         if token not in dylib_early:
             bad(f"host: {token.decode(errors='replace')} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")

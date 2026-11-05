@@ -339,23 +339,53 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 要么窗与窗紧挨。
         let y = metrics.top + CGFloat(row) * (height + metrics.gap)
         let target = CGRect(x: x, y: y, width: width, height: height)
-        // 0.1.26 — 尺寸也进动画。
+        // `dockedFrame` 是「这张卡停靠后应该在哪」的唯一答案。收缩途中 `card.frame`
+        // 是缩放后的中间值，日志和调用方都不能读它。
+        dockedFrame = target
+        // 0.1.27 — 由大变小改走**整层等比收缩**（只动 `transform` + `center`）。
         //
-        // 0.1.10 只在「尺寸不变、只换行」时动画，理由是「框缩完、画面还在旧尺寸」
-        // 会出现中间帧。那个中间帧的真实成因是**只**animate了 frame：`content` 的
-        // `transform` / `center` 是同一个动画块之外写的，于是各走各的。
+        // 0.1.26 是把卡片的 `bounds` 和画面的 `transform` 一起塞进同一个 spring：
+        // 卡片 305×508 → 98×163，画面 0.708 → 0.228，圆角 35 → 11 同时插值。
+        // 用户 Aevon(108) 的原话是「它会在吸附时翻转一下」—— 这就是三条曲线各自
+        // 插值的结果：`card.bounds` 是两个数、`content.transform` 又是两个数、
+        // `cornerRadius` 还是一条独立的 `CABasicAnimation`（遮罩逐帧重算）。三套
+        // 中间值合起来，画面在收缩途中会出现一帧「尺寸与裁切对不上」，看着像翻了一下。
         //
-        // 现在两者在同一个块里：卡片走 `bounds` + `center`，画面走 `followContent`。
-        // 中间帧为什么是准的：`fitScale` 对 5:3 的画布是 `卡宽 / 画布宽` 的线性
-        // 函数，线性函数与插值可交换 —— `lerp(scale(A), scale(B), t)` 恰好等于
-        // `scale(lerp(A, B, t))`。所以每一帧画面都正好填满框，不会露边。
-        let moving = animated && card.frame != target
-        if moving {
+        // 现在整段过渡里只改两个量：这张卡自己的 `transform` 和 `center`。画面
+        // （`content.transform` / `center`）与圆角在 0.27 s 里**一个像素都不动**，
+        // 由图层变换整体带走 —— 中间帧不可能对不上，因为根本没有第二个量在对齐。
+        //
+        // 落地那一拍换账本（`transform` 交给 `bounds`），屏幕上不该有任何变化：
+        // 收缩后 305×0.321 = 98，落地后画面 430×0.228 = 98；圆角 = 卡宽 × 常数，
+        // 缩到 0.321 后的观感半径正好等于小窗自己算出来的那个值。
+        //
+        // 遮罩先装好、再开始收缩：`addSubview` / `bringSubviewToFront` 会重排卡片
+        // 的子图层，而卡片里坐着的是 App 的**远程图层**（另一个进程的 scene）。
+        // 在动画途中重排它，渲染服务器要把宿主层重新挂一次 —— 那是「翻转一下」
+        // 最像的另一种成因。挪到过渡之前，这一拍就与动画无关；重排时只判一次
+        // 「是不是已经最上层」，对了就不动图层表。
+        //
+        // 遮罩必须盖在画面之上、且吃掉整张卡片 —— 用户要的是「点小窗任何位置都
+        // 还原成主窗，且不要透传到 App 里」。
+        installShield()
+        if let shield = shield, card.subviews.last !== shield {
+            card.bringSubviewToFront(shield)
+        }
+        let resized = abs(card.bounds.width - width) > 0.5
+            || abs(card.bounds.height - height) > 0.5
+        let shifted = abs(card.center.x - target.midX) > 0.5
+            || abs(card.center.y - target.midY) > 0.5
+        if animated && resized {
+            // 排到动画块之外跑：外层 spring 正在动别的卡的几何，收缩必须在它
+            // 自己的那一次动画里（见 `AevonMotion.outside`）。
+            AevonMotion.outside { [weak self] in
+                guard let self = self else { return }
+                self.flyToDock(target)
+            }
+        } else if animated && shifted {
+            // 尺寸没变、只换行（补位）：`center` 一条曲线就够，画面和圆角都不用动。
             AevonMotion.spring {
-                card.bounds = CGRect(origin: .zero, size: target.size)
                 card.center = CGPoint(x: target.midX, y: target.midY)
-                self.followContent()
-                self.syncGrip()
             }
         } else {
             card.frame = target
@@ -363,7 +393,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
         // `miniFrame` **不动**：它记的是「取消停靠要回到的那个大卡片」，不是
         // 「小窗现在在哪」。在这里覆盖它，取消停靠就会回到一个小窗尺寸。
-        installShield()
         // 0.1.7 — **停靠小窗里那块画面不再接触摸。**
         //
         // 用户第四次报「点小窗依旧会触发应用内的操作」。Aevon(94) 的证据把范围压到
@@ -389,11 +418,84 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         setMiniFlag(true)
         // 0.1.0 — 停靠小窗没有手势环。`syncGrip` 会按新尺寸重算环，摆完必须把
         // 它收起：环是「可操作」的意思，而小窗的定义就是不可操作。
-        if !moving { syncGrip() }
+        //
+        // 0.1.27 — 正在收缩的那一张不在这里量：此刻 `card.bounds` 还是大卡的尺寸，
+        // 量出来是旧环。落地（`landDock`）里按小窗尺寸再量一次。
+        if !resized { syncGrip() }
         grip?.isHidden = true
-        // 遮罩必须盖在画面之上、且吃掉整张卡片 —— 用户要的是「点小窗任何位置都
-        // 还原成主窗，且不要透传到 App 里」。
-        if let shield = shield { card.bringSubviewToFront(shield) }
+    }
+
+    // MARK: - 0.1.27 停靠收缩（整层 transform，不逐帧改画面）
+
+    /// 第几次收缩。自增令牌而不是 Bool：收缩途中又被叫去另一个位置时，上一次
+    /// 的完成回调必须认不出自己（否则它会拿着旧目标去落地）。
+    private var dockFlight = 0
+
+    /// 正在飞向的目标。非 nil = 收缩还没落地。
+    private var dockFlightTarget: CGRect?
+
+    /// 这张卡停靠后**应该**在的矩形。`placeDock` 是唯一算它的地方；`dockedFrame`
+    /// 供日志与 `applyMini` 读 —— 收缩途中 `card.frame` 是缩放后的中间值。
+    private(set) var dockedFrame: CGRect?
+
+    /// 大卡 → 小窗：只改这一张卡自己的 `transform` 与 `center`。
+    ///
+    /// 为什么这样就消掉了「翻转」：0.1.26 同时插值 `card.bounds`（两个数）+
+    /// `content.transform`（两个数）+ 一条圆角 `CABasicAnimation`（遮罩逐帧重算），
+    /// 三套中间值必须**逐帧对齐**才不会露馅，而它们本来就不同步。这里整段过渡
+    /// 只有一条仿射变换：画面、圆角、遮罩都挂在这条变换下面，跟着一起缩，不存在
+    /// 「谁没跟上谁」。
+    private func flyToDock(_ target: CGRect) {
+        // 上一段还没落地（0.27 s 内又换了一次位置）⇒ 先让它落地再用它当起点。
+        // 不落地的话下面读到的 `card.frame` 是缩放后的中间值，第二段起点会小一圈。
+        if dockFlightTarget != nil { landDock(dockFlight) }
+        guard let card = card else { return }
+        let from = card.frame
+        guard from.width > 1, from.height > 1 else {
+            card.frame = target
+            followContent()
+            return
+        }
+        // 光晕是根视图上的另一个视图，不跟着卡片缩就会在原地留下一圈大光。先把
+        // 它对齐到卡片当前矩形，再用同一条变换带着走（`shadowPath` 在图层坐标里，
+        // 会随变换一起缩放，不用重算）。
+        applyGlow()
+        let scale = CGSize(width: target.width / from.width,
+                           height: target.height / from.height)
+        let centre = CGPoint(x: target.midX, y: target.midY)
+        dockFlightTarget = target
+        dockFlight += 1
+        let token = dockFlight
+        Log.write(String(format: "win: dock flight %.0fx%.0f -> %.0fx%.0f s=%.3f",
+                         from.width, from.height,
+                         target.width, target.height, scale.width))
+        AevonMotion.spring({
+            card.transform = CGAffineTransform(scaleX: scale.width, y: scale.height)
+            card.center = centre
+            self.glow?.transform = CGAffineTransform(scaleX: scale.width, y: scale.height)
+            self.glow?.center = centre
+        }, completion: { [weak self] _ in
+            guard let self = self else { return }
+            self.landDock(token)
+        })
+    }
+
+    /// 收缩落地：把 `transform` 交回 `bounds`。这一拍屏幕上不该有任何变化。
+    ///
+    /// 落地前：305×508 的卡压到 0.321，画面（430 宽 × 0.708）跟着缩到 98；
+    /// 落地后：98×163 的卡，画面按 98/430 = 0.228 缩放。两种算法在纸上是同一个数，
+    /// 所以这一拍只换账本 —— 圆角同理（圆角 = 卡宽 × 常数）。
+    private func landDock(_ token: Int) {
+        guard token == dockFlight, let card = card, let target = dockFlightTarget else { return }
+        dockFlightTarget = nil
+        card.transform = .identity
+        card.bounds = CGRect(origin: .zero, size: target.size)
+        card.center = CGPoint(x: target.midX, y: target.midY)
+        glow?.transform = .identity
+        followContent()
+        syncGrip()
+        Log.write(String(format: "win: dock landed %.0fx%.0f at %.0f,%.0f",
+                         target.width, target.height, target.origin.x, target.origin.y))
     }
 
     /// 0.1.8 — 停靠标记的本地缓存。文件只在**状态变化**时写一次：`placeDock`
@@ -2049,13 +2151,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 原来 `relayoutDocked()` 是无动画版：这一张缩成小窗有过渡，后面四张
         // 补位却是瞬移，两者叠在同一拍里，用户看到的就是「1 的画面直接变成 2」。
         let prefer: Bool? = column
+        // 0.1.27 — 换档（`windowLevel`）不是可动画属性，塞进动画块只会让「窗口表
+        // 重排」和几何变化撞在同一拍。0.1.4 的纪律本来就是「先改层级、再改几何」，
+        // 这里照办：先换档，再让几何自己走过渡。
+        self.applyWindowLevel()
         AevonMotion.spring {
             FloatHost.claimDock(self, preferLeft: prefer ?? (manual && side == .left))
             FloatHost.relayoutDocked(animated: true)
-            // 0.1.4 — 变小的这一瞬降到小窗档，否则它会继续压在主窗上面（见 `mainLevel`）。
-            self.applyWindowLevel()
         }
-        let landed = card.frame
+        // 0.1.27 — 收缩是异步收尾的，这一拍 `card.frame` 还在半路（缩放中）。
+        // 日志必须读 `dockedFrame`：它是 `placeDock` 算出来的唯一答案。
+        let landed = dockedFrame ?? card.frame
         let column = FloatHost.columnIndex(self)
         Log.write(String(format: "win: card docked %.0fx%.0f at %.0f,%.0f nth=%d col=%@ row=%d",
                          landed.width, landed.height,
@@ -2631,6 +2737,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     private func performUndock() {
         guard let card = card, let window = window, miniFrame != nil else { return }
+        // 0.1.27 — 刚缩下去还没落地（0.27 s 内）就点它：先把账本落地。
+        // 不落地的话下面写 `bounds` 时 `transform` 上还挂着 0.321，两条一起算，
+        // 画面会先小后大地跳一次。
+        if dockFlightTarget != nil { landDock(dockFlight) }
         miniFrame = nil
         // 0.1.4 — 先抬层再改几何：反过来会有一帧「大卡片已经铺开、但还在小窗层」
         // 的画面，那正是用户报的「主窗被新小窗压住」（见 `mainLevel`）。

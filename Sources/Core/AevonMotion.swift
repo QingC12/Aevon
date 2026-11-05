@@ -69,9 +69,10 @@ enum AevonMotion {
     static func spring(_ changes: @escaping () -> Void,
                        completion: ((Bool) -> Void)? = nil) -> Bool {
         depth += 1
-        defer { depth -= 1 }
         if depth > 1 {
             changes()
+            depth -= 1
+            if depth == 0 { drain() }
             return false
         }
         if !announced {
@@ -86,7 +87,44 @@ enum AevonMotion {
                        options: [.beginFromCurrentState, .allowUserInteraction],
                        animations: changes,
                        completion: completion)
+        // 动画块已经登记完，这一拍里排队的「块外手术」现在可以跑了 —— 仍然是
+        // 同一拍 runloop，屏幕上与这次 spring 同时开始。
+        depth -= 1
+        if depth == 0 { drain() }
         return true
+    }
+
+    // MARK: - 动画块之外
+
+    /// 0.1.27 — 排队要「在动画块之外」执行的动作。
+    ///
+    /// 在 `spring` 的闭包里再开一次 `UIView.animate` 就是嵌套动画块：UIKit 对
+    /// 它没有定义，外层正在动的属性会把内层吞掉一半。而停靠收缩必须是自己的一次
+    /// 动画 —— 它动的是 `transform`，外面那层同时还在动 `bounds`/`center`，
+    /// 两者写在同一个块里，UIKit 会按来源各插一条曲线（那正是「吸附时翻转一下」
+    /// 的形状）。
+    ///
+    /// 所以：排队，等最外层的 `UIView.animate` 返回后立刻跑。同一拍 runloop，
+    /// 肉眼上与外面的 spring 是同时开始的。
+    static func outside(_ work: @escaping () -> Void) {
+        queued.append(work)
+        if depth == 0 { drain() }
+    }
+
+    private static var queued: [() -> Void] = []
+
+    /// 已经在清队列。收缩动画自己也会走 `spring`，它结束时又会调到这里 ——
+    /// 没有这个闩，队列会被内外两层同时消费，顺序就乱了。
+    private static var draining = false
+
+    private static func drain() {
+        guard draining == false else { return }
+        draining = true
+        while queued.isEmpty == false {
+            // 先摘再跑：这一段自己可能又往队列里塞东西，那些接在后面处理。
+            queued.removeFirst()()
+        }
+        draining = false
     }
 
     /// 现在是「已经在一次过渡里」吗。给圆角这类**不是** UIView 动画属性的东西用：
