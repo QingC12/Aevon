@@ -4760,33 +4760,79 @@ static void AevonKbGuideNote(void);
 /// 写一个 6 字节的小文件过去。Darwin 通知不能带载荷，prefs 又会把整个域刷一遍
 /// （触摸路径上被禁过），一个独立小文件最省。
 static void AevonKbLog(const char *line);
+/// 0.1.57 — **三条通道一起写**，因为 0.1.56 只写了最没希望的那一条。
+///
+/// Aevon(129) 的证词只有一行，但足够定案：
+///
+///   kb: top publish ok=0 path=/var/mobile/Aevon.kb      ← 三个 App 各一次
+///
+/// `/var/mobile` 由 `mobile` 用户持有、`0755`，App 沙盒里没有写权限 —— 0.1.56
+/// 把唯一的交货点选在了那儿，于是 `kbtop=0` 恒成立，宿主每次都退回「铺满屏底」，
+/// 401 形状一次都没出现过（`win: keyboard fill on card=430x717 at 0,215 kbtop=0`
+/// 连了 7 次）。用户看到的「有时在悬浮窗外、有时在内、都不显示输入框」，就是
+/// 这条通道时好时坏（`fill off` 之后 `kbtop` 归零、下一拍又读到旧文件）的抖动。
+///
+/// 现在按可靠性从高到低写三处，宿主也按同样顺序读：
+///
+///   ① `NSTemporaryDirectory()/aevon-kb` —— App **自己的** data 容器 tmp，
+///      沙盒里必然可写；宿主拿得到同一个目录（`AevonAppContainer`：
+///      `LSApplicationProxy.dataContainerURL` 或扫 `MCMMetadataIdentifier`，
+///      0.1.9 起就在给 band 容器兜底用）。
+///   ② `CFPreferencesSetAppValue` 写进 **App 自己的域**（`AevonKbTop`）——
+///      走 cfprefsd，App 有权写自己的域；宿主读别人域不受沙盒限制。
+///      慢（几十 ms 才落盘），但绝不会失败。
+///   ③ `/var/mobile/Aevon.kb` —— 保留，万一某个环境放得下；失败不再当回事。
 static void AevonKbTopPublish(CGFloat top) {
     if (top < 40.0 || top > 4000.0) return;
     static CGFloat last = -1.0;
     static int logged = 0;
     if (fabs(top - last) < 0.5) return;
     last = top;
-    int fd = open("/var/mobile/Aevon.kb", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        // 沙盒不放行就**安静地退出**：宿主读不到文件会退回「铺满屏底」的老形状，
-        // 也就是 0.1.55 的行为，不会因此更糟。留一行读数，免得下次只能猜。
-        if (logged < 1) {
-            logged = 1;
-            AevonKbLog("kb: top publish ok=0 path=/var/mobile/Aevon.kb\n");
-        }
-        return;
-    }
     char buf[24];
     int n = snprintf(buf, sizeof(buf), "%.0f", top);
-    if (n > 0) {
+    if (n <= 0) return;
+    // ① 自己容器的 tmp。`NSTemporaryDirectory()` 就是 `<容器>/tmp/`。
+    int door = 0;
+    NSString *tmp = NSTemporaryDirectory();
+    if (tmp.length > 0) {
+        NSString *path = [tmp stringByAppendingPathComponent:@"aevon-kb"];
+        int fd = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            ssize_t ignored = write(fd, buf, (size_t)n);
+            (void)ignored;
+            close(fd);
+            door |= 1;
+        }
+    }
+    // ② 自己的偏好域。丢到后台队列：`CFPreferencesAppSynchronize` 要等 cfprefsd
+    // 回话（几十 ms），放在 `willChangeFrame` 的主线程里就是白送一次掉帧。
+    // 文件那一路是即时的，宿主先读它；这一路晚到只是兜底。
+    NSString *selfID = [[NSBundle mainBundle] bundleIdentifier];
+    if (selfID.length > 0) {
+        NSString *payload = [[[NSString alloc] initWithBytes:buf length:(NSUInteger)n
+                                                    encoding:NSUTF8StringEncoding] autorelease];
+        if (payload.length > 0) {
+            door |= 2;
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+                CFStringRef app = (__bridge CFStringRef)selfID;
+                CFPreferencesSetAppValue(CFSTR("AevonKbTop"),
+                                         (__bridge CFStringRef)payload, app);
+                CFPreferencesAppSynchronize(app);
+            });
+        }
+    }
+    // ③ 老路。
+    int fd = open("/var/mobile/Aevon.kb", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
         ssize_t ignored = write(fd, buf, (size_t)n);
         (void)ignored;
+        close(fd);
+        door |= 4;
     }
-    close(fd);
-    if (logged < 1) {
-        logged = 1;
-        char line[120];
-        snprintf(line, sizeof(line), "kb: top publish ok=1 top=%.0f\n", top);
+    if (logged < 3) {
+        logged += 1;
+        char line[160];
+        snprintf(line, sizeof(line), "kb: top publish door=%d top=%.0f\n", door, top);
         AevonKbLog(line);
     }
 }

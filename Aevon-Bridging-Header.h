@@ -217,6 +217,13 @@ NSInteger AevonAppBandSet(NSString *_Nullable bundleID, CGRect band, CGRect hole
 /// App 侧收到锁就擦一次高亮，并整根吞到抬手（自带 3 秒租约，宿主没了也能自愈）。
 void AevonAppBandLock(NSString *_Nullable bundleID, BOOL locked);
 
+/// 0.1.57 — App 进程里键盘实体顶边的 Y（屏幕坐标，本机 616），拿不到返回 0。
+///
+/// 「键盘顶边」只有 App 进程知道（`UIRemoteKeyboardWindow` 长在 App 的 scene 里），
+/// 「窗口改多高」只有宿主做得动，所以这个数必须跨进程走一趟。App 写、宿主读，
+/// 三条路：App 容器 `tmp/aevon-kb` → `/var/mobile/Aevon.kb` → App 偏好域 `AevonKbTop`。
+CGFloat AevonAppKbTop(NSString *_Nullable bundleID);
+
 /// 0.1.29 — 系统换了深浅色。
 ///
 /// 悬浮窗里的 App 是另一个进程的 scene：系统切换时它自己那条 trait 更新链在我们

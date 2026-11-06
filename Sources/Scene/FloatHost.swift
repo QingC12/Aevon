@@ -1554,6 +1554,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         kbSavedOriginY = 0
         canvasHeight = 0
         kbSavedHeight = 0
+        kbTopMiss = 0
         card = nil
         content = nil
         visible = .zero
@@ -3462,6 +3463,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var kbSavedOriginY: CGFloat = 0
     /// 0.1.56 — 键盘态之前场景的高度（0 = 跟随 `natural.height`）。
     private var kbSavedHeight: CGFloat = 0
+    /// 0.1.57 — 这一次弹起里「顶边没读到」试了几次（见 `setKeyboardFill` 里那段）。
+    private var kbTopMiss = 0
 
     /// 全体宿主里挑主窗让位。
     ///
@@ -3509,11 +3512,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// `AevonKbTopPublish`）。读一个 6 字节的小文件，比再开一条跨进程通道便宜，
     /// 也比 `CFPreferences` 干净 —— 后者会把整个偏好域刷一遍。
     /// 读失败一律返回 0，调用方退回「铺满屏底」的老行为，不会因此变小。
-    static func keyboardTopOnScreen() -> CGFloat {
-        guard let text = try? String(contentsOfFile: "/var/mobile/Aevon.kb", encoding: .utf8),
-              let value = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)),
-              value > 40, value < 4000 else { return 0 }
-        return CGFloat(value)
+    /// 0.1.57 — 键盘实体顶边在屏幕上的 Y（本机 616，带候选栏 643），拿不到 0。
+    ///
+    /// 0.1.56 在这里直接读 `/var/mobile/Aevon.kb`，而 App 那一侧根本写不进去
+    /// （`kb: top publish ok=0` ×3，Aevon(129)），于是每次都是 0、每次都退回
+    /// 「铺满屏底」的 717 形状 —— 那一版等于没改。现在交给 `AevonAppKbTop`，
+    /// 它按 App 容器 → 老路径 → 偏好域三条路读，与 App 的写法一一对应。
+    static func keyboardTopOnScreen(_ bundle: String) -> CGFloat {
+        let value = AevonAppKbTop(bundle)
+        guard value > 200, value < 4000 else { return 0 }
+        return value
     }
 
     func setKeyboardFill(_ on: Bool) {
@@ -3522,7 +3530,26 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             let screen = window.bounds.size
             var y = screen.height - visible.height
             if y < 0 { y = 0 }
-            let kbTop = FloatHost.keyboardTopOnScreen()
+            let kbTop = FloatHost.keyboardTopOnScreen(bundle)
+            // 0.1.57 — 读不到顶边就**先别铺**，等一拍再问。
+            //
+            // App 写文件与发心跳几乎同拍，宿主读到的时间可能落在写入之前；
+            // 0.1.56 的做法是「读不到就铺 717」，于是画面先按整屏铺开、
+            // 下一拍心跳读到顶边再收成 401 —— 用户看到的就是「先放大再缩小」。
+            // 这里改成：第一次没读到 → 60 ms 后再走一遍；第二次仍没有才认命
+            // 铺 717（= 0.1.55 的保底形状，输入框可能被盖，但不会变形）。
+            if !kbFilled, kbTop <= y + 240 {
+                kbTopMiss += 1
+                if kbTopMiss <= 1 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+                        guard let self = self else { return }
+                        self.setKeyboardFill(true)
+                    }
+                    return
+                }
+            } else if kbTop > y + 240 {
+                kbTopMiss = 0
+            }
             // 0.1.56 — 已经铺开了也要再看一眼：键盘高度会中途变（候选栏收放，
             // 本机 616 ↔ 643）。不变就不动，变了只改高度，`kbSaved*` 一个都不碰
             // （那才是「收起时要还回去的东西」）。
@@ -3593,6 +3620,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         } else {
             guard kbFilled else { return }
             kbFilled = false
+            kbTopMiss = 0
             // 0.1.56 — **先放场景，再改卡片**。
             //
             // 原来是先 `card.frame = kbSavedFrame`（430×717@215 一步收回

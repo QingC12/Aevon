@@ -1839,6 +1839,66 @@ NSString *AevonAppLogPathOf(NSString *bundleID) {
     return [dir stringByAppendingPathComponent:@"tmp/aevon-app.log"];
 }
 
+/// 0.1.57 — App 那个进程里键盘实体顶边的 Y（屏幕坐标，本机 616），拿不到返回 0。
+///
+/// 为什么要在宿主这边读文件而不是让 App 自己把窗口改矮：改窗口是宿主的事
+/// （`FBScene.settings.frame` 只有 SpringBoard 写得动），而「键盘顶边」这个数
+/// 只有 App 进程有（`UIRemoteKeyboardWindow` 在 App 的 scene 里，不在 SpringBoard）。
+/// 所以必然是一次跨进程交付。
+///
+/// 0.1.56 把交货点选在 `/var/mobile/Aevon.kb`，三个 App 全是
+/// `kb: top publish ok=0` —— `/var/mobile` 是 `mobile:wheel 0755`，App 沙盒写不进。
+/// 这一版按「App 容器 tmp → 老路径 → App 偏好域」三条路读，与 App 那侧的写法一一对应。
+///
+/// 容器路径做了缓存：`AevonAppContainer` 最坏要扫一遍
+/// `/var/mobile/Containers/Data/Application`（几百个目录，每个读一次 metadata plist），
+/// 而这个函数每次键盘弹起、每一拍心跳都会被问。
+CGFloat AevonAppKbTop(NSString *bundleID) {
+    if (bundleID.length == 0) return 0.0;
+    static NSMutableDictionary<NSString *, NSString *> *dirs = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ dirs = [[NSMutableDictionary alloc] init]; });
+    NSString *dir = nil;
+    @synchronized (dirs) {
+        dir = dirs[bundleID];
+    }
+    if (dir == nil) {
+        dir = AevonAppContainer(bundleID);
+        if (dir.length > 0) {
+            @synchronized (dirs) {
+                if (dirs.count < 24) [dirs setObject:dir forKey:bundleID];
+            }
+        }
+    }
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    if (dir.length > 0) [paths addObject:[dir stringByAppendingPathComponent:@"tmp/aevon-kb"]];
+    [paths addObject:@"/var/mobile/Aevon.kb"];
+    NSFileManager *manager = [NSFileManager defaultManager];
+    for (NSString *path in paths) {
+        NSString *text = [NSString stringWithContentsOfFile:path
+                                                   encoding:NSUTF8StringEncoding error:NULL];
+        if (text.length == 0) continue;
+        double value = text.doubleValue;
+        // 键盘顶边只可能落在「屏幕上半部偏下」：本机 616（无候选栏）/ 643（带候选栏）。
+        // 小于 200 或大于 4000 的一律当没读到，免得把内容顶飞。
+        if (value > 200.0 && value < 4000.0) return (CGFloat)value;
+    }
+    // 兜底：App 自己的偏好域（`AevonKbTop`）。cfprefsd 会慢几十毫秒，但不会失败。
+    CFStringRef app = (__bridge CFStringRef)bundleID;
+    CFPropertyListRef stored = CFPreferencesCopyAppValue(CFSTR("AevonKbTop"), app);
+    double value = 0.0;
+    if (stored != NULL) {
+        if (CFGetTypeID(stored) == CFStringGetTypeID()) {
+            value = [(__bridge NSString *)stored doubleValue];
+        } else if (CFGetTypeID(stored) == CFNumberGetTypeID()) {
+            CFNumberGetValue((CFNumberRef)stored, kCFNumberDoubleType, &value);
+        }
+        CFRelease(stored);
+    }
+    if (value > 200.0 && value < 4000.0) return (CGFloat)value;
+    return 0.0;
+}
+
 /// 0.1.8 — 停靠标记的落点：App 容器里的 `tmp/aevon-mini`。
 ///
 /// 取不到容器返回 nil（此时 App 侧读不到文件 ⇒ 判成「不是小窗」，行为与旧版一致，
