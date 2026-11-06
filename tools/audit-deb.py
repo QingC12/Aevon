@@ -961,6 +961,13 @@ def main():
                       # 下一份日志能直接分开，不用再猜。
                       b"app: band note from host",
                       b"app: band prefs on=",
+                      # 0.1.60 — 「收 App 自己窗口」这件事的证词，也是 `setFrame:`
+                      # 那条旧禁令放宽后唯一的落点：`kb: win fit h=` 每次落一次，
+                      # `kb: win unfit h=` 收起时还回去。两条都在，说明只有这一处
+                      # 在动窗口；被拒时打 `kb: win fit reject`（读数不稳/越界）。
+                      b"kb: win fit h=%.0f",
+                      b"kb: win unfit h=%.0f",
+                      b"kb: win fit reject want=%.0f",
                       # 0.1.35 — 判不中的时候把坐标与两个矩形写下来。V111 里
                       # `app: band touch at` 是 0，而带子的值明明是对的 ⇒ 分不出
                       # 「这一拍没进来」还是「进来了被几何否掉」。有这一行就分得开。
@@ -1022,11 +1029,14 @@ def main():
                       b"transition scroll y=%.0f -> %.0f page=%.0f",        # gone
                       b"next=%.0f",                                         # gone
                       b" box=%.0f cell=%.0f span=%.0f",                     # gone
-                      # 强制重排：`layoutIfNeeded` / `setFrame:` 在这个文件里只剩
-                      # 一种用法 —— 替别人的 window 排一次版，而那正是 0.0.67 的
-                      # 第二个动作。
+                      # 强制重排：`layoutIfNeeded` **仍然全禁**。0.0.67 的第二个
+                      # 动作就是「名片一翻就给每个窗口补一次 layoutIfNeeded」，
+                      # 那一次真机反馈与原样一字不差。
                       b"layoutIfNeeded",                                    # gone
-                      b"setFrame:",                                         # gone
+                      # ⚠️ 0.1.60 — `setFrame:` **从本栏撤出**，但只放宽到唯一一种
+                      # 用法：键盘通知里、只对当前 key window、只改高度（见
+                      # `AevonKbFitWindow`）。理由与做法都写在下面那条正向断言里。
+                      # 撤一条旧禁令必须补一条新的证词，否则下一次没人知道边界在哪。
                       # 0.0.78 — `reloadData` 会让表格把每一屏都重建一次，等于替
                       # 用户翻了一次页：视频重来、正在看的那一帖被丢掉。它一直是
                       # 「能让行高对上」的最短路径，也是这一版明确不走的那条。
