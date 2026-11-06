@@ -4743,6 +4743,8 @@ static void AevonKbArm(BOOL on) {
 
 /// 0.1.47 — 定义在键盘段后部（要用 `AevonKbHostGate` / `AevonKbNativeBounds`）。
 static void AevonKbLiftApply(BOOL on);
+/// 0.1.48 — 连提三拍的那层壳（见定义处）。定义在键盘段后部。
+static void AevonKbLiftRepeat(void);
 
 static void AevonKbEvaluate(NSDictionary *info) {
     NSValue *value = info[UIKeyboardFrameEndUserInfoKey];
@@ -4761,7 +4763,7 @@ static void AevonKbEvaluate(NSDictionary *info) {
     // 推到下一拍：`willChangeFrame` 这一刻 UIKit 还没写完键盘窗的最终几何，
     // 当场写会被紧接着的那次布局覆盖（0.1.34 那条「早半步的写入被抹掉」同形）。
     dispatch_async(dispatch_get_main_queue(), ^{
-        AevonKbLiftApply(on);
+        AevonKbLiftRepeat();
     });
     if (on) {
         AevonKbPost();
@@ -5526,9 +5528,8 @@ static BOOL AevonKbHostGate(void) {
 // 换算（`intersectionHeight` 返回 316）只决定「App 该让出多少」，**决定不了键盘
 // 画在哪** —— 0.1.45 改它零变化，已经证伪。
 //
-// 真正的修法只有一条：把键盘窗自己往上搬 215 pt（932−717），让它的内容从
-// 「616..932」变成「401..717」，整块落进场景。视频（Stheno 分屏）里键盘在浮窗
-// 之外按原生尺寸显示，视觉结果与此一致。
+// 真正的修法只有一条：把键盘窗自己往上搬，让它的底边压在场景底边上，内容整块
+// 落进场景。视频（Stheno 分屏）里键盘在浮窗之外按原生尺寸显示，视觉结果一致。
 //
 // ⛔ 为什么是 `transform` 而不是 frame / bounds：0.1.42 改过键盘窗的几何（把它
 // 撑成整屏），真机结果是「所有 App 打开时黑屏，无论悬浮窗还是全屏」。平移只碰
@@ -5536,6 +5537,16 @@ static BOOL AevonKbHostGate(void) {
 // bounds/center/transform」同源，但更严格：连 bounds 都不碰。
 
 static volatile int AevonKbLiftNotes = 0;
+
+/// intersection 钩子里取到的键盘窗（真机证实非空：`kb: lead … kbwin=932`）。
+///
+/// 0.1.47 只靠扫 `connectedScenes[].windows` 找 `UIRemoteKeyboardWindow`，
+/// Aevon(120) 的日志里连一条 `kb: lift` 都没有 —— 说明那条扫法一个都没扫到，
+/// 函数在取窗处静默返回，整版等于没做。这里把 intersection 钩子那只留住：
+/// 扫不到就用它。retain 住不放 —— 一个窗口对象而已，换来的是一条永远不会
+/// 指向野指针的引用（窗口被回收时对象仍在，写 transform 是无害的空操作）。
+static UIView *AevonKbKeptWindow = nil;
+static int AevonKbKeptSource = 0;   // 1 = intersection 钩子给的，2 = 扫场景给的
 
 /// 键盘窗本体。App 进程里它是 `UIRemoteKeyboardWindow` 的实例，挂在承载场景的
 /// `windows` 数组里。**只用运行时事实取**：类名比对 + 数组遍历，不问任何可能抛
@@ -5572,41 +5583,70 @@ static CGFloat AevonKbSceneHeightNow(void) {
     return 0.0;
 }
 
-/// 键盘在屏时把键盘窗上移 `场景高 − 键盘窗高`（本机 = 717 − 932 = −215）。
-/// 收起时归零。
+/// 键盘在屏时把键盘窗整体上移，**让它的底边正好压在场景底边上**。
 ///
-/// 闸门沿用 `AevonKbHostGate()`：被卡片承载 + 面板开关没关 + 外框确实比屏小。
-/// 全屏打开的 App 一条都不动（0.1.42/0.1.46 两次黑屏都出在「闸门没挡住全屏」）。
+/// 0.1.47 写的是 `场景高 − 键盘窗高`（= −215），前提是「键盘窗底边本来就在场景
+/// 底」。Aevon(120) 的实测把这个前提否掉了：截图 1290×2796（430×932@3x）量到
+/// 键盘可见 744..932、卡片 215..932 ⇒ 键盘顶在场景 529、底在 845，比场景底低
+/// **128 pt**。所以正确上移量是 −128，不是 −215；而那一版 `kb: lift` 一条日志
+/// 都没有 ⇒ 取窗就失败了，连这个错的数都没写进去。
+///
+/// 所以改成**由实测底边反推**：`dy = 场景高 − (center.y + bounds.height/2)`。
+/// `center` 与 `bounds` 都不受 `transform` 影响，于是：
+///   · 每次算出来是同一个数（写绝对值，不累加）；
+///   · 键盘窗底边本来就在场景底时自动得 0，什么都不做；
+///   · UIKit 中途把它挪走，下一拍算出来的就是新的补偿量。
 static void AevonKbLiftApply(BOOL on) {
-    if (![NSThread isMainThread]) return;
-    UIView *keyboardWindow = AevonKbWindowScan();
-    if (keyboardWindow == nil) return;
-    CGFloat fullHeight = AevonKbNativeBounds(nil).size.height;
-    CGFloat keyboardHeight = keyboardWindow.bounds.size.height;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ AevonKbLiftApply(on); });
+        return;
+    }
+    UIView *keyboardWindow = AevonKbKeptWindow;
+    int source = AevonKbKeptSource;
+    if (keyboardWindow == nil) {
+        keyboardWindow = AevonKbWindowScan();
+        source = keyboardWindow != nil ? 2 : 0;
+    }
     CGFloat sceneHeight = AevonKbSceneHeightNow();
-    BOOL usable = on && AevonKbHostGate()
-               && keyboardHeight > 200.0
-               && sceneHeight > 200.0
-               && sceneHeight < keyboardHeight - 8.0
-               && keyboardHeight <= fullHeight + 1.0;
-    CGFloat dy = usable ? (sceneHeight - keyboardHeight) : 0.0;
+    if (keyboardWindow == nil || sceneHeight < 200.0) {
+        if (AevonKbLiftNotes < 8) {
+            AevonKbLiftNotes += 1;
+            char skip[180];
+            snprintf(skip, sizeof(skip), "kb: lift skip win=%d scene=%.0f src=%d\n",
+                     keyboardWindow != nil ? 1 : 0, sceneHeight, source);
+            AevonKbLog(skip);
+        }
+        return;
+    }
+    CGSize size = keyboardWindow.bounds.size;
+    CGFloat bottom = keyboardWindow.center.y + size.height * 0.5;
+    BOOL usable = on && AevonKbHostGate() && size.height > 200.0;
+    CGFloat dy = usable ? (sceneHeight - bottom) : 0.0;
+    if (dy > -0.5 && dy < 0.5) dy = 0.0;
     // 每次都写**绝对**值（不是累加）：UIKit 在键盘布局时会重设这个窗口的
     // `transform`，重复通知必须能把状态重新拉回来。
-    if (usable) {
-        keyboardWindow.transform = CGAffineTransformMakeTranslation(0, dy);
-    } else {
-        keyboardWindow.transform = CGAffineTransformIdentity;
-    }
+    keyboardWindow.transform = (dy == 0.0) ? CGAffineTransformIdentity
+                                           : CGAffineTransformMakeTranslation(0, dy);
     if (AevonKbLiftNotes < 10) {
         AevonKbLiftNotes += 1;
-        char line[200];
+        char line[220];
         snprintf(line, sizeof(line),
-                 "kb: lift %s dy=%.0f kb=%.0fx%.0f scene=%.0f full=%.0f\n",
-                 usable ? "applied" : "off", dy,
-                 keyboardWindow.bounds.size.width, keyboardHeight,
-                 sceneHeight, fullHeight);
+                 "kb: lift %s dy=%.0f bottom=%.0f scene=%.0f kb=%.0fx%.0f src=%d\n",
+                 (dy == 0.0) ? (usable ? "aligned" : "off") : "applied",
+                 dy, bottom, sceneHeight, size.width, size.height, source);
         AevonKbLog(line);
     }
+}
+
+/// 键盘窗的 `transform` 会被 UIKit 在布局时重置。写进去之后连提三拍
+/// （0 / 80 / 240 ms）：哪一拍被抹掉，后面那拍都会补回来。三次都是绝对值，
+/// 重复写同一个平移量没有副作用。
+static void AevonKbLiftRepeat(void) {
+    AevonKbLiftApply(AevonKbOn != 0);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbLiftApply(AevonKbOn != 0); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.24 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbLiftApply(AevonKbOn != 0); });
 }
 
 /// 母本 0x5284 的原式：`(原值 × 屏幕高 ÷ 键盘窗高) × 1.0 + 键盘窗高 − 屏幕高`。
@@ -5639,6 +5679,14 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
             AevonKbLog(line);
         }
         return answer;
+    }
+    // 0.1.48 — 这只窗是运行时给的真对象（`kbwin` 就是从它身上量的），留住给
+    // `AevonKbLiftApply` 用：那条扫场景的路在 Aevon(120) 里一个都没扫到。
+    if ((UIView *)window != AevonKbKeptWindow) {
+        [(UIView *)window retain];
+        [AevonKbKeptWindow release];
+        AevonKbKeptWindow = (UIView *)window;
+        AevonKbKeptSource = 1;
     }
     CGFloat fullHeight = AevonKbNativeBounds(nil).size.height;
     CGFloat keyboardHeight = ((UIView *)window).bounds.size.height;
@@ -5729,7 +5777,7 @@ static void AevonKbNativeInstall(void) {
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *note) {
-        AevonKbLiftApply(AevonKbOn != 0);
+        AevonKbLiftRepeat();
     }];
 }
 
