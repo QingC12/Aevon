@@ -5173,6 +5173,10 @@ static void AevonBandNote(CFNotificationCenterRef __unused center,
         AevonAppLogWrite("app: band note from host\n");
     }
     AevonBandReload();
+    // 0.1.50 — 卡片几何变了（键盘态把卡片摆到屏幕下半部 215..932），键盘上移
+    // 的基准「场景底边」也跟着变。这里补一拍重算：键盘弹出那一瞬间宿主还没把
+    // 卡片摆好，`kb: lift` 会先按旧几何算出一个非零位移，通知到了就得拉回来。
+    dispatch_async(dispatch_get_main_queue(), ^{ AevonKbLiftApply(AevonKbOn != 0); });
     // 0.1.36 — 只要锁是开的就擦一次，不再要求「这一次是 0→1」。
     //
     // 0.1.34/0.1.35 的写法是 `if (wasLocked || !AevonBandLock) return;`：锁在上
@@ -5442,6 +5446,8 @@ static IMP AevonOrigIntersection = NULL;
 /// 把键盘帧率拖下来。
 static volatile int AevonKbLeadNotes = 0;
 static volatile int AevonKbMissNotes = 0;
+/// 0.1.50 — 「键盘已经在场景里、不需要换算」那条分支的证词计数。
+static volatile int AevonKbPassNotes = 0;
 
 static void AevonKbLog(const char *line) {
     if (line == NULL) return;
@@ -5590,6 +5596,24 @@ static CGFloat AevonKbSceneHeightNow(void) {
     return 0.0;
 }
 
+/// 宿主那张卡片在**屏幕上的底边**。取不到返回 -1。
+///
+/// 0.1.50 — 场景可以被宿主整体搬到屏幕下半部（`settings.frame` 带原点），此时
+/// `coordinateSpace.bounds` 仍是 430×717、原点仍是 0，**它答不出场景在屏幕的哪
+/// 一段**。能答出来的是宿主推过来的卡片矩形（`AevonBandOuter`，屏幕坐标，
+/// 实测就是 `card.frame`：`win: band report 430x696 at 0,129 hole=335x566`，
+/// 内缩 47.5 才是 hole）。键盘态卡片是 `(0, 215, 430, 717)`，底边 932 ——
+/// 与键盘窗底边严丝合缝，于是上移量自动得 0。
+///
+/// 这是本版唯一依赖外部输入的量，所以拿不到就退 −1，由调用方回落到
+/// 「场景高」那套旧算法（不改变 0.1.48 的既有行为）。
+static CGFloat AevonKbBandBottomEdge(void) {
+    if (AevonBandOn == 0) return -1.0;
+    if (AevonBandOuter.size.width < 1.0 || AevonBandOuter.size.height < 1.0) return -1.0;
+    CGFloat bottom = CGRectGetMaxY(AevonBandOuter);
+    return bottom > 200.0 ? bottom : -1.0;
+}
+
 /// 键盘在屏时把键盘窗整体上移，**让它的底边正好压在场景底边上**。
 ///
 /// 0.1.47 写的是 `场景高 − 键盘窗高`（= −215），前提是「键盘窗底边本来就在场景
@@ -5615,12 +5639,20 @@ static void AevonKbLiftApply(BOOL on) {
         source = keyboardWindow != nil ? 2 : 0;
     }
     CGFloat sceneHeight = AevonKbSceneHeightNow();
-    if (keyboardWindow == nil || sceneHeight < 200.0) {
+    // 0.1.50 — 基准从「场景高」换成「场景在屏幕上的底边」。
+    //
+    // 两者只在「场景贴在屏幕顶」时相等。宿主现在会把场景随卡片搬到 215 上
+    // （`settings.frame = (0,215,430,717)`），这时底边是 932、高还是 717 ——
+    // 用高去算会得出 −215，又把键盘搬回 0.1.48 那个「输入框被盖」的位置。
+    // 用底边算：932 − 932 = 0，键盘留在原生位置，这正是要的。
+    CGFloat sceneBottom = AevonKbBandBottomEdge();
+    if (sceneBottom < 200.0) sceneBottom = sceneHeight;
+    if (keyboardWindow == nil || sceneBottom < 200.0) {
         if (AevonKbLiftNotes < 8) {
             AevonKbLiftNotes += 1;
-            char skip[180];
-            snprintf(skip, sizeof(skip), "kb: lift skip win=%d scene=%.0f src=%d\n",
-                     keyboardWindow != nil ? 1 : 0, sceneHeight, source);
+            char skip[200];
+            snprintf(skip, sizeof(skip), "kb: lift skip win=%d scene=%.0f base=%.0f src=%d\n",
+                     keyboardWindow != nil ? 1 : 0, sceneHeight, sceneBottom, source);
             AevonKbLog(skip);
         }
         return;
@@ -5628,7 +5660,7 @@ static void AevonKbLiftApply(BOOL on) {
     CGSize size = keyboardWindow.bounds.size;
     CGFloat bottom = keyboardWindow.center.y + size.height * 0.5;
     BOOL usable = on && AevonKbHostGate() && size.height > 200.0;
-    CGFloat dy = usable ? (sceneHeight - bottom) : 0.0;
+    CGFloat dy = usable ? (sceneBottom - bottom) : 0.0;
     if (dy > -0.5 && dy < 0.5) dy = 0.0;
     // 每次都写**绝对**值（不是累加）：UIKit 在键盘布局时会重设这个窗口的
     // `transform`，重复通知必须能把状态重新拉回来。
@@ -5636,11 +5668,11 @@ static void AevonKbLiftApply(BOOL on) {
                                            : CGAffineTransformMakeTranslation(0, dy);
     if (AevonKbLiftNotes < 10) {
         AevonKbLiftNotes += 1;
-        char line[220];
+        char line[240];
         snprintf(line, sizeof(line),
-                 "kb: lift %s dy=%.0f bottom=%.0f scene=%.0f kb=%.0fx%.0f src=%d\n",
+                 "kb: lift %s dy=%.0f bottom=%.0f base=%.0f scene=%.0f kb=%.0fx%.0f src=%d\n",
                  (dy == 0.0) ? (usable ? "aligned" : "off") : "applied",
-                 dy, bottom, sceneHeight, size.width, size.height, source);
+                 dy, bottom, sceneBottom, sceneHeight, size.width, size.height, source);
         AevonKbLog(line);
     }
 }
@@ -5648,11 +5680,19 @@ static void AevonKbLiftApply(BOOL on) {
 /// 键盘窗的 `transform` 会被 UIKit 在布局时重置。写进去之后连提三拍
 /// （0 / 80 / 240 ms）：哪一拍被抹掉，后面那拍都会补回来。三次都是绝对值，
 /// 重复写同一个平移量没有副作用。
+///
+/// 0.1.50 — 补两拍（700 / 1500 ms）：宿主把卡片摆到 215..932、场景跟着搬过去
+/// 之后，App 会再排一次版，UIKit 在那期间会重置键盘窗的 `transform`。前五拍
+/// 全是绝对值，重复写同一个数没有副作用。
 static void AevonKbLiftRepeat(void) {
     AevonKbLiftApply(AevonKbOn != 0);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ AevonKbLiftApply(AevonKbOn != 0); });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.24 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbLiftApply(AevonKbOn != 0); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.70 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbLiftApply(AevonKbOn != 0); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.50 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ AevonKbLiftApply(AevonKbOn != 0); });
 }
 
@@ -5738,6 +5778,26 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     }
     CGFloat fullHeight = AevonKbNativeBounds(nil).size.height;
     CGFloat keyboardHeight = ((UIView *)window).bounds.size.height;
+    // 0.1.50 — 键盘底边已经落在场景里 ⇒ 系统问的就是真值，一个数都不改。
+    //
+    // 换算的唯一目的是「补偿键盘超出场景的那一截」。宿主把场景搬到 215 之后
+    // （卡片 215..932、场景跟着 215..932），键盘原生的 616..932 整块在场景内，
+    // 超出量是 0 —— 此时再套 0.1.45 那两条式子只会把 316 抬成 458，内容被推到
+    // 屏幕中间。所以这里先判一次：卡片底边压到键盘底边上了就原样放行。
+    CGFloat keyboardBottomEdge = ((UIView *)window).center.y + keyboardHeight * 0.5;
+    CGFloat bandBottomEdge = AevonKbBandBottomEdge();
+    if (bandBottomEdge > 200.0 && bandBottomEdge >= keyboardBottomEdge - 1.0) {
+        // 证词：走到这条分支说明「键盘已经在场景里」这个前提成立了。没有它，
+        // 日志上「换算没生效」和「本来就不该换算」长得一模一样。
+        if (AevonKbPassNotes < 6) {
+            AevonKbPassNotes += 1;
+            char pass[200];
+            snprintf(pass, sizeof(pass), "kb: lead held h=%.0f base=%.0f kb=%.0f -> %.0f\n",
+                     answer, bandBottomEdge, keyboardHeight, answer);
+            AevonKbLog(pass);
+        }
+        return answer;
+    }
     CGFloat sceneHeight = -1;
     if ([scene isKindOfClass:[UIWindowScene class]]) {
         sceneHeight = ((UIWindowScene *)scene).coordinateSpace.bounds.size.height;

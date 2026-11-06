@@ -1767,18 +1767,24 @@ zStackParticipantDidChange:
             // 0.0.63 — 逻辑尺寸的看门狗，稳态两秒一次（10 拍 × 200 ms）。目标值
             // 记在 FloatHost 里（开窗与换比例时更新），真实值当场从 scene 的
             // settings 读 —— 对不上就重写一次，前四次各记一行。
-            if beat % 10 == 0 {
-                let want = host.canvas
+            //
+            // 0.1.50 — 两处改动：①目标从「尺寸」变成「矩形」，原点也参与对账
+            // （键盘态场景要跟卡片一起下移到 215）；②键盘态改成每拍查，因为
+            // 键盘弹起只有 0.25 s，等到第 10 拍（2 s）时用户早就看见画面在错的
+            // 位置上闪过了。
+            if beat % 10 == 0 || host.isKeyboardFilled {
+                let want = host.canvasFrame
                 if want.height > 200 {
                     let got = AevonSceneFrameOf(scene)
                     if got.width > 0,
-                       abs(got.width - want.width) > 1 || abs(got.height - want.height) > 1 {
+                       abs(got.width - want.width) > 1 || abs(got.height - want.height) > 1
+                        || abs(got.origin.y - want.origin.y) > 1 {
                         let door = AevonPushSceneFrame(scene)
                         if drifts < 4 {
                             drifts += 1
-                            Log.write(String(format: "win: frame drift now=%.0fx%.0f want=%.0fx%.0f door=%ld",
-                                             got.width, got.height,
-                                             want.width, want.height, door))
+                            Log.write(String(format: "win: frame drift now=%.0fx%.0f@%.0f want=%.0fx%.0f@%.0f door=%ld",
+                                             got.width, got.height, got.origin.y,
+                                             want.width, want.height, want.origin.y, door))
                         }
                     }
                 }

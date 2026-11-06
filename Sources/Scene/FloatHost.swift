@@ -1088,6 +1088,27 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 日志里从来没有过答案。
     var canvas: CGSize { natural }
 
+    /// 0.1.50 — 画布在**屏幕上的原点**（只有 y 会变，x 恒 0）。
+    ///
+    /// `settings.frame` 的语义是「这个场景占屏幕上的哪一块矩形」，含原点。0.1.49
+    /// 之前一直只写尺寸、原点写死 0，于是 App 的窗口永远停在屏幕 0..717 那一段：
+    /// 键盘窗底边在 932，超出 717 的那 215 pt 画不到，只能靠宿主搬键盘（0.1.47）
+    /// 或在卡片上盖一块黑（0.1.49）。
+    ///
+    /// 键盘态把卡片摆到 215..932（0.1.48 的形状）之后，场景只需要跟着卡片一起
+    /// 下移 215：窗口变成 215..932，键盘原生的 616..932 整块落在窗口里，**不需要
+    /// 再搬键盘、也不需要 App 重排**（尺寸没变，还是 430×717）。
+    private var canvasOriginY: CGFloat = 0
+
+    /// 场景在屏幕上应该占的那块矩形。守护循环（SceneProbe）按它纠偏。
+    var canvasFrame: CGRect {
+        CGRect(x: 0, y: canvasOriginY, width: natural.width, height: natural.height)
+    }
+
+    /// 键盘态是否生效。守护循环据此把「每 10 拍查一次」提到「每拍查一次」——
+    /// 键盘弹起那 0.25 s 里场景必须已经在 215 上，慢了就会先按 0 画一帧。
+    var isKeyboardFilled: Bool { kbFilled }
+
     /// Answers a host only when the window is really up and really holds the
     /// view. A nil answer means "activate nothing": a presenter whose view is
     /// not in a window is 0.0.20's black screen, and that is not worth one more
@@ -1518,6 +1539,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 就把画布顶出卡片外一截。
         kbTopCrop = 0
         kbSavedCrop = 0
+        // 0.1.50 — 场景原点同理：残留一个 215 会让下一张卡把场景摆到屏幕下半部，
+        // 而 `AevonSceneFrameSet` 的目标表是按 bundle 存的，也必须跟着清。
+        canvasOriginY = 0
+        kbSavedOriginY = 0
         card = nil
         content = nil
         visible = .zero
@@ -3138,7 +3163,15 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 过去。内缩 6 pt 把这条缝盖掉 —— 那 6 pt 里本来也不该有可点的内容。
         var inner = card.frame
         let rim = FloatHost.bandRim
-        if inner.width > rim * 3, inner.height > rim * 3 {
+        // 0.1.50 — 键盘态**不内缩**。
+        //
+        // 键盘态卡片铺到屏幕下半部（215..932），四边环带正好压住键盘的下沿
+        // （内缩 47.5 之后 hole 只到 828.5，键盘 828.5..932 那一排按键全在环里）。
+        // 那一片会被宿主吞掉 —— 用户点最下面一排会没反应。键盘态本来就不需要
+        // 卡片外面的环（卡片已经贴到屏幕边），所以 hole 直接等于卡片：
+        // 环带面积为 0，一根手指都不吞。`AevonBandOuter` 仍然照常上报，App 侧
+        // 的闸门与「卡片底边」判据都还读得到这个矩形。
+        if !kbFilled, inner.width > rim * 3, inner.height > rim * 3 {
             inner = inner.insetBy(dx: rim, dy: rim)
         }
         // 0.1.35 — `cast` 是这一条广播到了几个进程。它必须 > 1（卡片 + 桌面上
@@ -3405,6 +3438,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var kbTopCrop: CGFloat = 0
     /// 键盘态之前那个补偿量，收起时还回去。
     private var kbSavedCrop: CGFloat = 0
+    /// 0.1.50 — 键盘态之前场景在屏幕上的原点 y（平时恒 0），收起时写回去。
+    private var kbSavedOriginY: CGFloat = 0
 
     /// 全体宿主里挑主窗让位。
     ///
@@ -3418,27 +3453,34 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         host.setKeyboardFill(on)
     }
 
-    /// 0.1.49 — 卡片让位：**画布 1:1，画布顶对齐卡片顶（不是贴屏底）**。
+    /// 0.1.50 — 卡片摆回 0.1.48 的位置，**再把场景一起搬下去**。
     ///
-    /// 0.1.47/0.1.48 把卡片摆成「高 = 画布高、贴屏幕底」（`y = 932 − 717 = 215`），
-    /// 于是 App 内容被整体推到屏幕 215..932。Aevon(121) 的反馈是「键盘完整了，但
-    /// 输入框被挡住」—— 几何上完全对得上：
+    /// 前三版各修一半，把这件事的边界量清楚了：
     ///
-    ///   · App 侧收到让位量 316（`kb: lead … -> 316.0`），它把输入框摆在**内容
-    ///     坐标的 401**（= 717 − 316），401 以上是它自己让出来的空档；
-    ///   · 卡片却从屏幕 215 起，`401 + 215 = 616` 落在键盘（401..717）里面 ⇒ 输入框
-    ///     被键盘盖住。
+    ///   · 0.1.47/0.1.48：卡片贴屏底（215..932）、键盘窗上移 −215 ⇒ 键盘完整
+    ///     （401..717），但输入框在 616、正被键盘盖住。
+    ///   · 0.1.49：卡片铺满 932 + 画布顶对齐 ⇒ 输入框落到 401、与键盘上沿重合，
+    ///     但屏幕 717..932 那段在承载场景之外，只能填黑 ⇒ 「底部黑屏」。
+    ///   · 两条路的共同病根是同一个：**场景（也就是 App 的窗口）一直停在屏幕
+    ///     0..717**，而键盘窗的底边在 932。键盘要完整，就得让底边 932 落在场景
+    ///     里 —— 要么把键盘搬进 717（0.1.48），要么把场景撑成 932（会重排）。
     ///
-    /// 所以卡片必须跟**场景原点**对齐而不是跟屏幕底对齐：卡片铺满整块屏幕
-    /// （430×932）、`kbTopCrop = 932 − 717 = 215` 把画布顶到卡片顶，于是内容坐标
-    /// 401 正好映射到屏幕 401 —— 键盘上沿那一线，输入框完整露在键盘之上。
+    /// 0.1.50 走第三条：**场景尺寸一点不动，只把它的原点挪到卡片的原点**。
+    /// `settings.frame` 的语义是「这个场景占屏幕上哪一块矩形」，带原点。卡片摆
+    /// 215..932，场景跟着写 `(0, 215, 430, 717)`，于是：
     ///
-    /// 卡片高 932 还有第二个用处：屏幕 717..932 这 215 pt 在承载场景之外，
-    /// 卡片盖住它之后 `applyBars()` 会填黑，不再把桌面透出来。
+    ///   · App 的窗口变成 215..932，键盘原生的 616..932 **整块落在窗口内**，
+    ///     不需要搬键盘（App 侧 `dy = 场景底边 − 键盘底边 = 932 − 932 = 0`）；
+    ///   · App 收到的让位量就是真实值 316，内容可用 401，输入框在内容 401 →
+    ///     屏幕 616 = 键盘上沿；
+    ///   · 画布仍是 430×717，**App 不重排**，顶栏、字号、排版与平时一模一样
+    ///     （用户要的「顶部不要推到全屏」就是这一条）；
+    ///   · 卡片只有 717 高，屏幕 0..215 露出桌面，717..932 由场景自己画 ——
+    ///     没有任何一段需要靠卡片填黑。
     ///
-    /// ⛔ 只碰 `card.frame`、`content` 的 `center/transform` 与 `kbTopCrop`：
-    /// **不写 `content.bounds`**（0.0.67 的「应用打不开 + 桌面黑屏」就是替 presenter
-    /// 写那个 bounds），也**不动场景尺寸**（那是 0.0.6x 黑屏那一族）。
+    /// ⛔ 只碰 `card.frame`、`content` 的 `center/transform`、`canvasOriginY` 与
+    /// 场景原点：**不写 `content.bounds`、不改 `natural`**（尺寸没变，App 不重排，
+    /// 也就没有 0.0.67「替 presenter 写 bounds」和 0.0.6x「改几何」那两族风险）。
     func setKeyboardFill(_ on: Bool) {
         guard let card = card, let window = window, visible.height > 16 else { return }
         if on {
@@ -3446,27 +3488,41 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             kbFilled = true
             kbSavedFrame = card.frame
             kbSavedCrop = kbTopCrop
+            kbSavedOriginY = canvasOriginY
             let screen = window.bounds.size
-            card.frame = CGRect(x: 0, y: 0, width: screen.width, height: screen.height)
-            // 画布顶对齐卡片顶：多出来的那一截（932 − 717）全部记在顶部裁切上。
-            kbTopCrop = Swift.max(0, screen.height - visible.height)
+            var y = screen.height - visible.height
+            if y < 0 { y = 0 }
+            card.frame = CGRect(x: 0, y: y, width: visible.width, height: visible.height)
+            kbTopCrop = 0
+            canvasOriginY = y
+            // 场景跟着卡片走。目标登记在 C 侧，SceneProbe 的守护循环下一拍就把它
+            // 写进 `settings.frame`（键盘态改成每拍检查，见那里的注释）。
+            AevonSceneFrameSet(bundle, 0, Double(y),
+                               Double(visible.width), Double(visible.height))
             followContent()
-            // 0.1.49 — 光晕是卡片外面那一圈柔光，卡片整块换了尺寸就必须跟着走，
-            // 否则键盘态会在屏幕上方留下一个 342×570 的旧影子。
             applyGlow()
             Log.write("win: keyboard fill on card=" + size(card.frame.size)
                       + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
+                      + " scene=" + String(format: "%.0f", canvasOriginY)
                       + " crop=" + String(format: "%.0f", kbTopCrop))
+            // 0.1.50 — App 侧要按「卡片底边」算键盘该不该搬，所以卡片一换位置就得
+            // 立刻把新几何推过去（`reportBand` 自己判重，几何没变不会重复发）。
+            reportBand()
         } else {
             guard kbFilled else { return }
             kbFilled = false
             if !kbSavedFrame.isNull { card.frame = kbSavedFrame }
             kbTopCrop = kbSavedCrop
+            canvasOriginY = kbSavedOriginY
+            AevonSceneFrameSet(bundle, 0, Double(canvasOriginY),
+                               Double(natural.width), Double(natural.height))
             followContent()
             applyGlow()
             Log.write("win: keyboard fill off card=" + size(card.frame.size)
                       + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
+                      + " scene=" + String(format: "%.0f", canvasOriginY)
                       + " crop=" + String(format: "%.0f", kbTopCrop))
+            reportBand()
         }
     }
 
