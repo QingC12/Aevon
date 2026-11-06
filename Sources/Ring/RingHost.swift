@@ -1191,6 +1191,10 @@ final class RingHost: NSObject {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.kbAt = CACurrentMediaTime()
+            // 0.1.56 — 心跳顺手让宿主复核一次键盘高度。键盘开着期间候选栏收放会让
+            // 顶边在 616 / 643 之间跳，卡片底边不跟着走就会露出一条 27 pt 的缝
+            // （或压住输入框）。`setKeyboardFill` 自己判重：高度没变一个几何都不写。
+            FloatHost.keyboardFill(true)
             self.syncOverlayVisibility()
         }
     }

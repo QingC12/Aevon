@@ -1100,9 +1100,18 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 再搬键盘、也不需要 App 重排**（尺寸没变，还是 430×717）。
     private var canvasOriginY: CGFloat = 0
 
+    /// 0.1.56 — 场景的**高度**也变成可变项了。
+    ///
+    /// 键盘态把场景从 430×717@215 收到 430×401@215（底边正好落在键盘上沿），
+    /// 键盘因此整块落在 App 窗口外面。守护循环按 `canvasFrame` 纠偏，这个高度
+    /// 不跟着变就会把 717 写回去 —— 等于每拍把输入框重新盖住一次。
+    /// 0 表示「跟随 `natural.height`」。
+    private var canvasHeight: CGFloat = 0
+
     /// 场景在屏幕上应该占的那块矩形。守护循环（SceneProbe）按它纠偏。
     var canvasFrame: CGRect {
-        CGRect(x: 0, y: canvasOriginY, width: natural.width, height: natural.height)
+        CGRect(x: 0, y: canvasOriginY, width: natural.width,
+               height: canvasHeight > 16 ? canvasHeight : natural.height)
     }
 
     /// 键盘态是否生效。守护循环据此把「每 10 拍查一次」提到「每拍查一次」——
@@ -1543,6 +1552,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 而 `AevonSceneFrameSet` 的目标表是按 bundle 存的，也必须跟着清。
         canvasOriginY = 0
         kbSavedOriginY = 0
+        canvasHeight = 0
+        kbSavedHeight = 0
         card = nil
         content = nil
         visible = .zero
@@ -3149,8 +3160,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return
         }
         let shape = bandRect(for: card)
-        if !bandReported.isNull && shape.frame == bandReported { return }
-        bandReported = shape.frame
+        // 0.1.56 — 键盘态上报的外框**就是卡片本身**，不做 `reach` 外扩。
+        //
+        // Aevon(128) 里键盘态上报的是 `430x783 at 0,149`：卡片 430×717@215 四边
+        // 各外扩 33 pt，外框跑到场景（215..932）之外 66 pt、上边压到 149。
+        // App 拿到一个比自己窗口还大的外框，会把内容按 783 排 —— 这就是「关键盘时
+        // 内容先放大再缩小」的另一半（另一半是场景帧与卡片没同拍）。
+        // 键盘态本来就不需要环带（`ring: keyboard band stepped aside`），
+        // 外框 = 卡片，App 的两个矩形才是同一个。
+        let outer = kbFilled ? card.frame : shape.frame
+        if !bandReported.isNull && outer == bandReported { return }
+        bandReported = outer
         // 0.1.36 — 交给 App 进程的「卡片内部」比真卡片内缩 `bandRim`。
         //
         // 用户这一条只剩上滑关闭：「百分百触发全屏 App 的触摸，出现选中背景但
@@ -3180,10 +3200,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         //
         // 0.1.36 — 把 hole 一起写进这一行：下一份日志能直接看出上报的是「真卡片」
         // 还是内缩之后的那一块，不必再靠 `app: band miss … hole=` 反推。
-        let cast = AevonAppBandSet(bundle, shape.frame, inner)
+        let cast = AevonAppBandSet(bundle, outer, inner)
         Log.write(String(format: "win: band report %.0fx%.0f at %.0f,%.0f cast=%d hole=%.0fx%.0f",
-                         shape.frame.size.width, shape.frame.size.height,
-                         shape.frame.origin.x, shape.frame.origin.y,
+                         outer.size.width, outer.size.height,
+                         outer.origin.x, outer.origin.y,
                          Int32(clamping: cast), inner.size.width, inner.size.height))
     }
 
@@ -3440,6 +3460,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var kbSavedCrop: CGFloat = 0
     /// 0.1.50 — 键盘态之前场景在屏幕上的原点 y（平时恒 0），收起时写回去。
     private var kbSavedOriginY: CGFloat = 0
+    /// 0.1.56 — 键盘态之前场景的高度（0 = 跟随 `natural.height`）。
+    private var kbSavedHeight: CGFloat = 0
 
     /// 全体宿主里挑主窗让位。
     ///
@@ -3481,20 +3503,68 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// ⛔ 只碰 `card.frame`、`content` 的 `center/transform`、`canvasOriginY` 与
     /// 场景原点：**不写 `content.bounds`、不改 `natural`**（尺寸没变，App 不重排，
     /// 也就没有 0.0.67「替 presenter 写 bounds」和 0.0.6x「改几何」那两族风险）。
+    /// 0.1.56 — 键盘顶边在屏幕上的 Y（本机 616）。0 = 没读到。
+    ///
+    /// 应用进程在 `willChangeFrame` 里把它写进 `/var/mobile/Aevon.kb`（见
+    /// `AevonKbTopPublish`）。读一个 6 字节的小文件，比再开一条跨进程通道便宜，
+    /// 也比 `CFPreferences` 干净 —— 后者会把整个偏好域刷一遍。
+    /// 读失败一律返回 0，调用方退回「铺满屏底」的老行为，不会因此变小。
+    static func keyboardTopOnScreen() -> CGFloat {
+        guard let text = try? String(contentsOfFile: "/var/mobile/Aevon.kb", encoding: .utf8),
+              let value = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              value > 40, value < 4000 else { return 0 }
+        return CGFloat(value)
+    }
+
     func setKeyboardFill(_ on: Bool) {
         guard let card = card, let window = window, visible.height > 16 else { return }
         if on {
-            guard !kbFilled else { return }
+            let screen = window.bounds.size
+            var y = screen.height - visible.height
+            if y < 0 { y = 0 }
+            let kbTop = FloatHost.keyboardTopOnScreen()
+            // 0.1.56 — 已经铺开了也要再看一眼：键盘高度会中途变（候选栏收放，
+            // 本机 616 ↔ 643）。不变就不动，变了只改高度，`kbSaved*` 一个都不碰
+            // （那才是「收起时要还回去的东西」）。
+            if kbFilled {
+                guard kbTop > y + 240, kbTop < screen.height - 40 else { return }
+                let fresh = kbTop - y
+                guard abs(fresh - card.frame.height) > 8 else { return }
+                card.frame = CGRect(x: 0, y: y, width: visible.width, height: fresh)
+                canvasHeight = (fresh < visible.height - 1) ? fresh : 0
+                AevonSceneFrameSet(bundle, 0, Double(y),
+                                   Double(visible.width), Double(fresh))
+                var door: Int = 0
+                if let sc = window.windowScene { door = Int(AevonPushSceneFrame(sc)) }
+                followContent()
+                Log.write("win: keyboard fill reflow card=" + size(card.frame.size)
+                          + " kbtop=" + String(format: "%.0f", kbTop)
+                          + " push=" + String(format: "%d", door))
+                return
+            }
             kbFilled = true
             kbSavedFrame = card.frame
             kbSavedCrop = kbTopCrop
             kbSavedOriginY = canvasOriginY
-            let screen = window.bounds.size
-            var y = screen.height - visible.height
-            if y < 0 { y = 0 }
-            card.frame = CGRect(x: 0, y: y, width: visible.width, height: visible.height)
+            kbSavedHeight = canvasHeight
+            // 0.1.56 — **场景高收到键盘顶边**，不再一律铺到屏幕底。
+            //
+            // 前七版都是「卡片铺满 215..932，让 App 自己避让键盘」，微信/QQ 一次
+            // 都没避（`kb: guide h=0`、`kb: lead -> 289 took=0` 之后输入框仍在
+            // 键盘底下）。这一版换成原生形状：承载场景高 = 键盘顶边 − 卡片顶边，
+            // 键盘整块落在 App 窗口**外面**，App 不需要知道键盘存在，输入框天然
+            // 在窗口底边（屏幕 616，正是键盘上沿）。
+            //
+            // 代价是 App 会按 401 的高度重排一次 —— 那正是原生键盘弹出时的行为，
+            // 也是「输入框看得见」必须付的账。
+            var height = visible.height
+            if kbTop > y + 240, kbTop < screen.height - 40 {
+                height = kbTop - y
+            }
+            card.frame = CGRect(x: 0, y: y, width: visible.width, height: height)
             kbTopCrop = 0
             canvasOriginY = y
+            canvasHeight = (height < visible.height - 1) ? height : 0
             // 场景跟着卡片走。目标登记在 C 侧，这里**当拍就推一次**。
             //
             // 0.1.55 — 原来是只登记、等 SceneProbe 守护循环下一拍才写。Aevon(127)
@@ -3506,33 +3576,51 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 卡片 frame 与 settings.frame 必须在**同一拍**里落地，屏幕才只画一次。
             // `AevonPushSceneFrame` 是同步的，且自己判重（尺寸与原点都没变就返回 0）。
             AevonSceneFrameSet(bundle, 0, Double(y),
-                               Double(visible.width), Double(visible.height))
-            if let sc = window.windowScene { _ = AevonPushSceneFrame(sc) }
+                               Double(visible.width), Double(height))
+            var door: Int = 0
+            if let sc = window.windowScene { door = Int(AevonPushSceneFrame(sc)) }
             followContent()
             applyGlow()
             Log.write("win: keyboard fill on card=" + size(card.frame.size)
                       + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
                       + " scene=" + String(format: "%.0f", canvasOriginY)
-                      + " crop=" + String(format: "%.0f", kbTopCrop))
+                      + " crop=" + String(format: "%.0f", kbTopCrop)
+                      + " kbtop=" + String(format: "%.0f", kbTop)
+                      + " push=" + String(format: "%d", door))
             // 0.1.50 — App 侧要按「卡片底边」算键盘该不该搬，所以卡片一换位置就得
             // 立刻把新几何推过去（`reportBand` 自己判重，几何没变不会重复发）。
             reportBand()
         } else {
             guard kbFilled else { return }
             kbFilled = false
+            // 0.1.56 — **先放场景，再改卡片**。
+            //
+            // 原来是先 `card.frame = kbSavedFrame`（430×717@215 一步收回
+            // 345×575@50,150），再登记场景、再推帧。Aevon(128) 把中间态拍下来了：
+            //
+            //   win: keyboard fill off card=345x575 at 50,150 scene=0
+            //   win: band report 430x692 at 0,91
+            //   win: frame drift now=430x717@215 want=430x717@0 door=3 wrote=20
+            //
+            // 卡片已经是默认大小，场景还停在 215..932 —— 这一拍 App 的内容是按
+            // 717 高画的，却被塞进一张 575 高的卡里，用户看到的就是「先放大再缩小」。
+            // 顺序反过来，场景帧先落到 0..717，卡片再收，两个变化在同一拍里对齐。
+            canvasOriginY = kbSavedOriginY
+            canvasHeight = kbSavedHeight
+            AevonSceneFrameSet(bundle, 0, Double(canvasOriginY),
+                               Double(natural.width),
+                               Double(canvasHeight > 16 ? canvasHeight : natural.height))
+            var door: Int = 0
+            if let sc = window.windowScene { door = Int(AevonPushSceneFrame(sc)) }
             if !kbSavedFrame.isNull { card.frame = kbSavedFrame }
             kbTopCrop = kbSavedCrop
-            canvasOriginY = kbSavedOriginY
-            AevonSceneFrameSet(bundle, 0, Double(canvasOriginY),
-                               Double(natural.width), Double(natural.height))
-            // 0.1.55 — 收起时同样当拍推（理由见 `fill on` 那段）。
-            if let sc = window.windowScene { _ = AevonPushSceneFrame(sc) }
             followContent()
             applyGlow()
             Log.write("win: keyboard fill off card=" + size(card.frame.size)
                       + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
                       + " scene=" + String(format: "%.0f", canvasOriginY)
-                      + " crop=" + String(format: "%.0f", kbTopCrop))
+                      + " crop=" + String(format: "%.0f", kbTopCrop)
+                      + " push=" + String(format: "%d", door))
             // 0.1.53 — 上报推到下一拍。
             //
             // Aevon(125) 的关键盘序列是：
