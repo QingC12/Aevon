@@ -931,6 +931,9 @@ zStackParticipantDidChange:
     /// and a dead control on the home screen is worse than a full-screen app.
     static func openCard(_ bundleID: String, fallback: @escaping (String) -> Void) {
         guard !bundleID.isEmpty, !bundleID.hasPrefix("placeholder.") else { return }
+        // 0.1.91 — 「这张卡正在建」的登记。必须在**第一个** return 之前：
+        // 收面板那条路要用它区分「卡在路上，可以先收」与「根本没有卡，不许收」。
+        markPending(bundleID)
         // 0.1.29 — 圆盘选中的图标**已经在停靠小窗里**：把它升回主悬浮窗，
         // 不要再开一张。
         //
@@ -1037,6 +1040,36 @@ zStackParticipantDidChange:
     /// Who the card is showing. `Aevon.hostedPath` is the copy the app reads;
     /// the static is only here so the log can say whose mark was cleared.
     private static var hostedBundle: String?
+
+    // MARK: - 0.1.91 「卡在路上」
+
+    /// `openCard` 一进来就登记，3 秒后自动过期。
+    ///
+    /// 这一位只回答一个问题：**这张卡已经在建了，还是压根没开始建**。
+    /// 0.1.90 收通知中心要等 `AevonCardIsUpFor()` 说「卡片在」才动手 ——
+    /// 判据本身没错，但冷启动时卡片要 0.5 秒才占上槽，于是面板也跟着压
+    /// 0.5 秒才肯走。用户的原话是「感觉速度有点慢」。
+    ///
+    /// 两边分开之后就能各按各的节奏：卡片在 ⇒ 立刻收；卡在路上且已经等了
+    /// 一会儿 ⇒ 也收（面板自己那 0.35 秒下滑正好盖住卡片落地的那一下）；
+    /// 压根没登记 ⇒ 一动不动（0.1.90 的原判据，真锁屏 / 开卡失败都落在这）。
+    ///
+    /// 3 秒是过期时间不是判据，跟看门狗同一个理由：`openCard` 失败的那几条
+    /// 早退路径不会回头清这一位，过期把它兜掉。
+    private static var pendingBundle = ""
+    private static var pendingUntil: CFAbsoluteTime = 0
+
+    private static func markPending(_ bundleID: String) {
+        pendingBundle = bundleID
+        pendingUntil = CFAbsoluteTimeGetCurrent() + 3.0
+    }
+
+    static func cardIsComing(_ bundleID: String) -> Bool {
+        if FloatHost.mainBundle == bundleID { return true }
+        if FloatHost.dockedHost(of: bundleID) != nil { return true }
+        guard pendingBundle == bundleID else { return false }
+        return CFAbsoluteTimeGetCurrent() < pendingUntil
+    }
 
     private static func markHosted(_ bundleID: String) {
         hostedBundle = bundleID
@@ -2360,3 +2393,19 @@ public func AevonCardIsUpFor(_ bundle: UnsafePointer<CChar>?) -> Int32 {
     if FloatHost.dockedHost(of: identifier) != nil { return 1 }
     return 0
 }
+
+/// 0.1.91 — 「这张卡在路上吗」。
+///
+/// 与上面那一位的区别只有一个：卡片还没占上槽、但 `openCard` 已经接手了，
+/// 这里答 1，`AevonCardIsUpFor` 答 0。收面板要多知道这一格，理由写在
+/// `SceneProbe.pendingBundle` 上：冷启动那 0.5 秒里不许干等。
+///
+/// 同样只在主队列调用，读的是主线程状态。
+@_cdecl("AevonCardIsComingFor")
+public func AevonCardIsComingFor(_ bundle: UnsafePointer<CChar>?) -> Int32 {
+    guard let bundle = bundle else { return 0 }
+    let identifier = String(cString: bundle)
+    guard identifier.count > 2 else { return 0 }
+    return SceneProbe.cardIsComing(identifier) ? 1 : 0
+}
+

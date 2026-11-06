@@ -39,6 +39,9 @@ extern void AevonOpenFromNotification(const char *bundleID);
 // 用时间猜「起来没起来」会在真机上错判（0.1.84 已经在键盘上付过一次学费）。
 extern int AevonActivateSwitchOff(void);
 extern int AevonCardIsUpFor(const char *bundle);
+// 0.1.91 — 「卡在路上」。`openCard` 一接手就答 1，卡片真正占上槽之前它比
+// `AevonCardIsUpFor` 早开口。收面板要靠这一位把「在等卡」那半秒让开。
+extern int AevonCardIsComingFor(const char *bundle);
 
 /// The scene manager is a singleton with no public door, and its spelling has
 /// changed across releases. Resolving it here keeps the class-method dispatch
@@ -3158,8 +3161,13 @@ static void AevonOpenWatch(id self, SEL cmd, id request, id options,
 //           只影响当前这一条；log73 关账。
 // 所以这里照做：不伪造收起动作，只**提前**执行系统本来就会做的那一次。
 //
-// 时机：延迟 0.45 秒。点通知这一刻 SpringBoard 正在跑一次 open 事务，就地动通知中心有
-// 撞断言的历史（同一份 roadmap 里 0.6.20 的教训）—— 别人踩过的坑不重踩。
+// 时机：0.1.90 是固定 0.45 秒，0.1.91 改成 0.10 秒起、先问卡片、卡在路上就并行收
+// （见 `AevonCleanCoverAfterCard`）。0.45 秒那条的出发点是「点通知这一刻 SpringBoard
+// 还在跑一次 open 事务，就地动通知中心有撞断言的历史」（同一份 roadmap 里 0.6.20 的
+// 教训）。这个顾虑在 0.1.88 之后已经不成立了：我们把原实现整段跳过，结果块在
+// 同一个 runloop 里就收过尾了，没有事务可撞。留 0.10 秒只是给 open 请求的处理函数
+// 退出栈帧 —— 那点时间用户看不出来，但足以避开「在自己被调用的那一拍里改别人的状态」。
+// 用户 0.1.90 的真机反馈是「会收，但感觉有点慢」，慢的正是这 0.45 - 0.10 = 0.35 秒。
 
 /// 只读一个 getter。不存在、或对象把消息转发到一个会抛的实现上，都返回 nil。
 ///
@@ -3304,6 +3312,11 @@ static void AevonCleanBanner(id dispatcher, char *out, size_t size) {
 ///  ② **收面板不能自己定时，要等卡片。** 0.45 秒时卡片还没起来（真机 divert 18 秒、
 ///     card up 21 秒），那时收面板会露出两三秒空白桌面。所以改成轮询卡片，
 ///     卡片一在就收，面板消失与卡片出现同一拍。
+///  ③ **0.1.91 — 等卡片这一条留，但不再是唯一出口。** 用户 0.1.90 的真机反馈是
+///     「会收，但感觉有点慢」：面板压在卡片后面 0.3~0.5 秒才走。真机日志
+///     （Aevon(158)）里四处 `wait=0/1` 说明冷却期内卡片其实早就占了槽，慢的是那个
+///     0.45 秒的起始延迟与 0.15 秒的节拍。这一版把起始延迟压到 0.10 秒、节拍压到
+///     0.04 秒，并给「卡在路上」单开一个出口 —— 见 `AevonCleanCoverAfterCard`。
 static void AevonCleanCover(char *out, size_t size) {
     if (out == NULL || size == 0) return;
     out[0] = '\0';
@@ -3448,35 +3461,64 @@ static id AevonCleanDispatcher(void) {
 static int AevonCleanRuns = 0;
 #define AEVON_CLEAN_MAX 6
 
-/// 等卡片起来的那条轮询。每 0.15 秒一拍，最多 24 拍（3.6 秒）。
+/// 点通知那一刻的绝对时间。只给日志里的 `at=` 用 —— 0.1.90 说「慢了」，那就得有一个
+/// 从手指到面板开始走的毫秒数，否则下一版只能靠感觉再调一次。
+static double AevonCleanTap = 0;
+
+static int AevonCleanElapsed(void) {
+    if (AevonCleanTap <= 0) return -1;
+    return (int)((CFAbsoluteTimeGetCurrent() - AevonCleanTap) * 1000.0);
+}
+
+/// 等卡片的那条轮询。0.1.91 把节拍从 0.15 秒压到 0.04 秒，并多了一个「卡在路上」的出口。
 ///
-/// 为什么不能自己定个时间就收：真机上 `divert` 那一拍到卡片真正在（`FloatHost.mainBundle`
-/// 置上）隔着 2~3 秒 —— 20:36:18 分流、20:36:21 卡片在。0.1.89 在 0.45 秒就收，
-/// 即使闸放行，看到的也会是「通知中心先关、桌面空两三秒、App 才出现」。面板与卡片
-/// 必须同一拍，这也是这条轮询存在的唯一理由。
+/// 0.1.90 的判据是「卡片真的在（`FloatHost.mainBundle` 置上）才收」，这条留住 —— 它是
+/// 唯一不会把用户扔在空桌面上的判据。问题在于它是**唯一**的出口：冷启动时 `openCard`
+/// 要先等 scene 出现（真机 0.1~0.5 秒）才占槽，于是面板跟着压 0.5 秒才肯动，用户看到的
+/// 就是「点了，等一会儿，通知中心才走」。
 ///
-/// 反过来，卡片没起来就**不收**。这不只是省事：卡片没起来意味着 App 对用户不可用，
-/// 此时把面板收掉等于把人扔在一个空桌面上，还得等看门狗补调原实现、再全屏打开一遍。
-/// 「收不收」与「能不能用」绑在同一个判据上，锁这件事就不用单独猜了 —— 真锁屏时
-/// 挂起启动起不来，卡片自然不出现，面板自然不动。
-#define AEVON_CLEAN_POLL 0.15
-#define AEVON_CLEAN_TRIES 24
+/// 0.1.91 把「卡在路上」（`AevonCardIsComingFor`，`openCard` 进门就登记）单列成第二个
+/// 出口：等满 `AEVON_CLEAN_FORCE` 拍还没占上槽也收。敢这么做的理由是**面板自己那次
+/// 下滑要 0.35 秒左右**，卡片落地通常就在这 0.35 秒里 —— 两个动画叠着走，用户看到的
+/// 是「面板一走，卡就在」，而不是先空桌面再出卡。0.1.89 之所以在那条路上露出两三秒
+/// 空白，是因为它既没有「卡在路上」这一位、也没有卡片这条快路，收的时候卡片连影子
+/// 都还没有。
+///
+/// 第三格照旧不动：`AevonCardIsComingFor` 也答 0（`openCard` 根本没接手、或 3 秒过期）
+/// ⇒ 一拍都不收，最多问到 3.6 秒就收手。真锁屏、开卡失败都落在这里。
+///
+/// 时序（毫秒，从 `divert` 那拍算）：
+///   0     `AevonNotifyCleanup` 排进主队列
+///   100   第一次问：卡片在 ⇒ 当场收（热启动常见，`at≈100`）
+///   100+ 每 40 毫秒再问一次
+///   300   还只是「在路上」⇒ 收（`f=1`，冷启动常见）
+///   3600  连「在路上」都没有 ⇒ `cover=skip:nocard`，不动手
+#define AEVON_CLEAN_DELAY 0.10       // 从手指到第一次问卡片（0.1.90 是 0.45）
+#define AEVON_CLEAN_POLL 0.04
+#define AEVON_CLEAN_TRIES 90        // 0.04 × 90 = 3.6 秒，与 0.1.90 同一个上限
+#define AEVON_CLEAN_FORCE 5         // 5 × 0.04 = 0.2 秒；加上 0.10 秒起始延迟 = 0.30 秒
 
 static void AevonCleanCoverAfterCard(const char *bundle, int tick) {
     if (bundle == NULL || bundle[0] == '\0') return;
     if (AevonActivateSwitchOff()) return;          // 闸：开关每拍都查
 
-    if (AevonCardIsUpFor(bundle)) {
-        char cover[128], line[300];
+    int up = AevonCardIsUpFor(bundle);
+    int coming = up ? 1 : AevonCardIsComingFor(bundle);
+
+    if (up || (coming && tick >= AEVON_CLEAN_FORCE)) {
+        char cover[128], line[320];
         AevonCleanCover(cover, sizeof(cover));
-        snprintf(line, sizeof(line), "notify: cover b=%s %s wait=%d", bundle, cover, tick);
+        // `f=1` 表示这一下是「卡在路上就收了」，不是「卡片已经在」。两者都要留痕：
+        // 若用户觉得快是快了但闪了一下，日志里这两格就是分辨它的唯一办法。
+        snprintf(line, sizeof(line), "notify: cover b=%s %s wait=%d at=%dms f=%d",
+                 bundle, cover, tick, AevonCleanElapsed(), up ? 0 : 1);
         AevonLogRaw(line);
         return;
     }
     if (tick >= AEVON_CLEAN_TRIES) {
         char line[240];
-        snprintf(line, sizeof(line), "notify: cover b=%s cover=skip:nocard wait=%d",
-                 bundle, tick);
+        snprintf(line, sizeof(line), "notify: cover b=%s cover=skip:nocard wait=%d at=%dms",
+                 bundle, tick, AevonCleanElapsed());
         AevonLogRaw(line);
         return;
     }
@@ -3493,7 +3535,7 @@ static void AevonCleanCoverAfterCard(const char *bundle, int tick) {
 }
 
 /// 分流成功之后补做的那两件收尾。**唯一调用点**是 `AevonOpenHit` 的分流分支，
-/// 延迟 0.45 秒、走主队列。
+/// 延迟 0.10 秒、走主队列。
 ///
 /// 横幅当场收（它跟卡片无关，0.1.89 已验过 `banner=ok:bannerDestination`），
 /// 面板交给 `AevonCleanCoverAfterCard` 等卡片。
@@ -3586,12 +3628,15 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             }
             AevonOpenFromNotification(bundle);
             // 0.1.89：这次没转发，SpringBoard 就没有机会去收面板 / 收横幅 —— 那两件
-            // 事本来挂在它的收尾里。延迟 0.45 秒自己补上：open 事务跑完再动通知中心。
+            // 事本来挂在它的收尾里。自己补上。
             // 0.1.90：横幅在这里收，面板不在这里收 —— 面板要等卡片，见
             // `AevonCleanCoverAfterCard`。字符串必须自己复制一份带进块里。
+            // 0.1.91：0.45 秒压到 0.10 秒，并且先记下手指这一刻（`at=` 的零点）。
+            AevonCleanTap = CFAbsoluteTimeGetCurrent();
             char *cleanBundle = strdup(bundle);
             if (cleanBundle != NULL) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                             (int64_t)(AEVON_CLEAN_DELAY * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
                     AevonNotifyCleanup(cleanBundle);
                     free(cleanBundle);

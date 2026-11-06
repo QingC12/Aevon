@@ -667,7 +667,10 @@ def main():
                   # 必须不在。
                   b"notify: hub d=%@ via=%s",
                   b"notify: clean d=%s %s n=%d",
-                  b"notify: cover b=%s %s wait=%d",
+                  # 0.1.91 — 面板那行多了两格：`at=` 是手指到面板开始走的毫秒数，
+                  # `f=1` 表示「卡在路上就收了」而不是「卡片已经在」。用户报的是
+                  # 「会收但慢」，没有这两格，下一版只能再靠感觉调。
+                  b"notify: cover b=%s %s wait=%d at=%dms f=%d",
                   b"notify: cover sels%s",
                   b"cover=ok:%s",
                   b"cover=shape%s",
