@@ -4771,6 +4771,16 @@ static void AevonKbGuideNote(void);
 static void AevonKbLog(const char *line);
 /// 0.1.58 — 键盘视觉实体的顶边（定义在键盘段里 `AevonKbWindowScan` 之后）。
 static CGFloat AevonKbVisualTop(void);
+/// 0.1.84 — 同一个测量的**三态**版本。`AevonKbVisualTop` 把「窗在屏、这一拍量不到」
+/// 折成「沿用上次真值」，上层就分不清「键盘还在」和「键盘走了、只是空壳还没被隐藏」
+/// —— Aevon(152) 里每一次真收起都被那个假 573 判成 `settle keep`。所以收起判定
+/// 改问这个函数要状态，不再靠数的大小去猜。
+enum {
+    AevonKbStateGone = 0,   // 窗 hidden / 透明 / 滑出屏底 / 尺寸不对 ⇒ 真的收了
+    AevonKbStateShell = 1,  // 窗在屏、这一拍找不到键盘视图 ⇒ 不可测（既不算在，也不算走）
+    AevonKbStateTop = 2,    // 真量到顶边
+};
+static CGFloat AevonKbVisualTopState(int *stateOut);
 /// 0.1.59 — 场景几何（都定义在键盘段后部，这里只要前置声明）。
 static CGRect AevonKbSceneRectOnScreen(void);
 static CGFloat AevonKbSceneHeightNow(void);
@@ -5152,6 +5162,10 @@ static void AevonKbSample(void) {
 ///   · 量到键盘 ⇒ 这条通知是误报，续租、继续开着（`kb: settle keep top=`）；
 ///   · 量不到   ⇒ 真收了，此时才落状态、才把窗口还回去（`kb: settle gone`）。
 /// 代价：真收起时卡片与触发条晚 0.30 s 回来（原来是立刻）。
+///
+/// 0.1.84 — 「量不到」这句话被拆成两件事（空壳 / 窗真的不在了），因为「量不到」
+/// 出现的位置既有「键盘还在重排」也有「键盘已经走了」，一次单点判定分不开；
+/// 现在是一个最多九拍的轮询，见 `AevonKbSettleWait`。
 static int AevonKbSettleSeq = 0;
 
 /// 任何一次「起来」都作废待定的收起。
@@ -5159,79 +5173,91 @@ static void AevonKbSettleCancel(void) {
     AevonKbSettleSeq += 1;
 }
 
-static void AevonKbSettleWait(int seq, int retries);
+static void AevonKbSettleWait(int seq, int polls, int goneHits);
 
 static void AevonKbSettleOff(void) {
     int seq = AevonKbSettleSeq + 1;
     AevonKbSettleSeq = seq;
-    AevonKbSettleWait(seq, 0);
+    AevonKbSettleWait(seq, 0, 0);
 }
 
-/// 0.1.77 — **一次「收起」要两次独立证据才算数。**
+/// 0.1.84 — **收起改成一个「到点落地」的轮询，不再是一次判定。**
 ///
-/// Aevon(148) 把这条路的失效拍下来了。抖音那一串是：
+/// Aevon(152) 把「关键盘 5~10 s 才还原」的账算清了。整份日志里 8 次收起，8 次
+/// 都是同一个形状：
 ///
-///   kb: hide note seen gap=1.02        ← 键盘才起来 1 秒就收到 WillHide
-///   kb: settle gone measure=0          ← 量键盘视图，量到 0（一次窗口扫描失败）
-///   app: keyboard gone (bridge)        ← 于是发了 `com.aevon.kb.off`
-///   ring: keyboard gone, edge band back
-///   win: keyboard fill off …           ← 桌面把卡片收回去
-///   win: keyboard fill on …            ← 下一个心跳又张开
+///   kb: hide note gap=1.14 raw=1147 h=386 off=1   ← 真的关了（矩形在屏外）
+///   kb: top zero win=430x932@0 hid=0 sub=1 last=573  ← 键盘窗成了空壳
+///   kb: settle keep top=573                      ← **573 是缓存值，不是当拍读数**
+///   …… 5 秒空白 ……
+///   kb: idle zero close hits=3                   ← 1 Hz 心跳凑满三个零
+///   kb: settle wait measure=0 retry=0
+///   kb: settle gone measure=0 retry=1            ← 0.70 s 后才落地
 ///
-/// 这一段在整份日志里出现 **5 次**（16:38:23/24、25/27、28/29、30/32、33/34），
-/// 每次间隔 1 秒左右 —— 用户看到的就是「打开键盘时悬浮窗先缩小再放大」，而且
-/// 只要那一下正好落在关键盘之后，卡片就一直停在放大态（「不会还原」）。
+/// `top zero` 那一拍的窗是「满屏、可见、子视图只剩 1」，也就是**空壳**：键盘已经
+/// 走了、窗还没来得及被隐藏（日志里 `hid=1` 大约晚 1 s 才出现）。旧版把空壳折成
+/// 「上次真值 573」返回，于是 `top > 200` 成立 ⇒ `settle keep` ⇒ 这次收起被作废；
+/// 之后只能靠 1 Hz 的 `idle zero close` 三连零兜底，再走 0.70 s 的复量，最坏还要
+/// 被下一条假 hide 通知把 seq 顶掉重来（QQ 那一段就是 10 s）。
 ///
-/// 两处都不够硬：「`AevonKbVisualTop()` 量到 0」在窗口重排期间会假摔一次；
-/// 「收到 WillHide」在同一次键盘会话里会来好几条（gap 1.02 → 3.42 → 5.93 一路
-/// 变大，说明 `AevonKbFitAt` 早已过期，那条 0.8 s 的否决闸根本没在守）。
+/// 现在三态直说（`AevonKbVisualTopState`）：
+///   · TOP   ⇒ 通知是误报，续租、什么都不动（`settle keep`，与旧版一致）；
+///   · GONE  ⇒ 窗被隐藏/滑出屏底（且通知也说离屏）⇒ 连量两次就落地，约 0.5 s；
+///   · SHELL ⇒ 不可测 ⇒ **不落地也不作废**，0.18 s 后接着量，最多 9 拍（1.7 s）。
+///             真收起时 GONE 一般在 1 s 内出现，等不到就按「走了」落地 ——
+///             宁可晚 1.7 s 还原，也不能像旧版那样把这次收起整个丢掉。
 ///
-/// 0.1.78 — **复量是无条件的。**（0.1.77 写的是「量到 0 **且** 通知矩形也说离屏
-/// 才立刻认，否则复量一次」—— 那条件等于恒真：hide 通知自己就把
-/// `AevonKbNoteActive` 清了，于是复量一次都没跑过。见 `AevonKbSettleWait` 里
-/// 「复量不再问通知」那段。）
-static void AevonKbSettleWait(int seq, int retries) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)),
+/// 轮询而不是「等 0.3 s 判一次」的理由是：空壳和真收起的窗口期是同一段（约 1 s），
+/// 单点采样撞上哪一拍全看运气；连量九拍则一定能撞上 `hid=1` 那一刻。
+static void AevonKbSettleWait(int seq, int polls, int goneHits) {
+    // 第一拍 = 键盘收起动画（0.25 s）之后；之后每 0.18 s 一拍。
+    CFAbsoluteTime wait = (polls == 0) ? 0.30 : 0.18;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (seq != AevonKbSettleSeq) return;   // 期间又起来了 ⇒ 这次「收起」作废
         if (AevonKbOn == 0) return;            // 已经处理过
-        CGFloat top = AevonKbVisualTop();
-        char line[200];
-        if (top > 200.0) {
+        int state = AevonKbStateShell;
+        CGFloat top = AevonKbVisualTopState(&state);
+        char line[210];
+        if (state == AevonKbStateTop && top > 200.0) {
             // 键盘还在屏上 ⇒ 通知是误报（几乎都是我们改窗口高惹的）。续租，什么都不动。
             snprintf(line, sizeof(line), "kb: settle keep top=%.0f\n", top);
             AevonKbLog(line);
             AevonKbPost();
             return;
         }
-        if (retries < 1) {
-            // 0.1.78 — **复量不再问通知**。
-            //
-            // 0.1.77 的条件是 `AevonKbNoteActive != 0` —— 想用「通知矩形还说键盘
-            // 在屏内」当第二条独立证据。它不是独立的：`AevonKbPostNote` 在
-            // WillHide 那一条里就把 `AevonKbNoteActive` 清成 0（原始矩形落到屏外
-            // 或名字是 hide 都清），所以只要这次 settle 是被 hide 通知触发的，
-            // 这条证据**恒为假**，复量永远排不上。Aevon(149) 里 31 次 `settle gone`
-            // 全是 `note=0 retry=0`，一次复量都没跑过 —— 这就是「打开键盘时闪一下」
-            // 和「关键盘不还原」的共同上游。
-            //
-            // 现在改成无条件：第一次量到 0 只记一行，0.40 s 后**再量一次**。
-            //   真收起 ⇒ 两次都是 0（0.70 s 后落状态，比原来慢 0.40 s）
-            //   假收起 ⇒ 第二次量到键盘，走 `settle keep top=` 分支，什么都不动
-            //
-            // 这 0.40 s 是唯一的代价，而它买回来的是一条「不会误判」的判据。
-            snprintf(line, sizeof(line),
-                     "kb: settle wait measure=%.0f note=%d retry=%d\n",
-                     top, AevonKbNoteActive, retries);
-            AevonKbLog(line);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.40 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                AevonKbSettleWait(seq, retries + 1);
-            });
+        if (state == AevonKbStateGone) {
+            if (goneHits < 1) {
+                // 窗被隐藏是硬事实，但键盘收放的一瞬间也可能闪一下 —— 隔 0.18 s
+                // 再量一次，两次都 GONE 才落地。
+                static int goneNotes = 0;
+                if (goneNotes < 24) {
+                    goneNotes += 1;
+                    snprintf(line, sizeof(line), "kb: settle wait top=%.0f state=%d n=%d\n",
+                             top, state, polls);
+                    AevonKbLog(line);
+                }
+                AevonKbSettleWait(seq, polls + 1, goneHits + 1);
+                return;
+            }
+            snprintf(line, sizeof(line), "kb: settle gone top=%.0f state=%d n=%d\n",
+                     top, state, polls);
+        } else if (polls < 9) {
+            // 空壳：这一拍什么都证明不了。不落地也不作废，接着量。
+            static int shellNotes = 0;
+            if (shellNotes < 24) {
+                shellNotes += 1;
+                snprintf(line, sizeof(line), "kb: settle wait top=%.0f state=%d n=%d\n",
+                         top, state, polls);
+                AevonKbLog(line);
+            }
+            AevonKbSettleWait(seq, polls + 1, 0);
             return;
+        } else {
+            // 1.7 s 都只见到空壳 ⇒ 按走了处理。判据：`n=9` 且 state=1。
+            snprintf(line, sizeof(line), "kb: settle gone top=%.0f state=%d n=%d\n",
+                     top, state, polls);
         }
-        snprintf(line, sizeof(line), "kb: settle gone measure=%.0f note=%d retry=%d\n",
-                 top, AevonKbNoteActive, retries);
         AevonKbLog(line);
         AevonKbOn = 0;
         AevonKbArm(NO);
@@ -5386,30 +5412,33 @@ static void AevonKbHideNote(NSDictionary *info) {
 }
 
 /// 0.1.66 — 兜底：收起通知万一没送到（交互式下滑收起在某些 App 里只改帧），
-/// 键盘窗量两次都空、而且距离上一次收窗口已经过去 2 s，就按收起处理。
+/// 键盘窗明确「不在屏上」连来两拍、而且距离上一次收窗口已经过去 2 s，就按收起处理。
 ///
 /// 2 s 这道闸是给 `measure=0` 那个假读数留的：Aevon(137) 里 0 只出现在**刚收完
-/// 窗口**的几拍，静置之后量到的都是 573。所以「静置 2 s 且连续两次为空」不会
+/// 窗口**的几拍，静置之后量到的都是 573。所以「静置 2 s 且连续两拍为空」不会
 /// 被自己惹出来的假读数打中。
+///
+/// 0.1.84 — **只数「窗真的不在了」，不数空壳。**
+///
+/// 旧版问 `AevonKbVisualTop()`：空壳会被折成上一次真值 573 ⇒ 不计；可只要那一段
+/// 缓存过期，空壳就变成一个「零」被记进连零计数 —— 于是这个兜底既会误触发、又
+/// 会在该触发时装死（Aevon(152)：真收起全靠它，等到三连零已经过去 5 s 以上）。
+/// 现在问三态：只有 GONE（hidden / 滑出屏底 / 尺寸不对）才算一票，空壳一律不计。
+/// 两票就够 —— 空壳不再污染这个计数。
 static int AevonKbZeroHits = 0;
 
 static void AevonKbIdleCheck(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (AevonKbOn == 0) return;
         if (CFAbsoluteTimeGetCurrent() - AevonKbFitAt < 2.0) return;
-        CGFloat top = AevonKbVisualTop();
-        if (top > 200.0) {
+        int state = AevonKbStateShell;
+        AevonKbVisualTopState(&state);
+        if (state != AevonKbStateGone) {
             AevonKbZeroHits = 0;
             return;
         }
         AevonKbZeroHits += 1;
-        // 0.1.78 — 两次 → **三次**。
-        //
-        // 0.1.77 是两次。Aevon(149) 里那个假 0 连来了三拍（1.9 s 采样、下一拍心跳、
-        // 再下一拍），两次的门刚好在第二拍就放行。真正的根因已经修在量处
-        // （`AevonKbTopInWindow` 的窗高闸门），这里只是不让同类失败有第二次机会：
-        // 三次连零 = 3 秒，比任何一次动画/重排都长。
-        if (AevonKbZeroHits < 3) return;
+        if (AevonKbZeroHits < 2) return;
         int hits = AevonKbZeroHits;
         AevonKbZeroHits = 0;
         char line[160];
@@ -6847,17 +6876,22 @@ static CGFloat AevonKbTopInWindow(UIView *keyboardWindow) {
 ///
 /// 所以判据改成问**窗**，不再问子视图遍历：
 ///
-///   窗 hidden / 透明 / 尺寸不对 / 已不在窗口栈  ⇒ 真的收了 ⇒ 0
-///   窗在屏、只是这一拍没量到子视图            ⇒ 键盘还在 ⇒ 还回上一次的真值
+///   窗 hidden / 透明 / 尺寸不对 / 已不在窗口栈  ⇒ 真的收了 ⇒ GONE
+///   窗在屏、只是这一拍没量到子视图            ⇒ 不可测     ⇒ SHELL
+///   遍历量到那块键盘                          ⇒ 真的在     ⇒ TOP
 ///
-/// 后一种情况下还回去的是「上一次真的量到的顶边」，不是常量 —— 带候选栏时它是
-/// 643，只有主键盘时是 616，两种形状都不会被抹平。
-static CGFloat AevonKbVisualTop(void) {
+/// 后两种情况下还回去的数字是「上一次真的量到的顶边」，不是常量 —— 带候选栏时
+/// 它是 643，只有主键盘时是 616，两种形状都不会被抹平。**但那个数字不能用来判
+/// 收起**：Aevon(152) 里 8 次真收起全被它判成「键盘还在」（详见 `AevonKbSettleWait`），
+/// 所以收起只认 `stateOut`，数字只给「现在键盘顶在哪」这种画几何的调用点用。
+static CGFloat AevonKbVisualTopState(int *stateOut) {
+    if (stateOut != NULL) *stateOut = AevonKbStateShell;
     if (![NSThread isMainThread]) return 0.0;
     UIView *kept = AevonKbKeptWindow;
     CGFloat best = AevonKbTopInWindow(kept);
     if (best > 1.0) {
         AevonKbLastTop = best;
+        if (stateOut != NULL) *stateOut = AevonKbStateTop;
         return best;
     }
     // 0.1.83 — **再试两条来源，量到了就换窗。**
@@ -6884,16 +6918,31 @@ static CGFloat AevonKbVisualTop(void) {
                      cand.bounds.size.width, cand.bounds.size.height, i);
             AevonKbLog(line);
             AevonKbLastTop = again;
+            if (stateOut != NULL) *stateOut = AevonKbStateTop;
             return again;
         }
         // 这只窗在屏、只是这一拍没量到 ⇒ 是空窗，不是「收了」。
         if (again == 0.0 && best < 0.0) best = 0.0;
     }
     // 三处都判「不在屏上」⇒ 真的收了。
-    if (best < 0.0) return 0.0;
-    // 窗在屏、量不到 ⇒ 沿用上一次真的量到的值。
+    if (best < 0.0) {
+        if (stateOut != NULL) *stateOut = AevonKbStateGone;
+        return 0.0;
+    }
+    // 窗在屏、量不到 ⇒ 空壳。**状态要如实报出去。**
+    //
+    // 0.1.84 — 这里只回答「不可测」。旧版把它折成一个「上次真值」的数字返回，
+    // 上层拿 `top > 200` 当「键盘还在」⇒ Aevon(152) 里每一次真收起都被判成
+    // `settle keep top=573`（573 = 缓存值，不是任何一次当拍读数）⇒ 收起被作废，
+    // 只剩 1 Hz 的 `idle zero close` 三连零兜底 ⇒ 用户量到 5~10 s 才还原。
     if (AevonKbLastTop > 200.0) return AevonKbLastTop;
     return 0.0;
+}
+
+/// 只要一个数（老调用点：光标、参考线、发布）。**收起判定一律改用上面那个三态版**，
+/// 因为「沿用上次真值」这个便利恰恰会抹掉「键盘已经走了」这件事。
+static CGFloat AevonKbVisualTop(void) {
+    return AevonKbVisualTopState(NULL);
 }
 
 /// 承载场景的高（本机 717）。取不到返回 0。
