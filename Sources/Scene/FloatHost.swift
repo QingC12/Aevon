@@ -3470,6 +3470,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 时 `card.frame` 已经是终点值，可内容和呈现层还在半路。
     private var kbFillAt: CFTimeInterval = 0
     private var kbFillTarget: CGRect = .null
+    /// 0.1.83 — 收起意向的令牌。每收到一次「键盘还在」就加一，挂起中的收起
+    /// 到点发现令牌变了就自己作废（见 `setKeyboardFill` 的 else 分支）。
+    private var kbUnfillToken = 0
     /// 让位前的卡片几何，收起时原样还回去。
     private var kbSavedFrame: CGRect = .null
     /// 0.1.49 — 键盘态的「画布顶对齐」补偿量（pt），收起时清零。
@@ -3548,6 +3551,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     func setKeyboardFill(_ on: Bool) {
         guard let card = card, let window = window, visible.height > 16 else { return }
         if on {
+            // 0.1.83 — 「起来了」这一拍作废一切待定的收起（见下面的挂起逻辑）。
+            kbUnfillToken &+= 1
             let screen = window.bounds.size
             var y = screen.height - visible.height
             if y < 0 { y = 0 }
@@ -3663,8 +3668,35 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             grow()
         } else {
             guard kbFilled else { return }
-            kbFilled = false
-            kbFillTarget = .null
+            // 0.1.83 — **先挂起 0.60 s，再决定要不要真收。**
+            //
+            // Aevon(151) 的循环是：App 报「键盘收了」→ 这里当场把卡片收回小窗
+            // （0.24 s 动画）→ 一两拍之后 App 又报「键盘起来了」→ 再张开。用户
+            // 看到的就是「打开键盘后先向下缩一下再放大」和「键盘自动收起」。
+            // 那 30 多次假收起都是**同一个键盘窗量到 0** 引起的，App 侧已经修
+            // （见 `AevonKbVisualTop` 的换窗与双证据），这里再加一层：收起不是
+            // 落地动作，而是一个可以被下一拍否决的意向。
+            //
+            // 代价：真收起时卡片晚 0.60 s 缩回。这与「键盘已经消失、窗口还撑满
+            // 屏 0.6 s」是同一件事，比来回抖一次好得多；而 0.60 s 又是 App 侧
+            // 那串 `keyboard up` 心跳的间隔量级 —— 只要键盘还在，一定有下一拍。
+            kbUnfillToken &+= 1
+            let token = kbUnfillToken
+            DispatchQueue.main.asyncAfter(deadline: .now() + AevonMotion.unfillHold) { [weak self] in
+                guard let self = self, self.kbUnfillToken == token, self.kbFilled else { return }
+                self.performKeyboardUnfill()
+            }
+        }
+    }
+
+    /// 0.1.83 — 真正落地的收起。从 `setKeyboardFill(false)` 拆出来，用 `kbUnfillToken`
+    /// 让中途「又开了」的那一拍把它作废（上面挂起的那一段）。
+    private func performKeyboardUnfill() {
+        guard let card = card, let window = window else { return }
+        guard kbFilled else { return }
+        let bundle = self.bundle
+        kbFilled = false
+        kbFillTarget = .null
             // 0.1.56 — **先放场景，再改卡片**。
             //
             // 原来是先 `card.frame = kbSavedFrame`（430×717@215 一步收回
@@ -3703,7 +3735,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 让守护循环每拍都查，场景通常一拍就到位。
             kbSettleUntil = CFAbsoluteTimeGetCurrent() + 1.2
             finishKeyboardUnfill(bundle: bundle, door: door, tries: 0)
-        }
     }
 
     /// 0.1.67 — 收起流程的落点：**先重推一次场景、等两拍，再收卡片**。

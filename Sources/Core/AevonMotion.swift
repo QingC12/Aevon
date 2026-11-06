@@ -264,6 +264,17 @@ enum AevonMotion {
     /// 落地也同拍，中间不再有多余尾段。曲线仍是 ease-out（实测前大后小、无过冲）。
     static let fillDuration: TimeInterval = 0.24
 
+    /// 0.1.83 — **收起前先挂起这么久。**
+    ///
+    /// Aevon(151) 里 `fill off` 与下一条 `fill on` 常常落在同一秒内：App 侧一次
+    /// 假收起（同一个键盘窗量到 0）就把卡片缩回小窗，一两拍后又被心跳张开 ——
+    /// 用户的原话是「放大时会先向下缩一下，然后再放大」和「键盘自动收起」。
+    ///
+    /// 0.60 s 的依据是 App 那串心跳：键盘还在时 `com.aevon.kb.up` 每秒一发，
+    /// 假收起后面一定紧跟一条「又起来了」。真收起时也只多等 0.60 s —— 那 0.60 s
+    /// 里卡片仍是键盘态几何，屏幕上是「键盘已经下去、窗口还贴着底」，不会露黑。
+    static let unfillHold: TimeInterval = 0.60
+
     @discardableResult
     static func lift(_ views: [UIView], from scale: CGFloat, center: CGPoint?,
                      completion: (() -> Void)? = nil) -> Bool {

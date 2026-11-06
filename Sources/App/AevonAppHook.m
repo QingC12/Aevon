@@ -4794,6 +4794,8 @@ static void AevonKbCaretNote(void);
 static CGFloat AevonKbAnchorValue(CGFloat full);
 /// 0.1.77 — 挂 `-[UILayoutGuide layoutFrame]`（定义在键盘段后部）。
 static void AevonKbGuideHookInstall(void);
+/// 0.1.83 — 键盘管理器自己报的那只键盘窗（定义在交集钩子之前）。换窗要用。
+static id AevonKbWindowNow(id keyboardManager);
 /// 0.1.78 — 安全区让位（定义在 `AevonKbExtraStore` 之后）。收起时要用，
 /// 那里比定义点更靠前。
 static void AevonKbSafeRestore(void);
@@ -6300,6 +6302,11 @@ static void AevonKbExtraStore(CGFloat value) {
 static volatile int AevonKbSafeFlag = -1;      // -1 未读，0 不需要，1 需要
 static volatile int AevonKbSafeOn = 0;         // 本会话有没有写过
 static volatile CGFloat AevonKbSafeSaved = -1.0;   // 原始 bottom，写之前存一次
+/// 0.1.83 — 连着几次采样「写进去了还被盖」。两次就撤销安全区（见 `AevonKbCaretNote`）。
+static volatile int AevonKbSafeStuck = 0;
+/// 0.1.83 — 这个 App 已经被判过「不吃安全区」。本进程内不再尝试，否则
+/// 「升级 → 无效 → 撤销 → 下一拍又升级」会变成一个 0.7 s 的布局抖动环。
+static volatile int AevonKbSafeBanned = 0;
 
 static void AevonKbSafeLoad(void) {
     if (AevonKbSafeFlag >= 0) return;
@@ -6591,17 +6598,80 @@ static CGFloat AevonKbLastTop = 0.0;
 /// 0.1.44 的教训在这里复用：`_UIRemoteKeyboards +activeInstance` 是**实例**方法，
 /// 对类对象问 `respondsToSelector:` 恒为 NO ⇒ 那条取值链恒返回 nil。所以这里
 /// 不用管理器，直接扫窗口。
-static UIView *AevonKbWindowScan(void) {
+/// 0.1.83 — **进程里的全部窗口，不只是「本 App 那个场景的」。**
+///
+/// Aevon(151) 把这条路量死了：一次会话里 24 次 `kb: caret … kb=0`（QQ / 微信 /
+/// 抖音 / 酷安全部），而同一时段用户在这些 App 里正常打字 —— 键盘明明在屏上，
+/// 我们却一次都没量到过它。
+///
+/// 原因是 `connectedScenes` 里根本不含键盘那只窗所在场景（键盘在 iOS 17 有自己
+/// 的 window scene），所以 `scene.windows` 永远是空的。0.1.82 新增的「必须还在
+/// 窗口栈里」那道闸门因此**恒假**，每次测量都当场返回 -1（＝收起）——
+/// `caret kb=0`、`idle zero close`、`settle gone`、卡片缩回去又张开，
+/// 全都是它的下游。
+///
+/// `+[UIWindow _allWindowsIncludingInternalWindows:onlyVisibleWindows:]` 是
+/// 进程级的窗口总表（UIKit 自己用它做命中测试与快照），跨场景、含内部窗口。
+/// 拿不到就退回老的两条路，行为与 0.1.79 一致 —— 绝不让一条私有接口的缺失
+/// 变成「键盘永远不在」。
+static NSArray *AevonKbAllWindows(void) {
+    static int supported = -1;
+    if (supported == -1) {
+        Class w = objc_getClass("UIWindow");
+        SEL s = sel_registerName("_allWindowsIncludingInternalWindows:onlyVisibleWindows:");
+        supported = (w != Nil && class_respondsToSelector(object_getClass(w), s)) ? 1 : 0;
+    }
+    if (supported == 1) {
+        SEL s = sel_registerName("_allWindowsIncludingInternalWindows:onlyVisibleWindows:");
+        id boxed = ((id (*)(id, SEL, BOOL, BOOL))objc_msgSend)(objc_getClass("UIWindow"), s, YES, NO);
+        if ([boxed isKindOfClass:[NSArray class]] && [(NSArray *)boxed count] > 0) return boxed;
+    }
+    NSMutableArray *fallback = [NSMutableArray array];
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) [fallback addObject:window];
+    }
+    return fallback;
+}
+
+/// 键盘窗的候选池 + 打分。**不再「第一只就是它」。**
+///
+/// 同一个进程里可以同时存在两只 `UIRemoteKeyboardWindow`：上一轮会话留下来的
+/// （`hidden=1`、子视图已被拆空）和这一轮在用的。0.1.82 之前取「第一只」，
+/// 拿到哪只全看数组顺序 —— 于是有时量到 573、有时量到 0，日志里那 31 条
+/// `top zero win=430x932@0 hid=0 sub=1` 和这份日志里 13 条 `kb: gone hid=1`
+/// 是同一件事的两种形状。
+///
+/// 打分只看「像不像在画的键盘」：没隐藏 > 不透明 > 尺寸对。全为 0 分时返回
+/// 第一只（与老行为一致，至少不会把「有窗」变成「没窗」）。
+static UIView *AevonKbWindowPick(int *poolOut, int *visibleOut) {
     Class keyboardClass = objc_getClass("UIRemoteKeyboardWindow");
     if (keyboardClass == Nil) return nil;
     if (![NSThread isMainThread]) return nil;
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-            if ([window isKindOfClass:keyboardClass]) return window;
-        }
+    UIView *best = nil;
+    int bestScore = -1;
+    int pool = 0;
+    int visible = 0;
+    NSArray *all = AevonKbAllWindows();
+    for (id cand in all) {
+        if (![cand isKindOfClass:keyboardClass]) continue;
+        UIWindow *win = (UIWindow *)cand;
+        pool += 1;
+        int score = 0;
+        if (!win.hidden) score += 4;
+        if (win.alpha > 0.05) score += 2;
+        CGSize box = win.bounds.size;
+        if (box.width > 200.0 && box.height > 200.0) score += 1;
+        if (score >= 6) visible += 1;
+        if (score > bestScore) { bestScore = score; best = win; }
     }
-    return nil;
+    if (poolOut != NULL) *poolOut = pool;
+    if (visibleOut != NULL) *visibleOut = visible;
+    return best;
+}
+
+static UIView *AevonKbWindowScan(void) {
+    return AevonKbWindowPick(NULL, NULL);
 }
 
 /// 0.1.58 — 键盘**视觉实体**的顶边（屏幕坐标，本机 616；带候选栏 643）。取不到返回 0。
@@ -6651,9 +6721,20 @@ static CGFloat AevonKbTopInWindow(UIView *keyboardWindow) {
     // 一秒又被心跳重新张开 —— 用户看到的就是「先缩小再放大」和「不还原」。
     // 所以高度闸门放到 120：完整键盘 316、只剩候选栏 291、带工具栏 401 全过。
     if (winW < 200.0 || winH < 120.0) return -1.0;
-    // 窗被藏起来 / 透明 / 停在屏外 = 真的收了。这三条比视图遍历硬得多，也不受
-    // 「这一拍布局还没结算」影响 —— 收起判定最先该看的就是它们。
+    // 0.1.83 — **「窗藏起来了」不再自成一证。**
+    //
+    // Aevon(151) 里 13 条 `kb: gone hid=1 alpha=1.00 win=430x932` 和 24 次
+    // `caret … kb=0` 同时成立，而用户在 QQ / 抖音里照常打字 —— 说明我们手里
+    // 这只窗不是正在画的那一只（上一轮会话留下的空壳）。只看 `hidden` 就等于
+    // 让「拿到了旧窗」变成「键盘没了」。
+    //
+    // 现在要**两条互相独立的事实**同时成立才认收起：
+    //   ① 窗本身 hidden / 透明 / 滑出屏幕底；
+    //   ② 最近一条键盘通知也把矩形判成离屏（`AevonKbNoteActive == 0`）。
+    // 只有①成立时，语义是「这一拍不可测」，交给 `AevonKbVisualTop` 沿用上次真值。
+    BOOL noteActive = (AevonKbNoteActive != 0);
     if (keyboardWindow.hidden || keyboardWindow.alpha < 0.05) {
+        if (noteActive) return 0.0;
         // 0.1.80 — **这一行是「真收起」的唯一证词**。
         //
         // 旧版把这条与「量不到」混在一起返回 0，日志里根本分不清是哪种，
@@ -6662,27 +6743,18 @@ static CGFloat AevonKbTopInWindow(UIView *keyboardWindow) {
         static int goneNotes = 0;
         if (goneNotes < 8) {
             goneNotes += 1;
-            char line[160];
-            snprintf(line, sizeof(line), "kb: gone hid=%d alpha=%.2f win=%.0fx%.0f\n",
-                     keyboardWindow.hidden ? 1 : 0, keyboardWindow.alpha, winW, winH);
+            int pool = 0;
+            int visible = 0;
+            AevonKbWindowPick(&pool, &visible);
+            char line[200];
+            snprintf(line, sizeof(line),
+                     "kb: gone hid=%d alpha=%.2f win=%.0fx%.0f pool=%d vis=%d\n",
+                     keyboardWindow.hidden ? 1 : 0, keyboardWindow.alpha, winW, winH,
+                     pool, visible);
             AevonKbLog(line);
         }
         return -1.0;
     }
-    // 0.1.80 — **还在不在窗口栈里**。
-    //
-    // `AevonKbKeptWindow` 是 retain 住的（换窗才放），所以键盘被系统收走之后
-    // 那个对象可能还活着。只读 `hidden` 有一个洞：对象被我们攥着不放，系统未必
-    // 来得及把它标成 hidden。窗口栈的成员关系是运行时事实，一次指针比较就够。
-    BOOL attached = NO;
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *cand in ((UIWindowScene *)scene).windows) {
-            if ((UIView *)cand == keyboardWindow) { attached = YES; break; }
-        }
-        if (attached) break;
-    }
-    if (!attached) return -1.0;
     // 0.1.78 — 窗自己在屏幕上的原点：满屏时 0，收短时 616。返回值要加它。
     //
     // `windowScene` 是 `UIWindow` 的属性，不是 `UIView` 的（0.1.78 第一版直接
@@ -6707,6 +6779,7 @@ static CGFloat AevonKbTopInWindow(UIView *keyboardWindow) {
     // 阈值放到「屏高 − 80」：正常键盘态窗原点是 0，只有真的滑出去才会过线。
     CGFloat screenH = AevonKbNativeBounds(nil).size.height;
     if (screenH > 400.0 && originY > screenH - 80.0) {
+        if (noteActive) return 0.0;   // 同上：一条事实不够，交给上次真值
         static int slidNotes = 0;
         if (slidNotes < 8) {
             slidNotes += 1;
@@ -6787,17 +6860,36 @@ static CGFloat AevonKbVisualTop(void) {
         AevonKbLastTop = best;
         return best;
     }
-    UIView *fresh = AevonKbWindowScan();
-    if (fresh != nil && fresh != kept) {
-        CGFloat again = AevonKbTopInWindow(fresh);
+    // 0.1.83 — **再试两条来源，量到了就换窗。**
+    //
+    // 手里那只（`AevonKbKeptWindow`，多半是交集钩子给的）量不到时，可能是
+    // 这一拍还没结算，也可能它根本是上一轮会话的空壳。Aevon(151) 里后者已经
+    // 被证实：同一只窗连着 3 次量到 0、同时 13 条 `kb: gone hid=1`，而键盘
+    // 在屏上。只靠 `connectedScenes` 里的 `UIRemoteKeyboardWindow` 重扫是
+    // 换不了窗的 —— 键盘窗不在那些场景里（见 `AevonKbAllWindows`）。
+    // 所以这里多问一次键盘管理器自己（`_UIRemoteKeyboards.activeInstance`），
+    // 它手上那只才是正在画的那一只。
+    UIView *candidates[2] = { AevonKbWindowScan(), (UIView *)AevonKbWindowNow(nil) };
+    for (int i = 0; i < 2; i++) {
+        UIView *cand = candidates[i];
+        if (cand == nil || cand == kept) continue;
+        CGFloat again = AevonKbTopInWindow(cand);
         if (again > 1.0) {
+            [AevonKbKeptWindow release];
+            AevonKbKeptWindow = [cand retain];
+            AevonKbKeptSource = 2;
+            char line[180];
+            snprintf(line, sizeof(line), "kb: adopt top=%.0f hud=%d win=%.0fx%.0f src=%d\n",
+                     again, cand.hidden ? 1 : 0,
+                     cand.bounds.size.width, cand.bounds.size.height, i);
+            AevonKbLog(line);
             AevonKbLastTop = again;
             return again;
         }
         // 这只窗在屏、只是这一拍没量到 ⇒ 是空窗，不是「收了」。
-        if (again == 0.0) best = 0.0;
+        if (again == 0.0 && best < 0.0) best = 0.0;
     }
-    // -1 且场景里再没有第二只键盘窗 ⇒ 真的不在屏上。
+    // 三处都判「不在屏上」⇒ 真的收了。
     if (best < 0.0) return 0.0;
     // 窗在屏、量不到 ⇒ 沿用上一次真的量到的值。
     if (AevonKbLastTop > 200.0) return AevonKbLastTop;
@@ -7226,14 +7318,44 @@ static void AevonKbCaretNote(void) {
             // 复量那一拍读到的 `bar` 才是判决书 —— 它要么被①救回来了（`need`
             // 掉到 60 以下，什么都不做），要么证明这个 App 不读通知矩形，才轮到②。
             // ② 生效后再复量一次，仍被盖就只记 `kb: learn stuck`，不再叠第三条。
-            if (AevonKbSafeFlag == 1) {
-                // 已经在走安全区：只观测，不再动任何东西。
+            if (AevonKbSafeBanned == 0 && AevonKbSafeFlag == 1) {
+                // 已经在走安全区：只观测，两次都还没用就撤销（见下）。
+                //
+                // 0.1.83 — **安全区不是万能，补过没用必须退回通知矩形那条。**
+                //
+                // Aevon(151) 的酷安把这条路的死法写全了：`safe inset bottom=316`
+                // 写了两次，`bar` 一直是 `826..920`（一像素没动），每一次采样都是
+                // `kb: learn stuck safe=1 … need=354`；而 `safeOnly` 会把通知矩形
+                // 那条整体让开（`note rect raw=761 out=761`，一个字节都没改）——
+                // 两条通道同时不干活，输入框整条留在 920，被键盘盖死。
+                //
+                // 判据用「补过之后还差 60 以上」连着两次采样成立，就撤安全区、
+                // 把它记成「不吃这一套」，下一份通知立刻回到 `out = 616 − cal`
+                // （酷安 cal=209 ⇒ out=407，App 让位 310，输入框从 920 抬到 610）。
                 if (need > 60.0) {
-                    char stuck[200];
+                    AevonKbSafeStuck += 1;
+                    char stuck[220];
                     snprintf(stuck, sizeof(stuck),
-                             "kb: learn stuck safe=1 bar=%.0f target=%.0f need=%.0f\n",
-                             bottom, target, need);
+                             "kb: learn stuck safe=1 bar=%.0f target=%.0f need=%.0f hit=%d\n",
+                             bottom, target, need, AevonKbSafeStuck);
                     AevonKbLog(stuck);
+                    if (AevonKbSafeStuck >= 2) {
+                        AevonKbSafeStuck = 0;
+                        AevonKbSafeBanned = 1;
+                        AevonKbSafeRestore();
+                        AevonKbSafeStore(0);
+                        char give[220];
+                        snprintf(give, sizeof(give),
+                                 "kb: learn safe gave up bar=%.0f target=%.0f need=%.0f cal=%.0f\n",
+                                 bottom, target, need, cur);
+                        AevonKbLog(give);
+                        // 下一份通知会按通知矩形重写；0.70 s 后再量一次留证词。
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                     (int64_t)(0.70 * NSEC_PER_SEC)),
+                                       dispatch_get_main_queue(), ^{ AevonKbCaretNote(); });
+                    }
+                } else {
+                    AevonKbSafeStuck = 0;
                 }
             } else if (cur < 15.0) {
                 // ① 这一轮还没补过 ⇒ 按差额补通知矩形，然后**等复量**。
@@ -7253,18 +7375,35 @@ static void AevonKbCaretNote(void) {
                 // 判据不能用 `need > cur + 15`：Aevon(149) 里 Safari 的 `need` 与
                 // `cur` 都是 192（补多少就原样剩多少），用「增量」判永远不触发 ——
                 // 那正是它连着三版没被救回来的原因。
-                AevonKbSafeStore(1);
-                AevonKbSafeApply(fullH - kbVisible);
-                char learn[220];
-                snprintf(learn, sizeof(learn),
-                         "kb: learn safe=1 bar=%.0f target=%.0f need=%.0f extra=%.0f cover=%.0f\n",
-                         bottom, target, need, cur, fullH - kbVisible);
-                AevonKbLog(learn);
-                // 0.70 s 后再量一次：这一次的 `bar` 就是「安全区那条通道到底
-                // 有没有用」的唯一证词，和上一行落在同一份日志里。
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                             (int64_t)(0.70 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{ AevonKbCaretNote(); });
+                //
+                // 0.1.83 — 已经被判过「不吃安全区」的 App 不再升级：否则
+                // 「升级 → 无效 → 撤销 → 下一拍又升级」是个 0.7 s 的布局抖动环。
+                // 这时只留一条读得懂的证据行，不再动任何几何。
+                if (AevonKbSafeBanned != 0) {
+                    static int banned = 0;
+                    if (banned < 4) {
+                        banned += 1;
+                        char nb[220];
+                        snprintf(nb, sizeof(nb),
+                                 "kb: learn give up bar=%.0f target=%.0f need=%.0f cal=%.0f\n",
+                                 bottom, target, need, cur);
+                        AevonKbLog(nb);
+                    }
+                } else {
+                    AevonKbSafeStore(1);
+                    AevonKbSafeApply(fullH - kbVisible);
+                    AevonKbSafeStuck = 0;
+                    char learn[220];
+                    snprintf(learn, sizeof(learn),
+                             "kb: learn safe=1 bar=%.0f target=%.0f need=%.0f extra=%.0f cover=%.0f\n",
+                             bottom, target, need, cur, fullH - kbVisible);
+                    AevonKbLog(learn);
+                    // 0.70 s 后再量一次：这一次的 `bar` 就是「安全区那条通道到底
+                    // 有没有用」的唯一证词，和上一行落在同一份日志里。
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                 (int64_t)(0.70 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{ AevonKbCaretNote(); });
+                }
             }
             // `need ≤ 60` 一律当「已经看得见」：误差 60 pt 以内是多让一行工具条
             // 的量级，再追下去只会把输入框推到卡片上沿之外（酷安就是这样消失的）。
