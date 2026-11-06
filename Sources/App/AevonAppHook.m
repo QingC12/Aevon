@@ -503,6 +503,30 @@ static void AevonScheduleGeometry(void) {
                      dispatch_get_main_queue(), (void *)AevonGeomLate, AevonGeomTick);
 }
 
+/// 0.1.46 — 本机**真实**屏幕尺寸，进程内第一次取到就记住。
+///
+/// 为什么需要它：0.1.46 起 `UIScreen -bounds` 在「卡片承载中 + 键盘在屏」时会返回
+/// 承载场景的 430×717（母本 0x567c）。插件自己有几处拿「屏幕高」当参照来算卡片、
+/// 算右缘热区 —— 那几处要的是真屏 932，不能被我们自己的钩子改成 717，否则打字时
+/// 热区会往上跑、保活会以为「已经不是卡片了」。
+///
+/// 取数走 `nativeBounds / nativeScale`（不受钩子影响），并且**第一次必须在装钩子
+/// 之前调用**（`AevonKbNativeInstall` 里先算再装），得到的是没被污染的真值。
+static CGSize AevonTrueScreenSize(void) {
+    static CGSize size = {0, 0};
+    if (size.width > 1.0 && size.height > 1.0) return size;
+    UIScreen *screen = [UIScreen mainScreen];
+    if (screen == nil) return size;
+    CGRect native = screen.nativeBounds;
+    CGFloat scale = screen.nativeScale;
+    if (scale > 0.01 && native.size.width > 1.0 && native.size.height > 1.0) {
+        size = CGSizeMake(native.size.width / scale, native.size.height / scale);
+    } else {
+        size = [screen bounds].size;
+    }
+    return size;
+}
+
 /// 0.0.69 — 「这块画布比屏幕矮」。
 ///
 /// 量尺原来只在「状态被改写」那条路上安排，而那条路要求 `applicationState == 2`。
@@ -522,14 +546,15 @@ static BOOL AevonCanvasIsShrunk(void) {
     answer = NO;
     UIApplication *application = [UIApplication sharedApplication];
     if (application == nil) return answer;
-    CGRect screen = [[UIScreen mainScreen] bounds];
-    if (screen.size.height < 200.0) return answer;
+    // 0.1.46 — 用真屏高：本插件自己的 `UIScreen -bounds` 钩子在打字时会返回场景高。
+    CGSize screen = AevonTrueScreenSize();
+    if (screen.height < 200.0) return answer;
     for (UIScene *scene in [application connectedScenes]) {
         id box = AevonTryValue(AevonTryValue(scene, @"coordinateSpace"), @"bounds");
         if (![box isKindOfClass:[NSValue class]]) continue;
         CGRect rect = CGRectZero;
         [box getValue:&rect size:sizeof(rect)];
-        if (rect.size.height > 100.0 && rect.size.height < screen.size.height - 40.0) {
+        if (rect.size.height > 100.0 && rect.size.height < screen.height - 40.0) {
             answer = YES;
             // 0.0.71 — 这条判据同时是「我们演过这个进程」的记录点：翻页器的归位
             // 从这里开始生效，没被卡片打开过的 App 永远不会置上这个位。
@@ -2871,8 +2896,7 @@ static IMP AevonLayoutOriginalFor(Class cls) {
 /// 要不要管这一次排版：只有「卡片在屏」时管。全屏时窗口就是整屏，画面本来
 /// 就装得下，插手只是白花 CPU。
 static BOOL AevonCardIsUp(void) {
-    UIScreen *screen = [UIScreen mainScreen];
-    CGFloat full = screen != nil ? [screen bounds].size.height : 0.0;
+    CGFloat full = AevonTrueScreenSize().height;
     if (full < 200.0) return NO;
     CGFloat height = AevonWindowHeight();
     return (height > 200.0 && height < full - 40.0);
@@ -3748,8 +3772,7 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
     if (before < 200.0) return;
     if (fabs(before - size.height) < 0.5) return;
     if (!AevonAppHookAllowed()) return;
-    UIScreen *screen = [UIScreen mainScreen];
-    CGFloat full = screen != nil ? [screen bounds].size.height : 0.0;
+    CGFloat full = AevonTrueScreenSize().height;
     // 「被缩小」这件事本身就是证据，不必等前面先量过一次 —— 第一次开卡时没人
     // 告诉过我们这是不是卡，但 `new < 屏幕 - 40` 已经说明了。
     if (full > 200.0 && size.height < full - 40.0) {
@@ -3884,8 +3907,7 @@ static void AevonPagerWatchTick(void *context) {
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                      dispatch_get_main_queue(), NULL, AevonPagerWatchTick);
 
-    UIScreen *screen = [UIScreen mainScreen];
-    CGFloat full = screen != nil ? [screen bounds].size.height : 0.0;
+    CGFloat full = AevonTrueScreenSize().height;
     if (full < 200.0) return;
     // 与 `AevonAlignPager` 用同一把尺子：两处各写一遍循环，迟早会出现「心跳
     // 说还在卡里、归位说窗口已经对了」这种自相矛盾的读数。
@@ -4270,8 +4292,7 @@ static void AevonAliveTick(void *context) {
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                      dispatch_get_main_queue(), NULL, AevonAliveTick);
     CGFloat height = AevonWindowHeight();
-    UIScreen *screen = [UIScreen mainScreen];
-    CGFloat full = screen != nil ? [screen bounds].size.height : 0.0;
+    CGFloat full = AevonTrueScreenSize().height;
     if (height < 200.0 || full < 200.0) return;
     if (height > full - 40.0) return;
     AevonEverHosted = 1;
@@ -4705,6 +4726,63 @@ static void AevonStyleObserve(void) {
 // 不该被当成「键盘挡住右下角」。
 
 static volatile int AevonKbOn = 0;
+
+// ---------------------------------------------------------------------------
+// 0.1.46 — 母本 0x567c：`UIScreen -bounds`。
+//
+// Aevon(119) 把「键盘只露一条工具栏」量清楚了：
+//   kb: lead h=101.0 screen=717.0 full=932.0 kbwin=932.0 scene=717.0 -> 316.0 took=3
+// `kbwin=932` 的意思是键盘窗是**整屏高**的窗口，键盘内容贴在它底部 616..932；而承载
+// 场景只有 717 高，渲染只放行到 717 ⇒ 只看得见 616..717 这 101 pt，正好是「工具栏 +
+// 表情行 + 一行键」三行。换算本身没错（316 就是键盘真实高度），缺的是让**系统自己**
+// 把键盘排在 717 的画布里 —— 母本用的正是这条：把「屏幕」换成场景，键盘自然落到
+// 401..717，整块进场景。
+//
+// ⛔ 0.1.42 在这条线上黑过一次，根因是钩子体内又问了 `nativeBounds`（它内部会再走
+// `-bounds`）⇒ 自递归。所以这里的执行体**一次 UIScreen 方法都不调**：
+//   · 原值只取一次，重入直接直通；
+//   · 「场景尺寸」是别处缓存好的静态量，不在这里算；
+//   · 闸门全是静态开关，比较基准就是刚取到的 `out.size.height`。
+// 另：只装这一条。母本的第二条 `remoteKeyboardWindowForScreen:create:`（0x5390）反汇编
+// 只到「撑成整屏 + 居中 + 重设子视图 frame」，具体常量与目标视图不足以 1:1 复刻，
+// 硬凑就是 0.1.42 的「全屏打开也黑屏」。先看 UIScreen 这一条能不能让键盘窗自己变成
+// 717 高 —— 能，就不需要写任何窗口几何。
+// ---------------------------------------------------------------------------
+static CGRect (*AevonOrigScreenBounds)(id, SEL) = NULL;
+/// 重入闸。`-bounds` 是热路径，任何一次自递归都会把进程挂死。
+static volatile int AevonScreenInside = 0;
+/// 承载场景的尺寸（本机 430×717）。只由 `AevonScreenSceneRefresh` 写入。
+static CGSize AevonScreenSceneSize = {0, 0};
+/// 证词配额：换算一次输入会问几十遍 `-bounds`，只留前几条。
+static volatile int AevonScreenHitNotes = 0;
+
+/// 缓存承载场景尺寸。**只读场景，不碰 UIScreen**，因此不会和 `-bounds` 钩子打回环。
+/// 非主线程不直接摸 `connectedScenes`，甩回主线程再算（合流：同一时刻只排一次）。
+static void AevonScreenSceneRefresh(void) {
+    if (![NSThread isMainThread]) {
+        static volatile int queued = 0;
+        if (queued) return;
+        queued = 1;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            queued = 0;
+            AevonScreenSceneRefresh();
+        });
+        return;
+    }
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *windowed = (UIWindowScene *)scene;
+        UISceneActivationState state = windowed.activationState;
+        if (state != UISceneActivationStateForegroundActive &&
+            state != UISceneActivationStateForegroundInactive) continue;
+        CGSize size = windowed.coordinateSpace.bounds.size;
+        if (size.width > 40.0 && size.height > 40.0) {
+            AevonScreenSceneSize = size;
+            return;
+        }
+    }
+}
+
 static dispatch_source_t AevonKbTimer = NULL;
 /// timer 当前是不是跑着的。`dispatch_resume` / `dispatch_suspend` 必须成对，
 /// 用一个显式状态记，比靠 `AevonKbOn` 猜安全。
@@ -4741,11 +4819,34 @@ static void AevonKbArm(BOOL on) {
     }
 }
 
+/// 0.1.46 — 键盘窗现在多大。**只用于证词**，不参与任何判定。
+///
+/// 这一行是下一版的判据：`kb: kbwin 430x717 scene=430x717` ⇒ 换屏生效、键盘整块
+/// 进场景；仍然是 `430x932` ⇒ 窗口在换屏之前就建好了，下一版必须补母本那条
+/// `remoteKeyboardWindowForScreen:create:`（也就重新踩上写窗口几何那条线）。
+static UIView *AevonKbWindowFind(void) {
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            const char *name = object_getClassName(window);
+            if (name != NULL && strstr(name, "Keyboard") != NULL) return window;
+        }
+    }
+    return nil;
+}
+
+static volatile int AevonKbWinNotes = 0;
+
 static void AevonKbEvaluate(NSDictionary *info) {
     NSValue *value = info[UIKeyboardFrameEndUserInfoKey];
     if (value == nil) return;
+    // 0.1.46 — 先把场景尺寸续上，`AevonScreenBoundsHook` 才知道该换成多大。
+    // 放在 `AevonKbOn` 置位之前：置位那一拍之后 UIKit 才排键盘。
+    AevonScreenSceneRefresh();
     CGRect frame = [value CGRectValue];
-    CGFloat screenHeight = UIScreen.mainScreen.bounds.size.height;
+    // 0.1.46 — 这里必须是**真屏高**：钩子生效时 `UIScreen.bounds` 是场景的 717，
+    // 用它判「键盘有没有离开屏幕」会把贴底的小键盘误判成已经收起。
+    CGFloat screenHeight = AevonTrueScreenSize().height;
     BOOL on = frame.size.height > 40.0 && frame.origin.y < screenHeight - 1.0;
     if (on == (AevonKbOn != 0)) {
         // 状态没变也要续一次：键盘一直开着的时候，租约靠这一点续命。
@@ -4756,6 +4857,18 @@ static void AevonKbEvaluate(NSDictionary *info) {
     AevonKbArm(on);
     if (on) {
         AevonKbPost();
+        // 0.1.46 证词：键盘窗此刻的尺寸，和场景尺寸并排写，一眼就能判「换屏有没有
+        // 影响到键盘窗」。配额 6 条，够一次输入用。
+        UIView *keyboardWindow = AevonKbWindowFind();
+        if (keyboardWindow != nil && AevonKbWinNotes < 6) {
+            AevonKbWinNotes += 1;
+            char line[200];
+            snprintf(line, sizeof(line), "kb: kbwin %.0fx%.0f scene=%.0fx%.0f screen=%.0f\n",
+                     keyboardWindow.bounds.size.width, keyboardWindow.bounds.size.height,
+                     AevonScreenSceneSize.width, AevonScreenSceneSize.height,
+                     AevonTrueScreenSize().height);
+            AevonAppLogWrite(line);
+        }
     } else {
         // 0.1.18 — 收起要**立刻**告诉桌面，不等租约过期。
         AevonKbPostOff();
@@ -4892,7 +5005,7 @@ static void AevonEdgeKeep(UIEvent *event) {
 /// 而 App 自己的窗口可能被 transform / 分屏挪过。屏幕尺寸是这个判定唯一需要的
 /// 参照 —— **只读，不写**（0.0.65 / 0.0.67 的教训是「改」它，不是「读」它）。
 static BOOL AevonEdgeInBand(CGPoint p) {
-    CGSize size = [UIScreen mainScreen].bounds.size;
+    CGSize size = AevonTrueScreenSize();
     if (size.width < 1.0 || size.height < 1.0) return NO;
     return p.x >= size.width - 18.0 && p.y >= size.height * 0.65;
 }
@@ -5155,6 +5268,9 @@ static void AevonBandNote(CFNotificationCenterRef __unused center,
         AevonAppLogWrite("app: band note from host\n");
     }
     AevonBandReload();
+    // 0.1.46 — 宿主推卡片几何 = 这个进程刚被演起来，顺手把场景尺寸缓存上。
+    // `UIScreen -bounds` 的钩子要用它，而键盘可能比这条通知早到。
+    AevonScreenSceneRefresh();
     // 0.1.36 — 只要锁是开的就擦一次，不再要求「这一次是 0→1」。
     //
     // 0.1.34/0.1.35 的写法是 `if (wasLocked || !AevonBandLock) return;`：锁在上
@@ -5503,6 +5619,54 @@ static BOOL AevonKbHostGate(void) {
         || (AevonBandOuter.size.height <= screen.height - 8.0);
 }
 
+/// 0.1.46 — 换屏尺寸的全部闸门，**只能读静态量**。
+///
+/// 0.1.46 的第一版写的是「键盘在屏才换」，考虑后改成**只要被卡片承载就换**：
+/// `UIRemoteKeyboardWindow` 是懒创建且只创建一次（母本之所以还要挂
+/// `remoteKeyboardWindowForScreen:create:`，就是因为系统不会在每次弹键盘时重排这个
+/// 窗口）。如果等到 `UIKeyboardWillChangeFrame` 才换屏，窗口多半已经按 932 建好了，
+/// 这一版就会和 0.1.45 一样看不到任何变化。所以判据回到「本 App 正被卡片演着」。
+///
+/// 少一条都不动：`AevonBandOn`（本 App 正被卡片承载）、场景尺寸已知、面板开关
+/// （`!ring.keyboardNative`，关掉即整条回退原值），以及调用点里用刚取到的原值做的
+/// 两条几何比较（场景确实比屏矮、卡片外框确实比屏小）。
+static BOOL AevonKbScreenOn(void) {
+    if (AevonBandOn == 0) return NO;
+    if (AevonScreenSceneSize.width < 40.0 || AevonScreenSceneSize.height < 40.0) return NO;
+    return AevonKbNativeAllowed();
+}
+
+/// 母本 0x567c 的等价实现：交付同一个 `CGRect`，只把高换成场景高。
+///
+/// 与母本唯一的差别是取数方式 —— 母本在钩子里问私有方法
+/// `[scene _boundsForInterfaceOrientation:]`，这里用缓存好的
+/// `scene.coordinateSpace.bounds.size`，数值相同（430×717）而零私有依赖。
+static CGRect AevonScreenBoundsHook(id self, SEL _cmd) {
+    if (AevonOrigScreenBounds == NULL) return CGRectZero;
+    if (AevonScreenInside) return AevonOrigScreenBounds(self, _cmd);
+    AevonScreenInside = 1;
+    CGRect full = AevonOrigScreenBounds(self, _cmd);
+    CGRect out = full;
+    CGSize scene = AevonScreenSceneSize;
+    // 场景必须真的比屏矮，否则换了等于没换；卡片外框也必须真的比屏小，否则这就是
+    // 一个全屏 App（0.1.42 的教训：`AevonBandOn` 会在「全屏打开」时还停在 1）。
+    if (AevonKbScreenOn()
+        && scene.height < full.size.height - 8.0
+        && AevonBandOuter.size.height > 1.0
+        && AevonBandOuter.size.height <= full.size.height - 8.0) {
+        out = CGRectMake(0, 0, scene.width, scene.height);
+        if (AevonScreenHitNotes < 8) {
+            AevonScreenHitNotes += 1;
+            char line[200];
+            snprintf(line, sizeof(line), "kb: screen -> %.0fx%.0f (full %.0fx%.0f)\n",
+                     scene.width, scene.height, full.size.width, full.size.height);
+            AevonKbLog(line);
+        }
+    }
+    AevonScreenInside = 0;
+    return out;
+}
+
 /// 母本 0x5284 的原式：`(原值 × 屏幕高 ÷ 键盘窗高) × 1.0 + 键盘窗高 − 屏幕高`。
 /// 1.0 是母本的 `_heightFraction` 缺省值。
 ///
@@ -5516,6 +5680,20 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     double answer = ((double (*)(id, SEL, id, BOOL *, BOOL))AevonOrigIntersection)(self, _cmd,
                                                                                   scene, isLocal, ignore);
     if (AevonOrigIntersection == NULL) return answer;
+    // 0.1.46 — 屏尺寸已经换成场景（430×717）时，系统自己就会把键盘排在 401..717，
+    // 交点值天然等于键盘真实高度，**原样交回**即可。此时再套式子会撞上「屏高 ==
+    // 键盘窗高」的退化态，兜底分支会把整屏高当交点高交回来，反而把内容全挤出去。
+    // 这也是母本那个式子在 screen==kbwin 时的取值（h×1 + 0）。
+    if (AevonKbScreenOn()) {
+        if (AevonKbLeadNotes < 12) {
+            AevonKbLeadNotes += 1;
+            char line[200];
+            snprintf(line, sizeof(line), "kb: lead pass h=%.1f scene=%.0fx%.0f\n",
+                     answer, AevonScreenSceneSize.width, AevonScreenSceneSize.height);
+            AevonKbLog(line);
+        }
+        return answer;
+    }
     if (!AevonKbHostGate()) return answer;
     id window = AevonKbWindowNow(self);
     if (window == nil) {
@@ -5597,6 +5775,9 @@ static void AevonKbNativeInstall(void) {
     static int installed = 0;
     if (installed) return;   // 二次安装会把 `AevonOrig*` 覆盖成我们自己的钩子（自递归）
     installed = 1;
+    // 0.1.46 — 先把真屏尺寸记进静态量，**再**装 `UIScreen -bounds`。顺序反了就
+    // 等于用被污染的读数去记真值。
+    (void)AevonTrueScreenSize();
     int interOK = 0;
     Class keyboards = objc_getClass("_UIRemoteKeyboards");
     if (keyboards != Nil) {
@@ -5610,9 +5791,20 @@ static void AevonKbNativeInstall(void) {
         }
     }
     NSString *bundle = [[NSBundle mainBundle] bundleIdentifier] ?: @"?";
+    // 0.1.46 — 母本 0x567c。装在 `UIScreen` 这一层：所有 `UIScreen` 实例（含
+    // `mainScreen`）都走同一个 IMP，不必按实例去装。
+    int screenOK = 0;
+    Method boundsMethod = class_getInstanceMethod([UIScreen class], sel_registerName("bounds"));
+    if (boundsMethod != NULL) {
+        AevonOrigScreenBounds = method_getImplementation(boundsMethod);
+        if (AevonOrigScreenBounds != NULL) {
+            method_setImplementation(boundsMethod, (IMP)AevonScreenBoundsHook);
+            screenOK = 1;
+        }
+    }
     char line[220];
-    snprintf(line, sizeof(line), "kb: armed pid=%d inter=%d bundle=%.60s\n",
-             (int)getpid(), interOK, [bundle UTF8String]);
+    snprintf(line, sizeof(line), "kb: armed pid=%d inter=%d screen=%d bundle=%.60s\n",
+             (int)getpid(), interOK, screenOK, [bundle UTF8String]);
     AevonKbLog(line);
 }
 
