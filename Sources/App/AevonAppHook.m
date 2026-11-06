@@ -5868,7 +5868,6 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
             return needed;
         }
     }
-    }
     CGFloat sceneHeight = -1;
     if ([scene isKindOfClass:[UIWindowScene class]]) {
         sceneHeight = ((UIWindowScene *)scene).coordinateSpace.bounds.size.height;
