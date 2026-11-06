@@ -651,6 +651,48 @@ def main():
                   b"notify: divert replay threw %@",
                   # 判据要能在二进制里找到，否则「为什么没吞」全靠猜。
                   b"NotificationResponseAction",
+                  # 0.1.89 — 分流之后的收尾。收面板 / 收横幅这两件事本来挂在
+                  # SpringBoard 那一段的收尾里，被跳过之后要自己补。每一条候选
+                  # 选择子都必须能在产物里 grep 到 —— 少一条就等于少一条试过的
+                  # 路，而「面板还是没关」与「压根没试」在日志里长得不一样。
+                  #
+                  #   hub      = dispatcher 走哪条路拿到的、拿到的是什么类
+                  #   clean    = 一次收尾的完整结论（cover=… banner=…）
+                  #   cover=ok = 真的调到了收起；cover=shape = 编码不符，只记不动
+                  b"notify: hub d=%@ via=%s",
+                  b"notify: clean d=%s %s %s n=%d",
+                  b"cover=ok:%s",
+                  b"cover=shape%s",
+                  b"cover=noclass",
+                  b"cover=down",
+                  b"cover=locked",
+                  b"cover=none",
+                  b"banner=ok:%s%s",
+                  b"banner=none%s",
+                  b"banner=nodispatcher",
+                  b"setCoverSheetPresented:animated:withCompletion:",
+                  b"setCoverSheetPresented:animated:withCompletion:force:",
+                  b"_setCoverSheetPresented:animated:withCompletion:",
+                  b"_dismissCoverSheetAnimated:withCompletion:",
+                  b"dismissCoverSheetAnimated:completion:",
+                  b"dismissCoverSheet",
+                  # 形状闸的六个期望值。它们同时是「这一版到底校验了什么」的证词。
+                  b"v@:BB@",
+                  b"v@:BB@B",
+                  b"v@:B@",
+                  b"v@:",
+                  # 横幅：只有 GCD 计时器才动，而且必须是这个名字的那一个。
+                  b"dismissTimer",
+                  b"_dismissTimer",
+                  b"dispatch_source",
+                  b"bannerDestination",
+                  b"dashBoardDestination",
+                  b"notificationCenterDestination",
+                  # dispatcher 的三条取法 + 起点。
+                  b"notificationDispatcher",
+                  b"ncDispatcher",
+                  b"_notificationDispatcher",
+                  b"delegate",
                   # 闸四（Swift 侧）：闩的三态。三条缺一条，「上次死在这条钩子
                   # 上」这个结论就落不下来 —— 而这正是这一版唯一的安全网。
                   b"notify: activate latch held, previous boot died while armed",

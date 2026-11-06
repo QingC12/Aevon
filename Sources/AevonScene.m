@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 // 0.1.40 — 这两个符号由 Swift 侧（`Log.swift` / `SceneProbe.swift`）用
@@ -3132,6 +3133,299 @@ static void AevonOpenWatch(id self, SEL cmd, id request, id options,
     });
 }
 
+// MARK: - 0.1.89 分流之后的收尾：关通知中心 / 撤横幅
+//
+// 0.1.88 的真机日志（Aevon(156)）把「浮窗起来了」这件事关账了：五次点通知、五次
+// `notify: divert b=…` + `notify: divert card up b=…`，一次 `replay` 都没有。但同一个
+// 答复里还剩两条：「通知中心不自动关闭」「横幅不自动收起」。
+//
+// 这两条不是 bug，是 0.1.88 那个「不转发」的必然代价。正常点通知时，收面板、收横幅
+// 这两件事**挂在 SpringBoard 那一段的收尾里**（App 起来 → 面板跟着走）。我们整段跳过
+// 了，于是没有任何人去收它们。要补的正是被跳过的那一部分，不是发明新动作。
+//
+// 两条路都不猜名字，原因很实际：0.1.85 猜 `_activateBundleID:` 白丢了一版，0.1.86 才
+// 用只读普查把真名捞回来。所以这里的每个候选都先读 `method_getTypeEncoding`，归一化后
+// **逐字符等于**预期才调；不等就只记编码，绝不动手。四个候选全不符时一行都不做
+// （= 0.1.88 行为），日志里留下真实编码，下一版按它改。
+//
+// 横幅那条有现成的实证，不是推的：stheno 复刻线（`stheno-逆向分析/analysis/
+// roadmap-0.7-2026-10-17.md`）在这上面连错三版才认清 ——
+//   0.7.10：`dismissAllBanners*` 在横幅宿主 `SBNotificationBannerDestination` 上
+//           **根本不存在**（log71 能力地图实证），静默空转；
+//   0.7.11：改成 fire `dismissTimer`，撞上「它是 OS_dispatch_source、不是 NSTimer」（log72）；
+//   0.7.12：改 `dispatch_source_set_timer(_dismissTimer, DISPATCH_TIME_NOW, …)` —— 把系统
+//           自己那个 5 秒计时器的触发时间改到「现在」，让它自己的收起处理器跑一遍，
+//           只影响当前这一条；log73 关账。
+// 所以这里照做：不伪造收起动作，只**提前**执行系统本来就会做的那一次。
+//
+// 时机：延迟 0.45 秒。点通知这一刻 SpringBoard 正在跑一次 open 事务，就地动通知中心有
+// 撞断言的历史（同一份 roadmap 里 0.6.20 的教训）—— 别人踩过的坑不重踩。
+
+/// 只读一个 getter。不存在、或对象把消息转发到一个会抛的实现上，都返回 nil。
+///
+/// 双保险不是洁癖：这条链跑在 SpringBoard 主队列上，一次 `doesNotRecognizeSelector`
+/// 就是杀进程，不是一行日志。0.7.9 那条线正是这么死的（对 `NSObject` 用 `valueForKey:`
+/// 取未定义键 ⇒ 整条 open 请求被丢弃 + 自动重试），所以这里连 `@try` 都不敢省。
+static id AevonCleanRead(id object, const char *name) {
+    if (object == NULL || name == NULL) return nil;
+    SEL sel = sel_registerName(name);
+    if (![object respondsToSelector:sel]) return nil;
+    @try {
+        return ((id (*)(id, SEL))objc_msgSend)(object, sel);
+    } @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+/// 把 ObjC 类型编码归一化成「只有类型字符」的形式：
+/// `v28@0:8B16B20@24` → `v@:BB@`。数字（偏移量）、`+`/`-`（栈帧）、引号里的名字全部丢掉。
+///
+/// 有了它，闸就能写成 `strcmp(compact, "v@:BB@") == 0` —— 一眼能看出「这个选择子收
+/// 两个 BOOL 加一个对象」，而不是靠人肉对齐偏移量。`@?`（块）单列，因为它带一个 `?`。
+static void AevonCleanCompact(const char *encoding, char *out, size_t size) {
+    if (out == NULL || size == 0) return;
+    out[0] = '\0';
+    if (encoding == NULL) return;
+    size_t used = 0;
+    for (const char *p = encoding; *p != '\0' && used + 3 < size; p++) {
+        if (*p >= '0' && *p <= '9') continue;
+        if (*p == '+' || *p == '-') continue;
+        if (*p == '@' && p[1] == '?') { out[used++] = '@'; out[used++] = '?'; p++; continue; }
+        if (*p == '"') { p++; while (*p != '\0' && *p != '"') p++; continue; }
+        out[used++] = *p;
+    }
+    out[used] = '\0';
+}
+
+/// 这个对象是不是一个 GCD 计时器（`OS_dispatch_source`）？
+///
+/// 0.7.12 那条线在这里卡过一版：横幅的 `dismissTimer` 看着像计时器，`fire` 上去却
+/// 什么也没发生 —— 因为它根本不是 `NSTimer`。所以调用前必须先认类名，认错就是
+/// `dispatch_source_set_timer` 打在一个普通对象上。
+static BOOL AevonCleanIsSource(id object) {
+    if (object == nil) return NO;
+    const char *name = class_getName(object_getClass(object));
+    if (name == NULL) return NO;
+    return strstr(name, "dispatch_source") != NULL;
+}
+
+/// 让某一台上「已经排好队的那次收起」立刻发生。
+///
+/// 只碰名字里同时含 dismiss 与 timer 的 **对象型** ivar（类型编码必须以 `@` 开头，
+/// 否则 `object_getIvar` 会把一个标量当指针解引用）。取不到就返回 NO，一个字节都不动。
+static BOOL AevonCleanKick(id host, char *how, size_t size) {
+    if (how != NULL && size > 0) how[0] = '\0';
+    if (host == nil) return NO;
+
+    // ① getter 优先：`dismissTimer` 在 log72 里就是它给出的 OS_dispatch_source。
+    id timer = AevonCleanRead(host, "dismissTimer");
+    if (!AevonCleanIsSource(timer)) timer = nil;
+
+    // ② getter 不在就扫 ivar。名字匹配 + 类型必须是对象 + 认得出是 GCD 源，三条同时成立。
+    if (timer == nil) {
+        unsigned int count = 0;
+        Ivar *vars = class_copyIvarList([host class], &count);
+        for (unsigned int i = 0; vars != NULL && i < count; i++) {
+            const char *name = ivar_getName(vars[i]);
+            if (name == NULL) continue;
+            if (strcasestr(name, "dismiss") == NULL) continue;
+            if (strcasecmp(name, "dismissTimer") != 0 && strcasecmp(name, "_dismissTimer") != 0) continue;
+            const char *type = ivar_getTypeEncoding(vars[i]);
+            if (type == NULL || type[0] != '@') continue;
+            id value = object_getIvar(host, vars[i]);
+            if (!AevonCleanIsSource(value)) continue;
+            timer = value;
+            if (how != NULL && size > 0) snprintf(how, size, ":%s", name);
+            break;
+        }
+        if (vars != NULL) free(vars);
+    }
+
+    if (timer == nil) return NO;
+    // 触发时间 = 现在；间隔给一个「这辈子不会再来」的值，免得把周期改坏。
+    dispatch_source_set_timer((dispatch_source_t)(__bridge void *)timer,
+                              DISPATCH_TIME_NOW, (uint64_t)1 << 62, 0);
+    return YES;
+}
+
+/// 横幅。宿主不一定是 `SBNotificationBannerDestination`：这台机器上 dispatcher 有
+/// 四个 destination getter，还没验过哪一台真的挂着横幅，所以三个都问一遍，谁先
+/// 有计时器就动谁（只动第一台，避免一次点击收两遍）。
+static void AevonCleanBanner(id dispatcher, char *out, size_t size) {
+    if (out == NULL || size == 0) return;
+    out[0] = '\0';
+    if (dispatcher == nil) { snprintf(out, size, "banner=nodispatcher"); return; }
+
+    static const char *getters[3] = {
+        "bannerDestination", "dashBoardDestination", "notificationCenterDestination"
+    };
+    char notes[96];
+    notes[0] = '\0';
+    for (int i = 0; i < 3; i++) {
+        id dest = AevonCleanRead(dispatcher, getters[i]);
+        if (dest == nil) {
+            size_t used = strlen(notes);
+            if (used < sizeof(notes) - 8) snprintf(notes + used, sizeof(notes) - used, " -%d", i);
+            continue;
+        }
+        char how[40];
+        if (AevonCleanKick(dest, how, sizeof(how))) {
+            snprintf(out, size, "banner=ok:%s%s", getters[i], how);
+            return;
+        }
+    }
+    snprintf(out, size, "banner=none%s", notes);
+}
+
+/// 通知中心（cover sheet）收起来。
+///
+/// 候选顺序按「最可能是标准做法」排，不是按名字好写排：`setCoverSheetPresented:animated:
+/// withCompletion:` 是这台机器上 presentation manager 的常规入口，`_dismiss…` 是它的私有
+/// 快捷路径，无参的 `dismissCoverSheet` 只当最后的兜底。
+///
+/// 每一步都过形状闸。**四个候选全不符时一行都不做** —— 那等于退回 0.1.88（面板不关），
+/// 而日志里那几条真实编码就是下一版的依据。这比赌一个名字好：赌错轻则无效、重则调用
+/// 到一个参数不是这个类型的实现上，那是崩溃。
+static void AevonCleanCover(char *out, size_t size) {
+    if (out == NULL || size == 0) return;
+    out[0] = '\0';
+    id cover = AevonShared(@"SBCoverSheetPresentationManager");
+    if (cover == nil) { snprintf(out, size, "cover=noclass"); return; }
+    if (!AevonTruthy(cover, @"isPresented") && !AevonTruthy(cover, @"isVisible")) {
+        snprintf(out, size, "cover=down");
+        return;
+    }
+    // 锁屏上不许收：那一层面板是锁定状态的一部分，收了等于绕过锁屏。
+    if (AevonBoolOf(AevonShared(@"SBLockScreenManager"), @"isUILocked") == 1) {
+        snprintf(out, size, "cover=locked");
+        return;
+    }
+
+    static const struct { const char *sel; const char *shape; } ladder[] = {
+        { "setCoverSheetPresented:animated:withCompletion:",       "v@:BB@"  },
+        { "setCoverSheetPresented:animated:withCompletion:force:", "v@:BB@B" },
+        { "_setCoverSheetPresented:animated:withCompletion:",      "v@:BB@"  },
+        { "_dismissCoverSheetAnimated:withCompletion:",            "v@:B@"   },
+        { "dismissCoverSheetAnimated:completion:",                 "v@:B@"   },
+        { "dismissCoverSheet",                                     "v@:"     },
+    };
+    enum { ladderCount = sizeof(ladder) / sizeof(ladder[0]) };
+    char miss[96];
+    miss[0] = '\0';
+
+    for (int i = 0; i < ladderCount; i++) {
+        SEL sel = sel_registerName(ladder[i].sel);
+        Method method = class_getInstanceMethod([cover class], sel);
+        if (method == NULL) continue;
+        const char *encoding = method_getTypeEncoding(method);
+        if (encoding == NULL) continue;
+        char compact[24];
+        AevonCleanCompact(encoding, compact, sizeof(compact));
+        if (strcmp(compact, ladder[i].shape) != 0) {
+            size_t used = strlen(miss);
+            if (used < sizeof(miss) - 12) snprintf(miss + used, sizeof(miss) - used, " %s", compact);
+            continue;
+        }
+        // 空块比 nil 安全：有些实现不看就调，nil 调用是跳 0。块不带参数，多传的参数它不理。
+        // `copy` 一步不能省：`objc_msgSend` 的形参是 id，不是块，ARC 不会替我们把栈上的
+        // 块搬到堆上；搬晚了，被调方存下来再调就是野指针。
+        id done = [^{} copy];
+        BOOL ran = NO;
+        @try {
+            switch (i) {
+                case 0:
+                case 2:
+                    ((void (*)(id, SEL, BOOL, BOOL, id))objc_msgSend)
+                        (cover, sel, NO, YES, (id)done);
+                    ran = YES;
+                    break;
+                case 1:
+                    ((void (*)(id, SEL, BOOL, BOOL, id, BOOL))objc_msgSend)
+                        (cover, sel, NO, YES, (id)done, YES);
+                    ran = YES;
+                    break;
+                case 3:
+                case 4:
+                    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(cover, sel, YES, (id)done);
+                    ran = YES;
+                    break;
+                case 5:
+                    ((void (*)(id, SEL))objc_msgSend)(cover, sel);
+                    ran = YES;
+                    break;
+                default:
+                    break;
+            }
+        } @catch (NSException *exception) {
+            ran = NO;
+        }
+        if (ran) { snprintf(out, size, "cover=ok:%s", ladder[i].sel); return; }
+    }
+
+    if (miss[0] != '\0') snprintf(out, size, "cover=shape%s", miss);
+    else snprintf(out, size, "cover=none");
+}
+
+/// SpringBoard 的通知 dispatcher。只解析一次，解析结果留一份强引用。
+///
+/// 取法是 0.7 那条线留下的：SpringBoard（`UIApplication.delegate`）→ `notificationDispatcher`
+/// → `SBNCNotificationDispatcher` → 各 destination。三个名字都试，谁先答用谁；答不上就
+/// 记 `d=-`，本版退回「只有通知中心会被收、横幅照系统原样 5 秒后自己走」。
+static id AevonCleanDispatcherRef = nil;
+static int AevonCleanDispatcherTried = 0;
+
+static id AevonCleanDispatcher(void) {
+    if (AevonCleanDispatcherRef != nil) return AevonCleanDispatcherRef;
+    if (AevonCleanDispatcherTried) return nil;
+    AevonCleanDispatcherTried = 1;
+
+    static const char *names[3] = { "notificationDispatcher", "ncDispatcher", "_notificationDispatcher" };
+    id found = nil;
+    const char *via = "-";
+    id delegate = AevonCleanRead([UIApplication sharedApplication], "delegate");
+    for (int i = 0; i < 3 && found == nil; i++) {
+        found = AevonCleanRead(delegate, names[i]);
+        if (found != nil) via = names[i];
+    }
+    if (found == nil) {
+        id lock = AevonShared(@"SBLockScreenManager");
+        for (int i = 0; i < 3 && found == nil; i++) {
+            found = AevonCleanRead(lock, names[i]);
+            if (found != nil) via = names[i];
+        }
+    }
+    if (found != nil) AevonCleanDispatcherRef = found;
+
+    AevonLogRaw([[NSString stringWithFormat:@"notify: hub d=%@ via=%s",
+                  found != nil ? NSStringFromClass([found class]) : @"-", via] UTF8String]);
+    return found;
+}
+
+/// 一次分流最多收几次。用满之后一律回到 0.1.88 的行为（面板与横幅都不动）。
+static int AevonCleanRuns = 0;
+#define AEVON_CLEAN_MAX 6
+
+/// 分流成功之后补做的那两件收尾。**唯一调用点**是 `AevonOpenHit` 的分流分支，
+/// 延迟 0.45 秒、走主队列。
+static void AevonNotifyCleanup(void) {
+    if (AevonActivateSwitchOff()) return;          // 闸一：开关每拍都查
+    if (AevonCleanRuns >= AEVON_CLEAN_MAX) return;
+    AevonCleanRuns += 1;
+
+    id dispatcher = AevonCleanDispatcher();
+    char cover[128], banner[128], line[360];
+    cover[0] = '\0';
+    banner[0] = '\0';
+
+    AevonCleanBanner(dispatcher, banner, sizeof(banner));
+    AevonCleanCover(cover, sizeof(cover));
+
+    const char *dname = dispatcher != nil ? class_getName([dispatcher class]) : "-";
+    snprintf(line, sizeof(line), "notify: clean d=%s %s %s n=%d",
+             dname != NULL ? dname : "?", cover, banner, AevonCleanRuns);
+    AevonLogRaw(line);
+}
+
 /// 替身。**顺序就是这里的全部安全设计**：
 ///   ① 快照 —— 只读，不改任何参数；
 ///   ② 分流判定 —— 只有「这一拍是一次通知点击」才改变行为，其余一个字节都不动；
@@ -3201,6 +3495,12 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                 snprintf(line + used, sizeof(line) - used, " result=%s", shape);
             }
             AevonOpenFromNotification(bundle);
+            // 0.1.89：这次没转发，SpringBoard 就没有机会去收面板 / 收横幅 —— 那两件
+            // 事本来挂在它的收尾里。延迟 0.45 秒自己补上：open 事务跑完再动通知中心。
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                AevonNotifyCleanup();
+            });
             AevonOpenWatch(self, _cmd, request, options, settings, origin, replay,
                            AevonOpenOrig[slot], target);
         }
