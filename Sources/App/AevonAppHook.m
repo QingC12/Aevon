@@ -6042,31 +6042,59 @@ static volatile int AevonKbTopSettleNotes = 0;
 /// 所以 0.1.70 之后只做一件事：把「顶边」挪到一个能让**输入条底边正好落在
 /// 键盘上沿**的位置，挪多少由实测反解。抖音 0 因为它把工具栏算进了键盘矩形，
 /// 铺完正好 —— 不要给它加任何非零标定。
+/// 0.1.72 — 每个 App 通知里那颗「键盘矩形顶」的**结算值**，按 App 钉死。
+///
+/// 返回 0 表示「不认识这台机器」，调用方退回通知原值（行为同 0.1.71）。
+///
+/// 为什么不再从通知取：Aevon(143) 把这条路彻底证伪了。同一个键盘，`origin.y`
+/// 在一次弹出动画里是**先降后回弹**的，中途会出现比结算值更小的过冲帧：
+///   微信 761 → 663 → 565 → 788 → 467    （结算值 601，565 与 467 都是过冲）
+///    QQ   761 → 637 → 513               （结算值 639，513 是过冲）
+/// 只要判据里带「取最小」，就一定会取到过冲帧；而 `truth` 每少 1，输入框就抬
+/// 1 pt（三条实测式子的斜率都是 −1）—— 于是每开一次键盘就抬一档，三个过冲值
+/// 轮转就是用户说的「3 档一循环」。
+///
+/// 所以这个量不能用任何「采样 + 归约」的办法得到，只能**钉死**。三个值都是
+/// 143/142 两份日志里同一 App 反复出现过的结算值，与真机上沿 616 的关系由
+/// `AevonKbNoteCalibration` 抹平；换机型/横屏时返回 0，退回原逻辑。
+static CGFloat AevonKbTopFixed(CGFloat full) {
+    // 只认本机这块 430×932 竖屏。别的尺寸键盘高度不同，钉死的值会错，宁可不用。
+    if (fabs(full - 932.0) > 4.0) return 0.0;
+    if (fabs(AevonKbNativeBounds(nil).size.width - 430.0) > 4.0) return 0.0;
+    NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
+    if (bundle == nil) return 0.0;
+    if ([bundle isEqualToString:@"com.tencent.mqq"]) return 639.0;
+    if ([bundle isEqualToString:@"com.tencent.xin"]) return 601.0;
+    if ([bundle isEqualToString:@"com.ss.iphone.ugc.Aweme"]) return 611.0;
+    return 0.0;
+}
+
 static CGFloat AevonKbNoteCalibration(void) {
     NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
     if (bundle == nil) return 0.0;
-    // 0.1.71 — 三个数全部改成**由 `kb: caret … bar=` 反解**，不再靠手调。
+    // 0.1.72 — 三个数全部重解，因为 `AevonKbTopFixed` 把 `raw` 钉死了，方程变了。
     //
-    // 反解用的关系式（Aevon(142) 的读数，两处采样 1:1 吻合才敢用）：
+    // 从 Aevon(142)/(143) 两份日志（同一 App 不同版本，`cal` 不同）能解出唯一形式，
+    // 关键是**微信的 `cal` 出现两次**——它同时消费「通知矩形」和「交集返回值」，
+    // 两条通道各让一次位：
     //
-    //   QQ   输入条底 = 963 − truth   （truth 345 ⇒ 618；truth 318 ⇒ 645）
-    //   微信 输入条底 = 1190 − truth  （truth 421 ⇒ 769；truth 394 ⇒ 796）
+    //   QQ   底 =  31 + raw − cal          （只有一条通道）
+    //   微信 底 = 348 + raw − 2·cal        （两条通道叠加）
+    //   抖音 底 = raw − cal − 184
     //
-    // 两式斜率都是 −1 ⇒ 我们给的 `truth` 增 1，输入条就上移 1，方向与幅度都
-    // 精确。于是「让输入条底落在键盘上沿 616」变成一个一元一次方程：
+    // 微信这条是这样验出来的：142（cal 90）底 = 1190 − truth，143（cal 243）
+    // 底 = 1037 − truth，两版截距正好差 153 = 243 − 90；代入 truth = 932 − raw + cal
+    // 化简即得 `348 + raw − 2·cal`，两组共五个采样点全部命中。
     //
-    //   QQ   truth = 963 − 616 = 347 ⇒ 顶边 585 ⇒ cal = 639 − 585 = 54
-    //   微信 truth = 1190 − 616 = 574 ⇒ 顶边 358 ⇒ cal = 601 − 358 = 243
+    // 要「输入条底边落在键盘上沿 616」，把 raw 换成钉死的值解 cal：
     //
-    // 两个常数差得远（54 vs 243）不是笔误：它们各自把输入条铺在自己以为的
-    // 「键盘顶」下沿，铺出来的厚度不同（微信多铺 258 pt，是它把 tabbar、
-    // 工具条都算进去的结果）。抖音 0 —— 它的键盘矩形 533 本来就含工具栏，
-    // 铺完正好，别动它（0.1.70 实测正常）。
+    //   QQ   raw 639 ⇒ cal = 670 − 616 = 54
+    //   微信 raw 601 ⇒ cal = (348 + 601 − 616) / 2 = 166.5 → 166（底 617）
+    //   抖音 raw 611 ⇒ cal = 0（底 427，与 0.1.70 用户认可的「正常」完全一致）
     //
-    // ⚠️ 仍然是**按 Bundle 的标定值**。新增 App 照上面两条式子：先看
-    // `kb: caret … bar=` 与 `kb: inter true=` 两点，解出斜率与截距再填。
+    // 抖音**不要**去凑 533：它的 427 就是正常位置，凑 533 等于把它下推 106。
     if ([bundle isEqualToString:@"com.tencent.mqq"]) return 54.0;
-    if ([bundle isEqualToString:@"com.tencent.xin"]) return 243.0;
+    if ([bundle isEqualToString:@"com.tencent.xin"]) return 166.0;
     return 0.0;
 }
 
@@ -6702,19 +6730,22 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     // 0.1.71 — 这个返回值**不再等于真实键盘高度**，别再拿它跟 316 对账。
     //
     // 实测（Aevon(142)）两个 App 的输入条位置对 `truth` 都是 1:1 跟随：
-    //   QQ   caret底 = 963 − truth   微信 caret底 = 1190 − truth
-    // 斜率精确为 −1，方向也没错，只是截距不同。所以「让输入条底落在键盘上沿
-    // 616」反过来解出 QQ 要 347、微信要 574 —— 微信的 574 比键盘真实高度 316
-    // 还大 258，看着荒谬，但那正是它自己多铺的那一截（tabbar + 工具条）。
+    //   QQ   caret底 = 963 − truth   微信 caret底 = 1190 − truth（142；143 因 cal 变而为 1037）
+    // 斜率精确为 −1，方向也没错，只是截距不同。
     //
-    // 判据不要写死 316，要看 `kb: inter true=` 与 `kb: caret … bar=` 是否
-    // 满足上面两条式子。
-    // 这几个数就是各自键盘的上沿（`AevonKbVisualTop` 在键盘窗里量的结果，含
-    // App 自己的工具栏）—— 0.1.69 用它做顶边，但它随调用时机漂（501/528/573），
-    // 已改走 `AevonKbTopSettled`；这组读数留作对照。
+    // 0.1.72 — 顶边改由 `AevonKbTopFixed` 钉死，不再读任何通知/视图/采样。
+    //
+    // Aevon(143) 证明「取最小」这条路是错的：动画里的 `origin.y` 会**过冲**
+    // （微信 565/467、QQ 513，都比结算值更小），取最小必然取到过冲帧，truth 于是
+    // 每开一次键盘涨一档（微信 414→512→610→708→717），输入框阶梯上移、三档一循环。
+    // 顶边一旦恒定，truth 就恒定，输入框也就恒定 —— 这是本版唯一的目标。
     CGFloat cal = AevonKbNoteCalibration();
-    CGFloat kbTop = AevonKbTopSettled;
-    if (kbTop < 200.0 || kbTop > fullHeight - 60.0) kbTop = AevonKbAnchorValue(fullHeight);
+    CGFloat kbTop = AevonKbTopFixed(fullHeight);
+    if (kbTop < 1.0) {
+        // 不认识的机型/尺寸：退回通知结算值，再退回系统锚点。
+        kbTop = AevonKbTopSettled;
+        if (kbTop < 200.0 || kbTop > fullHeight - 60.0) kbTop = AevonKbAnchorValue(fullHeight);
+    }
     // 和上面发出去的那条通知**必须同源**：通知里给的顶边是 `kbTop − cal`，
     // 这里返回的让位量就是 `整屏高 − (kbTop − cal)`。两条通道说同一个数，
     // App 用哪条都落在同一处，也不会因为值变了而重排第二次。
@@ -6906,19 +6937,22 @@ static void AevonKbPostNote(id self, SEL _cmd, NSNotificationName name, id objec
             if (raw.origin.y >= full - 1.0) AevonKbNoteActive = 0;
             else if (raw.size.height > 40.0) AevonKbNoteActive = 1;
         }
-        // 0.1.70 — **只抬每个 App 自己那条输入条，不再按场景原点平移。**
+        // 0.1.72 — **顶边按 App 钉死，绝对写，不叠加。**
         //
-        // 0.1.68/0.1.69 把 `origin.y` 减掉场景原点 215，本意是「换成窗口坐标」。
-        // Aevon(141) 证明这个动作对这三个 App 都是**重复让位**：它们自己就用
-        // `UIScreen 高 − 键盘顶` 算，减完 215 让它算出的让位量再多 215。而同一个
-        // 会话里第一条通知往往读不到场景原点（缓存还没写）⇒ 先给未平移的、
-        // 再给平移的 ⇒ App 把两次让位**累加**：
-        //   抖音 184 + 399 = 583 ⇒ 输入条底边到屏幕 349（日志 `bar=329..349`）
-        // 现在只留一个方向、一个来源：顶边减掉该 App 输入条自身高度。
+        // 0.1.70 只做了「减掉输入条高度」，顶边仍从通知取；0.1.71 又加了「取最小」，
+        // 结果取到了动画的过冲帧（微信 565/467、QQ 513，都比结算值更小），
+        // truth 每开一次键盘涨一档 ⇒ 输入框阶梯上移、三档一循环（Aevon(143)）。
+        //
+        // 现在两条来源合一：`raw` 用 `AevonKbTopFixed`（本机实测结算值），
+        // 再减 `AevonKbNoteCalibration`。写的是**绝对值** `rect.origin.y = target - cal`，
+        // 不是 `-=`：同一会话里多条通知重复到达时不会累加（0.1.69 的教训）。
         CGFloat cal = AevonKbNoteCalibration();
-        CGFloat rawTop = -1.0;
-        CGFloat outTop = -1.0;
-        if (cal > 0.5) {
+        CGFloat full = AevonKbNativeBounds(nil).size.height;
+        CGFloat fixedTop = AevonKbTopFixed(full);
+        CGFloat rawTop = endValue != nil ? [endValue CGRectValue].origin.y : -1.0;
+        CGFloat target = fixedTop > 0.0 ? fixedTop : rawTop;
+        CGFloat outTop = rawTop;
+        if (target > 0.0 && (fixedTop > 0.0 || fabs(cal) > 0.5)) {
             NSMutableDictionary *copy = [[NSMutableDictionary alloc] initWithDictionary:info];
             BOOL moved = NO;
             NSArray *keys = @[UIKeyboardFrameBeginUserInfoKey, UIKeyboardFrameEndUserInfoKey];
@@ -6927,24 +6961,20 @@ static void AevonKbPostNote(id self, SEL _cmd, NSNotificationName name, id objec
                 if (boxed == nil) continue;
                 CGRect rect = [boxed CGRectValue];
                 if (rect.size.height < 40.0) continue;
-                if ([key isEqualToString:UIKeyboardFrameEndUserInfoKey]) rawTop = rect.origin.y;
-                rect.origin.y -= cal;
+                rect.origin.y = target - cal;
                 if ([key isEqualToString:UIKeyboardFrameEndUserInfoKey]) outTop = rect.origin.y;
                 [copy setObject:[NSValue valueWithCGRect:rect] forKey:key];
                 moved = YES;
             }
             if (moved) shifted = copy;
             else [copy release];
-        } else if (endValue != nil) {
-            rawTop = [endValue CGRectValue].origin.y;
-            outTop = rawTop;
         }
         if (AevonKbNoteNotes < 8) {
             AevonKbNoteNotes += 1;
-            char line[220];
+            char line[240];
             snprintf(line, sizeof(line),
-                     "kb: note rect raw=%.0f out=%.0f cal=%.0f name=%.40s\n",
-                     rawTop, outTop, cal, [(NSString *)name UTF8String]);
+                     "kb: note rect raw=%.0f out=%.0f cal=%.0f fixed=%.0f name=%.40s\n",
+                     rawTop, outTop, cal, fixedTop, [(NSString *)name UTF8String]);
             AevonKbLog(line);
         }
     }
