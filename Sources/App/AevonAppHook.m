@@ -4765,6 +4765,10 @@ static CGFloat AevonKbVisualTop(void);
 /// 0.1.59 — 场景几何（都定义在键盘段后部，这里只要前置声明）。
 static CGRect AevonKbSceneRectOnScreen(void);
 static CGFloat AevonKbSceneHeightNow(void);
+/// 0.1.65 — 系统算出来的「键盘遮住场景多少」（`AevonKbIntersection` 的返回值，
+/// 写在键盘段后部）。本机稳定 289 ⇒ 键盘顶 643，这是四个 App 唯一一致的锚点。
+static CGFloat AevonKbLeadSeen;
+static CGRect AevonKbNativeBounds(UIScreen *screen);
 /// 0.1.57 — **三条通道一起写**，因为 0.1.56 只写了最没希望的那一条。
 ///
 /// Aevon(129) 的证词只有一行，但足够定案：
@@ -4910,10 +4914,60 @@ static UIWindow *AevonKbAppWindow(void) {
 /// 用户的评价是「接近完美，只是关键盘不还原」。所以本版把 0.1.60 的这一段原样
 /// 还回来（含「第一次按 sceneY=0 收成 573、第二次按 215 收成 358」这两拍 ——
 /// 两拍是有用的：App 重排两次，输入框才跟到键盘上沿），只把还原那头留给宿主。
+/// 0.1.65 — 把「量到的键盘顶」抬到系统认可的那条线。
+///
+/// 两个独立来源，各答一半：
+///
+/// · `AevonKbVisualTop()` 在键盘窗里 BFS 找「满宽 + 底贴窗底 + 高 200..460」的
+///   **最靠上**那个。它答的是「键盘这块从哪开始」，可键盘窗里存着比键盘本体更高的
+///   满宽背景（键盘上方的工具条、App 输入栏的底衬），于是偏上。Aevon(136) 实测
+///   三个值互不相同 —— QQ/微信 **573**、抖音 **533**、备忘录 **529**；同一台机器、
+///   同一把键盘，却量出三个数，本身就说明它取到的不是同一个东西。
+///
+/// · `932 − AevonKbLeadSeen` 是系统自己算的交集（`_UIRemoteKeyboards` 的
+///   intersection）：场景 215..932 与键盘相交 **289** ⇒ 键盘顶 **643**。
+///   四个 App、十一次开键盘，稳定同一个数。
+///
+/// 643 才是输入框该贴住的那条线，两个报障都由这个差直接解释：
+///
+/// · **QQ 输入框显示不全** —— 窗口收到 573，而 QQ 的输入框整条落在 573..643 这
+///   70 pt 里，被窗口底边裁掉。
+/// · **抖音输入框被抬高、大面积空白** —— 窗口收到 533，键盘顶却在 643，
+///   中间 110 pt 全是卡片底色。
+/// · 微信量到 573 却不显问题，只是它的输入框更矮、刚好在 573 上面 —— 所以
+///   「微信正常」不能当反例，它只是没被切到。
+///
+/// 只在「两个来源相差 120 pt 以内」时才采用系统值：键盘还没弹完、场景还没搬的那
+/// 两拍系统会报 74 / 101（⇒ 858 / 831），差得远，一律不理，宁可维持原值。
+static CGFloat AevonKbTopCorrected(CGFloat measured) {
+    if (measured < 240.0) return measured;
+    CGFloat full = AevonKbNativeBounds(nil).size.height;
+    if (full < 400.0) return measured;
+    CGFloat lead = AevonKbLeadSeen;
+    if (lead < 200.0 || lead > 500.0) return measured;
+    CGFloat anchor = full - lead;
+    if (anchor < 240.0 || anchor > full - 120.0) return measured;
+    CGFloat gap = anchor - measured;
+    if (gap <= 1.0 || gap > 120.0) return measured;
+    static int notes = 0;
+    if (notes < 8) {
+        notes += 1;
+        char line[180];
+        snprintf(line, sizeof(line), "kb: top correct measured=%.0f lead=%.0f -> %.0f\n",
+                 measured, lead, anchor);
+        AevonKbLog(line);
+    }
+    return anchor;
+}
+
 static void AevonKbFitWindow(CGFloat top) {
     if (![NSThread isMainThread]) return;
     if (AevonKbOn == 0) return;
     if (top < 240.0 || top > 4000.0) return;
+    // 0.1.65 — 先抬到系统认可的那条线（见 `AevonKbTopCorrected`）：量视图偏上，
+    // 偏多少取决于 App 在键盘窗里垫了多高的底衬，不能直接用。
+    CGFloat raw = top;
+    top = AevonKbTopCorrected(top);
     UIWindow *window = AevonKbAppWindow();
     if (window == nil) return;
     CGRect box = AevonKbSceneRectOnScreen();
@@ -4936,8 +4990,9 @@ static void AevonKbFitWindow(CGFloat top) {
     if (fabs(frame.size.height - want) < 1.0) return;
     window.frame = CGRectMake(frame.origin.x, frame.origin.y, frame.size.width, want);
     char line[200];
-    snprintf(line, sizeof(line), "kb: win fit h=%.0f top=%.0f sceneY=%.0f sceneH=%.0f was=%.0f\n",
-             want, top, sceneY, sceneH, frame.size.height);
+    snprintf(line, sizeof(line),
+             "kb: win fit h=%.0f top=%.0f raw=%.0f sceneY=%.0f sceneH=%.0f was=%.0f\n",
+             want, top, raw, sceneY, sceneH, frame.size.height);
     AevonKbLog(line);
 }
 
@@ -5751,6 +5806,11 @@ static BOOL AevonKbNativeAllowed(void) {
 /// 0.1.43 — 全段只剩这一个原始实现。
 static IMP AevonOrigIntersection = NULL;
 
+/// 0.1.65 — 系统最近一次算出的「键盘遮住场景多少」（本机 289 ⇒ 键盘顶 643）。
+/// 由 `AevonKbIntersection` 写入，`AevonKbTopCorrected` 读它来校正量视图的偏差。
+/// 只保留 200..500 的合理值：键盘收起时系统报 0，场景没搬那拍报 74/101。
+static CGFloat AevonKbLeadSeen = 0.0;
+
 /// 日志配额。一次输入会反复问交点高度，证词只留前几条 —— 写日志本身就可能
 /// 把键盘帧率拖下来。
 static volatile int AevonKbLeadNotes = 0;
@@ -6273,6 +6333,8 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     // 这里只留一行读数。`answer` 应该是 0；如果下一份日志里它还是 289/316，
     // 说明场景没被收下来（宿主侧 `kbtop` 读到 0 → 退回铺满屏底），那不是这里的事。
     if (AevonKbOn == 0) return answer;
+    // 0.1.65 — 留一份给 `AevonKbTopCorrected`（只接受 200..500 的合理值）。
+    if (answer > 200.0 && answer < 500.0) AevonKbLeadSeen = (CGFloat)answer;
     AevonKbLeadNote(answer, screenHeight, fullHeight, AevonKbBandBottomEdge(),
                     sceneHeight, answer, 0);
     return answer;
