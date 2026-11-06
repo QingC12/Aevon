@@ -976,7 +976,15 @@ def main():
                       # 0.1.62 曾把这段整段删掉、只留 `kb: win keep` 读数 ——
                       # Aevon(134) 的结果是 23 次开键盘、输入框一次没出现，
                       # 所以这条路又回来了，三条断言一起回来。
-                      b"kb: win fit h=%.0f",
+                      b"kb: win hold h=%.0f",
+                      # 0.1.68 — 「键盘到底遮住这个窗口多少」由我们自己算，返回给
+                      # UIKit（`intersectionHeightForWindowScene:`）。系统按「窗口在
+                      # 屏幕 0」求交得 101，真实交集是 316 —— `kb: inter true= sys=`
+                      # 每次不一致时打一行，这一行在，就说明钩子真的改写了返回值。
+                      b"kb: inter true=%.0f",
+                      # 同理，键盘通知里的矩形也要从屏幕坐标换成窗口坐标（减场景
+                      # 原点 215：616 -> 401）。`kb: note shift=` 是这次平移的量。
+                      b"kb: note shift=%.0f",
                       b"kb: win unfit h=%.0f",
                       b"kb: win fit reject want=%.0f",
                       # 0.1.64 — 「收起」不再当场落状态：先压 0.30 s，到点量一次键盘
