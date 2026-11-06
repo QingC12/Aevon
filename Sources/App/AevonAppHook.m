@@ -6781,21 +6781,25 @@ static CGFloat AevonKbTopInWindow(UIView *keyboardWindow) {
 /// 643，只有主键盘时是 616，两种形状都不会被抹平。
 static CGFloat AevonKbVisualTop(void) {
     if (![NSThread isMainThread]) return 0.0;
-    CGFloat best = AevonKbTopInWindow(AevonKbKeptWindow);
-    if (best < 0.0) return 0.0;
+    UIView *kept = AevonKbKeptWindow;
+    CGFloat best = AevonKbTopInWindow(kept);
     if (best > 1.0) {
         AevonKbLastTop = best;
         return best;
     }
     UIView *fresh = AevonKbWindowScan();
-    if (fresh != nil && fresh != AevonKbKeptWindow) {
+    if (fresh != nil && fresh != kept) {
         CGFloat again = AevonKbTopInWindow(fresh);
-        if (again < 0.0) return 0.0;
         if (again > 1.0) {
             AevonKbLastTop = again;
             return again;
         }
+        // 这只窗在屏、只是这一拍没量到 ⇒ 是空窗，不是「收了」。
+        if (again == 0.0) best = 0.0;
     }
+    // -1 且场景里再没有第二只键盘窗 ⇒ 真的不在屏上。
+    if (best < 0.0) return 0.0;
+    // 窗在屏、量不到 ⇒ 沿用上一次真的量到的值。
     if (AevonKbLastTop > 200.0) return AevonKbLastTop;
     return 0.0;
 }
