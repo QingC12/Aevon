@@ -6057,14 +6057,37 @@ static volatile int AevonKbTopSettleNotes = 0;
 /// 所以这个量不能用任何「采样 + 归约」的办法得到，只能**钉死**。三个值都是
 /// 143/142 两份日志里同一 App 反复出现过的结算值，与真机上沿 616 的关系由
 /// `AevonKbNoteCalibration` 抹平；换机型/横屏时返回 0，退回原逻辑。
+/// 0.1.73 — 这个函数的返回值**语义改了**：不再是「该 App 通知里报的顶边」，而是
+/// **屏幕坐标下键盘真正的上沿**。Aevon(144) 把三种坐标混在一起了，先分清：
+///
+///   屏幕坐标（0..932）        —— 键盘真实上沿 616（中文键盘，含候选栏）
+///   窗口/场景坐标（0..717）   —— 同一个上沿在这里是 401（= 616 − 215）
+///
+/// 我们的场景是 `430×717@215`（窗口高 717、在屏幕上从 215 开始）。App 用
+/// `窗口高 − 键盘顶` 算让位，这个式子里**两个量必须同坐标系**；而 UIKit 发出来的
+/// `UIKeyboardFrameEndUserInfoKey` 是**屏幕坐标**。于是微信/QQ 算出来的让位量
+/// 恒少 215，输入框就整条沉进键盘 —— Aevon(144) 的两个读数把这一点钉死了：
+///
+///   微信  bar 底 638（屏幕）  键盘上沿 616  ⇒ 只差 22，几乎看不见
+///   QQ    bar 底 740（屏幕）  键盘上沿 616  ⇒ 差 124，完全看不见
+///   抖音  bar 底 427          键盘上沿 533  ⇒ 在键盘上方 106，正常
+///
+/// 抖音为什么没事：它把工具栏算进了键盘矩形，通知里报的顶边（611）本身就接近
+/// 屏幕坐标的真值，再用 `窗口高 − 611` 也不会掉到键盘里。
+///
+/// 于是这里只回答一件事：**这块键盘在屏幕上从哪一行开始**。
+///   616 —— QQ / 微信（中文键盘，含候选栏；`kb: top anchor measured=573 -> 616` 实测）
+///   611 —— 抖音（它自报的结算值，与它自己的工具栏口径一致）
+///
+/// 换成窗口坐标由 `AevonKbNoteCalibration` 统一减，不再在这里混着减。
 static CGFloat AevonKbTopFixed(CGFloat full) {
     // 只认本机这块 430×932 竖屏。别的尺寸键盘高度不同，钉死的值会错，宁可不用。
     if (fabs(full - 932.0) > 4.0) return 0.0;
     if (fabs(AevonKbNativeBounds(nil).size.width - 430.0) > 4.0) return 0.0;
     NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
     if (bundle == nil) return 0.0;
-    if ([bundle isEqualToString:@"com.tencent.mqq"]) return 639.0;
-    if ([bundle isEqualToString:@"com.tencent.xin"]) return 601.0;
+    if ([bundle isEqualToString:@"com.tencent.mqq"]) return 616.0;
+    if ([bundle isEqualToString:@"com.tencent.xin"]) return 616.0;
     if ([bundle isEqualToString:@"com.ss.iphone.ugc.Aweme"]) return 611.0;
     return 0.0;
 }
@@ -6072,29 +6095,26 @@ static CGFloat AevonKbTopFixed(CGFloat full) {
 static CGFloat AevonKbNoteCalibration(void) {
     NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
     if (bundle == nil) return 0.0;
-    // 0.1.72 — 三个数全部重解，因为 `AevonKbTopFixed` 把 `raw` 钉死了，方程变了。
+    // 0.1.73 — 这个量**不再是「每个 App 的输入条厚度」那种拟合值**，它是一个几何量：
+    // 场景原点在屏幕上的 y（本机 215）。减掉它，通知里的键盘顶就从屏幕坐标变成
+    // 窗口坐标，App 的 `窗口高 − 键盘顶` 才两个量同系。
     //
-    // 从 Aevon(142)/(143) 两份日志（同一 App 不同版本，`cal` 不同）能解出唯一形式，
-    // 关键是**微信的 `cal` 出现两次**——它同时消费「通知矩形」和「交集返回值」，
-    // 两条通道各让一次位：
+    // 前面六个版本的弯路值得记一笔，免得再走回去：
+    //   0.1.67~0.1.70  把它当成「各 App 多铺的那一截」（52 / 90 / 54 / 243 反复调），
+    //                  每次都能用两份日志解出一个「唯一解」，换一份日志就崩 ——
+    //                  因为那些方程本身是在拟合噪声，不是在描述几何。
+    //   0.1.71         键盘顶「只降不升」⇒ 取到动画过冲帧 ⇒ 每开一次键盘抬一档。
+    //   0.1.72         顶边钉死，truth 恒定了，但**基准仍然是屏幕坐标**，所以
+    //                  QQ/微信的让位量恒少 215，输入框整条沉进键盘。
     //
-    //   QQ   底 =  31 + raw − cal          （只有一条通道）
-    //   微信 底 = 348 + raw − 2·cal        （两条通道叠加）
-    //   抖音 底 = raw − cal − 184
+    // 0.1.73 只做一件事：把基准统一。同一份 Aevon(144) 日志里三个 App 的读数
+    // 一摆就清楚了 —— 抖音正常的那条 `bar` 底 427 用的是屏幕坐标，微信沉下去
+    // 的那条 638 也是屏幕坐标，两者差的就是「App 以为窗口底在哪一行」。
     //
-    // 微信这条是这样验出来的：142（cal 90）底 = 1190 − truth，143（cal 243）
-    // 底 = 1037 − truth，两版截距正好差 153 = 243 − 90；代入 truth = 932 − raw + cal
-    // 化简即得 `348 + raw − 2·cal`，两组共五个采样点全部命中。
-    //
-    // 要「输入条底边落在键盘上沿 616」，把 raw 换成钉死的值解 cal：
-    //
-    //   QQ   raw 639 ⇒ cal = 670 − 616 = 54
-    //   微信 raw 601 ⇒ cal = (348 + 601 − 616) / 2 = 166.5 → 166（底 617）
-    //   抖音 raw 611 ⇒ cal = 0（底 427，与 0.1.70 用户认可的「正常」完全一致）
-    //
-    // 抖音**不要**去凑 533：它的 427 就是正常位置，凑 533 等于把它下推 106。
-    if ([bundle isEqualToString:@"com.tencent.mqq"]) return 54.0;
-    if ([bundle isEqualToString:@"com.tencent.xin"]) return 166.0;
+    // 抖音给 0：它自报的顶边 611 本来就是屏幕坐标、且与它自己的工具栏口径一致，
+    // 减 215 反而会让它对不上（0.1.70 已实测正常，不动）。
+    if ([bundle isEqualToString:@"com.tencent.mqq"]) return 215.0;
+    if ([bundle isEqualToString:@"com.tencent.xin"]) return 215.0;
     return 0.0;
 }
 
@@ -6740,24 +6760,34 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     // 每开一次键盘涨一档（微信 414→512→610→708→717），输入框阶梯上移、三档一循环。
     // 顶边一旦恒定，truth 就恒定，输入框也就恒定 —— 这是本版唯一的目标。
     CGFloat cal = AevonKbNoteCalibration();
-    CGFloat kbTop = AevonKbTopFixed(fullHeight);
+    CGFloat fixedTop = AevonKbTopFixed(fullHeight);
+    CGFloat kbTop = fixedTop;
     if (kbTop < 1.0) {
         // 不认识的机型/尺寸：退回通知结算值，再退回系统锚点。
         kbTop = AevonKbTopSettled;
         if (kbTop < 200.0 || kbTop > fullHeight - 60.0) kbTop = AevonKbAnchorValue(fullHeight);
+        fixedTop = kbTop;
     }
-    // 和上面发出去的那条通知**必须同源**：通知里给的顶边是 `kbTop − cal`，
-    // 这里返回的让位量就是 `整屏高 − (kbTop − cal)`。两条通道说同一个数，
-    // App 用哪条都落在同一处，也不会因为值变了而重排第二次。
-    kbTop -= cal;
-    CGFloat kbHeight = fullHeight - kbTop;
+    // 0.1.73 — 两个通道分别对应两个坐标系，别再混：
+    //
+    //   truth（还给 UIKit 的让位量）—— **屏幕基准**：`整屏底 − 键盘真实上沿`。
+    //                          只由 fixedTop 决定，与 cal 无关。616 ⇒ 316（QQ/微信），
+    //                          611 ⇒ 321（抖音，与 0.1.72 一字不差）。
+    //   通知矩形（给 App 的 origin.y）—— **窗口坐标**：`fixedTop − 场景原点`。
+    //                          616 − 215 ⇒ 401，App 算 `717 − 401 = 316` 正好。
+    //
+    // 两条通道在 App 眼里是同一个数（316），所以它不会因为两条不一致而重排第二次；
+    // 而 0.1.70 那次「累加」是因为同一条通道先后给了未平移/平移两个值，现在这里是
+    // **绝对写**（见 `AevonKbPostNote`），同一通道全程只有一个值。
     CGFloat sceneOrigin = AevonKbSceneOriginCache;
     if (sceneOrigin < 1.0 && fullHeight > sceneHeight) sceneOrigin = fullHeight - sceneHeight;
     // 0.1.69 — 顺手把原点缓存补上：`AevonKbSceneOriginY`（平移通知那一路）要在
     // 任何线程上都读得到，而它自己那条「转坐标」的路要求主线程，QQ 的通知不在
     // 主线程投递 ⇒ 恒返回 0 ⇒ 只有 QQ 收不到平移（Aevon(140)：六个通知全 shift=0）。
     if (sceneOrigin > 1.0 && sceneOrigin < 400.0) AevonKbSceneOriginCache = sceneOrigin;
-    CGFloat truth = (sceneOrigin + sceneHeight) - kbTop;
+    kbTop -= cal;
+    CGFloat kbHeight = fullHeight - kbTop;
+    CGFloat truth = (sceneOrigin + sceneHeight) - fixedTop;
     if (truth < 0.0) truth = 0.0;
     if (truth > sceneHeight) truth = sceneHeight;
     static int interNotes = 0;
