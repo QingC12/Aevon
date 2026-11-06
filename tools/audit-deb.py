@@ -597,7 +597,15 @@ def main():
                   # 必须在内核里 —— 前两版黑屏就是「窗口回来了、画面没回来」。
                   b"win: system cover ",
                   b"win: canvas revived ",
-                  b"win: revive after unlock tick="):
+                  b"win: revive after unlock tick=",
+                  # 0.1.61 — 键盘态的**进与出**都在。0.1.60 只留下了「进」：
+                  # 进入分支把 `kbFilled` 置真的那几行被删掉，收起分支第一行
+                  # `guard kbFilled` 于是恒真返回 —— Aevon(132) 里
+                  # `win: keyboard fill on` 刷了 60 多条、`fill off` 零条，
+                  # 卡片永远停在 430x717@0,215，三边贴屏、环带按不到。
+                  # 两条都断言，缺一条就是这条路又断了半边。
+                  b"win: keyboard fill on card=",
+                  b"win: keyboard fill off card="):
         if token not in dylib_early:
             bad(f"host: {token.decode(errors='replace')} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")
@@ -968,6 +976,10 @@ def main():
                       b"kb: win fit h=%.0f",
                       b"kb: win unfit h=%.0f",
                       b"kb: win fit reject want=%.0f",
+                      # 0.1.61 — 「场景帧还没落地」那半拍的证词。它出现了说明
+                      # 闸门在挡错算（Aevon(132) 的 h=573 / sceneY=0）；
+                      # 它不出现也不等于没问题，只说明那几个采样点没撞上。
+                      b"kb: win fit wait sceneY=0 top=%.0f",
                       # 0.1.35 — 判不中的时候把坐标与两个矩形写下来。V111 里
                       # `app: band touch at` 是 0，而带子的值明明是对的 ⇒ 分不出
                       # 「这一拍没进来」还是「进来了被几何否掉」。有这一行就分得开。

@@ -3540,7 +3540,30 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 「让 App 重排到键盘上方」改由 App 进程自己做 —— 收的是**它自己的窗口**
             // （`AevonKbFitWindow`）。窗口不是场景，收它不会带动键盘。
             let height = visible.height
-            card.frame = CGRect(x: 0, y: y, width: visible.width, height: height)
+            let target = CGRect(x: 0, y: y, width: visible.width, height: height)
+            // 0.1.61 — **进来先存，出去才还得回去**。
+            //
+            // 0.1.60 重写这一段时把 `kbFilled = true` 与四个 `kbSaved*` 一起删掉了，
+            // 而收起分支的头一行就是 `guard kbFilled else { return }` —— 于是
+            // Aevon(132) 里 `win: keyboard fill on` 刷了 60 多条、`win: keyboard
+            // fill off` **一条都没有**：卡片永远停在 430×717@0,215，左右下三边贴死
+            // 屏幕，环带手势再也按不到，用户看到的就是「键盘关了也不回小窗」。
+            //
+            // 存的是**弹性收起那一刻的卡片几何**，不是常数：用户可能已经把窗挪到
+            // 别处、或改过尺寸，收起时必须原样还回去，不能按「默认小窗」硬编。
+            if kbFilled {
+                // 心跳每拍都会走到这里（`keyboardBeat` → `keyboardFill(true)`）。
+                // 目标几何与当前一致就一个字节都不写，也不打日志 —— 0.1.60 的日志里
+                // 一秒能刷八条 `fill on`，既是噪声也是每拍一次 `reportBand` 的开销。
+                if card.frame == target, canvasOriginY == y, canvasHeight == 0 { return }
+            } else {
+                kbSavedFrame = card.frame
+                kbSavedCrop = kbTopCrop
+                kbSavedOriginY = canvasOriginY
+                kbSavedHeight = canvasHeight
+                kbFilled = true
+            }
+            card.frame = target
             kbTopCrop = 0
             canvasOriginY = y
             canvasHeight = 0
@@ -3564,7 +3587,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                       + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
                       + " scene=" + String(format: "%.0f", canvasOriginY)
                       + " crop=" + String(format: "%.0f", kbTopCrop)
-                      + " push=" + String(format: "%d", door))
+                      + " push=" + String(format: "%d", door)
+                      + " saved=" + (kbSavedFrame.isNull ? "null" : size(kbSavedFrame.size)
+                                     + " at " + String(format: "%.0f,%.0f",
+                                                       kbSavedFrame.minX, kbSavedFrame.minY)))
             // 0.1.50 — App 侧要按「卡片底边」算键盘该不该搬，所以卡片一换位置就得
             // 立刻把新几何推过去（`reportBand` 自己判重，几何没变不会重复发）。
             reportBand()

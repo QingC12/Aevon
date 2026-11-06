@@ -4765,6 +4765,11 @@ static CGFloat AevonKbVisualTop(void);
 /// 0.1.59 — 场景几何（都定义在键盘段后部，这里只要前置声明）。
 static CGRect AevonKbSceneRectOnScreen(void);
 static CGFloat AevonKbSceneHeightNow(void);
+/// 0.1.61 — 宿主上报的环带底边（定义在键盘段后部）与该机型的原生屏高。
+/// 只有一条用途：判断宿主此刻在不在键盘态（底边铺到屏底就是），
+/// 用来挡掉「场景还没搬就按 0 收窗口」那一次错算。
+static CGFloat AevonKbBandBottomEdge(void);
+static CGRect AevonKbNativeBounds(UIScreen *screen);
 /// 0.1.57 — **三条通道一起写**，因为 0.1.56 只写了最没希望的那一条。
 ///
 /// Aevon(129) 的证词只有一行，但足够定案：
@@ -4895,7 +4900,7 @@ static UIWindow *AevonKbAppWindow(void) {
 ///
 /// 闸门：只在两次采样相差 < 40 时才落（键盘动画期间每帧都在变，照落就是
 /// 「一顿乱跳」）；目标必须 ≥ 240 且 ≤ 场景高 − 60。
-static void AevonKbFitWindow(CGFloat top) {
+static void AevonKbFitWindow(CGFloat top, BOOL late) {
     if (![NSThread isMainThread]) return;
     if (AevonKbOn == 0) return;
     if (top < 240.0 || top > 4000.0) return;
@@ -4905,6 +4910,39 @@ static void AevonKbFitWindow(CGFloat top) {
     CGFloat sceneY = CGRectIsNull(box) ? 0.0 : box.origin.y;
     CGFloat sceneH = AevonKbSceneHeightNow();
     if (sceneH < 200.0) return;
+    // 0.1.61 — **场景原点还是 0 就先别收**。
+    //
+    // Aevon(132) 的 QQ 段：
+    //   kb: top publish door=3 top=573 measure=1
+    //   kb: win fit h=573 top=573 sceneY=0 sceneH=717 was=717
+    // 这时宿主已经把卡片铺成键盘态（`band report 430x783 at 0,149`，底边 932 = 屏底），
+    // 场景本该在 215，可 App 这边读到的还是 0 —— 它下一拍才落地（同屏还有
+    // `win: frame drift now=430x717@0 want=430x717@215`）。按 0 算出来的 h=573 让
+    // 窗口底边落到屏幕 788，比键盘顶还低 215，App 按这个高度排一次版，输入框就被
+    // 压到键盘底下；等它 0.6 s 后纠正成 358 时，那个 App 未必再排第二次 ——
+    // 用户看到的就是「输入框偶尔才出来」。
+    //
+    // 判据就是宿主自己的 band：只有键盘态卡片才会把底边铺到屏底（平时是
+    // `400x582 at 22,165`，底边 747）。它说在键盘态、场景却读 0 ⇒ 一定是在半路上，
+    // 等下一拍。`late` 那次（1.6 s）放行：到那时场景还没搬，说明宿主真的没搬，
+    // 按 0 算才是对的，不能让闸门把这种情况也饿死。
+    if (!late) {
+        CGFloat fullH = AevonKbNativeBounds(nil).size.height;
+        CGFloat bandBottom = AevonKbBandBottomEdge();
+        BOOL hostFilled = (bandBottom > 200.0 && fullH > 200.0
+                           && bandBottom >= fullH - 2.0);
+        if (hostFilled && sceneY < 1.0) {
+            static int waited = 0;
+            if (waited < 3) {
+                waited += 1;
+                char line[160];
+                snprintf(line, sizeof(line), "kb: win fit wait sceneY=0 top=%.0f sceneH=%.0f\n",
+                         top, sceneH);
+                AevonKbLog(line);
+            }
+            return;
+        }
+    }
     CGFloat want = top - sceneY;
     if (want < 240.0 || want > sceneH - 60.0) {
         static int rejected = 0;
@@ -4944,11 +4982,14 @@ static void AevonKbUnfitWindow(void) {
 /// 一次采样：发布顶边 + 稳定时收窗口。三次采样共用，见 `AevonKbEvaluate`。
 static CGFloat AevonKbTopPrev = 0.0;
 
-static void AevonKbSample(void) {
+static void AevonKbSample(BOOL late) {
     CGFloat top = AevonKbVisualTop();
     AevonKbTopPublish(0.0);
-    if (top > 240.0 && AevonKbTopPrev > 240.0 && fabs(top - AevonKbTopPrev) < 40.0) {
-        AevonKbFitWindow(top);
+    // `late` 那次不看「两次读数相近」：它存在的意义就是兜住「场景迟迟没搬」这种
+    // 情况，再被前一道闸门挡住就等于白排一次。
+    if (top > 240.0
+        && (late || (AevonKbTopPrev > 240.0 && fabs(top - AevonKbTopPrev) < 40.0))) {
+        AevonKbFitWindow(top, late);
     }
     AevonKbTopPrev = top;
 }
@@ -4972,13 +5013,18 @@ static void AevonKbEvaluate(NSDictionary *info) {
     if (on && AevonKbOn == 0) {
         AevonKbTopPrev = 0.0;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
+                       dispatch_get_main_queue(), ^{ AevonKbSample(NO); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
+                       dispatch_get_main_queue(), ^{ AevonKbSample(NO); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
+                       dispatch_get_main_queue(), ^{ AevonKbSample(NO); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.95 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
+                       dispatch_get_main_queue(), ^{ AevonKbSample(NO); });
+        // 0.1.61 — 第五次、也是最后一次兜底。前四次都可能撞上「场景还没搬」而被
+        // `AevonKbFitWindow` 的新闸门放过去（见那段注释）；到 1.6 s 场景还在 0，
+        // 那就是宿主真没搬，按 0 收才是对的。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.60 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ AevonKbSample(YES); });
     }
     if (on == (AevonKbOn != 0)) {
         // 状态没变也要续一次：键盘一直开着的时候，租约靠这一点续命。
