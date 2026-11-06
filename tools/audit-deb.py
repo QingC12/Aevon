@@ -657,19 +657,29 @@ def main():
                   # 路，而「面板还是没关」与「压根没试」在日志里长得不一样。
                   #
                   #   hub      = dispatcher 走哪条路拿到的、拿到的是什么类
-                  #   clean    = 一次收尾的完整结论（cover=… banner=…）
-                  #   cover=ok = 真的调到了收起；cover=shape = 编码不符，只记不动
+                  #   clean    = 一次收尾的横幅结论（面板另起一行，见下）
+                  #   cover    = 面板的结论，`wait=` 是等了几拍才等到卡片
+                  #   sels     = 六个候选的真实编码，一次开机一行（0.1.90 新增）
+                  #
+                  # 0.1.90 的变化：`cover=locked` 那条闸删了 —— `isUILocked` 在通知
+                  # 中心在屏时本来就是 1，等于把功能关掉；换成 `cover=skip:passcode`
+                  # 与 `cover=skip:nocard` 两条。所以这两条必须在产物里，而 `locked`
+                  # 必须不在。
                   b"notify: hub d=%@ via=%s",
-                  b"notify: clean d=%s %s %s n=%d",
+                  b"notify: clean d=%s %s n=%d",
+                  b"notify: cover b=%s %s wait=%d",
+                  b"notify: cover sels%s",
                   b"cover=ok:%s",
                   b"cover=shape%s",
                   b"cover=noclass",
-                  b"cover=down",
-                  b"cover=locked",
+                  b"cover=down p=%ld v=%ld",
+                  b"cover=skip:passcode",
+                  b"cover=skip:nocard",
                   b"cover=none",
                   b"banner=ok:%s%s",
                   b"banner=none%s",
                   b"banner=nodispatcher",
+                  b"isPasscodeLocked",
                   b"setCoverSheetPresented:animated:withCompletion:",
                   b"setCoverSheetPresented:animated:withCompletion:force:",
                   b"_setCoverSheetPresented:animated:withCompletion:",
@@ -727,10 +737,14 @@ def main():
                  # 在二进制里 grep 到，就说明有个可见的东西又回到了屏幕上。
                  b"ring: bar faded out (auto hide 0.5 s)",  # gone
                  b"ring: held open at ",                     # gone
-                 b"ring: bar released at "):                 # gone
+                 b"ring: bar released at ",                 # gone
+                 # 0.1.90 — `cover=locked` 这条结论整个删了。它背后是
+                 # `isUILocked`，而通知中心在屏时那一位本来就是 1：闸在唯一
+                 # 该收的场景里恒真。留着这个字面量就等于留着那条死路。
+                 b"cover=locked"):                          # gone
         if gone in dylib_early:
             bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "
-                "back (hot zone 0.1.18 / summon bar 0.1.24)")
+                "back (hot zone 0.1.18 / summon bar 0.1.24 / cover lock gate 0.1.90)")
         else:
             ok(f"host: {gone.decode()} gone (removed layer stayed removed)")
     # The app list moved from the file store to the old plugin's snapshot store

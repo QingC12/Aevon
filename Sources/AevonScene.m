@@ -3178,10 +3178,16 @@ static id AevonCleanRead(id object, const char *name) {
 }
 
 /// 把 ObjC 类型编码归一化成「只有类型字符」的形式：
-/// `v28@0:8B16B20@24` → `v@:BB@`。数字（偏移量）、`+`/`-`（栈帧）、引号里的名字全部丢掉。
+/// `v28@0:8B16B20@?24` → `v@:BB@`。数字（偏移量）、`+`/`-`（栈帧）、引号里的名字全部丢掉。
 ///
 /// 有了它，闸就能写成 `strcmp(compact, "v@:BB@") == 0` —— 一眼能看出「这个选择子收
-/// 两个 BOOL 加一个对象」，而不是靠人肉对齐偏移量。`@?`（块）单列，因为它带一个 `?`。
+/// 两个 BOOL 加一个对象」，而不是靠人肉对齐偏移量。
+///
+/// **`@?`（块）折叠成 `@`，这是 0.1.90 的修正。** 0.1.89 把它单列成两个字符，于是
+/// `setCoverSheetPresented:animated:withCompletion:` 的真实编码 `v@:BB@?` 与候选表里
+/// 写的 `v@:BB@` 永远不等 —— 六个候选一次都进不去，而日志里只会看到「没装」。
+/// 折叠是安全的：块与对象在 ABI 上都是指针，我们的调用点传的是 `[^{} copy]`（堆块），
+/// 当 id 传过去本来就成立。这不是放宽闸，是修正一个写错的比较键。
 static void AevonCleanCompact(const char *encoding, char *out, size_t size) {
     if (out == NULL || size == 0) return;
     out[0] = '\0';
@@ -3190,7 +3196,7 @@ static void AevonCleanCompact(const char *encoding, char *out, size_t size) {
     for (const char *p = encoding; *p != '\0' && used + 3 < size; p++) {
         if (*p >= '0' && *p <= '9') continue;
         if (*p == '+' || *p == '-') continue;
-        if (*p == '@' && p[1] == '?') { out[used++] = '@'; out[used++] = '?'; p++; continue; }
+        if (*p == '@' && p[1] == '?') { out[used++] = '@'; p++; continue; }
         if (*p == '"') { p++; while (*p != '\0' && *p != '"') p++; continue; }
         out[used++] = *p;
     }
@@ -3283,21 +3289,35 @@ static void AevonCleanBanner(id dispatcher, char *out, size_t size) {
 /// withCompletion:` 是这台机器上 presentation manager 的常规入口，`_dismiss…` 是它的私有
 /// 快捷路径，无参的 `dismissCoverSheet` 只当最后的兜底。
 ///
-/// 每一步都过形状闸。**四个候选全不符时一行都不做** —— 那等于退回 0.1.88（面板不关），
+/// 每一步都过形状闸。**候选全不符时一行都不做** —— 那等于退回 0.1.88（面板不关），
 /// 而日志里那几条真实编码就是下一版的依据。这比赌一个名字好：赌错轻则无效、重则调用
 /// 到一个参数不是这个类型的实现上，那是崩溃。
+///
+/// 0.1.90 修了两处，都是 0.1.89 真机日志（Aevon(157)）逼出来的：
+///
+///  ① **`isUILocked` 不能当锁屏闸。** 三次点通知三次 `cover=locked`。通知中心
+///     （CoverSheet）本身就是锁屏那一套 UI，它一在屏 `SBLockScreenManager.isUILocked`
+///     就是 1 —— 也就是说这个闸在「唯一该收的场景」里恒为真，等于把功能关掉。
+///     换成 `isPasscodeLocked`：那一位问的是「要用密码才能进」，只有它才是真的锁。
+///     读不到（-1）就不拦 —— 拦不拦的后果不对称：误收只是「面板提前关了」，
+///     误拦是「这个功能一辈子不生效」；而误收还有下面那道真正的兜底。
+///  ② **收面板不能自己定时，要等卡片。** 0.45 秒时卡片还没起来（真机 divert 18 秒、
+///     card up 21 秒），那时收面板会露出两三秒空白桌面。所以改成轮询卡片，
+///     卡片一在就收，面板消失与卡片出现同一拍。
 static void AevonCleanCover(char *out, size_t size) {
     if (out == NULL || size == 0) return;
     out[0] = '\0';
     id cover = AevonShared(@"SBCoverSheetPresentationManager");
     if (cover == nil) { snprintf(out, size, "cover=noclass"); return; }
-    if (!AevonTruthy(cover, @"isPresented") && !AevonTruthy(cover, @"isVisible")) {
-        snprintf(out, size, "cover=down");
+    NSInteger presented = AevonBoolOf(cover, @"isPresented");
+    NSInteger visible = AevonBoolOf(cover, @"isVisible");
+    if (presented != 1 && visible != 1) {
+        snprintf(out, size, "cover=down p=%ld v=%ld", (long)presented, (long)visible);
         return;
     }
-    // 锁屏上不许收：那一层面板是锁定状态的一部分，收了等于绕过锁屏。
-    if (AevonBoolOf(AevonShared(@"SBLockScreenManager"), @"isUILocked") == 1) {
-        snprintf(out, size, "cover=locked");
+    // 真锁（要密码）才不收。`isUILocked` 在这里不能用，见上面 ①。
+    if (AevonBoolOf(AevonShared(@"SBLockScreenManager"), @"isPasscodeLocked") == 1) {
+        snprintf(out, size, "cover=skip:passcode");
         return;
     }
 
@@ -3312,6 +3332,29 @@ static void AevonCleanCover(char *out, size_t size) {
     enum { ladderCount = sizeof(ladder) / sizeof(ladder[0]) };
     char miss[96];
     miss[0] = '\0';
+
+    // 每个候选的真实编码，一次开机只打一行。0.1.89 最大的浪费是：六个候选一个都没
+    // 进过闸，日志里连「编码长什么样」都没有，只能靠下一次装机去猜。这一行买的是
+    // 「这一版再不通，下一版不用再装一次机」。
+    static int dumped = 0;
+    if (!dumped) {
+        dumped = 1;
+        char table[220];
+        size_t used = 0;
+        table[0] = '\0';
+        for (int i = 0; i < ladderCount && used + 34 < sizeof(table); i++) {
+            SEL probe = sel_registerName(ladder[i].sel);
+            Method method = class_getInstanceMethod([cover class], probe);
+            char compact[24];
+            AevonCleanCompact(method != NULL ? method_getTypeEncoding(method) : NULL,
+                              compact, sizeof(compact));
+            used += snprintf(table + used, sizeof(table) - used, " %d=%s",
+                             i, method != NULL ? compact : "-");
+        }
+        char line[300];
+        snprintf(line, sizeof(line), "notify: cover sels%s", table);
+        AevonLogRaw(line);
+    }
 
     for (int i = 0; i < ladderCount; i++) {
         SEL sel = sel_registerName(ladder[i].sel);
@@ -3405,25 +3448,72 @@ static id AevonCleanDispatcher(void) {
 static int AevonCleanRuns = 0;
 #define AEVON_CLEAN_MAX 6
 
+/// 等卡片起来的那条轮询。每 0.15 秒一拍，最多 24 拍（3.6 秒）。
+///
+/// 为什么不能自己定个时间就收：真机上 `divert` 那一拍到卡片真正在（`FloatHost.mainBundle`
+/// 置上）隔着 2~3 秒 —— 20:36:18 分流、20:36:21 卡片在。0.1.89 在 0.45 秒就收，
+/// 即使闸放行，看到的也会是「通知中心先关、桌面空两三秒、App 才出现」。面板与卡片
+/// 必须同一拍，这也是这条轮询存在的唯一理由。
+///
+/// 反过来，卡片没起来就**不收**。这不只是省事：卡片没起来意味着 App 对用户不可用，
+/// 此时把面板收掉等于把人扔在一个空桌面上，还得等看门狗补调原实现、再全屏打开一遍。
+/// 「收不收」与「能不能用」绑在同一个判据上，锁这件事就不用单独猜了 —— 真锁屏时
+/// 挂起启动起不来，卡片自然不出现，面板自然不动。
+#define AEVON_CLEAN_POLL 0.15
+#define AEVON_CLEAN_TRIES 24
+
+static void AevonCleanCoverAfterCard(const char *bundle, int tick) {
+    if (bundle == NULL || bundle[0] == '\0') return;
+    if (AevonActivateSwitchOff()) return;          // 闸：开关每拍都查
+
+    if (AevonCardIsUpFor(bundle)) {
+        char cover[128], line[300];
+        AevonCleanCover(cover, sizeof(cover));
+        snprintf(line, sizeof(line), "notify: cover b=%s %s wait=%d", bundle, cover, tick);
+        AevonLogRaw(line);
+        return;
+    }
+    if (tick >= AEVON_CLEAN_TRIES) {
+        char line[240];
+        snprintf(line, sizeof(line), "notify: cover b=%s cover=skip:nocard wait=%d",
+                 bundle, tick);
+        AevonLogRaw(line);
+        return;
+    }
+
+    // 跨帧传字符串：`strdup` 一份带进块里，块自己释放。这个工程按 MRC 编译，
+    // 块捕获 `const char *` 不会替你复制内容。
+    char *next = strdup(bundle);
+    if (next == NULL) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(AEVON_CLEAN_POLL * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonCleanCoverAfterCard(next, tick + 1);
+        free(next);
+    });
+}
+
 /// 分流成功之后补做的那两件收尾。**唯一调用点**是 `AevonOpenHit` 的分流分支，
 /// 延迟 0.45 秒、走主队列。
-static void AevonNotifyCleanup(void) {
+///
+/// 横幅当场收（它跟卡片无关，0.1.89 已验过 `banner=ok:bannerDestination`），
+/// 面板交给 `AevonCleanCoverAfterCard` 等卡片。
+static void AevonNotifyCleanup(const char *bundle) {
     if (AevonActivateSwitchOff()) return;          // 闸一：开关每拍都查
     if (AevonCleanRuns >= AEVON_CLEAN_MAX) return;
     AevonCleanRuns += 1;
 
     id dispatcher = AevonCleanDispatcher();
-    char cover[128], banner[128], line[360];
-    cover[0] = '\0';
+    char banner[128], line[360];
     banner[0] = '\0';
 
     AevonCleanBanner(dispatcher, banner, sizeof(banner));
-    AevonCleanCover(cover, sizeof(cover));
 
     const char *dname = dispatcher != nil ? class_getName([dispatcher class]) : "-";
-    snprintf(line, sizeof(line), "notify: clean d=%s %s %s n=%d",
-             dname != NULL ? dname : "?", cover, banner, AevonCleanRuns);
+    snprintf(line, sizeof(line), "notify: clean d=%s %s n=%d",
+             dname != NULL ? dname : "?", banner, AevonCleanRuns);
     AevonLogRaw(line);
+
+    if (bundle != NULL && bundle[0] != '\0') AevonCleanCoverAfterCard(bundle, 0);
 }
 
 /// 替身。**顺序就是这里的全部安全设计**：
@@ -3497,10 +3587,16 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             AevonOpenFromNotification(bundle);
             // 0.1.89：这次没转发，SpringBoard 就没有机会去收面板 / 收横幅 —— 那两件
             // 事本来挂在它的收尾里。延迟 0.45 秒自己补上：open 事务跑完再动通知中心。
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                AevonNotifyCleanup();
-            });
+            // 0.1.90：横幅在这里收，面板不在这里收 —— 面板要等卡片，见
+            // `AevonCleanCoverAfterCard`。字符串必须自己复制一份带进块里。
+            char *cleanBundle = strdup(bundle);
+            if (cleanBundle != NULL) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    AevonNotifyCleanup(cleanBundle);
+                    free(cleanBundle);
+                });
+            }
             AevonOpenWatch(self, _cmd, request, options, settings, origin, replay,
                            AevonOpenOrig[slot], target);
         }
