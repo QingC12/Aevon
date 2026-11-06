@@ -4705,15 +4705,6 @@ static void AevonStyleObserve(void) {
 // 不该被当成「键盘挡住右下角」。
 
 static volatile int AevonKbOn = 0;
-/// 0.1.51 — 键盘**内容**的上沿，屏幕坐标（本机 616）。来源是系统广播的
-/// `UIKeyboardFrameEndUserInfoKey`，不是从键盘窗几何反推的。
-///
-/// 为什么非要有这个数：键盘窗是 `UIRemoteKeyboardWindow`，它自己撑满整屏
-/// （`bounds` 932、`top` 0），**窗的几何答不出「按键画在哪」**。0.1.45 那两条
-/// 换算式子只能从「交集 h」和「窗高」倒推，前提是「场景贴在屏幕顶」。0.1.51
-/// 起场景随卡片搬到 215，这个前提没了，倒推会把真值 316 抬成 458。
-/// 有了键盘顶边 616，让位量就是一句话：`卡片底边 − 键盘顶边`。
-static volatile CGFloat AevonKbTopScreen = -1.0;
 static dispatch_source_t AevonKbTimer = NULL;
 /// timer 当前是不是跑着的。`dispatch_resume` / `dispatch_suspend` 必须成对，
 /// 用一个显式状态记，比靠 `AevonKbOn` 猜安全。
@@ -4763,9 +4754,6 @@ static void AevonKbEvaluate(NSDictionary *info) {
     CGRect frame = [value CGRectValue];
     CGFloat screenHeight = UIScreen.mainScreen.bounds.size.height;
     BOOL on = frame.size.height > 40.0 && frame.origin.y < screenHeight - 1.0;
-    // 0.1.51 — 这一次广播的键盘顶边（屏幕坐标）就是「按键从哪开始」的权威答案。
-    // 收起时置 -1，让换算那边知道「没有可用的真值」，退回 0.1.45 的老式子。
-    AevonKbTopScreen = on ? frame.origin.y : -1.0;
     if (on == (AevonKbOn != 0)) {
         // 状态没变也要续一次：键盘一直开着的时候，租约靠这一点续命。
         if (on) AevonKbPost();
@@ -5458,8 +5446,6 @@ static IMP AevonOrigIntersection = NULL;
 /// 把键盘帧率拖下来。
 static volatile int AevonKbLeadNotes = 0;
 static volatile int AevonKbMissNotes = 0;
-/// 0.1.50 — 「键盘已经在场景里、不需要换算」那条分支的证词计数。
-static volatile int AevonKbPassNotes = 0;
 
 static void AevonKbLog(const char *line) {
     if (line == NULL) return;
@@ -5608,44 +5594,48 @@ static CGFloat AevonKbSceneHeightNow(void) {
     return 0.0;
 }
 
-/// 0.1.51 — **场景的上边落在屏幕的哪一处**（主窗 `frame.origin.y`）。
+/// 0.1.52 — **承载场景在屏幕坐标里的矩形**（原点 + 尺寸）。
 ///
-/// 这是本进程里唯一能直接回答「宿主有没有把场景搬下去」的量，而且它不需要宿主
-/// 告诉我们任何东西：`settings.frame` 写了原点、系统认了，主窗的 frame 原点就会
-/// 从 0 变成 215；系统不认，它还是 0。键盘窗该不该搬，全看这一个数 ——
+/// 换掉 0.1.51 的 `AevonKbWindowTopNow()`。那个函数读主窗的 `frame.origin.y`，
+/// 可 App 的窗口恒坐在**场景坐标空间**的 (0,0)：宿主把场景搬到 215 之后，窗口
+/// 自己并不知道位置变了，`top` 一直是 0 —— Aevon(124) 的日志
+/// `kb: lift applied dy=-215 bottom=932 base=717 scene=717 top=0` 就是它。
+/// 于是 `sceneBottom` 算成 717，键盘又被上移 215，浮到屏幕中间
+/// （日志里场景已经搬到 215..932），这就是「键盘直接悬空」。
 ///
-///   · 原点 215 ⇒ 场景底边 215+717=932，键盘底边也在 932 ⇒ 不用搬（dy=0），
-///     键盘原生的 616..932 整块就在窗口里；
-///   · 原点 0   ⇒ 场景底边 717，键盘底边 932 ⇒ 必须搬 −215（0.1.48 那一套），
-///     否则 932 那一截在窗口外，只剩 101 露出来。
+/// 场景在屏幕哪一段，能问出来的只有**坐标转换**：把窗口 bounds 转到 screen 的
+/// 坐标空间，出来的矩形已经包含场景原点。搬成时是 (0,215,430,717)、没搬时是
+/// (0,0,430,717)，两个都是运行时事实，不含推断。
 ///
-/// 两条路都成立，等于把「原点到底能不能搬」这个不确定性从结果里彻底移除。
-/// 取不到主窗返回 0 —— 那就是「没搬」的假设，退回 0.1.48 的已知可形状。
-static CGFloat AevonKbWindowTopNow(void) {
-    if (![NSThread isMainThread]) return 0.0;
-    // 键盘窗自己撑满整屏（932），必须排除 —— 它也是本进程里的一个 UIWindow，
-    // 而且它的原点恒为 0，误选进来就等于「场景没搬」，把键盘又搬回 0.1.48。
+/// ⛔ 只做坐标转换，**不读 `UIScreen -bounds` 去改任何返回值** —— 0.0.65 /
+/// 0.0.67 / 0.1.42 / 0.1.46 四次黑屏全在改那个返回值上。
+/// 取不到就返回 `CGRectNull`，由调用方按序回落。
+static CGRect AevonKbSceneRectOnScreen(void) {
+    if (![NSThread isMainThread]) return CGRectNull;
     CGFloat screenH = UIScreen.mainScreen.bounds.size.height;
+    UIWindow *picked = nil;
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *cand in ((UIWindowScene *)scene).windows) {
-            if (cand.isKeyWindow
-                && cand.bounds.size.height > 200.0
-                && cand.bounds.size.height < screenH - 8.0) {
-                return cand.frame.origin.y;
-            }
+        UIWindowScene *windowed = (UIWindowScene *)scene;
+        UISceneActivationState state = windowed.activationState;
+        if (state != UISceneActivationStateForegroundActive &&
+            state != UISceneActivationStateForegroundInactive) continue;
+        for (UIWindow *cand in windowed.windows) {
+            if (cand.bounds.size.height < 200.0) continue;
+            // 键盘窗自己撑满整屏（932），排除 —— 它也是本进程里的一个 UIWindow，
+            // 拿它去转坐标等于量键盘自己，原点永远是屏幕顶。
+            if (cand.bounds.size.height >= screenH - 8.0) continue;
+            if (cand.isKeyWindow) { picked = cand; break; }
+            if (picked == nil) picked = cand;
         }
+        if (picked != nil) break;
     }
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *cand in ((UIWindowScene *)scene).windows) {
-            if (cand.bounds.size.height > 200.0
-                && cand.bounds.size.height < screenH - 8.0) {
-                return cand.frame.origin.y;
-            }
-        }
-    }
-    return 0.0;
+    if (picked == nil || picked.windowScene == nil) return CGRectNull;
+    UIScreen *screen = picked.windowScene.screen;
+    if (screen == nil) return CGRectNull;
+    CGRect box = [picked convertRect:picked.bounds toCoordinateSpace:screen.coordinateSpace];
+    if (box.size.height < 200.0 || box.size.width < 100.0) return CGRectNull;
+    return box;
 }
 
 /// 宿主那张卡片在**屏幕上的底边**。取不到返回 -1。
@@ -5691,20 +5681,27 @@ static void AevonKbLiftApply(BOOL on) {
         source = keyboardWindow != nil ? 2 : 0;
     }
     CGFloat sceneHeight = AevonKbSceneHeightNow();
-    // 0.1.51 — 基准 = **主窗原点 + 场景高**，也就是「场景底边在屏幕的哪一处」。
+    // 0.1.52 — 基准 = **承载场景在屏幕上的底边**，由坐标转换量出来。
     //
-    // 0.1.50 用的是宿主推过来的卡片底边（band）。那个数在「场景真的被搬下去」
-    // 时是对的，可 Aevon(123) 证明它没被搬（`door=0`），于是 band 说 932、场景
-    // 实际只到 717，`dy` 算成 0 —— 键盘留在 616..932，窗口外那一截全被裁掉，
-    // 这就是「又只剩一条工具栏」。改读本进程的主窗原点之后，这个数不再依赖
-    // 「原点搬成功」这个前提：搬成了它自然是 215，没搬它就是 0，两条路都给出
-    // 键盘真正该在的位置。
-    CGFloat windowTop = AevonKbWindowTopNow();
-    CGFloat sceneBottom = windowTop + sceneHeight;
-    if (sceneHeight < 200.0) {
-        // 场景高都读不到的时候才退回宿主那张卡片（历史上这条兜底从没被用过）。
-        sceneBottom = AevonKbBandBottomEdge();
+    // 0.1.51 用「主窗 `frame.origin.y` + 场景高」。那个原点恒为 0（窗口坐在
+    // 场景坐标空间的 (0,0)，宿主搬场景它不知道）⇒ 底边算成 717 ⇒ 键盘被上移
+    // 215 ⇒ 场景明明已经在 215..932，键盘却浮到 401..717。这就是 Aevon(124)
+    // 的「键盘直接悬空」。
+    //
+    // 现在三级：
+    //   ① 坐标转换（`AevonKbSceneRectOnScreen`）—— 搬成 932、没搬 717，都是事实；
+    //   ② 转换失败 ⇒ 用宿主推来的卡片底边（band，搬成时也是 932）；
+    //   ③ 都没有 ⇒ 场景高（0..717 的老形状，键盘会被搬 −215，0.1.48 的已知可形状）。
+    CGRect sceneBox = AevonKbSceneRectOnScreen();
+    CGFloat sceneTop = 0.0;
+    CGFloat sceneBottom = 0.0;
+    if (!CGRectIsNull(sceneBox)) {
+        sceneTop = sceneBox.origin.y;
+        sceneBottom = CGRectGetMaxY(sceneBox);
+        if (sceneHeight < 200.0) sceneHeight = sceneBox.size.height;
     }
+    if (sceneBottom < 200.0) sceneBottom = AevonKbBandBottomEdge();
+    if (sceneBottom < 200.0) sceneBottom = sceneHeight;
     if (keyboardWindow == nil || sceneBottom < 200.0) {
         if (AevonKbLiftNotes < 8) {
             AevonKbLiftNotes += 1;
@@ -5730,7 +5727,7 @@ static void AevonKbLiftApply(BOOL on) {
         snprintf(line, sizeof(line),
                  "kb: lift %s dy=%.0f bottom=%.0f base=%.0f scene=%.0f top=%.0f kb=%.0fx%.0f src=%d\n",
                  (dy == 0.0) ? (usable ? "aligned" : "off") : "applied",
-                 dy, bottom, sceneBottom, sceneHeight, windowTop, size.width, size.height, source);
+                 dy, bottom, sceneBottom, sceneHeight, sceneTop, size.width, size.height, source);
         AevonKbLog(line);
     }
 }
@@ -5836,38 +5833,17 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     }
     CGFloat fullHeight = AevonKbNativeBounds(nil).size.height;
     CGFloat keyboardHeight = ((UIView *)window).bounds.size.height;
-    // 0.1.51 — 让位量的真值只由两个屏幕坐标决定：**屏幕底 − 键盘顶**。
+    // 0.1.52 — 删掉 0.1.51 在这里加的「屏幕底 − 键盘顶」分支。
     //
-    // 0.1.50 在这里的判据是「键盘底边落在卡片底边上就放行系统原值」，Aevon(123)
-    // 的结果是 `kb: lead held h=101 base=932 kb=932 -> 101` —— 101 被原样交给
-    // App，输入框只让出 101，剩下 215 全压在键盘底下。判据本身没错，错在它成立
-    // 的那一刻场景还没搬（`door=0`），系统按 717 算交集当然只有 101。
+    // 那个分支读 `UIKeyboardFrameEndUserInfoKey.origin.y`。键盘弹出/收起是**动画**，
+    // `willChangeFrame` 每帧都发一次，这个值在动画途中一路变。Aevon(124) 的日志里
+    // 同一个键盘会话中出现过 502 / 573 / 674 / 775 四个值 ⇒ 让位量被算成
+    // 430 / 359 / 258 / 157，内容被推到屏幕中间。而下面的老式子在同一次里稳稳给
+    // 316（`kb: lead h=101.0 … -> 316.0 took=3`）—— 0.1.51 的新分支每次都把它覆盖掉。
     //
-    // 所以不再问系统「你觉得多少」，直接用量出来的键盘顶边算：
-    //   · 场景搬成功（215..932）：932 − 616 = 316 ✓
-    //   · 场景还没搬（0..717）：同一个式子还是 316 ✓ 不会退回 101
-    //   · 系统自己已经给到 316：`answer >= needed` 原样放行，不做二次加工
-    // 三条路同一个数，这就是「让位多少」唯一自洽的答案。
-    CGFloat kbTopEdge = AevonKbTopScreen;
-    if (kbTopEdge > 100.0 && kbTopEdge < fullHeight - 40.0) {
-        // 键盘态卡片铺到屏幕底（宿主 `setKeyboardFill` 保证），所以「被键盘挡住
-        // 多少」就是 `屏幕底 − 键盘顶`，两个都是屏幕坐标，与本进程的窗口多高、
-        // 场景站在哪一段都无关。316 这个数正是这么来的（932 − 616）。
-        CGFloat needed = fullHeight - kbTopEdge;
-        if (needed > 40.0 && needed <= fullHeight) {
-            if (fabs(answer - needed) > 0.5 && AevonKbPassNotes < 6) {
-                AevonKbPassNotes += 1;
-                char pass[220];
-                snprintf(pass, sizeof(pass),
-                         "kb: lead band h=%.0f top=%.0f -> %.0f\n",
-                         answer, kbTopEdge, needed);
-                AevonKbLog(pass);
-            }
-            // 无条件给真值。`answer` 是系统按「场景现在多高」算的交集，它不知道
-            // 场景被宿主摆到了屏幕哪一段；这一行给出的才是 App 真被挡住的高度。
-            return needed;
-        }
-    }
+    // 老式子的两个输入（场景高、键盘窗高）都是几何量，不受动画中间态影响；
+    // 场景被搬到 215 之后它依然给 316（搬的只是原点，两个高都没变），正是要的数。
+    // 所以这里只保留老式子，一条分支就够。
     CGFloat sceneHeight = -1;
     if ([scene isKindOfClass:[UIWindowScene class]]) {
         sceneHeight = ((UIWindowScene *)scene).coordinateSpace.bounds.size.height;
