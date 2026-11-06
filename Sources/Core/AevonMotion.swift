@@ -249,6 +249,17 @@ enum AevonMotion {
     static let liftDuration: TimeInterval = 0.55
     static let liftDamping: CGFloat = 0.72
 
+    /// 0.1.76 — 键盘弹出时卡片张开、收起时缩回的那一段。
+    ///
+    /// 实测参考（用户提供的同类浮窗录屏，2026-10）：键盘弹出时卡片整体位移
+    /// 316 pt —— 正好等于键盘高度 —— 从开始移动到稳定用 **0.36~0.40 s**。
+    /// 逐帧位移量是前大后小（1234→1150→1080→1046→1012→965→928→918），
+    /// 末尾 2 pt 内收、**没有过冲**，所以是一条 ease-out，不是弹簧。
+    ///
+    /// 之前这一段是直接赋值 `card.frame = target`，一帧到位 —— 用户看到的就是
+    /// 「突然撑满」。0.36 s 是那个视频实测的中位值。
+    static let fillDuration: TimeInterval = 0.36
+
     @discardableResult
     static func lift(_ views: [UIView], from scale: CGFloat, center: CGPoint?,
                      completion: (() -> Void)? = nil) -> Bool {

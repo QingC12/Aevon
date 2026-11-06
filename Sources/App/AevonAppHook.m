@@ -6129,7 +6129,7 @@ static void AevonKbExtraLoad(void) {
     AevonKbExtraLoaded = 1;
     NSString *selfID = [[NSBundle mainBundle] bundleIdentifier];
     if (selfID.length == 0) return;
-    CFPropertyListRef boxed = CFPreferencesCopyAppValue(CFSTR("AevonKbExtra"),
+    CFPropertyListRef boxed = CFPreferencesCopyAppValue(CFSTR("AevonKbExtra2"),
                                                         (__bridge CFStringRef)selfID);
     if (boxed == NULL) return;
     if (CFGetTypeID(boxed) == CFNumberGetTypeID()) {
@@ -6153,7 +6153,7 @@ static void AevonKbExtraStore(CGFloat value) {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
         CFNumberRef num = CFNumberCreate(NULL, kCFNumberDoubleType, &payload);
         if (num != NULL) {
-            CFPreferencesSetAppValue(CFSTR("AevonKbExtra"), num, app);
+            CFPreferencesSetAppValue(CFSTR("AevonKbExtra2"), num, app);
             CFRelease(num);
         }
         CFRelease(app);
@@ -7128,6 +7128,7 @@ static void AevonKbPostNote(id self, SEL _cmd, NSNotificationName name, id objec
         CGFloat rawTop = endValue != nil ? [endValue CGRectValue].origin.y : -1.0;
         CGFloat target = fixedTop > 0.0 ? fixedTop : rawTop;
         CGFloat outTop = rawTop;
+        CGFloat outH = -1.0;
         if (target > 0.0 && (fixedTop > 0.0 || fabs(cal) > 0.5)) {
             NSMutableDictionary *copy = [[NSMutableDictionary alloc] initWithDictionary:info];
             BOOL moved = NO;
@@ -7138,7 +7139,26 @@ static void AevonKbPostNote(id self, SEL _cmd, NSNotificationName name, id objec
                 CGRect rect = [boxed CGRectValue];
                 if (rect.size.height < 40.0) continue;
                 rect.origin.y = target - cal;
-                if ([key isEqualToString:UIKeyboardFrameEndUserInfoKey]) outTop = rect.origin.y;
+                // 0.1.76 — **高度必须跟着一起改。**
+                //
+                // 0.1.72 起只写 `origin.y`，矩形就变成「从 356 开始、高度仍是
+                // 系统给的 446」—— 一条底边落到 802 的矩形，它描述的已经不是
+                // 一块贴着屏幕底的键盘了。凡是拿 `rect.height` 或
+                // `CGRectGetMaxY(rect)` 算让位的 App 都会算错，而且错得没法自
+                // 学习补救：Safari（WebKit）就是这一种，Aevon(147) 里它的网页
+                // 输入框一直不躲，`kb: learn` 学到 192 反而把它推得更高。
+                //
+                // 正确的矩形是「从 target−cal 一直铺到屏幕底」，高度由这个关系
+                // 反算。抖音 `611/0 ⇒ 321`、QQ 微信 `356/260 ⇒ 576`，与日志里
+                // 的 `kbH=` 完全一致 —— 说明这条一直是我们自己对，只是没写回
+                // 矩形里。
+                CGFloat kbBottom = full;
+                CGFloat kbRectH = kbBottom - rect.origin.y;
+                if (kbRectH > 40.0) rect.size.height = kbRectH;
+                if ([key isEqualToString:UIKeyboardFrameEndUserInfoKey]) {
+                    outTop = rect.origin.y;
+                    outH = rect.size.height;
+                }
                 [copy setObject:[NSValue valueWithCGRect:rect] forKey:key];
                 moved = YES;
             }
@@ -7147,10 +7167,10 @@ static void AevonKbPostNote(id self, SEL _cmd, NSNotificationName name, id objec
         }
         if (AevonKbNoteNotes < 8) {
             AevonKbNoteNotes += 1;
-            char line[240];
+            char line[260];
             snprintf(line, sizeof(line),
-                     "kb: note rect raw=%.0f out=%.0f cal=%.0f fixed=%.0f name=%.40s\n",
-                     rawTop, outTop, cal, fixedTop, [(NSString *)name UTF8String]);
+                     "kb: note rect raw=%.0f out=%.0f cal=%.0f fixed=%.0f nh=%.0f name=%.40s\n",
+                     rawTop, outTop, cal, fixedTop, outH, [(NSString *)name UTF8String]);
             AevonKbLog(line);
         }
     }

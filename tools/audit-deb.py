@@ -506,6 +506,9 @@ def main():
                   b"ring: keyboard watch armed (lease 3.0 s)",
                   b"ring: keyboard up, edge band stepped aside",
                   b"ring: keyboard gone, edge band back",
+                  # 0.1.76 — 租约兜底：Darwin 「键盘收了」丢一条时，靠这一行把
+                  # 卡片收回去（Aevon(147) 的「必须再开关一次键盘才还原」）。
+                  b"ring: keyboard lease gone, fill back",
                   # 0.1.18 — 键盘「收起」那条独立通道（Aevon(104) 第 1 条要求
                   # 「关键盘后立即出现」）。宿主侧注册它、App 侧发它，两边各断言一次。
                   b"com.aevon.kb.off",
@@ -999,7 +1002,7 @@ def main():
                       # 所以同一会话多条通知重复到达也不会累加。
                       # 0.1.72 — 加 `fixed=` 字段：>0 表示这次用的是钉死值（本机
                       # 430×932），=0 表示不认识这台机器、退回通知原值。
-                      b"kb: note rect raw=%.0f out=%.0f cal=%.0f fixed=%.0f",
+                      b"kb: note rect raw=%.0f out=%.0f cal=%.0f fixed=%.0f nh=%.0f",
                       b"kb: win unfit h=%.0f",
                       b"kb: win fit reject want=%.0f",
                       # 0.1.64 — 「收起」不再当场落状态：先压 0.30 s，到点量一次键盘

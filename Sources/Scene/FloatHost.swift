@@ -3580,7 +3580,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 kbSavedHeight = canvasHeight
                 kbFilled = true
             }
-            card.frame = target
             kbTopCrop = 0
             canvasOriginY = y
             canvasHeight = 0
@@ -3598,7 +3597,22 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                                Double(visible.width), Double(height))
             var door: Int = 0
             if let sc = window.windowScene { door = Int(AevonPushSceneFrame(sc)) }
-            followContent()
+            // 0.1.76 — **卡片用 0.36 s ease-out 张开，不再一帧到位。**
+            //
+            // 顺序是「场景先落地、卡片再动」：场景一换，App 的内容当场按新画布
+            // 重排好，动画期间画面是稳定的，眼睛看到的只是「窗口在变大」。
+            // 反过来（先动卡片再推场景）会在这 0.36 s 里一直看到按旧画布画的
+            // 内容被拉伸，比硬切更难看。
+            //
+            // `followContent` 必须放在块里：内容的 center / transform 要跟卡片
+            // 一起插值，否则卡片在长、内容不动，中途会露出一圈黑。
+            UIView.animate(withDuration: AevonMotion.fillDuration, delay: 0,
+                           options: [.curveEaseOut, .beginFromCurrentState,
+                                     .allowUserInteraction]) {
+                card.frame = target
+                self.followContent()
+            }
+            // 光晕不在动画里：它是 layer 的阴影属性，跟着 frame 逐帧重算会掉帧。
             applyGlow()
             Log.write("win: keyboard fill on card=" + size(card.frame.size)
                       + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
@@ -3677,9 +3691,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return
         }
         kbSettleUntil = 0
-        if !kbSavedFrame.isNull { card.frame = kbSavedFrame }
         kbTopCrop = kbSavedCrop
-        followContent()
+        if !kbSavedFrame.isNull {
+            // 0.1.76 — 缩回也用同一条曲线、同一个时长：张开与缩小若不同速，
+            // 快速开关时会看到「啪一下撑开、慢慢缩回」。`beginFromCurrentState`
+            // 是必须的 —— 用户可能在动画中途又开键盘，得从当前尺寸接着走。
+            let restore = kbSavedFrame
+            UIView.animate(withDuration: AevonMotion.fillDuration, delay: 0,
+                           options: [.curveEaseOut, .beginFromCurrentState,
+                                     .allowUserInteraction]) {
+                card.frame = restore
+                self.followContent()
+            }
+        } else {
+            followContent()
+        }
         applyGlow()
         Log.write("win: keyboard fill off card=" + size(card.frame.size)
                   + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)

@@ -1186,11 +1186,40 @@ final class RingHost: NSObject {
         Unmanaged<RingHost>.fromOpaque(UnsafeRawPointer(raw)).takeUnretainedValue().keyboardGone()
     }
 
+    /// 0.1.76 — 租约到期的兜底复查。
+    ///
+    /// Darwin 通知**不保证送达**：应用进程被挂起、切到别的 App、或者那条通道
+    /// 正好挤的时候，「键盘收了」这一条会丢。丢了之后 `kbLogged` 永远是 true，
+    /// `FloatHost.keyboardFill(false)` 再也调不到 —— 用户看到的就是
+    /// 「键盘已经下去了，悬浮窗还撑满屏，必须再开一次键盘再关一次才回来」
+    /// （Aevon(147) 的原话）。
+    ///
+    /// 心跳每来一次就排一个「租约 + 一点余量」之后的复查：到点时若这一路还是
+    /// 最后一次心跳（token 没变），说明这段时间里一个心跳都没有 ⇒ 键盘确实不
+    /// 在了，走与 `keyboardGone` 完全相同的出口把卡片收回去。
+    private var kbLeaseToken = 0
+
+    private func armKbLease() {
+        kbLeaseToken &+= 1
+        let token = kbLeaseToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + kbLease + 0.4) { [weak self] in
+            guard let self = self, self.kbLeaseToken == token else { return }
+            guard self.kbLogged else { return }
+            self.kbAt = 0
+            self.kbLogged = false
+            Log.write("ring: keyboard lease gone, fill back")
+            FloatHost.keyboardFill(false)
+            self.syncOverlayVisibility()
+        }
+    }
+
     /// 应用进程说「键盘还在」：续租，然后**立刻**对齐显隐（把触发区藏掉）。
     private func keyboardBeat() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.kbAt = CACurrentMediaTime()
+            // 0.1.76 — 每次心跳续一次租约复查（见 `armKbLease`）。
+            self.armKbLease()
             // 0.1.56 — 心跳顺手让宿主复核一次键盘高度。键盘开着期间候选栏收放会让
             // 顶边在 616 / 643 之间跳，卡片底边不跟着走就会露出一条 27 pt 的缝
             // （或压住输入框）。`setKeyboardFill` 自己判重：高度没变一个几何都不写。
@@ -1207,6 +1236,9 @@ final class RingHost: NSObject {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.kbAt = 0
+            // 0.1.76 — 作废还没到点的租约复查：这一次已经由「收了」这条通知
+            // 亲手处理，晚到的复查不该再动一次几何。
+            self.kbLeaseToken &+= 1
             self.syncOverlayVisibility()
         }
     }
