@@ -1,40 +1,39 @@
 //
 //  ActivateProbe.swift — Aevon, SpringBoard side.
 //
-//  0.1.87 — 「通知点击 → 浮窗」的取证：**只读，不接管**。
+//  0.1.88 — 「通知点击 → 浮窗」：**第一次真的改行为**。
 //
-//  落点是 0.1.86 的真机普查定的，不是猜的。母本那条
+//  0.1.85 找错了名字（`_activateBundleID:…` 在这台机器上不存在），0.1.86 用只读
+//  普查把真名列了出来，0.1.87 按真名装上去、只读、只转发，拿到了一份完整的现场：
 //
-//      SBMainWorkspace -_activateBundleID:requestID:isTrusted:options:
-//                       source:originalSource:withResult:
+//      notify: hit op=open      act=#UINotificationResponseAction n=1 req=com.tencent.mqq
+//      notify: hit op=trusted   act=#UINotificationResponseAction n=1 req=com.tencent.mqq
 //
-//  在真机上 `no-method`（0.1.85 的日志）。普查把 `activ` 系全列出来后，真身是
-//  SBMainWorkspace 自己实现的四条**同形状**方法：
+//  于是这一版有三件事是确定的，不再是猜的：
 //
-//      _handleOpenApplicationRequest:options:activationSettings:origin:withResult:
-//      _handleUntrustedOpenRequestForApplication:options:...
-//      _handleTrustedOpenRequestForApplication:options:...
-//      _handleUserActionRequest:options:...
+//    · 点通知走 `SBMainWorkspace -_handleOpenApplicationRequest:…`，再进
+//      `-_handleTrustedOpenRequestForApplication:…`；
+//    · 「这是通知点击」的判据是 `options.__Actions.firstObject` 的类名含
+//      `NotificationResponseAction`（同一天从分享面板打开 App 是同样两条，
+//      但 `act=- n=0`，两者分得开）；
+//    · 目标 bundle id 就在 `request` 自己身上（它就是那个字符串）。
 //
-//  四条编码逐字相同（`v56@0:8@16@24@32@40@?48`，5 参数 + 结果块）。这一版把
-//  四条一起装成观察器：读一遍参数、原样转发、异步写一行日志，不写行为判定。
-//  它们每一行都在决定「这个 App 要不要起来」，所以闸必须硬，见 `AevonScene.m`
-//  里 `AevonActivateProbeInstall` 的四道闸（存在 / 逐字节形状 / 归属 / 原实现）。
+//  所以这个替身第一次有了「不原样转发」的分支：认出是通知点击时，SpringBoard 那
+//  一段（建 app layout、全屏推前台）整段跳过，改叫 `AevonOpenFromNotification`
+//  → `SceneProbe.openCard` → 挂起启动 + 建卡片，和圆盘图标走同一条路。
 //
-//  这道口子的危险不在「写错一个 if」，而在「装上去之后才发现形状不对」。
-//  装配侧的闸（存在 / 逐字节形状 / 归属 / 原实现）在 `AevonScene.m` 里；这一侧
-//  负责剩下的两道：
+//  危险面随之变大，所以闸也变多了，见 `AevonScene.m` 里 `AevonOpenDecide`：
 //
-//    闸四 · 启动闩   装配前写 `notify.armed`，活到 180 秒才摘。它还在 ⇒ 上一次
-//                    就是死在这条钩子上 ⇒ 这次不装，并落下 `notify.off`。
-//    闸六 · 延迟装载 装载后 3 秒才装。那时主屏已经在，`AevonStart` 里任何一行
-//                    都不可能再是「开不了机」的原因。
+//    闸一 · 开关   `notify.off` 在 ⇒ 一个字节都不改，行为和 0.1.87 完全一样。
+//                  这一条每拍都查，不是只在装配那一刻查一次。
+//    闸二 · 判据   类名必须含 `NotificationResponseAction`。点图标、分享面板、
+//                  系统 URL 都不含，一律照旧全屏。
+//    闸三 · 目标   取不到 bundle 或目标是 SpringBoard 自己 ⇒ 不接管。
+//    闸四 · 兜底   吞掉之后 2.5 秒查 `AevonCardIsUpFor()`；卡片没起来就把原实现
+//                  补调一次。判据是「卡片在不在」，不是「过了多久」。
 //
-//  调用预算（四条合计 32 行）在替身里。
-//
-//  这六道之外还有一条不写在代码里、写在顺序里的：**快照在原实现之前，落盘在原
-//  实现之后**。快照只读、不分配、不写盘 —— 它不改任何参数，所以系统那一段照旧
-//  原样跑；落盘走主队列异步，那 0.1~0.3 ms 不该压在「点开 App」那一拍上。
+//  装配侧的四道闸（存在 / 逐字节形状 / 归属 / 原实现）与两道时间闸（`notify.armed`
+//  180 秒、装载后 3 秒）原样保留 —— 0.1.87 证明了它们能装上，也证明了它们没惹事。
 //
 
 import Foundation
@@ -42,6 +41,16 @@ import Foundation
 /// `AevonScene.m` 里的 C 函数，只此一处声明。
 @_silgen_name("AevonActivateProbeInstall")
 private func AevonActivateProbeInstall()
+
+/// `AevonScene.m` 的分流判定每一拍都要问一次「人关了没有」。
+///
+/// 只在装配那一刻查一次是不够的：`notify.off` 的语义是「现在别动我的 App 打开」，
+/// 而人在发现不对劲之后建这个文件时，钩子已经在内存里跑着了。所以这条查询放在
+/// 热路径上 —— 一次 `fileExists` 对一次 App 启动来说可以忽略。
+@_cdecl("AevonActivateSwitchOff")
+public func AevonActivateSwitchOff() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.activateOffPath) ? 1 : 0
+}
 
 enum ActivateProbe {
 

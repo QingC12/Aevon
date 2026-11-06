@@ -2341,3 +2341,22 @@ public func AevonOpenFromNotification(_ bundle: UnsafePointer<CChar>?) {
         DispatchQueue.main.async(execute: work)
     }
 }
+
+/// 0.1.88 — 「这个 App 已经在卡片里了吗」。
+///
+/// `AevonScene.m` 的分流看门狗靠它决定要不要把原实现补调一次。注意它问的是
+/// **卡片在不在**，不是「过了多久」：`openCard` 要等 scene 出现，真机上 0.3~1 秒
+/// 是常态，用固定延时判成败会在慢一点的那一次上错判 —— 0.1.84 的假收起就是
+/// 这么来的（缓存值当证据）。
+///
+/// 只在主队列调用（看门狗本来就投在主队列）。`FloatHost` 的那两个静态量都是
+/// 主线程状态，跨线程读会撞上正在拆窗的那一拍。
+@_cdecl("AevonCardIsUpFor")
+public func AevonCardIsUpFor(_ bundle: UnsafePointer<CChar>?) -> Int32 {
+    guard let bundle = bundle else { return 0 }
+    let identifier = String(cString: bundle)
+    guard identifier.count > 2 else { return 0 }
+    if FloatHost.mainBundle == identifier { return 1 }
+    if FloatHost.dockedHost(of: identifier) != nil { return 1 }
+    return 0
+}

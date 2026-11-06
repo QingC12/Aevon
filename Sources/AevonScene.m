@@ -31,6 +31,13 @@
 // `extern`：签名必须与那两处逐字一致（`const char *`，可空）。
 extern void AevonLogRaw(const char *line);
 extern void AevonOpenFromNotification(const char *bundleID);
+// 0.1.88 — 两条只读查询，都由 Swift 侧 `@_cdecl` 导出：
+//   AevonActivateSwitchOff()  → 1 表示 `notify.off` 在，一个字节都不许改行为；
+//   AevonCardIsUpFor(bundle)  → 1 表示这个 App 已经在主悬浮窗/停靠小窗里。
+// 后者是**唯一的成功判据**：`openCard` 把 App 拉起来之后场景是异步出现的，
+// 用时间猜「起来没起来」会在真机上错判（0.1.84 已经在键盘上付过一次学费）。
+extern int AevonActivateSwitchOff(void);
+extern int AevonCardIsUpFor(const char *bundle);
 
 /// The scene manager is a singleton with no public door, and its spelling has
 /// changed across releases. Resolving it here keeps the class-method dispatch
@@ -2698,6 +2705,157 @@ static int AevonOpenTotal = 0;
 /// 点击」在日志里长得一模一样。这一行是唯一能把两者分开的东西。
 static int AevonOpenKeyNotes = 0;
 
+// MARK: - 0.1.88 分流：通知点击不再全屏打开
+//
+// 0.1.87 的真机日志（Aevon(155)，19:37:47）把三件事一次答完了：
+//
+//   notify: hit op=open    b=- src=- act=#UINotificationResponseAction n=1 url=- req=com.tencent.mqq …
+//   notify: hit op=open    … keys=__Actions,__PromptUnlockDevice,__LaunchOrigin,__LaunchImage,__UnlockDevice
+//   notify: hit op=trusted b=- src=- act=#UINotificationResponseAction n=1 url=- req=com.tencent.mqq …
+//
+//   ① 点通知确实走 `_handleOpenApplicationRequest:`，再进 `_handleTrustedOpenRequestForApplication:`；
+//   ② `act=#UINotificationResponseAction` 就是「这是通知点击」的判据 —— 同一天从
+//      sharingd 分享面板打开 Sileo 也是这两条，但 `act=- n=0`，两者在日志里分得开；
+//   ③ `req` **本身就是 bundle id 字符串**（`com.tencent.mqq`），不是带 `application`
+//      的对象 —— 0.1.87 的 `b=-` 就是按对象取值取空了，不是没有值。
+//
+// 有了这三条，「通知 → 浮窗」的识别部分不需要再取证。剩下的是动作：SpringBoard
+// 收到这个请求会自己把 App 全屏推上前台，所以要么跟着它走，要么**不交给它**。
+// 这一版选后者 —— 和母本同一条思路（它 hook 的也是这一层，接管之后自己排布局），
+// 只是 Aevon 的布局早就有了（`openCard` / `FloatHost`），不必再写一套。
+//
+// 于是替身第一次有了「不原样转发」的分支。它被四道闸夹住：
+//
+//   闸一 · 开关      `notify.off` 在 ⇒ 一个字节都不改，和 0.1.87 完全一样；
+//   闸二 · 判据      `__Actions.firstObject` 的类名必须含 `NotificationResponseAction`。
+//                    分享面板、URL、点图标都不含，一律照旧全屏；
+//   闸三 · 目标      bundle 必须是从 `request` 直接取到的非空串，且不是 SpringBoard 自己；
+//   闸四 · 兜底      吞掉之后 2.5 秒查一次 `AevonCardIsUpFor()`；卡片没起来就把原实现
+//                    **补调一次**（这是「点了没反应」这个最坏结果唯一的出口）。
+//
+// 为什么敢吞：`openCard` 自己已经有一条全屏兜底（`ring: card route declined` →
+// `LSApplicationWorkspace openApplicationWithBundleID:`）。闸四补的是它兜不住的那
+// 一段 —— 挂起启动成功但卡片没建成，那时既没有卡片也没有全屏。
+//
+// 为什么必须查而不是等：真机上场景是异步出现的，`openCard` 的轮询最长会走满
+// 若干拍。用一个固定延时判「成了没成」正是 0.1.84 键盘那一版的错法（拿时间当
+// 证据），所以这里判的是**卡片在不在**，不是「过了多久」。
+
+/// 上一次分流的时刻与目标。同一次点击会连着走 open → trusted 两条，第一条被吞掉
+/// 之后第二条通常不会再来（链条在替身里就断了）；真来了也不能再开一次卡片。
+static double AevonDivertAt = 0;
+static char AevonDivertBundle[64] = {0};
+
+/// 一次开机最多分流几次。真机上「点了通知却什么都没有」是最难受的失败，所以
+/// 宁可少分几次 —— 用满之后一律回到 0.1.87 的行为。
+static int AevonDivertCount = 0;
+#define AEVON_DIVERT_MAX 24
+
+/// 「认出来了却没分流」的解释行单独计数，不占 `AevonOpenKeyNotes` 的键名预算 ——
+/// 两个预算合用一个计数器，先跑完的那个会把另一个静音。
+static int AevonDivertNotes = 0;
+
+/// 下面几个取值函数都用 `AevonActRead`，而它写在更下面（读键的实现挨着读键的
+/// 注释）。C 里先声明后使用，这一行是声明。
+static id AevonActRead(id object, NSString *key);
+
+/// `options` 可能是个裸字典，也可能是个带 `dictionary` 的包装对象。
+static id AevonOpenDict(id options) {
+    if (options == nil) return nil;
+    if ([options isKindOfClass:[NSDictionary class]]) return options;
+    id inner = AevonActRead(options, @"dictionary");
+    return [inner isKindOfClass:[NSDictionary class]] ? inner : nil;
+}
+
+/// 目标 App 的 bundle id。
+///
+/// 三个取值点按真机顺序排：`request` 自己是字符串（0.1.87 实测就是这一种，它
+/// 直接就是 bundle id）→ `request.application.bundleIdentifier`（母本那套对象
+/// 形状）→ `request.bundleIdentifier`。全落空返回 nil，调用方据此不接管。
+static id AevonOpenBundleOf(id request) {
+    if ([request isKindOfClass:[NSString class]]) return request;
+    id app = AevonActRead(request, @"application");
+    id bundle = app != nil ? AevonActRead(app, @"bundleIdentifier") : nil;
+    if (![bundle isKindOfClass:[NSString class]]) {
+        bundle = AevonActRead(request, @"bundleIdentifier");
+    }
+    return [bundle isKindOfClass:[NSString class]] ? bundle : nil;
+}
+
+/// `options.__Actions` 的第一个元素 —— 点通知时它就是 `UINotificationResponseAction`。
+/// 键名是私有键，换系统版本可能变，所以退路依次是 `request` 和 `actions`。
+static id AevonOpenFirstAction(id request, id options) {
+    id actions = AevonActRead(options, @"__Actions");
+    if (actions == nil) actions = AevonActRead(request, @"__Actions");
+    if (actions == nil) actions = AevonActRead(options, @"actions");
+    if (![actions isKindOfClass:[NSArray class]]) return nil;
+    if ([(NSArray *)actions count] == 0) return nil;
+    return [(NSArray *)actions objectAtIndex:0];
+}
+
+/// 「这是一次通知点击」唯一的判据。用类名而不是 `respondsToSelector:`：动作对象
+/// 的私有选择器在两代系统之间改过名（母本用的 `defaultAction` 在 17 上就没有），
+/// 而类名是从 UIKit 自己那儿来的，改它等于改整个通知回应的实现。
+static BOOL AevonOpenIsNotificationAction(id action) {
+    if (action == nil) return NO;
+    const char *name = class_getName([action class]);
+    return name != NULL && strstr(name, "NotificationResponseAction") != NULL;
+}
+
+/// `options` 里有没有某个键。
+static BOOL AevonOpenHasKey(id options, NSString *key) {
+    id dict = AevonOpenDict(options);
+    if (dict == nil) return NO;
+    return [(NSDictionary *)dict objectForKey:key] != nil;
+}
+
+/// 分流决定。
+///   返回 1 → 吞掉，开卡片；
+///   返回 2 → 吞掉，不再开（同一次点击的后续链）；
+///   返回 0 → 原样转发，行为与 0.1.87 一致。
+/// `why` 只用于日志：它把「没分流」的四种原因分开，否则下一份日志里
+/// 「一个 notify: divert 都没有」与「分流了但没生效」长得一样。
+static int AevonOpenDecide(id request, id options,
+                           char *bundle, size_t size, const char **why) {
+    if (bundle == NULL || size == 0) return 0;
+    bundle[0] = '\0';
+    *why = "-";
+
+    if (AevonActivateSwitchOff()) { *why = "off"; return 0; }
+    if (AevonDivertCount >= AEVON_DIVERT_MAX) { *why = "cap"; return 0; }
+
+    id target = AevonOpenBundleOf(request);
+    if (target == nil) { *why = "nobundle"; return 0; }
+    const char *raw = [(NSString *)target UTF8String];
+    if (raw == NULL || strlen(raw) < 3) { *why = "nobundle"; return 0; }
+    snprintf(bundle, size, "%s", raw);
+
+    // SpringBoard 自己也有开请求（解锁后回到主屏之类）。吞掉它就是吞掉主屏。
+    if (strncmp(bundle, "com.apple.springboard", 21) == 0) { *why = "springboard"; return 0; }
+
+    // 判据先于「同一次点击的第二条」：先确认这是一次通知回应，再谈它是不是
+    // 上一次的后续。顺序反过来，用户在 1.5 秒内点桌面图标也会被当成链条吞掉 ——
+    // 那是一个真实的「点了没反应」。
+    if (!AevonOpenIsNotificationAction(AevonOpenFirstAction(request, options))) {
+        *why = "plain";
+        return 0;
+    }
+
+    // 同一次点击的第二条（open → trusted 之间只隔几毫秒）。第一条被吞掉之后
+    // 链条通常就断了；真来了也不能再开一次卡片，否则屏幕上一大一小的两个。
+    double now = CFAbsoluteTimeGetCurrent();
+    if (AevonDivertAt > 0 && now - AevonDivertAt < 1.5 &&
+        strcmp(bundle, AevonDivertBundle) == 0) {
+        *why = "chain";
+        return 2;
+    }
+
+    *why = "notify";
+    AevonDivertAt = now;
+    snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
+    return 1;
+}
+
 /// 只读取一个键。两条路按从便宜到贵的顺序试：
 ///   ① `objectForKey:` —— 字典本身；
 ///   ② `valueForKey:`  —— KVC。`__PayloadOptions` 这种私有键只在 KVC 里答。
@@ -2760,9 +2918,10 @@ static int AevonOpenSlot(SEL cmd) {
 ///
 /// 字段（下一份日志按这个读）：
 ///   op    = 四条里的哪一条（open / untrusted / trusted / user）
-///   b     = 目标 App 的 bundle id。取 `request.application.bundleIdentifier`，
-///           退不到就取 `request` 自己的 `bundleIdentifier`
+///   b     = 目标 App 的 bundle id。真机上 `request` 自己就是 bundle id 串
+///           （0.1.87 实测 `req=com.tencent.mqq`），对象形状是退路
 ///   src   = 来源 App。`__PayloadOptions[UIApplicationLaunchOptionsSourceApplicationKey]`
+///           —— 0.1.88 实测这一层拿不到（键里没有 `__PayloadOptions`），恒为 `-`
 ///   act   = `__Actions.firstObject` 的类名 —— 认「通知回应」全靠它
 ///   n     = `__Actions` 的元素个数
 ///   url   = 动作对象上 `url` 的 absoluteString（母本用它做 URL 注入）
@@ -2794,21 +2953,17 @@ static void AevonOpenSnapshot(int slot, id request, id options,
                 ? AevonActRead(payload, @"UIApplicationLaunchOptionsSourceApplicationKey")
                 : nil;
 
-        id actions = AevonActRead(options, @"__Actions");
-        if (actions == nil) actions = AevonActRead(request, @"__Actions");
-        if (actions == nil) actions = AevonActRead(options, @"actions");
         id first = nil;
         int actionCount = 0;
-        if ([actions isKindOfClass:[NSArray class]]) {
-            actionCount = (int)[(NSArray *)actions count];
-            if (actionCount > 0) first = [(NSArray *)actions objectAtIndex:0];
+        id actionsRaw = AevonActRead(options, @"__Actions");
+        if (actionsRaw == nil) actionsRaw = AevonActRead(request, @"__Actions");
+        if (actionsRaw == nil) actionsRaw = AevonActRead(options, @"actions");
+        if ([actionsRaw isKindOfClass:[NSArray class]]) {
+            actionCount = (int)[(NSArray *)actionsRaw count];
+            if (actionCount > 0) first = [(NSArray *)actionsRaw objectAtIndex:0];
         }
 
-        id app = AevonActRead(request, @"application");
-        id bundle = app != nil ? AevonActRead(app, @"bundleIdentifier") : nil;
-        if (![bundle isKindOfClass:[NSString class]]) {
-            bundle = AevonActRead(request, @"bundleIdentifier");
-        }
+        id bundle = AevonOpenBundleOf(request);
 
         id url = first != nil ? AevonActRead(first, @"url") : nil;
         if (url != nil) AevonActName(url, urlText, sizeof(urlText));
@@ -2852,23 +3007,216 @@ static void AevonOpenSnapshot(int slot, id request, id options,
     }
 }
 
+// MARK: - 0.1.88 结果块
+//
+// 这四条方法最后一个参数都是 `@?`（结果块）。原样转发时它是系统自己的事；一旦
+// 不转发，这个块就没人调了 —— 而它多半是某个开请求事务的收尾，悬着不落的后
+// 果是 SpringBoard 以为「还在开 App」：首页手势失灵、下一次切换排队。两种都
+// 比「点了没反应」更难查。
+//
+// 块的具体形状不知道，也不许猜。这里读块自己的签名（`Block_layout` →
+// `descriptor->signature`），只认三种不会再变的形状：
+//
+//     v12@?0B8        一个 BOOL（成功/失败）        → 传 YES
+//     v16@?0@"NSError"8  一个对象（错误，nil 即成功）→ 传 nil
+//     v8@?0           一个参数都没有                → 直接调
+//
+// 其余一律不调，只在日志里写 `result=skip`。宁可留一个悬着的事务，也不拿一个
+// 形状不对的块去赌 —— 那是崩溃，不是一行日志。
+typedef struct {
+    unsigned long reserved;
+    unsigned long size;
+    const char *signature;
+} AevonBlockDesc;
+
+typedef struct {
+    void *isa;
+    int flags;
+    int reserved;
+    void *invoke;
+    AevonBlockDesc *descriptor;
+} AevonBlockLayout;
+
+/// 读签名并归一成三种形状之一：'B' / '@' / 'v'，认不出返回 0。
+static char AevonOpenResultShape(id result) {
+    if (result == NULL) return 0;
+    const char *sig = NULL;
+    @try {
+        AevonBlockDesc *desc = ((AevonBlockLayout *)result)->descriptor;
+        if (desc != NULL) sig = desc->signature;
+    } @catch (NSException *exception) {
+        return 0;
+    }
+    if (sig == NULL) return 0;
+    // 块自己的参数编码形如 `v12@?0B8`：`@?` 是 self，紧跟数字是偏移。
+    const char *self = strstr(sig, "@?");
+    if (self == NULL) return 0;
+    const char *cur = self + 2;
+    while (*cur >= '0' && *cur <= '9') cur++;
+    if (*cur == '\0') return 'v';
+    if (*cur == 'B' || *cur == 'c' || *cur == 'C') return 'B';
+    if (*cur == '@') return '@';
+    return 0;
+}
+
+/// 三个空块，形状各一种。补调原实现时用它们顶替**已经收过尾**的结果块：原实现
+/// 照旧会调一次，而这一次什么都不做。
+static void (^AevonNoopBool)(BOOL) = ^(BOOL ok) { (void)ok; };
+static void (^AevonNoopObj)(id) = ^(id value) { (void)value; };
+static void (^AevonNoopVoid)(void) = ^{ };
+
+static id AevonOpenNoopFor(char form) {
+    switch (form) {
+        case 'B': return (id)AevonNoopBool;
+        case '@': return (id)AevonNoopObj;
+        case 'v': return (id)AevonNoopVoid;
+        default: return nil;
+    }
+}
+
+/// 上一个收过尾的结果块。同一次点击的 open → trusted 两条有可能拿的是**同一个块**，
+/// 收两次比悬着更难查（`[transaction invalidate]` 跑第二遍、`resume` 跑两遍）。
+static void *AevonLastResult = NULL;
+
+/// 收尾。`shape` 只用于日志：`BOOL` / `nil` / `void` / `skip` / `same` 五种写清楚，
+/// 下一份日志才能回答「结果块到底被谁收了尾」。
+static void AevonOpenFinishResult(id result, const char **shape) {
+    if (result == NULL) { *shape = "none"; return; }
+    if ((void *)result == AevonLastResult) { *shape = "same"; return; }
+    AevonLastResult = (void *)result;
+    char form = AevonOpenResultShape(result);
+    @try {
+        switch (form) {
+            case 'B': ((void (^)(BOOL))result)(YES); *shape = "BOOL"; return;
+            case '@': ((void (^)(id))result)(nil); *shape = "nil"; return;
+            case 'v': ((void (^)(void))result)(); *shape = "void"; return;
+            default: *shape = "skip"; return;
+        }
+    } @catch (NSException *exception) {
+        *shape = "threw";
+    }
+}
+
+/// 吞掉之后的兜底看门狗。
+/// 吞掉 SpringBoard 的开请求，最坏的结果是「点了通知什么也没发生」。`openCard`
+/// 自己有一条全屏兜底，但它兜不住「挂起启动成功、卡片没建成」那一段 —— 那时既
+/// 没有卡片也没有全屏。所以 2.5 秒后查一次**卡片在不在**：不在就把原实现补调
+/// 一次，让这一下退化成 0.1.87 的行为。补调只发生一次，且只在没有卡片时。
+///
+/// 2.5 秒是给的余量，不是判据：`openCard` 里 `pollForScene` 要等场景出现，真机
+/// 上通常 0.3~1 秒；判据是 `AevonCardIsUpFor()` 的返回值。拿时间当判据正是
+/// 0.1.84 键盘那一版的错法。
+static void AevonOpenWatch(id self, SEL cmd, id request, id options,
+                           id settings, id origin, id replayResult,
+                           IMP original, NSString *bundle) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        const char *want = [bundle UTF8String];
+        if (want == NULL) return;
+        if (AevonCardIsUpFor(want)) {
+            AevonLogRaw([[NSString stringWithFormat:@"notify: divert card up b=%@", bundle]
+                         UTF8String]);
+            return;
+        }
+        AevonLogRaw([[NSString stringWithFormat:@"notify: divert replay b=%@", bundle]
+                     UTF8String]);
+        @try {
+            if (original != NULL) {
+                ((void (*)(id, SEL, id, id, id, id, id))original)
+                    (self, cmd, request, options, settings, origin, replayResult);
+            }
+        } @catch (NSException *exception) {
+            AevonLogRaw([[NSString stringWithFormat:@"notify: divert replay threw %@",
+                          exception.name != nil ? exception.name : @"?"] UTF8String]);
+        }
+    });
+}
+
 /// 替身。**顺序就是这里的全部安全设计**：
 ///   ① 快照 —— 只读，不改任何参数；
-///   ② 原实现 —— 一个字节都不拦，返回值原样交回；
-///   ③ 落盘 —— 异步，写盘那 0.1~0.3 ms 不压在「点开 App」那一拍上。
+///   ② 分流判定 —— 只有「这一拍是一次通知点击」才改变行为，其余一个字节都不动；
+///   ③ 原实现 —— 不分流时原样转发，返回值原样交回；
+///   ④ 落盘 —— 异步，写盘那 0.1~0.3 ms 不压在「点开 App」那一拍上。
+///
+/// 0.1.88 起第 ③ 步前面多了一个分支：判据成立时**不转发**，改叫 `openCard`
+/// （`AevonOpenFromNotification` → `RingHost.openFromNotification` → `SceneProbe.openCard`），
+/// 由它挂起启动、建卡片、必要时自己全屏兜底。转发与不转发互斥，不会两头都开。
 static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                          id settings, id origin, id result) {
     int slot = AevonOpenSlot(_cmd);
     char line[640];
     line[0] = '\0';
-    if (slot >= 0) {
+    char bundle[64];
+    bundle[0] = '\0';
+    const char *why = "-";
+    int verdict = 0;
+
+    // 分流判定只对「我们装上的那四条」做。父类链上万一还有人来，走原样转发。
+    if (slot >= 0 && AevonOpenOrig[slot] != NULL) {
+        @try {
+            verdict = AevonOpenDecide(request, options, bundle, sizeof(bundle), &why);
+        } @catch (NSException *exception) {
+            verdict = 0;
+            why = "threw";
+        }
+    }
+
+    if (verdict == 1) {
+        AevonDivertCount += 1;
+        // `unlock=1` 表示这一拍 SpringBoard 还带着「要不要顺手解锁」的意图。
+        // 照样分流，但把它记下来：锁屏点通知若出现「卡片没起来、看门狗补调了
+        // 原实现」，这一位就是解释 —— 解锁那一步在卡片这条路上没人做。
+        snprintf(line, sizeof(line), "notify: divert b=%s op=%s why=%s unlock=%d n=%d",
+                 bundle, slot >= 0 ? AevonOpenTargets[slot].tag : "?", why,
+                 AevonOpenHasKey(options, @"__UnlockDevice") ? 1 : 0,
+                 AevonDivertCount);
+    } else if (verdict == 2) {
+        // 吞掉，也不再开卡片。结果块照样要收尾，否则这一次调用会悬着。
+        const char *chainShape = "none";
+        AevonOpenFinishResult(result, &chainShape);
+        snprintf(line, sizeof(line), "notify: divert chain b=%s op=%s result=%s", bundle,
+                 slot >= 0 ? AevonOpenTargets[slot].tag : "?", chainShape);
+    } else if (slot >= 0) {
         AevonOpenSnapshot(slot, request, options, settings, origin, line, sizeof(line));
     }
 
-    IMP original = slot >= 0 ? AevonOpenOrig[slot] : NULL;
-    if (original != NULL) {
-        ((void (*)(id, SEL, id, id, id, id, id))original)
-            (self, _cmd, request, options, settings, origin, result);
+    if (verdict == 1) {
+        // 不转发。SpringBoard 那一段（建 app layout、全屏推前台）整段跳过，改由
+        // 卡片那条路自己拉起来。`AevonOpenFromNotification` 自己会切到主队列。
+        NSString *target = [NSString stringWithUTF8String:bundle];
+        if (target.length > 2) {
+            // 结果块：认得出形状就当场收尾 —— 悬着的事务会让 SpringBoard 以为
+            // 还在开 App。收尾之后补调原实现时必须换一个同形状的空块，
+            // 否则同一个块会被收两次。
+            char form = AevonOpenResultShape(result);
+            const char *shape = "none";
+            id replay = result;
+            if (form != 0) {
+                AevonOpenFinishResult(result, &shape);
+                id noop = AevonOpenNoopFor(form);
+                if (noop != nil) replay = noop;
+            }
+            size_t used = strlen(line);
+            if (used + 16 < sizeof(line)) {
+                snprintf(line + used, sizeof(line) - used, " result=%s", shape);
+            }
+            AevonOpenFromNotification(bundle);
+            AevonOpenWatch(self, _cmd, request, options, settings, origin, replay,
+                           AevonOpenOrig[slot], target);
+        }
+    } else if (verdict == 0) {
+        IMP original = slot >= 0 ? AevonOpenOrig[slot] : NULL;
+        if (original != NULL) {
+            ((void (*)(id, SEL, id, id, id, id, id))original)
+                (self, _cmd, request, options, settings, origin, result);
+        }
+        // 「认出来了但没分流」才是需要解释的：开关、上限、取不到目标。
+        // `plain`/`nobundle` 是常态（点图标、分享面板），一行都不写。
+        if (strcmp(why, "plain") != 0 && strcmp(why, "nobundle") != 0 &&
+            AevonDivertNotes < 6 && line[0] == '\0') {
+            AevonDivertNotes += 1;
+            snprintf(line, sizeof(line), "notify: divert pass b=%s why=%s", bundle, why);
+        }
     }
 
     if (line[0] != '\0') {

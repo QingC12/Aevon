@@ -635,6 +635,22 @@ def main():
                   b"notify: hit op=%s b=%s src=%s act=%s n=%d url=%s req=%s opt=%s set=%s org=%s",
                   # 闸五：预算用尽后闭嘴的那一行（四条合计 32 行）。
                   b"notify: open budget spent n=32",
+                  # 0.1.88 — 分流。这是第一次「不原样转发」，所以每一条分支都要
+                  # 能在产物里 grep 到：哪一条缺了，就等于那一种结局没有证词。
+                  #
+                  #   divert b=… op=… why=… unlock=…  吞掉了，去开卡片
+                  #   divert chain b=…                同一次点击的第二条，吞掉但不再开
+                  #   divert pass b=… why=…           认出来了但没吞（开关/上限/取不到）
+                  #   divert card up b=…              2.5 秒后查到卡片在 —— 成功判据
+                  #   divert replay b=…               卡片没起来，已补调原实现退回全屏
+                  b"notify: divert b=%s op=%s why=%s unlock=%d n=%d",
+                  b"notify: divert chain b=%s op=%s result=%s",
+                  b"notify: divert pass b=%s why=%s",
+                  b"notify: divert card up b=%@",
+                  b"notify: divert replay b=%@",
+                  b"notify: divert replay threw %@",
+                  # 判据要能在二进制里找到，否则「为什么没吞」全靠猜。
+                  b"NotificationResponseAction",
                   # 闸四（Swift 侧）：闩的三态。三条缺一条，「上次死在这条钩子
                   # 上」这个结论就落不下来 —— 而这正是这一版唯一的安全网。
                   b"notify: activate latch held, previous boot died while armed",
