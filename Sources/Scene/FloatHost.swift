@@ -1555,6 +1555,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         canvasHeight = 0
         kbSavedHeight = 0
         kbTopMiss = 0
+        kbReflowAt = 0
         card = nil
         content = nil
         visible = .zero
@@ -3465,6 +3466,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var kbSavedHeight: CGFloat = 0
     /// 0.1.57 — 这一次弹起里「顶边没读到」试了几次（见 `setKeyboardFill` 里那段）。
     private var kbTopMiss = 0
+    /// 0.1.58 — 上一次改键盘态高度的时刻（`CACurrentMediaTime()`），用来挡住连续改写。
+    private var kbReflowAt: CFTimeInterval = 0
 
     /// 全体宿主里挑主窗让位。
     ///
@@ -3553,10 +3556,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 0.1.56 — 已经铺开了也要再看一眼：键盘高度会中途变（候选栏收放，
             // 本机 616 ↔ 643）。不变就不动，变了只改高度，`kbSaved*` 一个都不碰
             // （那才是「收起时要还回去的东西」）。
+            // 0.1.58 — 一次弹起只认一次高度变化。
+            //
+            // Aevon(130)：`kbtop` 先后读到 717 / 744 / 788，卡片高度就跟着被
+            // 改了三遍（502 → 529 → 573），每一遍都让 App 重排一次 —— 用户看到的
+            // 「内容一顿乱跳」正是这一串。顶边来源已经改成实测（`AevonKbVisualTop`），
+            // 这里再加一道时间闸：铺开之后 0.35 s 内不再接受新的高度，让画面先落地。
+            // 心跳每秒一次，正常的候选栏收放照样会被下一次心跳接住。
             if kbFilled {
                 guard kbTop > y + 240, kbTop < screen.height - 40 else { return }
                 let fresh = kbTop - y
                 guard abs(fresh - card.frame.height) > 8 else { return }
+                guard CACurrentMediaTime() - kbReflowAt > 0.35 else { return }
+                kbReflowAt = CACurrentMediaTime()
                 card.frame = CGRect(x: 0, y: y, width: visible.width, height: fresh)
                 canvasHeight = (fresh < visible.height - 1) ? fresh : 0
                 AevonSceneFrameSet(bundle, 0, Double(y),
@@ -3592,6 +3604,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             kbTopCrop = 0
             canvasOriginY = y
             canvasHeight = (height < visible.height - 1) ? height : 0
+            kbReflowAt = CACurrentMediaTime()
             // 场景跟着卡片走。目标登记在 C 侧，这里**当拍就推一次**。
             //
             // 0.1.55 — 原来是只登记、等 SceneProbe 守护循环下一拍才写。Aevon(127)
@@ -3621,6 +3634,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             guard kbFilled else { return }
             kbFilled = false
             kbTopMiss = 0
+            kbReflowAt = 0
             // 0.1.56 — **先放场景，再改卡片**。
             //
             // 原来是先 `card.frame = kbSavedFrame`（430×717@215 一步收回

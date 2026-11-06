@@ -4760,6 +4760,8 @@ static void AevonKbGuideNote(void);
 /// 写一个 6 字节的小文件过去。Darwin 通知不能带载荷，prefs 又会把整个域刷一遍
 /// （触摸路径上被禁过），一个独立小文件最省。
 static void AevonKbLog(const char *line);
+/// 0.1.58 — 键盘视觉实体的顶边（定义在键盘段里 `AevonKbWindowScan` 之后）。
+static CGFloat AevonKbVisualTop(void);
 /// 0.1.57 — **三条通道一起写**，因为 0.1.56 只写了最没希望的那一条。
 ///
 /// Aevon(129) 的证词只有一行，但足够定案：
@@ -4782,14 +4784,34 @@ static void AevonKbLog(const char *line);
 ///      走 cfprefsd，App 有权写自己的域；宿主读别人域不受沙盒限制。
 ///      慢（几十 ms 才落盘），但绝不会失败。
 ///   ③ `/var/mobile/Aevon.kb` —— 保留，万一某个环境放得下；失败不再当回事。
+///
+/// 0.1.58 — **通道通了，但送的是错数**。Aevon(130) 里 `door=3`（tmp + prefs 都写成），
+/// 可送过来的顶边是 `717 / 744 / 761 / 788`，折成键盘高只有 `215 / 188 / 171 / 144`；
+/// 用户肉眼看到的键盘顶一直没动过，就是 616。
+///
+/// 所以「`UIKeyboardFrameEndUserInfoKey` 里那个 origin.y 就是屏幕坐标的键盘顶」这个
+/// 前提也被否掉了 —— 场景被搬到 215 之后，UIKit 报的那块矩形只覆盖屏幕最底一截
+/// （717..932），它回答的是「键盘超出场景的那部分」，不是键盘本身。
+///
+/// 于是本版改成**量**：见 `AevonKbVisualTop`。量到就用量到的，量不到才退回通知帧，
+/// 并且加一条硬闸门：键盘高不足 250 pt 的值一律丢弃（717/744/761/788 全在闸门外）。
 static void AevonKbTopPublish(CGFloat top) {
-    if (top < 40.0 || top > 4000.0) return;
+    CGFloat measured = AevonKbVisualTop();
+    CGFloat value = measured > 200.0 ? measured : top;
+    if (value < 200.0 || value > 4000.0) return;
+    if (measured < 200.0) {
+        // 只有通知帧可用。它在这个环境里不可信，唯一的用处是「键盘真的在屏」时
+        // 给一个近似的顶边；所以加一道闸门，宁可读不到（宿主退回铺满屏底），
+        // 也不能把 717 这种「只覆盖最底 215 pt」的矩形当成整只键盘。
+        CGFloat fullHeight = UIScreen.mainScreen.bounds.size.height;
+        if (fullHeight > 400.0 && value > fullHeight - 250.0) return;
+    }
     static CGFloat last = -1.0;
     static int logged = 0;
-    if (fabs(top - last) < 0.5) return;
-    last = top;
+    if (fabs(value - last) < 0.5) return;
+    last = value;
     char buf[24];
-    int n = snprintf(buf, sizeof(buf), "%.0f", top);
+    int n = snprintf(buf, sizeof(buf), "%.0f", value);
     if (n <= 0) return;
     // ① 自己容器的 tmp。`NSTemporaryDirectory()` 就是 `<容器>/tmp/`。
     int door = 0;
@@ -4832,7 +4854,8 @@ static void AevonKbTopPublish(CGFloat top) {
     if (logged < 3) {
         logged += 1;
         char line[160];
-        snprintf(line, sizeof(line), "kb: top publish door=%d top=%.0f\n", door, top);
+        snprintf(line, sizeof(line), "kb: top publish door=%d top=%.0f measure=%d\n",
+                 door, value, measured > 200.0 ? 1 : 0);
         AevonKbLog(line);
     }
 }
@@ -4843,10 +4866,21 @@ static void AevonKbEvaluate(NSDictionary *info) {
     CGRect frame = [value CGRectValue];
     CGFloat screenHeight = UIScreen.mainScreen.bounds.size.height;
     BOOL on = frame.size.height > 40.0 && frame.origin.y < screenHeight - 1.0;
-    // 0.1.56 — 先交底，再谈别的。`AevonKbPost` 只在「状态翻转」时发，宿主收到
-    // 那一条时会立刻读这个文件；键盘开着期间换了高度（候选栏收放）也走这里，
-    // 文件跟着改，宿主下一次心跳读到的就是新值。
-    if (on) AevonKbTopPublish(frame.origin.y);
+    // 0.1.58 — **不再**用 `frame.origin.y` 当顶边（见 `AevonKbTopPublish` 上面那段：
+    // 它报的是「键盘超出场景的那部分」，本机恒为 717 一带）。顶边改成量键盘视图，
+    // 而且要在**动画结束之后**量 —— 动画中键盘视图一路从 932 升到 616，中途量到的
+    // 每个值都会变成一次卡片重排，那正是用户看到的「一顿乱跳」。
+    // 这里只在**状态翻转那一拍**安排三次采样（`AevonKbOn` 还没置 1），值相同的
+    // 会被 `AevonKbTopPublish` 自己去重。中途换高度（候选栏收放）不重新采，
+    // 因为那只会多一次重排。
+    if (on && AevonKbOn == 0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ AevonKbTopPublish(0.0); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ AevonKbTopPublish(0.0); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ AevonKbTopPublish(0.0); });
+    }
     if (on == (AevonKbOn != 0)) {
         // 状态没变也要续一次：键盘一直开着的时候，租约靠这一点续命。
         if (on) AevonKbPost();
@@ -5691,9 +5725,59 @@ static UIView *AevonKbWindowScan(void) {
     return nil;
 }
 
-/// 承载场景的高（本机 717）。取不到返回 0。
-static CGFloat AevonKbSceneHeightNow(void) {
+/// 0.1.58 — 键盘**视觉实体**的顶边（屏幕坐标，本机 616；带候选栏 643）。取不到返回 0。
+///
+/// Aevon(130) 把「不能再信通知帧」这件事钉死了。三个 App 的
+/// `UIKeyboardFrameEndUserInfoKey.origin.y` 报出来的是 `717 / 744 / 761 / 788`，
+/// 折成键盘高只有 `215 / 188 / 171 / 144`，而 `kb: guide … seen=717/788` 两次采样
+/// 都是同一批数 —— 那不是动画中间帧，是这套环境里 UIKit 报的键盘矩形只覆盖
+/// 屏幕最底一截（717..932，正好是场景底边 717 往下 215 pt）。
+///
+/// 换句话说：场景被搬到 215 之后，`UIKeyboardFrameEndUserInfoKey` 回答的是
+/// 「键盘超出场景的那部分」，不是「键盘在哪」。拿它当顶边，卡片底边就永远
+/// 落在 717/744/761/788 —— 全都比真实键盘顶 616 低，键盘照样盖住输入框。
+///
+/// 所以这里改成**量**。键盘窗（`UIRemoteKeyboardWindow`，本机 430×932、底边
+/// 贴屏幕底 932）里那块真键盘是可见的：宽≈窗宽、底边≈窗底、高在 200..460 之间。
+/// 取最靠上的那个（完整键盘 316 比只剩候选栏时高）。整条链只读 `bounds`/`frame`，
+/// 不碰任何 UIKit 的几何返回值。
+static CGFloat AevonKbVisualTop(void) {
     if (![NSThread isMainThread]) return 0.0;
+    UIView *keyboardWindow = AevonKbKeptWindow;
+    if (keyboardWindow == nil) keyboardWindow = AevonKbWindowScan();
+    if (keyboardWindow == nil) return 0.0;
+    CGRect box = keyboardWindow.bounds;
+    CGFloat winW = box.size.width;
+    CGFloat winH = box.size.height;
+    if (winW < 200.0 || winH < 400.0) return 0.0;
+    // 广度优先，最多 4 层、160 个视图：键盘的宿主视图链很短
+    // （`UIInputSetContainerView` → `UIInputSetHostView` → `_UIKeyboardView`），
+    // 不需要更深的遍历，也不该在键盘通知里做无界递归。
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:keyboardWindow];
+    NSMutableArray *levels = [NSMutableArray arrayWithObject:@0];
+    NSUInteger head = 0;
+    CGFloat best = 0.0;
+    while (head < queue.count && head < 160) {
+        UIView *view = queue[head];
+        NSInteger level = [levels[head] integerValue];
+        head += 1;
+        if (level >= 4) continue;
+        for (UIView *child in view.subviews) {
+            CGRect frame = [child convertRect:child.bounds toView:keyboardWindow];
+            if (frame.size.width >= winW * 0.85
+                && frame.size.height > 200.0 && frame.size.height < 460.0
+                && fabs(CGRectGetMaxY(frame) - winH) < 6.0) {
+                if (best < 1.0 || frame.origin.y < best) best = frame.origin.y;
+            }
+            [queue addObject:child];
+            [levels addObject:@(level + 1)];
+        }
+    }
+    return best;
+}
+
+/// 承载场景的高（本机 717）。取不到返回 0。
+static CGFloat AevonKbSceneHeightNow(void) {    if (![NSThread isMainThread]) return 0.0;
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
         UIWindowScene *windowed = (UIWindowScene *)scene;
