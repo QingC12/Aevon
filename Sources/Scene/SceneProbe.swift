@@ -1695,6 +1695,14 @@ zStackParticipantDidChange:
         // （`win: frame drift now=… want=…`）—— 有这一行，「内容只在刚打开时
         // 是对的」就不再是靠猜的。
         var drifts = 0
+        // 0.1.51 — 原点这条路要是系统不认，不能每拍硬推。
+        //
+        // `settings.frame` 的尺寸历来有效（关窗还原就在用它），原点是从 0.1.50
+        // 才开始用的，真机没验过。键盘态每拍查一次账，如果连续 8 拍「写了还是
+        // 0」，就说明 FrontBoard 不接原点 —— 那时停手，只把尺寸对账留着，让画面
+        // 退回 0.1.49 的形状，而不是每 200 ms 推一次 scene 更新（那是会抖的）。
+        var originMisses = 0
+        var originParked = false
         // The clock has to be able to stop from the outside, and 0.0.33 gives it
         // a second reason to: the card no longer disappears on a timer, so the
         // only thing that ends this loop is `closeCard` setting `stopped`.
@@ -1773,18 +1781,41 @@ zStackParticipantDidChange:
             // 键盘弹起只有 0.25 s，等到第 10 拍（2 s）时用户早就看见画面在错的
             // 位置上闪过了。
             if beat % 10 == 0 || host.isKeyboardFilled {
+                if !host.isKeyboardFilled {
+                    // 键盘收起 ⇒ 原点归零这一趟必须重新允许，否则「写过 215 又被
+                    // 判成不认」的标志会一直拦着还原。
+                    originMisses = 0
+                    originParked = false
+                }
                 let want = host.canvasFrame
                 if want.height > 200 {
                     let got = AevonSceneFrameOf(scene)
+                    let wantOrigin = originParked ? got.origin.y : want.origin.y
                     if got.width > 0,
                        abs(got.width - want.width) > 1 || abs(got.height - want.height) > 1
-                        || abs(got.origin.y - want.origin.y) > 1 {
+                        || abs(got.origin.y - wantOrigin) > 1 {
                         let door = AevonPushSceneFrame(scene)
+                        // 原点要不要判「系统不收」：只看「目标原点非 0，回读还是旧值」。
+                        if abs(want.origin.y) > 1, abs(got.origin.y - want.origin.y) > 1 {
+                            originMisses += 1
+                            if originMisses == 8, !originParked {
+                                originParked = true
+                                Log.write("win: frame origin rejected misses="
+                                          + String(originMisses) + " door=" + String(door))
+                            }
+                        } else {
+                            originMisses = 0
+                        }
                         if drifts < 4 {
                             drifts += 1
-                            Log.write(String(format: "win: frame drift now=%.0fx%.0f@%.0f want=%.0fx%.0f@%.0f door=%ld",
+                            // 0.1.51 — 补 `wrote` / `armed` 两个计数。0.1.50 的
+                            // `door=0` 有两种完全不同的含义：目标没登记（armed=0，
+                            // 我们自己的错）或登记了但判「不用写」（wrote 不涨）。
+                            // 只看 door 分不清，那一次就白烧了一版。
+                            Log.write(String(format: "win: frame drift now=%.0fx%.0f@%.0f want=%.0fx%.0f@%.0f door=%ld wrote=%ld armed=%ld",
                                              got.width, got.height, got.origin.y,
-                                             want.width, want.height, want.origin.y, door))
+                                             want.width, want.height, want.origin.y, door,
+                                             AevonFrameWriteCount(), AevonFrameArmedCount()))
                         }
                     }
                 }

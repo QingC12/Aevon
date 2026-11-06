@@ -655,7 +655,19 @@ static BOOL AevonWriteFrame(id settings, int slot) {
     SEL getter = sel_registerName("frame");
     if ([settings respondsToSelector:getter]) {
         CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(settings, getter);
-        if (fabs(now.size.width - target.size.width) < 0.5
+        // 0.1.51 — **原点也要比。**
+        //
+        // 0.1.50 让宿主把场景随卡片搬到屏幕 215（`(0,215,430,717)`，尺寸一点没改，
+        // 只挪原点），结果 Aevon(123) 的日志里四条全是
+        // `win: frame drift now=430x717@0 want=430x717@215 door=0` —— 一次都没写成。
+        // 根因就在这里：delta-first 只比了 `size`，尺寸相同就判「不用写」，
+        // 原点这一趟差事从来没上路，`door=0` 是它必然的答案，不是门坏了。
+        //
+        // 补上原点之后，同一个目标值才会真的落下一次 `setFrame:`。尺寸没变，
+        // 所以 App 不需要按新尺寸重排 —— 这正是搬原点这条路存在的全部理由。
+        if (fabs(now.origin.x - target.origin.x) < 0.5
+            && fabs(now.origin.y - target.origin.y) < 0.5
+            && fabs(now.size.width - target.size.width) < 0.5
             && fabs(now.size.height - target.size.height) < 0.5) {
             return NO;
         }
