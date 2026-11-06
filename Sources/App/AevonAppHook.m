@@ -6700,6 +6700,23 @@ static CGFloat AevonKbTopInWindow(UIView *keyboardWindow) {
                                     toCoordinateSpace:owner.screen.coordinateSpace];
         if (onScreen.size.height > 1.0) originY = onScreen.origin.y;
     }
+    // 0.1.80 — **窗被推到屏幕底以下 = 收起**。
+    //
+    // 除了 hidden，另一种收法是「整只窗往下滑出屏幕」：形状还是 430×932，
+    // 只是原点变成 932 以上。这条和 hidden 一样是几何事实，不需要看子视图。
+    // 阈值放到「屏高 − 80」：正常键盘态窗原点是 0，只有真的滑出去才会过线。
+    CGFloat screenH = AevonKbNativeBounds(nil).size.height;
+    if (screenH > 400.0 && originY > screenH - 80.0) {
+        static int slidNotes = 0;
+        if (slidNotes < 8) {
+            slidNotes += 1;
+            char line[150];
+            snprintf(line, sizeof(line), "kb: gone slid win=%.0fx%.0f@%.0f\n",
+                     winW, winH, originY);
+            AevonKbLog(line);
+        }
+        return -1.0;
+    }
     // 广度优先，最多 4 层、160 个视图：键盘的宿主视图链很短
     // （`UIInputSetContainerView` → `UIInputSetHostView` → `_UIKeyboardView`），
     // 不需要更深的遍历，也不该在键盘通知里做无界递归。
