@@ -1554,8 +1554,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         kbSavedOriginY = 0
         canvasHeight = 0
         kbSavedHeight = 0
-        kbTopMiss = 0
-        kbReflowAt = 0
         card = nil
         content = nil
         visible = .zero
@@ -3464,10 +3462,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var kbSavedOriginY: CGFloat = 0
     /// 0.1.56 — 键盘态之前场景的高度（0 = 跟随 `natural.height`）。
     private var kbSavedHeight: CGFloat = 0
-    /// 0.1.57 — 这一次弹起里「顶边没读到」试了几次（见 `setKeyboardFill` 里那段）。
-    private var kbTopMiss = 0
-    /// 0.1.58 — 上一次改键盘态高度的时刻（`CACurrentMediaTime()`），用来挡住连续改写。
-    private var kbReflowAt: CFTimeInterval = 0
 
     /// 全体宿主里挑主窗让位。
     ///
@@ -3533,78 +3527,23 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             let screen = window.bounds.size
             var y = screen.height - visible.height
             if y < 0 { y = 0 }
-            let kbTop = FloatHost.keyboardTopOnScreen(bundle)
-            // 0.1.57 — 读不到顶边就**先别铺**，等一拍再问。
+            // 0.1.59 — **场景一个像素都不缩**。
             //
-            // App 写文件与发心跳几乎同拍，宿主读到的时间可能落在写入之前；
-            // 0.1.56 的做法是「读不到就铺 717」，于是画面先按整屏铺开、
-            // 下一拍心跳读到顶边再收成 401 —— 用户看到的就是「先放大再缩小」。
-            // 这里改成：第一次没读到 → 60 ms 后再走一遍；第二次仍没有才认命
-            // 铺 717（= 0.1.55 的保底形状，输入框可能被盖，但不会变形）。
-            if !kbFilled, kbTop <= y + 240 {
-                kbTopMiss += 1
-                if kbTopMiss <= 1 {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
-                        guard let self = self else { return }
-                        self.setKeyboardFill(true)
-                    }
-                    return
-                }
-            } else if kbTop > y + 240 {
-                kbTopMiss = 0
-            }
-            // 0.1.56 — 已经铺开了也要再看一眼：键盘高度会中途变（候选栏收放，
-            // 本机 616 ↔ 643）。不变就不动，变了只改高度，`kbSaved*` 一个都不碰
-            // （那才是「收起时要还回去的东西」）。
-            // 0.1.58 — 一次弹起只认一次高度变化。
+            // 0.1.56~0.1.58 走的是「键盘不进窗口」：把承载场景收到键盘顶边。
+            // Aevon(131) 把这条路封死了 —— 键盘是**挂在场景上**的，底边跟着场景
+            // 底边走：场景收成 358 之后 `kb: lead h=74` 说明 UIKit 认为键盘顶在
+            // 场景 358−74=284（屏幕 499），而场景只画到 573，于是只有最上面 74 pt
+            // 落在画面里，用户看到的就是「键盘只显示工具栏」。同一个错数还解释了
+            // 另两句：卡片 573 → 358 连改两遍（乱跳）、场景晚一拍（两边黑条）。
             //
-            // Aevon(130)：`kbtop` 先后读到 717 / 744 / 788，卡片高度就跟着被
-            // 改了三遍（502 → 529 → 573），每一遍都让 App 重排一次 —— 用户看到的
-            // 「内容一顿乱跳」正是这一串。顶边来源已经改成实测（`AevonKbVisualTop`），
-            // 这里再加一道时间闸：铺开之后 0.35 s 内不再接受新的高度，让画面先落地。
-            // 心跳每秒一次，正常的候选栏收放照样会被下一次心跳接住。
-            if kbFilled {
-                guard kbTop > y + 240, kbTop < screen.height - 40 else { return }
-                let fresh = kbTop - y
-                guard abs(fresh - card.frame.height) > 8 else { return }
-                guard CACurrentMediaTime() - kbReflowAt > 0.35 else { return }
-                kbReflowAt = CACurrentMediaTime()
-                card.frame = CGRect(x: 0, y: y, width: visible.width, height: fresh)
-                canvasHeight = (fresh < visible.height - 1) ? fresh : 0
-                AevonSceneFrameSet(bundle, 0, Double(y),
-                                   Double(visible.width), Double(fresh))
-                var door: Int = 0
-                if let sc = window.windowScene { door = Int(AevonPushSceneFrame(sc)) }
-                followContent()
-                Log.write("win: keyboard fill reflow card=" + size(card.frame.size)
-                          + " kbtop=" + String(format: "%.0f", kbTop)
-                          + " push=" + String(format: "%d", door))
-                return
-            }
-            kbFilled = true
-            kbSavedFrame = card.frame
-            kbSavedCrop = kbTopCrop
-            kbSavedOriginY = canvasOriginY
-            kbSavedHeight = canvasHeight
-            // 0.1.56 — **场景高收到键盘顶边**，不再一律铺到屏幕底。
-            //
-            // 前七版都是「卡片铺满 215..932，让 App 自己避让键盘」，微信/QQ 一次
-            // 都没避（`kb: guide h=0`、`kb: lead -> 289 took=0` 之后输入框仍在
-            // 键盘底下）。这一版换成原生形状：承载场景高 = 键盘顶边 − 卡片顶边，
-            // 键盘整块落在 App 窗口**外面**，App 不需要知道键盘存在，输入框天然
-            // 在窗口底边（屏幕 616，正是键盘上沿）。
-            //
-            // 代价是 App 会按 401 的高度重排一次 —— 那正是原生键盘弹出时的行为，
-            // 也是「输入框看得见」必须付的账。
-            var height = visible.height
-            if kbTop > y + 240, kbTop < screen.height - 40 {
-                height = kbTop - y
-            }
+            // 所以回到 0.1.55 的形状：卡片铺满屏底，场景恒 430×717@215。
+            // 「让 App 重排到键盘上方」改由 App 进程自己做 —— 收的是**它自己的窗口**
+            // （`AevonKbFitWindow`）。窗口不是场景，收它不会带动键盘。
+            let height = visible.height
             card.frame = CGRect(x: 0, y: y, width: visible.width, height: height)
             kbTopCrop = 0
             canvasOriginY = y
-            canvasHeight = (height < visible.height - 1) ? height : 0
-            kbReflowAt = CACurrentMediaTime()
+            canvasHeight = 0
             // 场景跟着卡片走。目标登记在 C 侧，这里**当拍就推一次**。
             //
             // 0.1.55 — 原来是只登记、等 SceneProbe 守护循环下一拍才写。Aevon(127)
@@ -3625,7 +3564,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                       + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
                       + " scene=" + String(format: "%.0f", canvasOriginY)
                       + " crop=" + String(format: "%.0f", kbTopCrop)
-                      + " kbtop=" + String(format: "%.0f", kbTop)
                       + " push=" + String(format: "%d", door))
             // 0.1.50 — App 侧要按「卡片底边」算键盘该不该搬，所以卡片一换位置就得
             // 立刻把新几何推过去（`reportBand` 自己判重，几何没变不会重复发）。
@@ -3633,8 +3571,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         } else {
             guard kbFilled else { return }
             kbFilled = false
-            kbTopMiss = 0
-            kbReflowAt = 0
             // 0.1.56 — **先放场景，再改卡片**。
             //
             // 原来是先 `card.frame = kbSavedFrame`（430×717@215 一步收回

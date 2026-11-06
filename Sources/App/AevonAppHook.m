@@ -4762,6 +4762,9 @@ static void AevonKbGuideNote(void);
 static void AevonKbLog(const char *line);
 /// 0.1.58 — 键盘视觉实体的顶边（定义在键盘段里 `AevonKbWindowScan` 之后）。
 static CGFloat AevonKbVisualTop(void);
+/// 0.1.59 — 场景几何（都定义在键盘段后部，这里只要前置声明）。
+static CGRect AevonKbSceneRectOnScreen(void);
+static CGFloat AevonKbSceneHeightNow(void);
 /// 0.1.57 — **三条通道一起写**，因为 0.1.56 只写了最没希望的那一条。
 ///
 /// Aevon(129) 的证词只有一行，但足够定案：
@@ -4860,6 +4863,96 @@ static void AevonKbTopPublish(CGFloat top) {
     }
 }
 
+/// 0.1.59 — App **自己的**窗口（不是键盘窗）。
+///
+/// 键盘窗也叫 `UIWindow`、也在同一个 scene 里，收错一个就是把键盘收短，
+/// 那正是本版要避开的故障形状。所以按类排除，再按 key window 优先。
+static UIWindow *AevonKbAppWindow(void) {
+    if (![NSThread isMainThread]) return nil;
+    Class kbClass = objc_getClass("UIRemoteKeyboardWindow");
+    UIWindow *fallback = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (kbClass != Nil && [window isKindOfClass:kbClass]) continue;
+            if (window.rootViewController == nil) continue;
+            if (window.isKeyWindow) return window;
+            if (fallback == nil) fallback = window;
+        }
+    }
+    return fallback;
+}
+
+/// 0.1.59 — 把 App 的窗口收到键盘上沿。
+///
+/// 前八版都在动**承载场景**（搬原点 / 缩高度）。Aevon(131) 证明缩场景这条路走不通：
+/// 键盘挂在场景上，场景底边一抬，UIKit 就把键盘顶到场景 358−74=284（屏幕 499），
+/// 而场景只画到 573 —— 只有最上面 74 pt 落在画面里，用户看到「键盘只显示工具栏」。
+///
+/// 于是改成：场景不动（`FloatHost.setKeyboardFill` 恒铺 430×717@215），只收
+/// **App 的窗口**。窗口是 App 自己排版的根，收它 App 会按新高度重排一次（原生键盘
+/// 就是这么做的），输入框落到窗口底边 = 键盘上沿；键盘在窗口外面，一个像素没动。
+///
+/// 闸门：只在两次采样相差 < 40 时才落（键盘动画期间每帧都在变，照落就是
+/// 「一顿乱跳」）；目标必须 ≥ 240 且 ≤ 场景高 − 60。
+static void AevonKbFitWindow(CGFloat top) {
+    if (![NSThread isMainThread]) return;
+    if (AevonKbOn == 0) return;
+    if (top < 240.0 || top > 4000.0) return;
+    UIWindow *window = AevonKbAppWindow();
+    if (window == nil) return;
+    CGRect box = AevonKbSceneRectOnScreen();
+    CGFloat sceneY = CGRectIsNull(box) ? 0.0 : box.origin.y;
+    CGFloat sceneH = AevonKbSceneHeightNow();
+    if (sceneH < 200.0) return;
+    CGFloat want = top - sceneY;
+    if (want < 240.0 || want > sceneH - 60.0) {
+        static int rejected = 0;
+        if (rejected < 3) {
+            rejected += 1;
+            char line[180];
+            snprintf(line, sizeof(line), "kb: win fit reject want=%.0f top=%.0f sceneY=%.0f sceneH=%.0f\n",
+                     want, top, sceneY, sceneH);
+            AevonKbLog(line);
+        }
+        return;
+    }
+    CGRect frame = window.frame;
+    if (fabs(frame.size.height - want) < 1.0) return;
+    window.frame = CGRectMake(frame.origin.x, frame.origin.y, frame.size.width, want);
+    char line[200];
+    snprintf(line, sizeof(line), "kb: win fit h=%.0f top=%.0f sceneY=%.0f sceneH=%.0f was=%.0f\n",
+             want, top, sceneY, sceneH, frame.size.height);
+    AevonKbLog(line);
+}
+
+/// 收起时把窗口还回场景高。不判 `AevonKbOn`（调用点刚刚把它清成 0）。
+static void AevonKbUnfitWindow(void) {
+    if (![NSThread isMainThread]) return;
+    UIWindow *window = AevonKbAppWindow();
+    if (window == nil) return;
+    CGFloat sceneH = AevonKbSceneHeightNow();
+    if (sceneH < 200.0) return;
+    CGRect frame = window.frame;
+    if (fabs(frame.size.height - sceneH) < 1.0) return;
+    window.frame = CGRectMake(frame.origin.x, frame.origin.y, frame.size.width, sceneH);
+    char line[160];
+    snprintf(line, sizeof(line), "kb: win unfit h=%.0f scene=%.0f\n", sceneH, sceneH);
+    AevonKbLog(line);
+}
+
+/// 一次采样：发布顶边 + 稳定时收窗口。三次采样共用，见 `AevonKbEvaluate`。
+static CGFloat AevonKbTopPrev = 0.0;
+
+static void AevonKbSample(void) {
+    CGFloat top = AevonKbVisualTop();
+    AevonKbTopPublish(0.0);
+    if (top > 240.0 && AevonKbTopPrev > 240.0 && fabs(top - AevonKbTopPrev) < 40.0) {
+        AevonKbFitWindow(top);
+    }
+    AevonKbTopPrev = top;
+}
+
 static void AevonKbEvaluate(NSDictionary *info) {
     NSValue *value = info[UIKeyboardFrameEndUserInfoKey];
     if (value == nil) return;
@@ -4873,13 +4966,19 @@ static void AevonKbEvaluate(NSDictionary *info) {
     // 这里只在**状态翻转那一拍**安排三次采样（`AevonKbOn` 还没置 1），值相同的
     // 会被 `AevonKbTopPublish` 自己去重。中途换高度（候选栏收放）不重新采，
     // 因为那只会多一次重排。
+    // 0.1.59 — 三次采样交给 `AevonKbSample`：它除了发布顶边，还会在两次读数
+    // 稳定（差 < 40）时收一次 App 窗口。0.15 s 那次几乎一定还在动画里，读数与
+    // 0.35 s 差得远，于是不落；0.60 s 那次才落地。
     if (on && AevonKbOn == 0) {
+        AevonKbTopPrev = 0.0;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbTopPublish(0.0); });
+                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbTopPublish(0.0); });
+                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbTopPublish(0.0); });
+                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.95 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
     }
     if (on == (AevonKbOn != 0)) {
         // 状态没变也要续一次：键盘一直开着的时候，租约靠这一点续命。
@@ -4909,6 +5008,9 @@ static void AevonKbEvaluate(NSDictionary *info) {
     } else {
         // 0.1.18 — 收起要**立刻**告诉桌面，不等租约过期。
         AevonKbPostOff();
+        // 0.1.59 — 窗口还回场景高，并把顶边读数清零（下一次弹起从干净状态开始）。
+        AevonKbTopPrev = 0.0;
+        AevonKbUnfitWindow();
     }
     AevonRawNote(on ? "app: keyboard up (bridge)\n"
                     : "app: keyboard gone (bridge)\n");
