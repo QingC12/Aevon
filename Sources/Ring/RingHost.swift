@@ -101,6 +101,12 @@ final class RingHost: NSObject {
     private var kbObserver: UnsafeMutableRawPointer?
     /// 租约时长。1 秒心跳 + 3 秒租约 = 丢两条心跳才判死，够宽松。
     private let kbLease: CFTimeInterval = 3.0
+    /// 0.1.77 — 「零心跳」复查窗口。
+    ///
+    /// 0.1.76 之前它是 `kbLease + 0.4`（3.4 s），太长：漏的是「收起」那一条通知，
+    /// 用户要等三秒才看到窗口还原，体感就是「没修」。心跳每秒一发，1.7 s 内一条
+    /// 都没有等价于「漏了一整拍还有余量」，绝不可能是正常打字。
+    private let kbReview: CFTimeInterval = 1.7
     /// 0.1.19 — 呼盘垫上一次的隐藏状态，只在变化时写日志。
     /// 用来把「垫子被键盘/面板收走了」和「手指没落到带子上」分开。
     private var edgeHiddenLogged = false
@@ -1152,7 +1158,11 @@ final class RingHost: NSObject {
         CFNotificationCenterAddObserver(center, observer, RingHost.kbOffCallback,
                                         RingHost.kbOffText, nil, .deliverImmediately)
         kbObserver = observer
-        Log.write("ring: keyboard watch armed (lease 3.0 s)")
+        // 0.1.78 — 把真实租约写进日志。0.1.77 把复查窗口从 3.4 s 缩到 1.7 s，这一行
+        // 还印着 "lease 3.0 s" —— Aevon(149) 里我就靠这一行判断兜底有没有生效，
+        // 印错等于把判据本身弄脏。现在两个数都从常量取，印的和跑的是同一个。
+        Log.write(String(format: "ring: keyboard watch armed (lease %.1f s review %.1f s)",
+                         kbLease, kbReview))
     }
 
     private func stopKeyboardWatch() {
@@ -1209,7 +1219,7 @@ final class RingHost: NSObject {
     private func armKbLease() {
         kbLeaseToken &+= 1
         let token = kbLeaseToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + kbReview) { [weak self] in
             guard let self = self, self.kbLeaseToken == token else { return }
             guard self.kbLogged else { return }
             self.kbAt = 0

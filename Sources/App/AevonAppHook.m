@@ -4797,6 +4797,12 @@ static CGFloat AevonKbAnchorValue(CGFloat full);
 static volatile int AevonKbGuideFilled;
 /// 0.1.77 — 挂 `-[UILayoutGuide layoutFrame]`（定义在键盘段后部）。
 static void AevonKbGuideHookInstall(void);
+/// 0.1.78 — 安全区让位（定义在 `AevonKbExtraStore` 之后）。收起时要用，
+/// 那里比定义点更靠前。
+static void AevonKbSafeRestore(void);
+static void AevonKbSafeApply(CGFloat cover);
+/// 0.1.72 — 屏幕坐标里的键盘真实上沿（定义在键盘段后部）。
+static CGFloat AevonKbTopFixed(CGFloat full);
 static CGRect AevonKbNativeBounds(UIScreen *screen);
 /// 0.1.57 — **三条通道一起写**，因为 0.1.56 只写了最没希望的那一条。
 ///
@@ -5107,6 +5113,14 @@ static void AevonKbSample(void) {
     }
     CGFloat top = AevonKbVisualTop();
     AevonKbTopPublish(0.0);
+    // 0.1.78 — 学过的 App 在这里把安全区加上。放在采样里而不是通知里：
+    // 采样已经是主线程的延后拍（0.15 s 起），不在 `postNotificationName:` 的
+    // 调用栈里改布局，不会再引起一轮重排通知。
+    CGFloat full = AevonKbNativeBounds(nil).size.height;
+    CGFloat fixedTop = AevonKbTopFixed(full);
+    if (fixedTop > 200.0 && fixedTop < full - 40.0) {
+        AevonKbSafeApply(full - fixedTop);
+    }
     if (top > 240.0 && AevonKbTopPrev > 240.0 && fabs(top - AevonKbTopPrev) < 40.0) {
         AevonKbFitWindow(top);
     }
@@ -5173,10 +5187,10 @@ static void AevonKbSettleOff(void) {
 /// 「收到 WillHide」在同一次键盘会话里会来好几条（gap 1.02 → 3.42 → 5.93 一路
 /// 变大，说明 `AevonKbFitAt` 早已过期，那条 0.8 s 的否决闸根本没在守）。
 ///
-/// 所以改成：量到 0 **且** 最近一条通知矩形也说键盘离屏（`AevonKbNoteActive == 0`）
-/// 才立刻认；若通知矩形还说在屏内，就再等 0.40 s 复量一次，连两次为 0 才认。
-/// 真收起时 WillChangeFrame 一定会带一条离屏矩形 ⇒ 走快路（0.30 s）；
-/// 假收起时那条矩形从来不会出现 ⇒ 复量那一次键盘早就在 573 上了，直接 `keep`。
+/// 0.1.78 — **复量是无条件的。**（0.1.77 写的是「量到 0 **且** 通知矩形也说离屏
+/// 才立刻认，否则复量一次」—— 那条件等于恒真：hide 通知自己就把
+/// `AevonKbNoteActive` 清了，于是复量一次都没跑过。见 `AevonKbSettleWait` 里
+/// 「复量不再问通知」那段。）
 static void AevonKbSettleWait(int seq, int retries) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -5191,11 +5205,25 @@ static void AevonKbSettleWait(int seq, int retries) {
             AevonKbPost();
             return;
         }
-        if (AevonKbNoteActive != 0 && retries < 1) {
-            // 通知矩形还说在屏内 ⇒ 这次「量不到」可能是重排期的假摔，复量一次。
+        if (retries < 1) {
+            // 0.1.78 — **复量不再问通知**。
+            //
+            // 0.1.77 的条件是 `AevonKbNoteActive != 0` —— 想用「通知矩形还说键盘
+            // 在屏内」当第二条独立证据。它不是独立的：`AevonKbPostNote` 在
+            // WillHide 那一条里就把 `AevonKbNoteActive` 清成 0（原始矩形落到屏外
+            // 或名字是 hide 都清），所以只要这次 settle 是被 hide 通知触发的，
+            // 这条证据**恒为假**，复量永远排不上。Aevon(149) 里 31 次 `settle gone`
+            // 全是 `note=0 retry=0`，一次复量都没跑过 —— 这就是「打开键盘时闪一下」
+            // 和「关键盘不还原」的共同上游。
+            //
+            // 现在改成无条件：第一次量到 0 只记一行，0.40 s 后**再量一次**。
+            //   真收起 ⇒ 两次都是 0（0.70 s 后落状态，比原来慢 0.40 s）
+            //   假收起 ⇒ 第二次量到键盘，走 `settle keep top=` 分支，什么都不动
+            //
+            // 这 0.40 s 是唯一的代价，而它买回来的是一条「不会误判」的判据。
             snprintf(line, sizeof(line),
-                     "kb: settle keep note active=%d top=%.0f retry=%d\n",
-                     AevonKbNoteActive, top, retries);
+                     "kb: settle wait measure=%.0f note=%d retry=%d\n",
+                     top, AevonKbNoteActive, retries);
             AevonKbLog(line);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.40 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
@@ -5214,6 +5242,7 @@ static void AevonKbSettleWait(int seq, int retries) {
         AevonKbPostOff();
         AevonKbTopPrev = 0.0;
         AevonKbUnfitWindow();
+        AevonKbSafeRestore();
         AevonRawNote("app: keyboard gone (bridge)\n");
     });
 }
@@ -5354,9 +5383,18 @@ static void AevonKbIdleCheck(void) {
             return;
         }
         AevonKbZeroHits += 1;
-        if (AevonKbZeroHits < 2) return;
+        // 0.1.78 — 两次 → **三次**。
+        //
+        // 0.1.77 是两次。Aevon(149) 里那个假 0 连来了三拍（1.9 s 采样、下一拍心跳、
+        // 再下一拍），两次的门刚好在第二拍就放行。真正的根因已经修在量处
+        // （`AevonKbTopInWindow` 的窗高闸门），这里只是不让同类失败有第二次机会：
+        // 三次连零 = 3 秒，比任何一次动画/重排都长。
+        if (AevonKbZeroHits < 3) return;
+        int hits = AevonKbZeroHits;
         AevonKbZeroHits = 0;
-        AevonKbLog("kb: idle zero close\n");
+        char line[160];
+        snprintf(line, sizeof(line), "kb: idle zero close hits=%d\n", hits);
+        AevonKbLog(line);
         AevonKbSettleOff();
     });
 }
@@ -6212,6 +6250,133 @@ static void AevonKbExtraStore(CGFloat value) {
     });
 }
 
+// MARK: - 0.1.78 安全区让位（第四条通道，只给「学出来确实被盖」的 App）
+
+/// 前三条通道（通知矩形 / 交集 / 键盘布局参考线）对 Safari 全部无效：
+/// Aevon(149) 里 `out` 从 424 改到 616、`inter true=316 sys=101`、
+/// `guide fill h=316 top=401` 三样全对，而 Safari 的地址栏胶囊
+/// （`UnifiedField`）一直停在 `bar=713..758`（屏幕坐标，键盘上沿 616）——
+/// 一像素没动。它既不读通知矩形，也不读参考线的**返回值**。
+///
+/// 这三条通道有个共同点：**都在改「告诉 App 什么」，而不是改「App 的可用区域」**。
+/// 而 App 把输入框摆在窗口底边时，唯一它一定服从的量是它自己的安全区。
+/// 所以这一条通道直接改那个：
+///
+///   rootViewController.additionalSafeAreaInsets.bottom += 键盘遮住的高度
+///
+/// 效果等同「原生键盘把窗口撑矮」：可用区从 0..717 变成 0..401，任何把内容摆在
+/// 可用区底部的 App（Safari 的底栏胶囊正是这一类）都必须上移 316 —— 上移到
+/// 屏幕 616，正好在键盘上沿。
+///
+/// 为什么可以改：它是**本进程里、App 自己的**视图控制器上的公开属性，
+/// 不碰 `UIScreen`、不碰窗口几何、不碰系统返回值 —— 与前三次黑屏的那类改动
+/// 无关。收起时按存档原样还回（`AevonKbSafeRestore`），失败也只是「没效果」，
+/// 不会留下错位。
+///
+/// 三道闸门，缺一不可：
+///   ① 只在**学过**的 Bundle 上生效（`AevonKbSafe`，默认 0）—— 会自己让位的
+///      App 一个字节都不碰，否则就是 0.1.69 的「让两次」；
+///   ② 只在键盘在屏时写（`AevonKbOn`），收起立刻还原；
+///   ③ 学习判据与 `extra` 那条完全一样：1.9 s 稳态量到输入框底边仍在键盘上沿
+///      之下，才认为这个 App 不会让位。
+static volatile int AevonKbSafeFlag = -1;      // -1 未读，0 不需要，1 需要
+static volatile int AevonKbSafeOn = 0;         // 本会话有没有写过
+static volatile CGFloat AevonKbSafeSaved = -1.0;   // 原始 bottom，写之前存一次
+
+static void AevonKbSafeLoad(void) {
+    if (AevonKbSafeFlag >= 0) return;
+    AevonKbSafeFlag = 0;
+    NSString *selfID = [[NSBundle mainBundle] bundleIdentifier];
+    if (selfID.length == 0) return;
+    CFPropertyListRef boxed = CFPreferencesCopyAppValue(CFSTR("AevonKbSafe"),
+                                                        (__bridge CFStringRef)selfID);
+    if (boxed == NULL) return;
+    if (CFGetTypeID(boxed) == CFNumberGetTypeID()) {
+        int value = 0;
+        if (CFNumberGetValue((CFNumberRef)boxed, kCFNumberIntType, &value) && value == 1) {
+            AevonKbSafeFlag = 1;
+        }
+    }
+    CFRelease(boxed);
+}
+
+static void AevonKbSafeStore(int on) {
+    AevonKbSafeFlag = on ? 1 : 0;
+    NSString *selfID = [[NSBundle mainBundle] bundleIdentifier];
+    if (selfID.length == 0) return;
+    CFStringRef app = (CFStringRef)CFRetain((__bridge CFStringRef)selfID);
+    int payload = on ? 1 : 0;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        CFNumberRef num = CFNumberCreate(NULL, kCFNumberIntType, &payload);
+        if (num != NULL) {
+            CFPreferencesSetAppValue(CFSTR("AevonKbSafe"), num, app);
+            CFRelease(num);
+        }
+        CFRelease(app);
+    });
+}
+
+/// App 自己的根视图控制器。取不到返回 nil（`keyWindow` 优先，退回第一个有 VC 的）。
+static UIViewController *AevonKbRootVC(void) {
+    if (![NSThread isMainThread]) return nil;
+    UIViewController *fallback = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            UIViewController *vc = window.rootViewController;
+            if (vc == nil) continue;
+            if (window.isKeyWindow) return vc;
+            if (fallback == nil) fallback = vc;
+        }
+    }
+    return fallback;
+}
+
+/// 把「键盘遮住的这一段」加进安全区。重复调用幂等（存的是**原始** bottom）。
+static void AevonKbSafeApply(CGFloat cover) {
+    if (![NSThread isMainThread]) return;
+    AevonKbSafeLoad();
+    if (AevonKbSafeFlag != 1) return;
+    if (AevonKbOn == 0) return;
+    if (cover < 40.0) return;
+    UIViewController *vc = AevonKbRootVC();
+    if (vc == nil) return;
+    UIEdgeInsets now = vc.additionalSafeAreaInsets;
+    if (AevonKbSafeSaved < 0.0) AevonKbSafeSaved = now.bottom;
+    CGFloat want = AevonKbSafeSaved + cover;
+    BOOL already = AevonKbSafeOn != 0 && fabs(now.bottom - want) < 1.0;
+    if (already) return;
+    UIEdgeInsets next = now;
+    next.bottom = want;
+    vc.additionalSafeAreaInsets = next;
+    AevonKbSafeOn = 1;
+    char line[200];
+    snprintf(line, sizeof(line),
+             "kb: safe inset bottom=%.0f was=%.0f cover=%.0f\n",
+             want, AevonKbSafeSaved, cover);
+    AevonKbLog(line);
+}
+
+static void AevonKbSafeRestore(void) {
+    if (AevonKbSafeOn == 0) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ AevonKbSafeRestore(); });
+        return;
+    }
+    AevonKbSafeOn = 0;
+    CGFloat saved = AevonKbSafeSaved;
+    AevonKbSafeSaved = -1.0;
+    UIViewController *vc = AevonKbRootVC();
+    if (vc == nil || saved < 0.0) return;
+    UIEdgeInsets now = vc.additionalSafeAreaInsets;
+    UIEdgeInsets next = now;
+    next.bottom = saved;
+    vc.additionalSafeAreaInsets = next;
+    char line[160];
+    snprintf(line, sizeof(line), "kb: safe inset restored bottom=%.0f\n", saved);
+    AevonKbLog(line);
+}
+
 static CGFloat AevonKbNoteCalibration(void) {
     AevonKbExtraLoad();
     NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
@@ -6433,15 +6598,34 @@ static UIView *AevonKbWindowScan(void) {
 /// 贴屏幕底 932）里那块真键盘是可见的：宽≈窗宽、底边≈窗底、高在 200..460 之间。
 /// 取最靠上的那个（完整键盘 316 比只剩候选栏时高）。整条链只读 `bounds`/`frame`，
 /// 不碰任何 UIKit 的几何返回值。
-static CGFloat AevonKbVisualTop(void) {
-    if (![NSThread isMainThread]) return 0.0;
-    UIView *keyboardWindow = AevonKbKeptWindow;
-    if (keyboardWindow == nil) keyboardWindow = AevonKbWindowScan();
+static CGFloat AevonKbTopInWindow(UIView *keyboardWindow) {
     if (keyboardWindow == nil) return 0.0;
     CGRect box = keyboardWindow.bounds;
     CGFloat winW = box.size.width;
     CGFloat winH = box.size.height;
-    if (winW < 200.0 || winH < 400.0) return 0.0;
+    // 0.1.78 — **键盘窗不总是满屏高。**
+    //
+    // 旧判据是 `winH < 400 ⇒ 返回 0`，等于默认它恒为 430×932。Aevon(149) 证明
+    // 这个默认是错的：每个键盘周期里 0.75 s 那一次量到 573（窗 430×932），
+    // 1.9 s 那一次量到 0，而同一刻连第一响应者都找不到
+    // （`kb: caret none … scout=413` —— 413 个节点是空壳窗的量级）。那一刻
+    // `isKeyWindow` 落在了键盘窗上，而它的 `bounds` 已经收成 430×316。旧判据把
+    // 「窗变小」读成了「键盘没了」。
+    //
+    // 30 次假收起里每一次都跟着一条 `measure=0`，每一次 `settle gone` 后面
+    // 一秒又被心跳重新张开 —— 用户看到的就是「先缩小再放大」和「不还原」。
+    // 所以高度闸门放到 120：完整键盘 316、只剩候选栏 291、带工具栏 401 全过。
+    if (winW < 200.0 || winH < 120.0) return 0.0;
+    // 窗被藏起来 / 透明 / 停在屏外 = 真的收了。这三条比视图遍历硬得多，也不受
+    // 「这一拍布局还没结算」影响 —— 收起判定最先该看的就是它们。
+    if (keyboardWindow.hidden || keyboardWindow.alpha < 0.05) return 0.0;
+    // 0.1.78 — 窗自己在屏幕上的原点：满屏时 0，收短时 616。返回值要加它。
+    CGFloat originY = keyboardWindow.frame.origin.y;
+    if (keyboardWindow.windowScene != nil) {
+        CGRect onScreen = [keyboardWindow convertRect:keyboardWindow.bounds
+                                    toCoordinateSpace:keyboardWindow.windowScene.screen.coordinateSpace];
+        if (onScreen.size.height > 1.0) originY = onScreen.origin.y;
+    }
     // 广度优先，最多 4 层、160 个视图：键盘的宿主视图链很短
     // （`UIInputSetContainerView` → `UIInputSetHostView` → `_UIKeyboardView`），
     // 不需要更深的遍历，也不该在键盘通知里做无界递归。
@@ -6449,6 +6633,7 @@ static CGFloat AevonKbVisualTop(void) {
     NSMutableArray *levels = [NSMutableArray arrayWithObject:@0];
     NSUInteger head = 0;
     CGFloat best = 0.0;
+    BOOL found = NO;
     while (head < queue.count && head < 160) {
         UIView *view = queue[head];
         NSInteger level = [levels[head] integerValue];
@@ -6457,13 +6642,58 @@ static CGFloat AevonKbVisualTop(void) {
         for (UIView *child in view.subviews) {
             CGRect frame = [child convertRect:child.bounds toView:keyboardWindow];
             if (frame.size.width >= winW * 0.85
-                && frame.size.height > 200.0 && frame.size.height < 460.0
+                && frame.size.height > 120.0 && frame.size.height < 460.0
                 && fabs(CGRectGetMaxY(frame) - winH) < 6.0) {
-                if (best < 1.0 || frame.origin.y < best) best = frame.origin.y;
+                if (!found || frame.origin.y < best) { best = frame.origin.y; found = YES; }
             }
             [queue addObject:child];
             [levels addObject:@(level + 1)];
         }
+    }
+    if (!found) {
+        static int zeros = 0;
+        if (zeros < 8) {
+            zeros += 1;
+            char line[180];
+            snprintf(line, sizeof(line), "kb: top zero win=%.0fx%.0f@%.0f hid=%d sub=%lu\n",
+                     winW, winH, originY,
+                     keyboardWindow.hidden ? 1 : 0,
+                     (unsigned long)keyboardWindow.subviews.count);
+            AevonKbLog(line);
+        }
+        return 0.0;
+    }
+    // 0.1.78 — 返回值改成**屏幕坐标**。
+    //
+    // 窗满屏（430×932@0）时窗内坐标与屏幕坐标恰好相等，573 这个历史读数一位
+    // 都不变；窗收短（430×316@616）时窗内坐标是 0，按老约定会被当成「量不到」。
+    // 加上窗自己的原点，两种形状给出同一个数（616），上层的一切标定都不用动。
+    return originY + best;
+}
+
+/// 0.1.78 — **量到 0 分两种**：键盘真的走了，或者这一拍没量到。
+///
+/// Aevon(149) 把第二种钉死了。整份日志 26 条 `hide note seen`、31 条
+/// `settle gone measure=0 note=0`，而每个周期里紧挨着的 0.75 s 读数是
+/// `bar=487..511 kb=573` —— 键盘明明在。逐条对齐之后规律是固定的：
+///
+///   kb: caret cls=… kb=573 bar=487..511     ← 0.75 s 那一拍
+///   kb: caret none win=717 kb=0 scout=413   ← 1.9 s 那一拍
+///
+/// 不是随机抖动，是**同一个键盘在 1.9 s 时换了一副形状**：键盘窗从 430×932
+/// 收成 430×316 并成为 key window。旧 `AevonKbTopInWindow` 的 `winH < 400`
+/// 闸门当场把它判成 0（详见那里的注释）。修在量处，不在这里兜。
+///
+/// 这里只留一层保险：缓存窗量不到时重扫一次场景。缓存窗可能是上一次会话
+/// 留下来的、已经 `hidden` 的对象 —— 重扫能把当前那只拣回来。
+static CGFloat AevonKbVisualTop(void) {
+    if (![NSThread isMainThread]) return 0.0;
+    CGFloat best = AevonKbTopInWindow(AevonKbKeptWindow);
+    if (best > 1.0) return best;
+    UIView *fresh = AevonKbWindowScan();
+    if (fresh != nil && fresh != AevonKbKeptWindow) {
+        CGFloat again = AevonKbTopInWindow(fresh);
+        if (again > best) best = again;
     }
     return best;
 }
@@ -6891,12 +7121,42 @@ static void AevonKbCaretNote(void) {
         NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
         // 抖音口径不同（它把工具栏算进键盘矩形，`cal` 恒 0），不参与学习。
         BOOL skip = [bid isEqualToString:@"com.ss.iphone.ugc.Aweme"];
+        AevonKbSafeLoad();
         if (!skip && bottom > 100.0 && target > 200.0) {
             CGFloat need = bottom - target;
             CGFloat cur = AevonKbExtraCal;
-            // 只往「多让」方向走，且要比现有值多 15 才动 —— 同一份读数重复采样
-            // 时是幂等的，不会一次次累加。
-            if (need > cur + 15.0 && need < 340.0) {
+            // 0.1.78 — **两条补救通道，依次升级，绝不叠加。**
+            //
+            //   ① 通知矩形（`AevonKbExtra2`）：默认那一条。差多少补多少，
+            //      绝大多数 App 一次就够。
+            //   ② 安全区（`AevonKbSafe`）：① 已经补过（cur ≥ 60）却还差 60 以上
+            //      ⇒ 说明这个 App 根本不读通知矩形（Safari 就是），换通道。
+            //
+            // 升级判据用的是「①补过了、还是被盖」这个**已发生的事实**，不是类名
+            // 也不是猜测。反过来，②一旦生效就停止 ① 的累加 —— 两条同时让位就是
+            // 0.1.69 的「让两次」。
+            if (AevonKbSafeFlag == 1) {
+                // 已经在走安全区这条路：不再叠通知补偿。
+            } else if (cur >= 60.0 && need > 60.0) {
+                // ① 补过（extra ≥ 60）却还差 60 以上 ⇒ 它不读通知矩形，升级到 ②。
+                // 判据不能用 `need > cur + 15`：Aevon(149) 里 Safari 的 `need` 与
+                // `cur` 都是 192（补多少就原样剩多少），用「增量」判永远不触发 ——
+                // 那正是它连着三版没被救回来的原因。
+                AevonKbSafeStore(1);
+                AevonKbSafeApply(fullH - kbVisible);
+                char learn[220];
+                snprintf(learn, sizeof(learn),
+                         "kb: learn safe=1 bar=%.0f target=%.0f need=%.0f extra=%.0f cover=%.0f\n",
+                         bottom, target, need, cur, fullH - kbVisible);
+                AevonKbLog(learn);
+                // 0.70 s 后再量一次：这一次的 `bar` 就是「安全区那条通道到底
+                // 有没有用」的唯一证词，和上一行落在同一份日志里。
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                             (int64_t)(0.70 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{ AevonKbCaretNote(); });
+            } else if (need > cur + 15.0 && need < 340.0) {
+                // 只往「多让」方向走，且要比现有值多 15 才动 —— 同一份读数重复
+                // 采样时是幂等的，不会一次次累加。
                 AevonKbExtraStore(need);
                 char learn[200];
                 snprintf(learn, sizeof(learn),
@@ -7272,11 +7532,18 @@ static void AevonKbPostNote(id self, SEL _cmd, NSNotificationName name, id objec
         CGFloat cal = AevonKbNoteCalibration();
         CGFloat full = AevonKbNativeBounds(nil).size.height;
         CGFloat fixedTop = AevonKbTopFixed(full);
+        // 0.1.78 — 安全区通道生效时，**通知矩形整体让开**。
+        //
+        // 两条通道各管一种 App：读通知矩形的走 ①，读安全区的走 ②。同时写就是
+        // 0.1.69 的「让两次」—— 输入框被顶到屏幕中间，比被盖住还难看。
+        // Safari 是唯一已知走 ② 的（前三条通道它一条都不读）。
+        AevonKbSafeLoad();
+        BOOL safeOnly = (AevonKbSafeFlag == 1);
         CGFloat rawTop = endValue != nil ? [endValue CGRectValue].origin.y : -1.0;
         CGFloat target = fixedTop > 0.0 ? fixedTop : rawTop;
         CGFloat outTop = rawTop;
         CGFloat outH = -1.0;
-        if (target > 0.0 && (fixedTop > 0.0 || fabs(cal) > 0.5)) {
+        if (!safeOnly && target > 0.0 && (fixedTop > 0.0 || fabs(cal) > 0.5)) {
             NSMutableDictionary *copy = [[NSMutableDictionary alloc] initWithDictionary:info];
             BOOL moved = NO;
             NSArray *keys = @[UIKeyboardFrameBeginUserInfoKey, UIKeyboardFrameEndUserInfoKey];

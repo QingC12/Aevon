@@ -3597,52 +3597,59 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                                Double(visible.width), Double(height))
             var door: Int = 0
             if let sc = window.windowScene { door = Int(AevonPushSceneFrame(sc)) }
-            // 0.1.77 — `door=0` 时下一拍再推一次。
+            // 0.1.78 — **卡片等场景落地再动。**
             //
-            // Aevon(148) 第一次张开是这样：
+            // 0.1.77 在这里只做了「door=0 就下一拍再推一次」，卡片在同一拍里照样
+            // 开始张。Aevon(149) 第一次张开还是原样：
             //
             //   win: keyboard fill on card=430x717 at 0,215 scene=215 crop=0 push=0
             //   win: frame drift now=430x717@0 want=430x717@215 door=3 wrote=2 armed=1
             //
-            // 卡片已经 430×717@215 了，场景还停在 0 —— 于是这一拍画面是「内容按
-            // 0 画、窗口按 215 装」，差 215 pt。用户报的「打开键盘时先缩小再放大」
-            // 里有一部分就是这一拍：内容先被按旧原点画一次，下一拍才对齐。
-            // 多推一次最坏情况是白写一次（自己判重会返回 0），代价远小于一次错位。
+            // 卡片已经铺到 215..932，场景还停在 0..717 —— 这一拍画面是「内容按 0
+            // 画、窗口按 215 装」，底下露出 215 pt 黑的。0.24 s 的动画把它摊成了
+            // 一闪，用户的原话就是「放大时会闪一下」。
+            //
+            // 现在把「动卡片」整段收进 `grow`：场景真写进去了（door != 0）才当场跑，
+            // door == 0 就先推一拍、下一拍再跑。最多晚一帧（约 16 ms），换掉一次
+            // 215 pt 的错位。这个顺序不能反过来 —— 0.1.56 已经证明「先动卡片」会在
+            // 整段动画里露出按旧画布画的内容。
+            let grow = { [weak self] in
+                guard let self = self, self.kbFilled else { return }
+                // 0.1.76 — **卡片用 ease-out 张开**（0.1.77 起 0.24 s，与系统键盘
+                // 同速；0.36 s 会留下「键盘已到位、窗口还在长」的拖尾）。
+                // `followContent` 必须放在块里：内容的 center / transform 要跟卡片
+                // 一起插值，否则卡片在长、内容不动，中途会露出一圈黑。
+                UIView.animate(withDuration: AevonMotion.fillDuration, delay: 0,
+                               options: [.curveEaseOut, .beginFromCurrentState,
+                                         .allowUserInteraction]) {
+                    card.frame = target
+                    self.followContent()
+                }
+                // 光晕不在动画里：它是 layer 的阴影属性，跟着 frame 逐帧重算会掉帧。
+                self.applyGlow()
+                Log.write("win: keyboard fill on card=" + self.size(card.frame.size)
+                          + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
+                          + " scene=" + String(format: "%.0f", self.canvasOriginY)
+                          + " crop=" + String(format: "%.0f", self.kbTopCrop)
+                          + " push=" + String(format: "%d", door)
+                          + " saved=" + (self.kbSavedFrame.isNull ? "null" : self.size(self.kbSavedFrame.size)
+                                         + " at " + String(format: "%.0f,%.0f",
+                                                           self.kbSavedFrame.minX, self.kbSavedFrame.minY)))
+                // 0.1.50 — App 侧要按「卡片底边」算键盘该不该搬，所以卡片一换位置
+                // 就得立刻把新几何推过去（`reportBand` 自己判重，没变不会重复发）。
+                self.reportBand()
+            }
             if door == 0, let sc = window.windowScene {
                 DispatchQueue.main.async { [weak self] in
-                    guard self?.kbFilled == true else { return }
+                    guard let self = self, self.kbFilled else { return }
                     _ = AevonPushSceneFrame(sc)
+                    // 再让一拍：跨进程的 settings 写入要等 SceneProbe 那一拍才落地，
+                    // 但按帧算已经够了；再等下去就变成「键盘到位、窗口还没动」。
+                    DispatchQueue.main.async { grow() }
                 }
+            } else {
+                grow()
             }
-            // 0.1.76 — **卡片用 ease-out 张开，不再一帧到位**（0.1.77 起 0.24 s，
-            // 与系统键盘同速；0.36 s 会留下「键盘已到位、窗口还在长」的拖尾）。
-            //
-            // 顺序是「场景先落地、卡片再动」：场景一换，App 的内容当场按新画布
-            // 重排好，动画期间画面是稳定的，眼睛看到的只是「窗口在变大」。
-            // 反过来（先动卡片再推场景）会在这 0.24 s 里一直看到按旧画布画的
-            // 内容被拉伸，比硬切更难看。
-            //
-            // `followContent` 必须放在块里：内容的 center / transform 要跟卡片
-            // 一起插值，否则卡片在长、内容不动，中途会露出一圈黑。
-            UIView.animate(withDuration: AevonMotion.fillDuration, delay: 0,
-                           options: [.curveEaseOut, .beginFromCurrentState,
-                                     .allowUserInteraction]) {
-                card.frame = target
-                self.followContent()
-            }
-            // 光晕不在动画里：它是 layer 的阴影属性，跟着 frame 逐帧重算会掉帧。
-            applyGlow()
-            Log.write("win: keyboard fill on card=" + size(card.frame.size)
-                      + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
-                      + " scene=" + String(format: "%.0f", canvasOriginY)
-                      + " crop=" + String(format: "%.0f", kbTopCrop)
-                      + " push=" + String(format: "%d", door)
-                      + " saved=" + (kbSavedFrame.isNull ? "null" : size(kbSavedFrame.size)
-                                     + " at " + String(format: "%.0f,%.0f",
-                                                       kbSavedFrame.minX, kbSavedFrame.minY)))
-            // 0.1.50 — App 侧要按「卡片底边」算键盘该不该搬，所以卡片一换位置就得
-            // 立刻把新几何推过去（`reportBand` 自己判重，几何没变不会重复发）。
-            reportBand()
         } else {
             guard kbFilled else { return }
             kbFilled = false

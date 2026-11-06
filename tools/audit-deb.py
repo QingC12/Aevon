@@ -503,7 +503,10 @@ def main():
                   # 0.1.17 — 键盘避让的三条证词。第一条证明观察者装上了，后两条
                   # 证明「键盘起来 → 让路」这条链真的跑过；只有第一条而没有后两条，
                   # 就是「装上了但收不到心跳」（App 侧没编译进通道）。
-                  b"ring: keyboard watch armed (lease 3.0 s)",
+                  # 0.1.78 — 从写死的 `lease 3.0 s` 改成带参数的格式串。0.1.77 把复查
+                  # 窗口缩到 1.7 s 之后这行还印着 3.0，判据被自己写脏了；现在印的是
+                  # 常量本身（`kbLease` / `kbReview`）。
+                  b"ring: keyboard watch armed (lease %.1f s review %.1f s)",
                   b"ring: keyboard up, edge band stepped aside",
                   b"ring: keyboard gone, edge band back",
                   # 0.1.76 — 租约兜底：Darwin 「键盘收了」丢一条时，靠这一行把
@@ -1011,10 +1014,25 @@ def main():
                       # 闸门没被写成「无脑延迟」。
                       b"kb: settle keep top=%.0f",
                       b"kb: settle gone measure=%.0f note=%d retry=%d",
-                      # 0.1.77 — 「收起」要两次独立证据：量到 0 但通知矩形还说在屏内
-                      # 时先 keep 并复量，这一行就是那次复量（Aevon(148) 每 1 秒
-                      # 一次的假收起，会让卡片先缩小再放大）。
-                      b"kb: settle keep note active=%d top=%.0f retry=%d",
+                      # 0.1.78 — 「收起」要两次独立测量。第一次量到 0 只记这一行，
+                      # 0.40 s 后再量一次；真收起两次都 0，假收起第二次会量到键盘。
+                      # 0.1.77 的复量条件挂在 `AevonKbNoteActive != 0` 上，而 hide
+                      # 通知自己就把它清成 0 ⇒ Aevon(149) 里 31 次全都是
+                      # `measure=0 note=0 retry=0`，一次复量都没跑过。
+                      b"kb: settle wait measure=%.0f note=%d retry=%d",
+                      # 0.1.78 — 量不到时把键盘窗的形状写下来。Aevon(149) 的假 0
+                      # 全部出现在「窗收成 430×316」那一拍，旧判据 `winH < 400`
+                      # 把它读成「键盘没了」；这一行是下一次判据的唯一依据。
+                      b"kb: top zero win=%.0fx%.0f@%.0f hid=%d sub=%lu",
+                      # 0.1.78 — 第四条通道：改 App 自己的 `additionalSafeAreaInsets`。
+                      # Safari 的前三条通道全无效（通知矩形 / 交集 / 参考线都试过），
+                      # 唯一一定服从的量是它自己的安全区。这两行是「写进去」和
+                      # 「按原样还回来」的证词，缺一条就可能留下错位。
+                      b"kb: safe inset bottom=%.0f was=%.0f cover=%.0f",
+                      b"kb: safe inset restored bottom=%.0f",
+                      # 0.1.78 — 两条补救通道的升级点：extra 补过（≥60）却还被盖
+                      # ⇒ 说明它不读通知矩形，换安全区。
+                      b"kb: learn safe=1 bar=%.0f target=%.0f need=%.0f extra=%.0f cover=%.0f",
                       # 0.1.77 — 键盘布局参考线兜底（Safari 的地址栏只认这条通道，
                       # 通知矩形改到 424 它一 pt 都不动）。只在原值 h<1 且该 App
                       # 不在 QQ/微信/抖音 名单里时才写。
@@ -1042,7 +1060,9 @@ def main():
                       # hide，全落在 fit 后一秒内），`veto` 就是被 0.8 s 时间闸
                       # 挡下的那条；真收起交给 `idle zero close` 兜底。
                       b"kb: hide note veto gap=%.2f",
-                      b"kb: idle zero close",
+                      # 0.1.78 — 3 → 3 连零才认（原两次；Aevon(149) 那个假 0 连
+                      # 来了三拍，两次的门在第二拍就放行了）。`hits=` 是实际连零次数。
+                      b"kb: idle zero close hits=%d",
                       # 0.1.67 — 输入框到底在哪一行（屏幕坐标）。判据从此是
                       # 「输入框底边 ≤ 键盘顶边」，不再靠推。
                       # 0.1.69 — 后面补了 `bar=`：`UITextView` 自己那一条的屏幕矩形。
