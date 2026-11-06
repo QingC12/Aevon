@@ -4773,6 +4773,8 @@ static CGFloat AevonKbLeadStable;
 /// 0.1.66 — 上一次真的改了 App 窗口高度的时刻。`measure=0` 的假读数只出现在
 /// 这之后两秒内（见 `AevonKbIdleCheck`），空窗兜底要躲开它。
 static CFAbsoluteTime AevonKbFitAt;
+/// 0.1.67 — 输入框光标读数（定义在 `AevonKbGuideNote` 之后）。
+static void AevonKbCaretNote(void);
 static CGFloat AevonKbAnchorValue(CGFloat full);
 static CGRect AevonKbNativeBounds(UIScreen *screen);
 /// 0.1.57 — **三条通道一起写**，因为 0.1.56 只写了最没希望的那一条。
@@ -4931,49 +4933,46 @@ static UIWindow *AevonKbAppWindow(void) {
 ///   同一把键盘，却量出三个数，本身就说明它取到的不是同一个东西。
 ///
 /// · `932 − AevonKbLeadSeen` 是系统自己算的交集（`_UIRemoteKeyboards` 的
-///   intersection）：场景 215..932 与键盘相交 **289** ⇒ 键盘顶 **643**。
-///   四个 App、十一次开键盘，稳定同一个数。
+///   intersection）。这个数**有两个版本**，0.1.65/0.1.66 取错了那一个：
 ///
-/// 643 才是输入框该贴住的那条线，两个报障都由这个差直接解释：
+///   **316**（≈willShow 那一拍）：本机 = 键盘 616..932，正好是 0.1.56 起一直
+///   写在注释里的「键盘 616..932 整块落在窗口外面」。
+///   **289**（≈我们收过窗口之后）：932−289=643，比真值低 27 pt。
 ///
-/// · **QQ 输入框显示不全** —— 窗口收到 573，而 QQ 的输入框整条落在 573..643 这
-///   70 pt 里，被窗口底边裁掉。
-/// · **抖音输入框被抬高、大面积空白** —— 窗口收到 533，键盘顶却在 643，
-///   中间 110 pt 全是卡片底色。
-/// · 微信量到 573 却不显问题，只是它的输入框更矮、刚好在 573 上面 —— 所以
-///   「微信正常」不能当反例，它只是没被切到。
+/// 0.1.67 用录屏把这条线钉死了。0.1.63 那段 25 s 录屏（886×1920，932 pt ⇒
+/// 比例 2.06）第 330 帧逐行取色，键盘底色 `RGB(229,227,234)` 从 **610 pt**
+/// 起一路到底，670 之后才是白色键帽；610 之上是白色聊天面板。也就是说键盘
+/// 上沿在 610~616，**不是 643**。
 ///
-/// 只在「两个来源相差 120 pt 以内」时才采用系统值：键盘还没弹完、场景还没搬的那
-/// 两拍系统会报 74 / 101（⇒ 858 / 831），差得远，一律不理，宁可维持原值。
+/// 于是三个报障全部有同一个解释：App 的输入框贴在**键盘上沿 616**，而我们把
+/// 窗口底边收到了 643 —— 输入框整条落在 616..643 这 27 pt 里被键盘盖住。
 ///
-/// **0.1.66 — 锚点必须一次学到、之后每次都用，不能每拍现算。**
+/// · **QQ/微信「输入框不再出现」** —— 0.1.66 把窗口停在 428（底边 643），
+///   616..666 那条输入栏整个在键盘下面，一个像素都看不见。
+/// · **QQ「输入框显示不全」**（0.1.64）—— 那时停在 358（底边 573），同一条
+///   输入栏被窗口底边裁掉，只露最上面一窄条。
+/// · **抖音「输入框被抬高、大面积空白」** —— 停在 533（底边），键盘顶在 616，
+///   中间 83 pt 是卡片底色；抖音还会自己再让一次位，于是空得更多。
 ///
-/// 0.1.65 是「用当前这一拍的交集值反推锚点」。Aevon(137) 把它证伪了：
-///
-/// · 抖音：`kb: lead h=101.0` / `h=74.0` 连着两次，`kb: win fit h=318 top=533
-///   raw=533` —— 差 110 在 120 以内其实该采用，但当时读到的 lead 是 74
-///   （锚点算成 858，差 298）⇒ **一次都没校正**，窗口底边停在 533，键盘顶在
-///   643，中间 110 pt 全是卡片底色，就是用户说的「抖音输入框距键盘还有空白」。
-///   同一份日志后半段抖音又报过 289 ⇒ 交集值在动画里先小后大，拿「这一拍」
-///   当锚点必然看运气。
-/// · QQ/微信：289 稳定、`top=643` 落地了，可同一秒里 `settle keep` 紧跟着
-///   `settle gone measure=0`（16 次 fit 配 16 次 unfit），窗口在 428 与 717 之间
-///   来回 —— 输入框只在那零点几秒里露出来，正是「无法百分百出现」。
+/// 只在「两个来源相差 120 pt 以内」时才采用锚点：键盘还没弹完那几拍会报
+/// 74 / 101（⇒ 858 / 831），差得远，一律不理，宁可维持原值。
 ///
 /// 所以把「键盘顶在哪」和「这一拍读到多少」拆开：前者一次学到就固定（
 /// `AevonKbAnchorValue`），后者只用来判「这次读到的值值不值得信」。
 static CGFloat AevonKbAnchorFixed = 0.0;
 static CGFloat AevonKbAnchorGuess = 0.0;
 
-/// 键盘顶边在屏幕上的锚点。学到之前用 `整屏高 − 289` 兜底。
+/// 键盘顶边在屏幕上的锚点。学到之前用 `整屏高 − 316` 兜底（本机 616）。
 ///
-/// 289 是本机系统结算后的交集值（932−289=643），QQ/微信/抖音三个 App 都给出过
-/// 同一个数。上界取 310 是因为 316 只在 willShow 那一拍出现（＝整块键盘矩形，
-/// 含键盘上方那 27 pt 底衬），结算后会被 289 覆盖；宁可先不学，也不拿它当锚点。
+/// 0.1.67 — 只认 **300..340** 那一段。316 是 willShow 那一拍几何式算出来的
+/// （场景高 + 键盘窗高，都不受动画影响），实测对上录屏里的 610~616；289 是
+/// **我们收过窗口之后** UIKit 重新结算的值（键盘相对新窗口被裁掉一截），
+/// 它比真值低 27 pt —— 0.1.65/0.1.66 就是把它当了真值，窗口收到 643，
+/// 输入框整条被键盘盖住。上界放到 340 是为了将来换机型（键盘更高）时还能学。
 static CGFloat AevonKbAnchorValue(CGFloat full) {
     if (AevonKbAnchorFixed > 240.0 && AevonKbAnchorFixed < full - 120.0) return AevonKbAnchorFixed;
     CGFloat lead = AevonKbLeadStable;
-    if (lead > 240.0 && lead < 310.0) {
+    if (lead >= 300.0 && lead <= 340.0) {
         CGFloat anchor = full - lead;
         if (anchor > 240.0 && anchor < full - 120.0) {
             AevonKbAnchorFixed = anchor;
@@ -4984,7 +4983,7 @@ static CGFloat AevonKbAnchorValue(CGFloat full) {
         }
     }
     if (AevonKbAnchorGuess < 240.0) {
-        AevonKbAnchorGuess = full - 289.0;
+        AevonKbAnchorGuess = full - 316.0;
         char line[160];
         snprintf(line, sizeof(line), "kb: anchor fallback -> %.0f\n", AevonKbAnchorGuess);
         AevonKbLog(line);
@@ -5204,6 +5203,10 @@ static void AevonKbEvaluate(NSDictionary *info) {
     // 两个时刻读数不同 ⇒ 只是先后；两个都 0 ⇒ UIKit 真的没认。
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.95 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ AevonKbGuideNote(); });
+    // 0.1.67 — 0.75 s：收窗口（0.60 s 那一拍）之后 App 的重排已经跑完，这时
+    // 量到的光标位置才是「用户实际看到的那条输入框」。每个周期一条。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbCaretNote(); });
     AevonRawNote("app: keyboard up (bridge)\n");
 }
 
@@ -5212,13 +5215,35 @@ static void AevonKbEvaluate(NSDictionary *info) {
 /// 我们改 App 窗口只会换来 `willChangeFrame`，从来生不出 hide 通知 —— 所以
 /// 「谁才是收起」这件事不用猜。到了之后不立刻落状态，仍交给 `AevonKbSettleOff`
 /// 压 0.30 s 再量一次：万一是「通知到了、键盘其实还在」，量到就续租。
+///
+/// **0.1.67 — 这条通知也不全是外来的。** Aevon(138) 数出来 15 次 `win fit` 对应
+/// 15 次 `hide note`，全部落在**收完窗口之后一秒内**：收矮 key window 会让 UIKit
+/// 重新结算「键盘还在不在这个窗口里」，于是反过来给 App 补一条 hide。真用户
+/// 收键盘不可能每次都恰好踩在 fit 后面。所以这里加一道时间闸：距我们上次动
+/// 窗口不足 0.8 s 的 hide 一律**否决**（`kb: hide note veto`），真收起交给
+/// `AevonKbIdleCheck`（键盘窗连量两次空 ⇒ `kb: idle zero close`）兜底，最多晚
+/// 一次心跳。宁可晚 1~2 s 还原，也不能把刚弹起来的输入框又按回去。
 static void AevonKbHideNote(void) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    CGFloat gap = (AevonKbFitAt > 0) ? (CGFloat)(now - AevonKbFitAt) : 999.0;
     static int notes = 0;
-    if (notes < 6) {
+    if (notes < 8) {
         notes += 1;
-        AevonKbLog("kb: hide note seen\n");
+        char line[120];
+        snprintf(line, sizeof(line), "kb: hide note seen gap=%.2f\n", gap);
+        AevonKbLog(line);
     }
     if (AevonKbOn == 0) return;
+    if (gap < 0.8) {
+        static int vetoes = 0;
+        if (vetoes < 8) {
+            vetoes += 1;
+            char line[120];
+            snprintf(line, sizeof(line), "kb: hide note veto gap=%.2f\n", gap);
+            AevonKbLog(line);
+        }
+        return;
+    }
     AevonKbSettleOff();
 }
 
@@ -6327,6 +6352,8 @@ static void AevonKbLiftRepeat(void) {
 ///
 /// 只问 `respondsToSelector:` + 读 `layoutFrame`，不调任何可能抛异常的路径。
 static volatile int AevonKbGuideNotes = 0;
+/// 0.1.67 — 光标/输入框读数最多打几条（每个键盘周期最多一条，够了）。
+static volatile int AevonKbCaretNotes = 0;
 
 static void AevonKbGuideNote(void) {
     if (![NSThread isMainThread]) {
@@ -6355,6 +6382,73 @@ static void AevonKbGuideNote(void) {
     snprintf(line, sizeof(line), "kb: guide win=%.0fx%.0f top=%.0f h=%.0f seen=%.0f\n",
              found.bounds.size.width, found.bounds.size.height,
              box.origin.y, box.size.height, (double)AevonKbTopSeen);
+    AevonKbLog(line);
+}
+
+/// 0.1.67 — **输入框到底在哪一行**（屏幕坐标），每个键盘周期打一条。
+///
+/// 这一条是为了不再靠猜。前面所有关于「窗口该收多高」的争论都缺同一个量：
+/// App 自己把输入框摆到了屏幕的哪个 y。有了这个数，判据就变成一句话 ——
+/// 输入框底边 ≤ 键盘顶边 ⇒ 看得见；否则就是被键盘盖住。
+///
+/// 取法是唯一稳的：从 key window 往下深度优先找 `isFirstResponder` 且符合
+/// `UITextInput` 的那个视图，读它的 `selectedTextRange.end` 处的
+/// `caretRectForPosition:`，再转换到屏幕坐标空间。光标就是人眼看到的那条竖线。
+///
+/// 走整棵树是因为 App 没有公开的「当前焦点」入口；节点数封顶 6000，一次
+/// 键盘周期只走一次（0.75 s 那一拍），开销可以忽略。
+static UIView *AevonKbFirstTextInput(UIView *root, int *budget) {
+    if (root == nil || budget == NULL || *budget <= 0) return nil;
+    *budget -= 1;
+    if (root.isFirstResponder && [root conformsToProtocol:@protocol(UITextInput)]) return root;
+    for (UIView *kid in root.subviews) {
+        UIView *hit = AevonKbFirstTextInput(kid, budget);
+        if (hit != nil) return hit;
+    }
+    return nil;
+}
+
+static void AevonKbCaretNote(void) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ AevonKbCaretNote(); });
+        return;
+    }
+    if (AevonKbCaretNotes >= 12) return;
+    UIWindow *found = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *cand in ((UIWindowScene *)scene).windows) {
+            if (cand.isKeyWindow) { found = cand; break; }
+        }
+        if (found != nil) break;
+    }
+    if (found == nil) return;
+    CGFloat kbTop = AevonKbVisualTop();
+    int budget = 6000;
+    UIView *input = AevonKbFirstTextInput(found, &budget);
+    AevonKbCaretNotes += 1;
+    char line[220];
+    if (input == nil) {
+        snprintf(line, sizeof(line), "kb: caret none win=%.0f kb=%.0f scout=%d\n",
+                 found.bounds.size.height, kbTop, 6000 - budget);
+        AevonKbLog(line);
+        return;
+    }
+    id<UITextInput> field = (id<UITextInput>)input;
+    CGRect caret = CGRectNull;
+    UITextRange *range = field.selectedTextRange;
+    if (range != nil) caret = [field caretRectForPosition:range.end];
+    CGRect box = CGRectNull;
+    if (!CGRectIsNull(caret) && found.windowScene != nil) {
+        box = [input convertRect:caret toCoordinateSpace:found.windowScene.screen.coordinateSpace];
+    }
+    snprintf(line, sizeof(line),
+             "kb: caret cls=%s y=%.0f..%.0f x=%.0f win=%.0f kb=%.0f\n",
+             NSStringFromClass([input class]).UTF8String,
+             CGRectIsNull(box) ? -1.0 : box.origin.y,
+             CGRectIsNull(box) ? -1.0 : CGRectGetMaxY(box),
+             CGRectIsNull(box) ? -1.0 : box.origin.x,
+             found.bounds.size.height, kbTop);
     AevonKbLog(line);
 }
 
@@ -6447,11 +6541,13 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     // 0.1.66 — 再分一层：**两次连续一致**才算「结算完」（`AevonKbLeadStable`）。
     //
     // 收过窗口之后这里还会被问一次，答案是 74/101（键盘相对新窗口的遮拦量），
-    // 那是我们自己造成的，不能拿去当锚点 —— 所以稳定值只认 240..340 这一段：
-    // 本机结算值是 289，动画中间的半截值全在它下面，willShow 那一拍的 316 在它上面。
+    // 那是我们自己造成的，不能拿去当锚点。0.1.67 把稳定值的窗口收到 **300..340**：
+    // 316（键盘 616..932）是几何式算出来的真值，289（键盘 643..932）是收过窗口
+    // 之后 UIKit 重新结算的**偏小值** —— 0.1.65/0.1.66 让 289 混进了稳定值，
+    // 锚点被锁成 643，输入框整条被键盘盖住。
     if (answer > 200.0 && answer < 500.0) {
         if (fabs((CGFloat)answer - AevonKbLeadSeen) < 1.5
-            && answer > 240.0 && answer < 340.0) {
+            && answer >= 300.0 && answer <= 340.0) {
             AevonKbLeadStable = (CGFloat)answer;
         }
         AevonKbLeadSeen = (CGFloat)answer;

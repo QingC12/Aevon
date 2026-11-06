@@ -3655,22 +3655,23 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
-    /// 0.1.66 — 收起流程的落点：场景回读到 0 才收卡片，等不到就按超时收。
+    /// 0.1.67 — 收起流程的落点：**先重推一次场景、等两拍，再收卡片**。
     ///
-    /// 回读不可用（`AevonSceneFrameOf` 在部分版本里恒返回 0x0@0）时不能当成
-    /// 「已经到位」，否则又回到闪黑那一版；给它 3 次机会（0.3 s）再放行。
+    /// 0.1.66 想等 `AevonSceneFrameOf` 回读到 0 再收，可那个函数读的是
+    /// `settings.frame`，在本机恒返回 `0x0@0`（日志里每次都是 `land=3`，
+    /// 3 次机会用完就放行）—— 等于**没等**。Aevon(138) 因此还是「卡片先收、
+    /// 场景后搬」，中间那一拍 App 按 215 摆、卡片按 0 装，用户看到的就是
+    /// 「关闭键盘后悬浮窗没还原时底部一片黑」。
+    ///
+    /// 场景写入走 `updateSettings:withTransitionContext:`，是跨进程的，回读不可用
+    /// 就拿**时间**换：重推一次（幂等，几何没变自己返回 0）再等 0.15 s。两拍之内
+    /// 系统的 scene 更新一定落地，这期间卡片保持键盘态几何，两边始终对齐。
     private func finishKeyboardUnfill(bundle: String, door: Int, tries: Int) {
         guard let card = card, let window = window else { return }
         if kbFilled { return }              // 期间又开了 ⇒ 这次收起作废
-        var readable = false
-        var landed = false
-        if let sc = window.windowScene {
-            let frame = AevonSceneFrameOf(sc)
-            readable = frame.size.width > 1
-            landed = readable && abs(frame.origin.y) < 1
-        }
-        if !landed && tries < 8 && (readable || tries < 3) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
+        if tries == 0 {
+            _ = window.windowScene.map { AevonPushSceneFrame($0) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 self?.finishKeyboardUnfill(bundle: bundle, door: door, tries: tries + 1)
             }
             return
@@ -3685,7 +3686,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                   + " scene=" + String(format: "%.0f", canvasOriginY)
                   + " crop=" + String(format: "%.0f", kbTopCrop)
                   + " push=" + String(format: "%d", door)
-                  + " land=" + (landed ? "ok" : String(format: "%d", tries)))
+                  + " land=" + String(format: "%d", tries))
         // 0.1.53 — 上报推到下一拍（理由见原先这一段注释：卡片收回默认大小时
         // `bandRect` 还在插值，同拍上报会把中间态推给 App）。
         DispatchQueue.main.async { [weak self] in

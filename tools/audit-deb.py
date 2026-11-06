@@ -989,9 +989,12 @@ def main():
                       # 0.1.66 — 锚点改成**一次学到、之后每次都用**，不再拿每一拍
                       # 的交集现算（Aevon(137)：抖音那两拍读到 74/101，锚点算成
                       # 858，差太远被挡 ⇒ 一次没校正，窗口停在 533）。三条证词：
-                      #   `anchor fallback` ⇒ 还没学到，用 932−289 兜底；
+                      #   `anchor fallback` ⇒ 还没学到，用 932−316 兜底；
                       #   `anchor learned`  ⇒ 从系统的稳定交集值学到；
                       #   `top anchor`      ⇒ 每次落地用的锚点与量值。
+                      # 0.1.67 — 316 才是键盘高（键盘 616..932），289 是**我们
+                      # 收过窗口之后** UIKit 重新结算的偏小值；0.1.65/0.1.66 把
+                      # 289 当真值，窗口收到 643，输入框整条被键盘盖住。
                       b"kb: top anchor measured=%.0f",
                       b"kb: anchor learned lead=%.0f",
                       b"kb: anchor fallback -> %.0f",
@@ -1000,8 +1003,15 @@ def main():
                       # 通知（Aevon(137)：16 次 fit 配 16 次 unfit，同秒成对，
                       # 输入框只在一瞬间露头）。现在只认 hide 通知，另加一条
                       # 「静置 2 s 且量两次都空」的空窗兜底。
-                      b"kb: hide note seen",
+                      b"kb: hide note seen gap=%.2f",
+                      # 0.1.67 — hide 也会被我们自己惹出来（15 次 fit 配 15 次
+                      # hide，全落在 fit 后一秒内），`veto` 就是被 0.8 s 时间闸
+                      # 挡下的那条；真收起交给 `idle zero close` 兜底。
+                      b"kb: hide note veto gap=%.2f",
                       b"kb: idle zero close",
+                      # 0.1.67 — 输入框到底在哪一行（屏幕坐标）。判据从此是
+                      # 「输入框底边 ≤ 键盘顶边」，不再靠推。
+                      b"kb: caret cls=%s y=%.0f..%.0f",
                       # 0.1.35 — 判不中的时候把坐标与两个矩形写下来。V111 里
                       # `app: band touch at` 是 0，而带子的值明明是对的 ⇒ 分不出
                       # 「这一拍没进来」还是「进来了被几何否掉」。有这一行就分得开。
