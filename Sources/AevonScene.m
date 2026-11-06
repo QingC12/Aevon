@@ -2560,7 +2560,7 @@ void AevonNotificationOpenInstall(void) {
     //   · `UNSUserNotificationServer` / `NCNotificationDispatcher` /
     //     `SBNotificationBannerDestination` 三个类在 SpringBoard 里**都不存在**。
     // 再按名字猜就是赌。这一版只把真名查出来。
-    AevonLogRaw("notify: hooks off (census only)");
+    AevonLogRaw("notify: census pass, activate probe separate (0.1.85)");
 
     // 第二路（0.1.42 起）保留：只探不猜。类不存在就什么都不发生；真机上存在时
     // 才挂 `UNSUserNotificationServer -presentPresentable:withOptions:userInfo:`。
@@ -2590,6 +2590,13 @@ void AevonNotificationOpenInstall(void) {
     // 通知相关方法名。下一版按真名精确挂，不再猜。
     AevonNotifyCensus();
     AevonNotifyMethods("SBMainWorkspace", "transition");
+    // 0.1.85 — 激活总入口的真名。stheno 的取证结论是
+    // `_activateBundleID:requestID:isTrusted:options:source:originalSource:withResult:`，
+    // 而它出自 iOS 15/16 的那台机器。这一段是「换一台机器还叫这个名字吗」的
+    // 唯一答案来源：真的不叫这个，这三行的列表里会有真名。
+    AevonNotifyMethods("SBMainWorkspace", "activate");
+    AevonNotifyMethods("SBMainWorkspace", "bundle");
+    AevonNotifyMethods("SBWorkspace", "activate");
     AevonNotifyMethods("SBWorkspace", "notification");
     AevonNotifyMethods("SBLockScreenManager", "notification");
 
@@ -2606,4 +2613,296 @@ void AevonNotificationOpenInstall(void) {
     AevonNotifyMethods("SBUserNotificationCenter", "notification");
     AevonNotifyMethods("SBUserNotificationCenter", "response");
     AevonNotifyMethods("SBUserNotificationCenter", "activate");
+}
+
+// MARK: - 0.1.85 通知点击观察器（只读，不接管）
+//
+// 取证来源：母本 `Stheno.dylib` 的注入段。0.1.40~0.1.45 那五次都挂错了地方 ——
+// 真正的入口不在通知栈里，而在**激活栈的最底下一层**：
+//
+//   SBMainWorkspace -_activateBundleID:requestID:isTrusted:options:
+//                    source:originalSource:withResult:
+//
+// 母本在那个方法上做了三件事：从 `options.__PayloadOptions` 里取来源 App、从
+// `options.__Actions.firstObject` 的类名认动作（`UINotificationResponseAction` /
+// `UIActivityContinuationAction` / `UIHandleApplicationShortcutAction`）、再取
+// 动作用 `performSelector:"url"` 带上来的 URL。三个取值点在 0x9042c 那 12 KB
+// 里各出现一次，是本轮逆向里最硬的一处证据。
+//
+// 这一版**一个判定都不写**。理由不是保守，是顺序：先把「真机上这个方法叫什么、
+// 参数编码长什么样、点通知时那三个字段到底填的什么」拿到手，再谈行为。前五版
+// 每一次都是先写判定、再靠日志认出判据是错的 —— 那个顺序每次都花掉一整版。
+//
+// 危险面在哪里：这是「App 要不要起来」的必经之路，一次错位调用就是 SpringBoard
+// 的崩溃。所以装配有六道闸（存在性 / 参数形状 / 方法归属 / 启动闩 / 调用预算 /
+// 延迟装载），前四道不成立就什么都不做；替身本身只读一次参数、原样转发。
+
+/// 母本给的那个签名。写成宏是因为它同时在 `sel_registerName` 与日志里出现，
+/// 两处必须逐字一致 —— 拼错一个字就是「方法不存在」，而那看起来像「这台机器
+/// 上这条路不通」，是完全不同的结论。
+#define AEVON_ACTIVATE_SELECTOR \
+    "_activateBundleID:requestID:isTrusted:options:source:originalSource:withResult:"
+
+/// 原实现的 IMP。**在这个文件里只赋值一次，就在换 IMP 的前一行**，而且赋不
+/// 上就不换 —— 一个拿不到原实现的替身会把整条激活吞掉，那不是「观察」，那是
+/// 让手机打不开应用。替身里那句 `if (AevonActOriginal != NULL)` 只是最后一道
+/// 保险，不是设计的一部分。
+static IMP AevonActOriginal = NULL;
+
+/// 闸五：取证的预算。一次 App 激活一行，60 行足够覆盖「通知 / 分享 / 冷启动 /
+/// 后台唤醒」四种来源各来十次；再多就是日志噪音。
+static int AevonActCalls = 0;
+
+/// `options` 的键名只在前三次打出来。它是这一版最想要的东西之一：
+/// 母本用的是 `__PayloadOptions` / `__Actions` 两个私有键，而那两个键名出自
+/// iOS 15/16 —— 换一台机器，键名可能不同，而键名不同就意味着「字段全是 nil」，
+/// 那与「没有通知点击」在日志里长得一模一样。
+static int AevonActKeyNotes = 0;
+
+/// 只读取一个键。两条路按从便宜到贵的顺序试：
+///   ① `objectForKey:` —— 字典本身；
+///   ② `valueForKey:`  —— KVC。`__PayloadOptions` 这种私有键只在 KVC 里答。
+/// 任何一步抛异常都返回 nil：这条链跑在 SpringBoard 主线程上，一次
+/// `NSUndefinedKeyException` 就是杀进程，不是一行日志。
+static id AevonActRead(id object, NSString *key) {
+    if (object == nil || key.length == 0) return nil;
+    SEL boxed = NSSelectorFromString(@"objectForKey:");
+    SEL kvc = NSSelectorFromString(@"valueForKey:");
+    @try {
+        if ([object respondsToSelector:boxed]) {
+            return ((id (*)(id, SEL, id))objc_msgSend)(object, boxed, (id)key);
+        }
+        if ([object respondsToSelector:kvc]) {
+            return ((id (*)(id, SEL, id))objc_msgSend)(object, kvc, (id)key);
+        }
+    } @catch (NSException *exception) {
+        return nil;
+    }
+    return nil;
+}
+
+/// 一个对象的名字：字符串取内容、URL 取 absoluteString、其余取类名（带 `#`
+/// 前缀，一眼能分出「这是值」还是「这是类型」）。写进调用方给的槽位，所以
+/// 整个快照里没有一次堆分配。
+static const char *AevonActName(id object, char *slot, size_t size) {
+    if (slot == NULL || size == 0) return "-";
+    if (object == nil) {
+        snprintf(slot, size, "-");
+        return slot;
+    }
+    @try {
+        if ([object isKindOfClass:[NSString class]]) {
+            const char *raw = [(NSString *)object UTF8String];
+            snprintf(slot, size, "%s", raw != NULL ? raw : "-");
+            return slot;
+        }
+        if ([object isKindOfClass:[NSURL class]]) {
+            const char *raw = [[(NSURL *)object absoluteString] UTF8String];
+            snprintf(slot, size, "%s", raw != NULL ? raw : "-");
+            return slot;
+        }
+        const char *name = class_getName([object class]);
+        snprintf(slot, size, "#%s", name != NULL ? name : "?");
+    } @catch (NSException *exception) {
+        snprintf(slot, size, "!");
+    }
+    return slot;
+}
+
+/// 把这一拍看见的东西拼成一行。**只读**：没有一次 retain、没有一次写盘、
+/// 没有一个对象被持有到下一条语句之外。
+///
+/// 字段含义（下一份日志要按这个读）：
+///   b     = 目标 App 的 bundle id（`_activateBundleID:` 的第一个参数）
+///   src   = 来源 App。`options.__PayloadOptions[UIApplicationLaunchOptionsSourceApplicationKey]`
+///           有就用它，没有就退回 `source` 参数 —— 通知点击时前者是点通知的
+///           那个 App（通常是 `com.apple.springboard`），后者是发起这次激活的进程。
+///   org   = `originalSource`，母本里叫「原始来源」。三者互相对照才能分清
+///           「用户点了通知」与「用户在桌面点了图标」。
+///   act   = `options.__Actions.firstObject` 的类名。认动作全靠它：
+///           `UINotificationResponseAction` = 通知点击。
+///   opt   = `options` 自己的类型。私有类名会在这里露出来（`#__NSDictionaryM`
+///           说明它就是字典，`#SBActivationOptions` 之类说明还有一层）。
+///   trust = `isTrusted` 参数原值。
+///   n     = `__Actions` 的元素个数。
+///   url   = 动作对象上 `url` 的 absoluteString。母本用它做 URL 注入。
+///   keys  = `options` 的键名（只在前三拍出现）。
+static void AevonActSnapshot(id bundleID, BOOL trusted, id options,
+                             id source, id originalSource,
+                             char *out, size_t size) {
+    if (out == NULL || size < 128) return;
+    out[0] = '\0';
+    AevonActCalls += 1;
+    if (AevonActCalls > 60) {
+        if (AevonActCalls == 61) {
+            snprintf(out, size, "notify: act budget spent n=60\n");
+        }
+        return;
+    }
+    @try {
+        char bundleText[48], sourceText[48], originText[48];
+        char actionText[56], optionText[40], urlText[84];
+        char keys[160];
+        keys[0] = '\0';
+        urlText[0] = '-';
+        urlText[1] = '\0';
+
+        id payload = AevonActRead(options, @"__PayloadOptions");
+        id from = payload != nil
+                ? AevonActRead(payload, @"UIApplicationLaunchOptionsSourceApplicationKey")
+                : nil;
+
+        id actions = AevonActRead(options, @"__Actions");
+        id first = nil;
+        int actionCount = 0;
+        if ([actions isKindOfClass:[NSArray class]]) {
+            actionCount = (int)[(NSArray *)actions count];
+            if (actionCount > 0) first = [(NSArray *)actions objectAtIndex:0];
+        }
+
+        id url = nil;
+        if (first != nil) {
+            SEL urlsel = NSSelectorFromString(@"url");
+            if ([first respondsToSelector:urlsel]) {
+                url = ((id (*)(id, SEL))objc_msgSend)(first, urlsel);
+            }
+        }
+        if (url != nil) AevonActName(url, urlText, sizeof(urlText));
+
+        if (AevonActKeyNotes < 3 && [options isKindOfClass:[NSDictionary class]]) {
+            AevonActKeyNotes += 1;
+            size_t used = 0;
+            for (id key in (NSDictionary *)options) {
+                if (![key isKindOfClass:[NSString class]]) continue;
+                const char *raw = [(NSString *)key UTF8String];
+                if (raw == NULL) continue;
+                size_t need = strlen(raw);
+                if (used + need + 2 >= sizeof(keys)) break;
+                if (used > 0) keys[used++] = ',';
+                memcpy(keys + used, raw, need);
+                used += need;
+                keys[used] = '\0';
+            }
+        }
+
+        snprintf(out, size,
+                 "notify: act b=%s src=%s org=%s act=%s opt=%s trust=%d n=%d url=%s%s%s\n",
+                 AevonActName(bundleID, bundleText, sizeof(bundleText)),
+                 AevonActName(from != nil ? from : source, sourceText, sizeof(sourceText)),
+                 AevonActName(originalSource, originText, sizeof(originText)),
+                 AevonActName(first, actionText, sizeof(actionText)),
+                 AevonActName(options, optionText, sizeof(optionText)),
+                 trusted ? 1 : 0, actionCount, urlText,
+                 keys[0] != '\0' ? " keys=" : "", keys);
+    } @catch (NSException *exception) {
+        const char *name = exception.name != nil ? [exception.name UTF8String] : NULL;
+        snprintf(out, size, "notify: act threw %s\n", name != NULL ? name : "?");
+    }
+}
+
+/// 替身。**顺序就是这里的全部安全设计**：
+///
+///   ① 快照 —— 只读，不改任何参数，所以系统那一段照旧拿着原值跑；
+///   ② 原实现 —— 一个字节都不拦。这条钩子的意义是「看见」，不是「决定」；
+///   ③ 落盘 —— 主队列异步，写盘那 0.1~0.3 ms 不压在「点开 App」那一拍上。
+///
+/// 变量 `line` 是栈上的，`strdup` 就是因为它要跨到另一个队列去。拷贝失败就
+/// 丢掉这一行 —— 取证不能成为这条路上的失败点。
+static void AevonActivate(id self, SEL _cmd, id bundleID, id requestID,
+                          BOOL trusted, id options, id source,
+                          id originalSource, id result) {
+    char line[448];
+    AevonActSnapshot(bundleID, trusted, options, source, originalSource,
+                     line, sizeof(line));
+
+    if (AevonActOriginal != NULL) {
+        ((void (*)(id, SEL, id, id, BOOL, id, id, id, id))AevonActOriginal)
+            (self, _cmd, bundleID, requestID, trusted, options, source,
+             originalSource, result);
+    }
+
+    if (line[0] != '\0') {
+        char *copy = strdup(line);
+        if (copy != NULL) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AevonLogRaw(copy);
+                free(copy);
+            });
+        }
+    }
+}
+
+/// 装配。由 `ActivateProbe.arm()`（`Sources/Scene/ActivateProbe.swift`）在
+/// 装载后 3 秒调用一次，且只在它的前三道闸放行之后。
+///
+/// 这里的三道闸按「最便宜且最能提前止损」的顺序排：类在不在 → 方法在不在 →
+/// 形状对不对 → 是不是它自己实现的。任何一道不过都只写一行日志就返回，
+/// 一次 `method_setImplementation` 都不做。
+void AevonActivateProbeInstall(void) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+
+    Class cls = objc_getClass("SBMainWorkspace");
+    if (cls == Nil) {
+        AevonLogRaw("notify: activate absent reason=no-class");
+        return;
+    }
+
+    SEL sel = sel_registerName(AEVON_ACTIVATE_SELECTOR);
+    Method method = class_getInstanceMethod(cls, sel);
+    if (method == NULL) {
+        // 方法名不对才是这一版最可能的失败：母本那台机器是 iOS 15/16，
+        // 这里跑的是另一台。把真名列出来，下一版按列表改，不按名字赌。
+        AevonLogRaw("notify: activate absent reason=no-method");
+        AevonNotifyMethods("SBMainWorkspace", "activate");
+        AevonNotifyMethods("SBMainWorkspace", "bundle");
+        AevonNotifyMethods("SBWorkspace", "activate");
+        return;
+    }
+
+    // 闸二 · 参数形状。必须是 void 返回、正好 6 个对象参数（bundleID /
+    // requestID / options / source / originalSource / 结果块）。差一个就是
+    // 一次错位调用 —— 那是 SpringBoard 的崩溃，不是一行日志。
+    const char *encoding = method_getTypeEncoding(method);
+    int args = AevonObjectArgs(encoding);
+    if (args != 6) {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: activate shape off args=%d want=6 types=%s",
+                      args, encoding != NULL ? encoding : "?"] UTF8String]);
+        AevonNotifyMethods("SBMainWorkspace", "activate");
+        return;
+    }
+
+    // 闸三 · 方法归属。`class_getInstanceMethod` 沿父类链找，改到一个不属于
+    // 自己的实现上，等于同时改了所有兄弟类 —— 那已经不是「观察」了。
+    BOOL owns = NO;
+    unsigned int count = 0;
+    Method *list = class_copyMethodList(cls, &count);
+    for (unsigned int i = 0; list != NULL && i < count; i++) {
+        if (method_getName(list[i]) == sel) { owns = YES; break; }
+    }
+    free(list);
+    if (!owns) {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: activate shape off reason=inherited types=%s",
+                      encoding != NULL ? encoding : "?"] UTF8String]);
+        return;
+    }
+
+    // 闸三（收尾）· 原实现必须先拿到。拿不到就不换 —— 换上去等于把整条激活吞掉。
+    IMP original = method_getImplementation(method);
+    if (original == NULL) {
+        AevonLogRaw("notify: activate absent reason=no-orig");
+        return;
+    }
+    AevonActOriginal = original;
+    method_setImplementation(method, (IMP)AevonActivate);
+
+    // 回读：arm64e 上 `method_getImplementation` 回来的可能是指纹签名过的
+    // 跳板（0.1.84 的 `AevonAttach` 里同一个现象），所以真正说明「活着」的
+    // 不是 `back` 的相等，而是下一份日志里有没有 `notify: act`。
+    IMP back = method_getImplementation(class_getInstanceMethod(cls, sel));
+    AevonLogRaw([[NSString stringWithFormat:@"notify: activate armed args=%d types=%s back=%@ orig=%d",
+                  args, encoding != NULL ? encoding : "?",
+                  back == (IMP)AevonActivate ? @"exact" : @"signed",
+                  AevonActOriginal != NULL ? 1 : 0] UTF8String]);
 }

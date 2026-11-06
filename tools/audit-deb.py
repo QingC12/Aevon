@@ -1117,6 +1117,31 @@ def main():
                       b"app: band touch at %.0f,%.0f watch",
                       # 0.1.29 — 深浅色的应用侧观察者。
                       b"com.aevon.style.",
+                      # 0.1.85 — 通知点击观察器（只取证、不接管）。母本的正解是
+                      # SpringBoard 的激活总入口，而前五版挂错了地方，所以这一版
+                      # 只装一个「读一遍参数、原样转发、写一行日志」的替身。
+                      #
+                      # 六道闸的每一条都要在二进制里，否则「装不上」与「装了但
+                      # 形状不对」在日志里分不开：
+                      #   armed     = 装上了，附类型编码与真实参数个数
+                      #   shape off = 类在、方法在，但参数个数不是 6 ⇒ 主动不装
+                      #   absent    = 类或方法不存在 ⇒ 不装，改列真名
+                      b"notify: activate armed args=%d types=%s back=%@",
+                      b"notify: activate shape off args=%d want=6 types=%s",
+                      b"notify: activate absent reason=no-class",
+                      # 取证行本身。字段顺序就是判据顺序：先看 `act` 是不是
+                      # `UINotificationResponseAction`，再看 `b` 是不是被点的那个
+                      # App；`src` / `org` 两者对照才能分清「点通知」与「点图标」。
+                      b"notify: act b=%s src=%s org=%s act=%s opt=%s trust=%d n=%d url=%s",
+                      # 闸五：预算用尽后闭嘴的那一行。它出现而 `notify: act`
+                      # 只有 60 条，是正常收工；只有它而没有前一条，是格式串坏了。
+                      b"notify: act budget spent n=60",
+                      # 闸四（Swift 侧）：闩的三态。三条缺一条，「上次死在这条钩子
+                      # 上」这个结论就落不下来 —— 而这正是这一版唯一的安全网。
+                      b"notify: activate latch held, previous boot died while armed",
+                      b"notify: activate latch cleared uptime=",
+                      b"notify: activate off switch=notify.off",
+                      b"notify: activate arm scheduled in ",
                       b"setContentOffset:"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")

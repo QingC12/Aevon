@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.1.84"
+    public static let version = "0.1.85"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -108,6 +108,18 @@ public enum Aevon {
     /// because nothing crashed. 0.0.20 left three live scenes' presenters
     /// activated with no way back and the phone went black while SpringBoard
     /// kept answering heartbeats.
+
+    /// 0.1.85 — 通知点击观察器的两道闩。
+    ///
+    /// `armed` 在装配**之前**写、活到 180 秒才摘。它还在 = 上一次装上去之后
+    /// 没活到摘闩，那一次 SpringBoard 的死因不必再猜：就是这条钩子。
+    ///
+    /// `off` 是那个结论的落点，也是操作者的手动开关。它存在时一个字节都不碰；
+    /// 自动落下之后要重新取证，删掉这个文件再重启即可。用文件而不是偏好域，
+    /// 理由与 `state.plist` 相同：roothide 会按进程重定向 Library/Preferences，
+    /// 而这个判断必须在任何进程里都读到同一份。
+    public static let activateArmedPath = "/var/mobile/Library/Logs/Aevon/notify.armed"
+    public static let activateOffPath   = "/var/mobile/Library/Logs/Aevon/notify.off"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"

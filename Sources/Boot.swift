@@ -98,6 +98,12 @@ public func AevonStart() {
     // 全在键盘进程（`AevonAppHook.m` 的 `AevonKbNativeInstall`），这里不该有活。
     AevonNotificationOpenInstall()
 
+    // 0.1.85 — 通知点击观察器。**只取证，不接管**：挂的是 SpringBoard 的
+    // App 激活总入口，替身只读一遍参数、原样转发、写一行日志。
+    // 装配的三道前置闸在这里，钩子自己的两道在 AevonScene.m 里；六道闸的
+    // 分工与理由写在 Sources/Scene/ActivateProbe.swift 的文件头。
+    ActivateProbe.arm()
+
     // Before anything else touches the runtime: if a probe left a death marker
     // behind, name the class that stopped it and blacklist it. This is the only
     // way a probe that killed SpringBoard can be read instead of guessed at.
