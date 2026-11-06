@@ -6620,10 +6620,20 @@ static CGFloat AevonKbTopInWindow(UIView *keyboardWindow) {
     // 「这一拍布局还没结算」影响 —— 收起判定最先该看的就是它们。
     if (keyboardWindow.hidden || keyboardWindow.alpha < 0.05) return 0.0;
     // 0.1.78 — 窗自己在屏幕上的原点：满屏时 0，收短时 616。返回值要加它。
+    //
+    // `windowScene` 是 `UIWindow` 的属性，不是 `UIView` 的（0.1.78 第一版直接
+    // `keyboardWindow.windowScene` 被 CI 拦在编译期：property 'windowScene' not
+    // found on object of type 'UIView *'）。这里按类判断一次。
     CGFloat originY = keyboardWindow.frame.origin.y;
-    if (keyboardWindow.windowScene != nil) {
+    UIWindowScene *owner = nil;
+    if ([keyboardWindow isKindOfClass:[UIWindow class]]) {
+        owner = ((UIWindow *)keyboardWindow).windowScene;
+    } else {
+        owner = keyboardWindow.window.windowScene;
+    }
+    if (owner != nil) {
         CGRect onScreen = [keyboardWindow convertRect:keyboardWindow.bounds
-                                    toCoordinateSpace:keyboardWindow.windowScene.screen.coordinateSpace];
+                                    toCoordinateSpace:owner.screen.coordinateSpace];
         if (onScreen.size.height > 1.0) originY = onScreen.origin.y;
     }
     // 广度优先，最多 4 层、160 个视图：键盘的宿主视图链很短
