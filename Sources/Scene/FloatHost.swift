@@ -3597,11 +3597,29 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                                Double(visible.width), Double(height))
             var door: Int = 0
             if let sc = window.windowScene { door = Int(AevonPushSceneFrame(sc)) }
-            // 0.1.76 — **卡片用 0.36 s ease-out 张开，不再一帧到位。**
+            // 0.1.77 — `door=0` 时下一拍再推一次。
+            //
+            // Aevon(148) 第一次张开是这样：
+            //
+            //   win: keyboard fill on card=430x717 at 0,215 scene=215 crop=0 push=0
+            //   win: frame drift now=430x717@0 want=430x717@215 door=3 wrote=2 armed=1
+            //
+            // 卡片已经 430×717@215 了，场景还停在 0 —— 于是这一拍画面是「内容按
+            // 0 画、窗口按 215 装」，差 215 pt。用户报的「打开键盘时先缩小再放大」
+            // 里有一部分就是这一拍：内容先被按旧原点画一次，下一拍才对齐。
+            // 多推一次最坏情况是白写一次（自己判重会返回 0），代价远小于一次错位。
+            if door == 0, let sc = window.windowScene {
+                DispatchQueue.main.async { [weak self] in
+                    guard self?.kbFilled == true else { return }
+                    _ = AevonPushSceneFrame(sc)
+                }
+            }
+            // 0.1.76 — **卡片用 ease-out 张开，不再一帧到位**（0.1.77 起 0.24 s，
+            // 与系统键盘同速；0.36 s 会留下「键盘已到位、窗口还在长」的拖尾）。
             //
             // 顺序是「场景先落地、卡片再动」：场景一换，App 的内容当场按新画布
             // 重排好，动画期间画面是稳定的，眼睛看到的只是「窗口在变大」。
-            // 反过来（先动卡片再推场景）会在这 0.36 s 里一直看到按旧画布画的
+            // 反过来（先动卡片再推场景）会在这 0.24 s 里一直看到按旧画布画的
             // 内容被拉伸，比硬切更难看。
             //
             // `followContent` 必须放在块里：内容的 center / transform 要跟卡片

@@ -1194,15 +1194,22 @@ final class RingHost: NSObject {
     /// 「键盘已经下去了，悬浮窗还撑满屏，必须再开一次键盘再关一次才回来」
     /// （Aevon(147) 的原话）。
     ///
-    /// 心跳每来一次就排一个「租约 + 一点余量」之后的复查：到点时若这一路还是
-    /// 最后一次心跳（token 没变），说明这段时间里一个心跳都没有 ⇒ 键盘确实不
-    /// 在了，走与 `keyboardGone` 完全相同的出口把卡片收回去。
+    /// 心跳每来一次就排一个复查：到点时若这一路还是最后一次心跳（token 没变），
+    /// 说明这段时间里一个心跳都没有 ⇒ 键盘确实不在了，走与 `keyboardGone`
+    /// 完全相同的出口把卡片收回去。
+    ///
+    /// 0.1.77 — 复查窗口从 `kbLease + 0.4`（3.4 s）缩到 **1.7 s**。
+    ///
+    /// App 侧的心跳是 `dispatch_source` 每秒一发（`AevonKbObserve`），所以
+    /// 「1.7 s 内零心跳」等价于「漏了一整拍还有余量」，绝不可能是正常打字。
+    /// 3.4 s 太长：Aevon(148) 里用户报的「关闭键盘后不还原」如果落在这条兜底上，
+    /// 他的感受就是「等了三秒才回来」，看着像没修。1.7 s 在体感上就是紧跟键盘。
     private var kbLeaseToken = 0
 
     private func armKbLease() {
         kbLeaseToken &+= 1
         let token = kbLeaseToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + kbLease + 0.4) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) { [weak self] in
             guard let self = self, self.kbLeaseToken == token else { return }
             guard self.kbLogged else { return }
             self.kbAt = 0

@@ -1010,7 +1010,15 @@ def main():
                       # `settle gone` = 真收了、这时才还窗口。两条都在才说明这个
                       # 闸门没被写成「无脑延迟」。
                       b"kb: settle keep top=%.0f",
-                      b"kb: settle gone measure=%.0f",
+                      b"kb: settle gone measure=%.0f note=%d retry=%d",
+                      # 0.1.77 — 「收起」要两次独立证据：量到 0 但通知矩形还说在屏内
+                      # 时先 keep 并复量，这一行就是那次复量（Aevon(148) 每 1 秒
+                      # 一次的假收起，会让卡片先缩小再放大）。
+                      b"kb: settle keep note active=%d top=%.0f retry=%d",
+                      # 0.1.77 — 键盘布局参考线兜底（Safari 的地址栏只认这条通道，
+                      # 通知矩形改到 424 它一 pt 都不动）。只在原值 h<1 且该 App
+                      # 不在 QQ/微信/抖音 名单里时才写。
+                      b"kb: guide fill h=%.0f own=%.0fx%.0f cover=%.0f",
                       # 0.1.65 — 「把量到的键盘顶抬到系统认可的那条线」。
                       # 0.1.66 — 锚点改成**一次学到、之后每次都用**，不再拿每一拍
                       # 的交集现算（Aevon(137)：抖音那两拍读到 74/101，锚点算成

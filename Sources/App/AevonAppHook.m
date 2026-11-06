@@ -4792,6 +4792,11 @@ static CFAbsoluteTime AevonKbFitAt;
 /// 0.1.67 — 输入框光标读数（定义在 `AevonKbGuideNote` 之后）。
 static void AevonKbCaretNote(void);
 static CGFloat AevonKbAnchorValue(CGFloat full);
+/// 0.1.77 — 本会话有没有真的喂过键盘布局参考线（定义见 `AevonKbGuideFrame`）。
+/// 提前声明是因为 `AevonKbNoteCalibration`（更靠前）要读它来避免「让两次」。
+static volatile int AevonKbGuideFilled;
+/// 0.1.77 — 挂 `-[UILayoutGuide layoutFrame]`（定义在键盘段后部）。
+static void AevonKbGuideHookInstall(void);
 static CGRect AevonKbNativeBounds(UIScreen *screen);
 /// 0.1.57 — **三条通道一起写**，因为 0.1.56 只写了最没希望的那一条。
 ///
@@ -5141,15 +5146,44 @@ static void AevonKbSettleCancel(void) {
     AevonKbSettleSeq += 1;
 }
 
+static void AevonKbSettleWait(int seq, int retries);
+
 static void AevonKbSettleOff(void) {
     int seq = AevonKbSettleSeq + 1;
     AevonKbSettleSeq = seq;
+    AevonKbSettleWait(seq, 0);
+}
+
+/// 0.1.77 — **一次「收起」要两次独立证据才算数。**
+///
+/// Aevon(148) 把这条路的失效拍下来了。抖音那一串是：
+///
+///   kb: hide note seen gap=1.02        ← 键盘才起来 1 秒就收到 WillHide
+///   kb: settle gone measure=0          ← 量键盘视图，量到 0（一次窗口扫描失败）
+///   app: keyboard gone (bridge)        ← 于是发了 `com.aevon.kb.off`
+///   ring: keyboard gone, edge band back
+///   win: keyboard fill off …           ← 桌面把卡片收回去
+///   win: keyboard fill on …            ← 下一个心跳又张开
+///
+/// 这一段在整份日志里出现 **5 次**（16:38:23/24、25/27、28/29、30/32、33/34），
+/// 每次间隔 1 秒左右 —— 用户看到的就是「打开键盘时悬浮窗先缩小再放大」，而且
+/// 只要那一下正好落在关键盘之后，卡片就一直停在放大态（「不会还原」）。
+///
+/// 两处都不够硬：「`AevonKbVisualTop()` 量到 0」在窗口重排期间会假摔一次；
+/// 「收到 WillHide」在同一次键盘会话里会来好几条（gap 1.02 → 3.42 → 5.93 一路
+/// 变大，说明 `AevonKbFitAt` 早已过期，那条 0.8 s 的否决闸根本没在守）。
+///
+/// 所以改成：量到 0 **且** 最近一条通知矩形也说键盘离屏（`AevonKbNoteActive == 0`）
+/// 才立刻认；若通知矩形还说在屏内，就再等 0.40 s 复量一次，连两次为 0 才认。
+/// 真收起时 WillChangeFrame 一定会带一条离屏矩形 ⇒ 走快路（0.30 s）；
+/// 假收起时那条矩形从来不会出现 ⇒ 复量那一次键盘早就在 573 上了，直接 `keep`。
+static void AevonKbSettleWait(int seq, int retries) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (seq != AevonKbSettleSeq) return;   // 期间又起来了 ⇒ 这次「收起」作废
         if (AevonKbOn == 0) return;            // 已经处理过
         CGFloat top = AevonKbVisualTop();
-        char line[160];
+        char line[200];
         if (top > 200.0) {
             // 键盘还在屏上 ⇒ 通知是误报（几乎都是我们改窗口高惹的）。续租，什么都不动。
             snprintf(line, sizeof(line), "kb: settle keep top=%.0f\n", top);
@@ -5157,7 +5191,20 @@ static void AevonKbSettleOff(void) {
             AevonKbPost();
             return;
         }
-        snprintf(line, sizeof(line), "kb: settle gone measure=%.0f\n", top);
+        if (AevonKbNoteActive != 0 && retries < 1) {
+            // 通知矩形还说在屏内 ⇒ 这次「量不到」可能是重排期的假摔，复量一次。
+            snprintf(line, sizeof(line),
+                     "kb: settle keep note active=%d top=%.0f retry=%d\n",
+                     AevonKbNoteActive, top, retries);
+            AevonKbLog(line);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.40 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                AevonKbSettleWait(seq, retries + 1);
+            });
+            return;
+        }
+        snprintf(line, sizeof(line), "kb: settle gone measure=%.0f note=%d retry=%d\n",
+                 top, AevonKbNoteActive, retries);
         AevonKbLog(line);
         AevonKbOn = 0;
         AevonKbArm(NO);
@@ -5316,6 +5363,11 @@ static void AevonKbIdleCheck(void) {
 
 /// 构造函数里调一次。观察者与心跳都只在**真的弹过键盘**之后才有开销。
 static void AevonKbObserve(void) {
+    // 0.1.77 — 先把参考线挂上：Safari（以及所有 `keyboardLayoutGuide` 拿不到
+    // 真值的 App）只认这条通道，通知矩形对它们一个字都不算（Aevon(148) 七次
+    // 采样六次不动）。挂在这里而不是构造函数里，是因为它和键盘的其余钩子同一
+    // 生命周期，卸载/重装不会打架。
+    AevonKbGuideHookInstall();
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
     [center addObserverForName:UIKeyboardWillChangeFrameNotification
                         object:nil
@@ -6222,6 +6274,14 @@ static CGFloat AevonKbNoteCalibration(void) {
     }
     // 表外 App：默认 0 —— 它们自己会 convert，给了真值就正确。只有被量到「确实
     // 被盖」时才靠 `AevonKbExtraCal` 补上（见 `AevonKbCaretNote` 末尾的学习段）。
+    //
+    // 0.1.77 — **走 guide 的那种就不再加通知补偿。**
+    //
+    // `AevonKbGuideFilled` 一旦置位，说明这个 App 的 `keyboardLayoutGuide` 原本是
+    // `h=0`、被我们喂上了真值（Safari 正是这一类，见 `AevonKbGuideFrame`）。
+    // 它按那条线已经会自己让位，再叠一层通知平移就会「让两次」—— 0.1.69 的坑。
+    // 所以这里直接归零，两条通道只留 guide 那一条。
+    if (AevonKbGuideFilled != 0) return 0.0;
     return extra;
 }
 
@@ -6643,6 +6703,93 @@ static void AevonKbGuideNote(void) {
              found.bounds.size.width, found.bounds.size.height,
              box.origin.y, box.size.height, (double)AevonKbTopSeen);
     AevonKbLog(line);
+}
+
+// MARK: - 0.1.77 键盘布局参考线（`UIKeyboardLayoutGuide`）兜底
+
+/// 表外 App 的最后一条通道。
+///
+/// Aevon(148) 里 Safari 的读数把「靠通知矩形调它」这条路彻底否掉了：
+///
+///   kb: note rect raw=701 out=616 cal=0 fixed=616 nh=316   ← 值全对
+///   kb: inter true=316 sys=101 origin=215 sceneH=717       ← 交集也对
+///   kb: caret cls=UnifiedField y=725..746 win=717 kb=513 bar=713..758
+///   kb: caret cls=UnifiedField y=725..746 win=717 kb=513 bar=713..758   （学完 192 之后）
+///
+/// `out` 从 616 改到 424，输入条底边**一 pt 没动**（七次采样里六次都是 758，
+/// 只有一次 543）。也就是说 Safari 的地址栏既不读 `UIKeyboardFrameEndUserInfoKey`，
+/// 也不读 `intersectionHeightForWindowScene:`。它读的是**第三条通道**：
+///
+///   kb: guide win=430x717 top=0 h=0
+///
+/// 键盘布局参考线的高度**恒为 0**。这条线本该由 UIKit 按「键盘窗与本窗口的交集」
+/// 自己算，可我们的 App 跑在别人（宿主）的场景里，UIKit 根本没把这只键盘和这个窗口
+/// 关联起来 —— 这也是微信 0.1.56 那一版 `keyboardLayoutGuide` 一直是 `h=0` 的同一个
+/// 原因（见 `AevonKbGuideNote` 上面的长注释）。
+///
+/// 所以这一版把这条线**自己喂上**：`layoutFrame` 原本高度不足 1 pt 时，按
+/// 「窗口底边往上 cover pt」返回一个真值。只在下面三个条件同时成立时动手：
+///
+///   ① 原值高度 < 1 pt —— 已经拿到真值的 App 一个字节都不碰；
+///   ② 键盘确实在屏（`AevonKbNoteActive != 0`）；
+///   ③ 该 App **不**在我们已校准的名单里（QQ / 微信 / 抖音）。
+///
+/// ③ 是这一版最要紧的一条：前两个 App 现在靠通知矩形已经摆对了，抖音的口径本来
+/// 就不同；它们若也读到这条线，会**在已经正确的让位之上再让一次**（正是 0.1.69
+/// 「让两次」那个坑）。名单外（Safari / 酷安 / 贴吧 …）才是这条线唯一该服务的人。
+static CGRect (*AevonKbGuideOrig)(id, SEL);
+static Class AevonKbGuideClass;
+static int AevonKbGuideFillNotes;
+
+static BOOL AevonKbGuideWanted(void) {
+    NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
+    if (bundle == nil) return NO;
+    if ([bundle isEqualToString:@"com.tencent.mqq"]) return NO;
+    if ([bundle isEqualToString:@"com.tencent.xin"]) return NO;
+    if ([bundle isEqualToString:@"com.ss.iphone.ugc.Aweme"]) return NO;
+    return YES;
+}
+
+static CGRect AevonKbGuideFrame(id self, SEL _cmd) {
+    CGRect box = AevonKbGuideOrig != NULL ? AevonKbGuideOrig(self, _cmd) : CGRectZero;
+    if (box.size.height > 1.0) return box;                 // 系统给了真值 ⇒ 不插手
+    if (AevonKbNoteActive == 0) return box;                // 键盘不在屏 ⇒ 不插手
+    if (AevonKbGuideClass == Nil || ![self isKindOfClass:AevonKbGuideClass]) return box;
+    if (!AevonKbGuideWanted()) return box;
+    SEL ownSel = sel_registerName("owningView");
+    if (![self respondsToSelector:ownSel]) return box;
+    UIView *owner = ((id (*)(id, SEL))objc_msgSend)(self, ownSel);
+    if (owner == nil) return box;
+    CGFloat ownW = owner.bounds.size.width;
+    CGFloat ownH = owner.bounds.size.height;
+    if (ownW < 60.0 || ownH < 60.0) return box;
+    CGFloat full = AevonKbNativeBounds(nil).size.height;
+    if (full < 400.0) return box;
+    CGFloat top = AevonKbTopFixed(full);                   // 屏幕坐标键盘真实上沿
+    if (top < 200.0) top = AevonKbAnchorValue(full);
+    if (top < 200.0) return box;
+    CGFloat cover = full - top;
+    if (cover < 40.0 || cover > ownH - 40.0) return box;
+    AevonKbGuideFilled = 1;
+    if (AevonKbGuideFillNotes < 6) {
+        AevonKbGuideFillNotes += 1;
+        char line[200];
+        snprintf(line, sizeof(line), "kb: guide fill h=%.0f own=%.0fx%.0f cover=%.0f\n",
+                 cover, ownW, ownH, cover);
+        AevonKbLog(line);
+    }
+    return CGRectMake(0.0, ownH - cover, ownW, cover);
+}
+
+static void AevonKbGuideHookInstall(void) {
+    if (AevonKbGuideOrig != NULL) return;
+    if (AevonKbGuideClass == Nil) AevonKbGuideClass = NSClassFromString(@"UIKeyboardLayoutGuide");
+    Class cls = NSClassFromString(@"UILayoutGuide");
+    if (cls == Nil) return;
+    Method m = class_getInstanceMethod(cls, sel_registerName("layoutFrame"));
+    if (m == NULL) return;
+    AevonKbGuideOrig = (CGRect (*)(id, SEL))method_getImplementation(m);
+    method_setImplementation(m, (IMP)AevonKbGuideFrame);
 }
 
 /// 0.1.67 — **输入框到底在哪一行**（屏幕坐标），每个键盘周期打一条。

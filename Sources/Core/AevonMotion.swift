@@ -256,9 +256,13 @@ enum AevonMotion {
     /// 逐帧位移量是前大后小（1234→1150→1080→1046→1012→965→928→918），
     /// 末尾 2 pt 内收、**没有过冲**，所以是一条 ease-out，不是弹簧。
     ///
-    /// 之前这一段是直接赋值 `card.frame = target`，一帧到位 —— 用户看到的就是
-    /// 「突然撑满」。0.36 s 是那个视频实测的中位值。
-    static let fillDuration: TimeInterval = 0.36
+    /// 0.1.77 — **0.36 s 按用户实测偏慢**（Aevon(148)：「过渡动画有点慢，看起来
+    /// 不流畅」）。参考录屏量的是**别人家**浮窗的总位移时间，它那一段里还包含
+    /// 键盘自己的 0.25 s 动画；我们把卡片独立于键盘跑 0.36 s，于是卡片比键盘晚
+    /// 0.11 s 落地 —— 眼睛看到的是「键盘已经到位、窗口还在长」的拖尾，这就是
+    /// 「不流畅」的来源。改回与系统键盘同速的 **0.24 s**：起手跟键盘同拍，
+    /// 落地也同拍，中间不再有多余尾段。曲线仍是 ease-out（实测前大后小、无过冲）。
+    static let fillDuration: TimeInterval = 0.24
 
     @discardableResult
     static func lift(_ views: [UIView], from scale: CGFloat, center: CGPoint?,
