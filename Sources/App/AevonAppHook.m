@@ -6089,10 +6089,79 @@ static CGFloat AevonKbTopFixed(CGFloat full) {
     if ([bundle isEqualToString:@"com.tencent.mqq"]) return 616.0;
     if ([bundle isEqualToString:@"com.tencent.xin"]) return 616.0;
     if ([bundle isEqualToString:@"com.ss.iphone.ugc.Aweme"]) return 611.0;
-    return 0.0;
+    // 0.1.75 — **表外 App 不再返回 0。**
+    //
+    // 键盘上沿是「这一把键盘在屏幕上从哪一行开始」，与是哪个 App 无关：中文键盘
+    // 就是 616、抖音那把（含它自己的工具栏）就是 611。返回 0 等于说「不知道」，
+    // 于是 `AevonKbIntersection` 退回 `AevonKbTopSettled` —— 那是动画途中的值
+    // （Aevon(146) 的 Safari：701 → 570 → 440），`truth` 随之在 231 / 362 / 492
+    // 之间跳，输入框跟着上下跳。这就是「表外 App 表现怪」的直接原因，不是它们
+    // 各自有什么私有公式。
+    //
+    // 改成返回锚点值：本机中文键盘即 616（`full − 316`，与三家同一行），truth
+    // 恒定为 316，插入点位置不再随通知的到达时机变。锚点若能学到真实 `lead`
+    // （300~340）会自己更新，换键盘高度也能跟。
+    return AevonKbAnchorValue(full);
+}
+
+/// 0.1.75 — **每个 App 自己学到的额外让位量**（屏幕 pt）。
+///
+/// 为什么需要它：表外 App 分成两类，从代码上看不出来 ——
+///
+///   会 convert 的（绝大多数，苹果文档要求）—— 它们把通知里的屏幕坐标自己换算
+///     成窗口坐标，我们**什么都不用做**，给了真值就正确。
+///   不 convert 的（QQ / 微信就是这种）—— 它们直接拿 `origin.y` 当窗口坐标用，
+///     让位量恒少「场景原点」215 pt，输入框整条沉进键盘。
+///
+/// 这两类没有可靠的静态判据（类名、是否 Swift、是否用 UIScrollView 都不作数），
+/// 但**运行时能直接看出来**：键盘起来 1.9 s 后量一次输入框自己的矩形，底边到底
+/// 在键盘上沿之上还是之下，一切都清楚了。被盖就说明是第二类，差多少补多少，
+/// 按 Bundle 记到偏好域里，下一次开键盘直接生效。
+///
+/// 这就避免了「把每个 App 装一遍挨个调」：任何一个 App（包括以后新装的）第一次
+/// 打开键盘时被盖，我们自己会量到并记住，第二次就是对的。
+static volatile CGFloat AevonKbExtraCal = 0.0;
+static volatile int AevonKbExtraLoaded = 0;
+
+/// 从 App 自己的偏好域读回学习值。构造函数里调一次即可（读的是本地缓存，不阻塞）。
+static void AevonKbExtraLoad(void) {
+    if (AevonKbExtraLoaded) return;
+    AevonKbExtraLoaded = 1;
+    NSString *selfID = [[NSBundle mainBundle] bundleIdentifier];
+    if (selfID.length == 0) return;
+    CFPropertyListRef boxed = CFPreferencesCopyAppValue(CFSTR("AevonKbExtra"),
+                                                        (__bridge CFStringRef)selfID);
+    if (boxed == NULL) return;
+    if (CFGetTypeID(boxed) == CFNumberGetTypeID()) {
+        double value = 0.0;
+        if (CFNumberGetValue((CFNumberRef)boxed, kCFNumberDoubleType, &value)) {
+            // 合理区间：0 表示「不需要额外让位」，320 已超过整只键盘高度。
+            if (value >= -8.0 && value <= 340.0) AevonKbExtraCal = (CGFloat)value;
+        }
+    }
+    CFRelease(boxed);
+}
+
+/// 记住学习值。写盘丢到后台队列：`CFPreferencesSetAppValue` 之后 cfprefsd 会有
+/// 几十 ms 的回话等待，而这里是在主线程的输入框采样里调的，不能卡那一拍。
+static void AevonKbExtraStore(CGFloat value) {
+    AevonKbExtraCal = value;
+    NSString *selfID = [[NSBundle mainBundle] bundleIdentifier];
+    if (selfID.length == 0) return;
+    CFStringRef app = (CFStringRef)CFRetain((__bridge CFStringRef)selfID);
+    double payload = (double)value;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        CFNumberRef num = CFNumberCreate(NULL, kCFNumberDoubleType, &payload);
+        if (num != NULL) {
+            CFPreferencesSetAppValue(CFSTR("AevonKbExtra"), num, app);
+            CFRelease(num);
+        }
+        CFRelease(app);
+    });
 }
 
 static CGFloat AevonKbNoteCalibration(void) {
+    AevonKbExtraLoad();
     NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
     if (bundle == nil) return 0.0;
     // 0.1.73 — 这个量**不再是「每个 App 的输入条厚度」那种拟合值**，它是一个几何量：
@@ -6137,9 +6206,23 @@ static CGFloat AevonKbNoteCalibration(void) {
     //
     // ⚠️ 260 这个数只由两条实测斜率反解，没有第三点验证。抖音仍然是 0 ——
     // 它本来就正常，且它对 `out` 的依赖方式与这两个不同。
-    if ([bundle isEqualToString:@"com.tencent.mqq"]) return 260.0;
-    if ([bundle isEqualToString:@"com.tencent.xin"]) return 260.0;
-    return 0.0;
+    // 抖音：它自己把工具栏算进键盘矩形，口径与别人不同，本机实测它**不用任何
+    // 换算**就是对的（`out=611 cal=0 fixed=611` ⇒ `bar` 底 427）。别给它加减法。
+    if ([bundle isEqualToString:@"com.ss.iphone.ugc.Aweme"]) return 0.0;
+    CGFloat extra = AevonKbExtraCal;
+    // 场景原点：屏幕坐标 → 窗口坐标的那一截。缓存没写就先按本机竖屏兜底。
+    CGFloat full = AevonKbNativeBounds(nil).size.height;
+    CGFloat origin = AevonKbSceneOriginCache;
+    if (origin < 1.0 || origin > 400.0) origin = (fabs(full - 932.0) < 4.0) ? 215.0 : 0.0;
+    // QQ / 微信：不 convert，基准要减掉 215；另外它们的输入条下面还有一行工具
+    // 按钮（表情/图片/语音），实测要多让 45 才能整行露出，故 215 + 45 = 260。
+    if ([bundle isEqualToString:@"com.tencent.mqq"]
+        || [bundle isEqualToString:@"com.tencent.xin"]) {
+        return origin + 45.0 + extra;
+    }
+    // 表外 App：默认 0 —— 它们自己会 convert，给了真值就正确。只有被量到「确实
+    // 被盖」时才靠 `AevonKbExtraCal` 补上（见 `AevonKbCaretNote` 末尾的学习段）。
+    return extra;
 }
 
 static void AevonKbLog(const char *line) {
@@ -6637,6 +6720,45 @@ static void AevonKbCaretNote(void) {
              CGRectIsNull(bar) ? -1.0 : bar.origin.y,
              CGRectIsNull(bar) ? -1.0 : CGRectGetMaxY(bar));
     AevonKbLog(line);
+    // 0.1.75 — **自学习：这一步就是「不用逐个 App 标定」的答案。**
+    //
+    // 键盘起来 0.75 s / 1.9 s 各量一次，量到的是**输入框自己的矩形**（屏幕坐标，
+    // 任何 App 都能量，`AevonKbFirstTextInput` 只认 `isFirstResponder` +
+    // `UITextInput`，不认类名）。把它和键盘可见上沿一比，这个 App 属于哪一类立刻
+    // 就清楚了 —— 不需要知道它是 ObjC 还是 Swift、用不用 UIScrollView：
+    //
+    //   底边 < 上沿 − 8  ⇒ 它自己换算对了，什么都不做（绝大多数 App）
+    //   底边 ≥ 上沿 − 8  ⇒ 它把 `origin.y` 直接当窗口坐标用了，让位少了；
+    //                      少的正是「底边 − 目标」，记住这个数，下次开键盘补上
+    //
+    // 目标是「上沿 − 50」而不是「上沿」：输入条下面通常还有一行工具按钮
+    // （表情 / 图片 / 语音），QQ 群和微信被盖的就是那一行（Aevon(145)）。
+    //
+    // 记录按 Bundle 存进 App 自己的偏好域（`AevonKbExtra`），进程重启仍在。
+    if (!CGRectIsNull(bar)) {
+        CGFloat fullH = AevonKbNativeBounds(nil).size.height;
+        CGFloat kbVisible = AevonKbTopFixed(fullH);
+        if (kbVisible < 1.0) kbVisible = fullH - 316.0;
+        CGFloat target = kbVisible - 50.0;
+        CGFloat bottom = CGRectGetMaxY(bar);
+        NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+        // 抖音口径不同（它把工具栏算进键盘矩形，`cal` 恒 0），不参与学习。
+        BOOL skip = [bid isEqualToString:@"com.ss.iphone.ugc.Aweme"];
+        if (!skip && bottom > 100.0 && target > 200.0) {
+            CGFloat need = bottom - target;
+            CGFloat cur = AevonKbExtraCal;
+            // 只往「多让」方向走，且要比现有值多 15 才动 —— 同一份读数重复采样
+            // 时是幂等的，不会一次次累加。
+            if (need > cur + 15.0 && need < 340.0) {
+                AevonKbExtraStore(need);
+                char learn[200];
+                snprintf(learn, sizeof(learn),
+                         "kb: learn bar=%.0f target=%.0f need=%.0f extra=%.0f -> %.0f\n",
+                         bottom, target, need, cur, need);
+                AevonKbLog(learn);
+            }
+        }
+    }
 }
 
 /// 母本 0x5284 的原式：`(原值 × 屏幕高 ÷ 键盘窗高) × 1.0 + 键盘窗高 − 屏幕高`。
