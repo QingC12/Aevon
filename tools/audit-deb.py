@@ -636,7 +636,21 @@ def main():
                   b"notify: activate latch held, previous boot died while armed",
                   b"notify: activate latch cleared uptime=",
                   b"notify: activate off switch=notify.off",
-                  b"notify: activate arm scheduled in ",):
+                  b"notify: activate arm scheduled in ",
+                  # 0.1.86 — 激活面普查（只读）。这一版的价值全在「取证是不是
+                  # 真的装进去了」：0.1.85 的教训是断言写了、位置放错了，于是
+                  # audit 失败而二进制其实没问题。所以这五条必须落在 Aevon.dylib
+                  # （SpringBoard 侧）那一组里 —— AevonApp.dylib 没有这个文件。
+                  #   exists  = 18 个候选类在不在（1 / 0）
+                  #   ~       = 某个类自己的方法名，花括号里是参数编码
+                  #   g       = 全局命中（不限类名）
+                  #   begin/end = 一次普查的边界，缺 end 就是半路断了
+                  b"surf: exists ",
+                  b"surf: chain %@",
+                  b"surf: %s~%s n=%d/%u %@",
+                  b"surf: g n=%d %@",
+                  b"surf: begin (0.1.86 read-only)",
+                  b"surf: end",):
 
         if token not in dylib_early:
             bad(f"host: {token.decode(errors='replace')} missing from Aevon.dylib — "

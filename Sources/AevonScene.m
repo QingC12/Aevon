@@ -2545,6 +2545,10 @@ static void AevonNotifyMethods(const char *className, const char *needle) {
                   className, needle, count, count > 0 ? hits : @"(none)"] UTF8String]);
 }
 
+/// 0.1.86 — 定义在文件末尾（普查那一段）。这里先声明：装配这条路在本函数里，
+/// 而普查是纯只读的，晚一步再定义不影响阅读顺序。
+void AevonActivateSurfaceCensus(void);
+
 void AevonNotificationOpenInstall(void) {
     static int installed = 0;
     if (installed) return;
@@ -2560,7 +2564,15 @@ void AevonNotificationOpenInstall(void) {
     //   · `UNSUserNotificationServer` / `NCNotificationDispatcher` /
     //     `SBNotificationBannerDestination` 三个类在 SpringBoard 里**都不存在**。
     // 再按名字猜就是赌。这一版只把真名查出来。
-    AevonLogRaw("notify: census pass, activate probe separate (0.1.85)");
+    AevonLogRaw("notify: census pass, activate probe separate (0.1.86)");
+
+    // 0.1.86 — 激活面普查。**不挂在闩上**：闩管的是「换 IMP」那件危险事，
+    // 而普查一行都不改，没有理由让一次历史崩溃把它一起关掉。启动后 10 秒再跑，
+    // 让 SpringBoard 自己把镜像加载完，别和开机抢 objc 的类锁。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        AevonActivateSurfaceCensus();
+    });
 
     // 第二路（0.1.42 起）保留：只探不猜。类不存在就什么都不发生；真机上存在时
     // 才挂 `UNSUserNotificationServer -presentPresentable:withOptions:userInfo:`。
@@ -2905,4 +2917,197 @@ void AevonActivateProbeInstall(void) {
                   args, encoding != NULL ? encoding : "?",
                   back == (IMP)AevonActivate ? @"exact" : @"signed",
                   AevonActOriginal != NULL ? 1 : 0] UTF8String]);
+}
+
+// MARK: - 0.1.86 激活面普查（只读，一次装机能答完）
+//
+// 0.1.85 的真机答案（Aevon(153)，19:15:21）是一行：
+//
+//   notify: activate absent reason=no-method
+//   notify: SBMainWorkspace~activate n=5 systemService:canActivateApplication:withResult:
+//          _keyboardActivate _keyboardActivateEventDown: accessibilityActivate
+//          setAccessibilityActivateBlock:
+//
+// 这五行里没有一条是「拿 bundle id 去激活一个 App」。也就是说母本那个
+// `_activateBundleID:requestID:isTrusted:options:source:originalSource:withResult:`
+// **在这台机器的 SpringBoard 里不存在** —— 不是「没挂上」，是名字不对。
+//
+// 但 0.1.85 那次列名本身就有个洞：`strcasestr(sel, "activate")` 匹配不到
+// `activation`（`activate` 的第七个字符是 `e`，`activation` 那里是 `i`）。
+// 凡是叫 `...ApplicationActivation...` 的方法，那一版全都看不见。所以「这台
+// 机器没有激活入口」这个结论还不能下 —— 只能说「没有叫 activate 的」。
+//
+// 这一版把网撒对：
+//   · 需词从 `activate` 改成 `activ`（同时覆盖 activate / activation / deactivate）；
+//   · 加 `applic` / `launch` 两路，因为激活入口也可能根本不叫 activ*；
+//   · **带参数编码**。下一版换 IMP 时要靠它对齐参数个数与类型 —— 0.1.85 的
+//     闸二就是在赌这个形状，这次直接量出来。
+//   · 全局扫一遍（不限类名）：任何类上同时含 `activ` 与（`bundl`|`applic`）的
+//     选择子，以及 `openurl` / `openapplication` / `launchapplication`。母本的
+//     正解如果换了宿主类，这一行会把它露出来。
+//
+// 全部只读：`class_copyMethodList` + `method_getTypeEncoding`，没有一次
+// `method_setImplementation`，没有一次 `objc_msgSend` 到系统对象上。跑在全局
+// 队列（低优先级），不占 SpringBoard 主线程一拍。
+
+/// 普查的总行数预算。一次装机的证据够用就行；真超了说明关键词选宽了，
+/// 那是下一版要收窄的信号，不是把日志撑大。
+static int AevonSurfLines = 0;
+
+static void AevonSurfEmit(NSString *line) {
+    if (AevonSurfLines >= 46) return;
+    AevonSurfLines += 1;
+    AevonLogRaw(line.UTF8String);
+}
+
+/// 这些类在不在。一行答完 —— 「类不存在」与「类在但方法改了名」是两条
+/// 完全不同的下一步，混在一行里会读错。
+static void AevonSurfExists(void) {
+    static const char *names[] = {
+        "SBMainWorkspace", "SBWorkspace", "SBApplicationController",
+        "SBLockScreenManager", "SBUIController", "SBSceneManagerCoordinator",
+        "SBNCNotificationDispatcher", "SBDashBoardNotificationPresenter",
+        "SBUserNotificationCenter", "SBNotificationBannerDestination",
+        "NCNotificationDispatcher", "NCNotificationShortLookViewController",
+        "NCNotificationLongLookViewController", "NCNotificationRequest",
+        "NCNotificationListViewController", "SBLockScreenNotificationListController",
+        "SBActivationSettings", "UNSUserNotificationServer"
+    };
+    NSMutableString *buf = [NSMutableString string];
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        Class cls = objc_getClass(names[i]);
+        [buf appendFormat:@"%s=%d ", names[i], cls != Nil ? 1 : 0];
+    }
+    AevonSurfEmit([NSString stringWithFormat:@"surf: exists %@", buf]);
+}
+
+/// 类族链。一个类的真身常常在父类上（`SBNCNotificationDispatcher` 就是这种），
+/// 所以「本类没有这个方法」不等于「这个家族没有」——下一版要不要换宿主类，
+/// 全靠这一行。
+static void AevonSurfChain(const char *className) {
+    Class cls = objc_getClass(className);
+    if (cls == Nil) return;
+    NSMutableString *buf = [NSMutableString stringWithFormat:@"%s", className];
+    Class walk = class_getSuperclass(cls);
+    int depth = 0;
+    while (walk != Nil && depth < 4) {
+        const char *name = class_getName(walk);
+        [buf appendFormat:@" > %s", name != NULL ? name : "?"];
+        walk = class_getSuperclass(walk);
+        depth += 1;
+    }
+    AevonSurfEmit([NSString stringWithFormat:@"surf: chain %@", buf]);
+}
+
+/// 列某个类自己的方法（只本类，不含父类）。`withSig` 时把参数编码一起带上。
+///
+/// 只本类是有意的：`class_getInstanceMethod` 会沿父类链找，而下一版要换 IMP 的
+/// 那一条必须由目标类自己实现，否则改的是父类、连坐所有子类。
+static void AevonSurfClass(const char *className, const char *needle,
+                           int cap, BOOL withSig) {
+    Class cls = objc_getClass(className);
+    if (cls == Nil) return;   // `surf: exists` 已经答过，这里不再重复
+    unsigned int total = 0;
+    Method *list = class_copyMethodList(cls, &total);
+    if (list == NULL) return;
+    NSMutableString *buf = [NSMutableString string];
+    int hits = 0;
+    for (unsigned int i = 0; i < total && hits < cap; i++) {
+        const char *sel = sel_getName(method_getName(list[i]));
+        if (sel == NULL || strcasestr(sel, needle) == NULL) continue;
+        if (withSig) {
+            const char *enc = method_getTypeEncoding(list[i]);
+            [buf appendFormat:@"%s{%s} ", sel, enc != NULL ? enc : "?"];
+        } else {
+            [buf appendFormat:@"%s ", sel];
+        }
+        hits += 1;
+    }
+    free(list);
+    if (hits == 0) return;
+    AevonSurfEmit([NSString stringWithFormat:@"surf: %s~%s n=%d/%u %@",
+                   className, needle, hits, total, buf]);
+}
+
+/// 全局扫：不限类名。命中条件写死两条，因为这两条正好对应「通知点击最终要
+/// 走的那一步」——(1) 拿 bundle/app 去激活，(2) 拿 URL 去打开。
+static void AevonSurfGlobal(void) {
+    int total = objc_getClassList(NULL, 0);
+    if (total <= 0) {
+        AevonLogRaw("surf: global unavailable");
+        return;
+    }
+    Class *list = (Class *)malloc(sizeof(Class) * (size_t)total);
+    if (list == NULL) return;
+    total = objc_getClassList(list, total);
+    NSMutableString *buf = [NSMutableString string];
+    int hits = 0;
+    for (int i = 0; i < total && hits < 60; i++) {
+        unsigned int count = 0;
+        Method *methods = class_copyMethodList(list[i], &count);
+        if (methods == NULL) continue;
+        const char *cls = class_getName(list[i]);
+        for (unsigned int j = 0; j < count && hits < 60; j++) {
+            const char *sel = sel_getName(method_getName(methods[j]));
+            if (sel == NULL || cls == NULL) continue;
+            BOOL activates = (strcasestr(sel, "activ") != NULL) &&
+                             (strcasestr(sel, "bundl") != NULL ||
+                              strcasestr(sel, "applic") != NULL);
+            BOOL opens = strcasestr(sel, "openurl") != NULL ||
+                         strcasestr(sel, "openapplication") != NULL ||
+                         strcasestr(sel, "openrequest") != NULL ||
+                         strcasestr(sel, "launchapplication") != NULL;
+            if (!activates && !opens) continue;
+            [buf appendFormat:@"%s.%s ", cls, sel];
+            hits += 1;
+            if (buf.length > 1100) {
+                AevonSurfEmit([NSString stringWithFormat:@"surf: g n=%d %@", hits, buf]);
+                [buf setString:@""];
+            }
+        }
+        free(methods);
+    }
+    free(list);
+    if (buf.length > 0) {
+        AevonSurfEmit([NSString stringWithFormat:@"surf: g tail n=%d %@", hits, buf]);
+    }
+    if (hits == 0) AevonLogRaw("surf: g n=0 (no bundle/url activation selector anywhere)");
+}
+
+/// 入口。装配前调用一次；跑在低优先级全局队列上。
+void AevonActivateSurfaceCensus(void) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        AevonLogRaw("surf: begin (0.1.86 read-only)");
+        AevonSurfExists();
+        AevonSurfChain("SBMainWorkspace");
+        AevonSurfChain("SBNCNotificationDispatcher");
+        AevonSurfChain("SBDashBoardNotificationPresenter");
+        AevonSurfChain("SBLockScreenManager");
+        // 工作区：激活总入口最可能在这两个类上。带编码。
+        AevonSurfClass("SBMainWorkspace", "activ", 24, YES);
+        AevonSurfClass("SBMainWorkspace", "applic", 24, YES);
+        AevonSurfClass("SBMainWorkspace", "launch", 16, YES);
+        AevonSurfClass("SBWorkspace", "activ", 24, YES);
+        AevonSurfClass("SBWorkspace", "applic", 16, YES);
+        // 应用控制器：按 bundle id 取 SBApplication 的那一层。
+        AevonSurfClass("SBApplicationController", "activ", 12, NO);
+        AevonSurfClass("SBApplicationController", "applic", 12, NO);
+        AevonSurfClass("SBLockScreenManager", "activ", 16, NO);
+        // 通知栈：如果激活入口这条路不通，下一步要挂这里。
+        AevonSurfClass("NCNotificationShortLookViewController", "tap", 8, NO);
+        AevonSurfClass("NCNotificationShortLookViewController", "handle", 12, NO);
+        AevonSurfClass("NCNotificationDispatcher", "action", 12, NO);
+        AevonSurfClass("NCNotificationDispatcher", "handle", 12, NO);
+        AevonSurfClass("SBNCNotificationDispatcher", "perform", 12, NO);
+        AevonSurfClass("SBNCNotificationDispatcher", "request", 12, NO);
+        AevonSurfClass("SBDashBoardNotificationPresenter", "perform", 12, NO);
+        AevonSurfClass("SBDashBoardNotificationPresenter", "request", 12, NO);
+        AevonSurfClass("SBUserNotificationCenter", "request", 12, NO);
+        AevonSurfClass("SBUserNotificationCenter", "action", 12, NO);
+        AevonSurfGlobal();
+        AevonLogRaw("surf: end");
+    });
 }
