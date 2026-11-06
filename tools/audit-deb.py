@@ -605,7 +605,11 @@ def main():
                   # 卡片永远停在 430x717@0,215，三边贴屏、环带按不到。
                   # 两条都断言，缺一条就是这条路又断了半边。
                   b"win: keyboard fill on card=",
-                  b"win: keyboard fill off card="):
+                  b"win: keyboard fill off card=",
+                  # 0.1.62 — 场景帧落后时的对账行（`win: scene lag now=… want=…`）。
+                  # 与 0.0.74 撤掉的 `win: scene nudge door=`（内容轻推）不是一回事：
+                  # 这条只写 scene 的 settings，不碰任何已经上屏的内容。
+                  b"win: scene lag now="):
         if token not in dylib_early:
             bad(f"host: {token.decode(errors='replace')} missing from Aevon.dylib — "
                 "the ring would never appear on the home screen")
@@ -969,17 +973,12 @@ def main():
                       # 下一份日志能直接分开，不用再猜。
                       b"app: band note from host",
                       b"app: band prefs on=",
-                      # 0.1.60 — 「收 App 自己窗口」这件事的证词，也是 `setFrame:`
-                      # 那条旧禁令放宽后唯一的落点：`kb: win fit h=` 每次落一次，
-                      # `kb: win unfit h=` 收起时还回去。两条都在，说明只有这一处
-                      # 在动窗口；被拒时打 `kb: win fit reject`（读数不稳/越界）。
-                      b"kb: win fit h=%.0f",
+                      # 0.1.62 — 「收 App 窗口」这条路整条撤掉（Aevon(133)：收了
+                      # 反而把按场景排版的输入栏裁掉，输入框出现率更低）。留下两条
+                      # 证词：`kb: win keep` 每次弹起一行，读出窗口高 + 场景原点，
+                      # 证明我们一个字节都没写；`kb: win unfit` 只在清残留时才打印。
+                      b"kb: win keep h=%.0f",
                       b"kb: win unfit h=%.0f",
-                      b"kb: win fit reject want=%.0f",
-                      # 0.1.61 — 「场景帧还没落地」那半拍的证词。它出现了说明
-                      # 闸门在挡错算（Aevon(132) 的 h=573 / sceneY=0）；
-                      # 它不出现也不等于没问题，只说明那几个采样点没撞上。
-                      b"kb: win fit wait sceneY=0 top=%.0f",
                       # 0.1.35 — 判不中的时候把坐标与两个矩形写下来。V111 里
                       # `app: band touch at` 是 0，而带子的值明明是对的 ⇒ 分不出
                       # 「这一拍没进来」还是「进来了被几何否掉」。有这一行就分得开。

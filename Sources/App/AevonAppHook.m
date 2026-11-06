@@ -4765,11 +4765,6 @@ static CGFloat AevonKbVisualTop(void);
 /// 0.1.59 — 场景几何（都定义在键盘段后部，这里只要前置声明）。
 static CGRect AevonKbSceneRectOnScreen(void);
 static CGFloat AevonKbSceneHeightNow(void);
-/// 0.1.61 — 宿主上报的环带底边（定义在键盘段后部）与该机型的原生屏高。
-/// 只有一条用途：判断宿主此刻在不在键盘态（底边铺到屏底就是），
-/// 用来挡掉「场景还没搬就按 0 收窗口」那一次错算。
-static CGFloat AevonKbBandBottomEdge(void);
-static CGRect AevonKbNativeBounds(UIScreen *screen);
 /// 0.1.57 — **三条通道一起写**，因为 0.1.56 只写了最没希望的那一条。
 ///
 /// Aevon(129) 的证词只有一行，但足够定案：
@@ -4888,79 +4883,36 @@ static UIWindow *AevonKbAppWindow(void) {
     return fallback;
 }
 
-/// 0.1.59 — 把 App 的窗口收到键盘上沿。
+/// 0.1.62 — **不碰 App 的窗口**。这一版只留一行证词。
 ///
-/// 前八版都在动**承载场景**（搬原点 / 缩高度）。Aevon(131) 证明缩场景这条路走不通：
-/// 键盘挂在场景上，场景底边一抬，UIKit 就把键盘顶到场景 358−74=284（屏幕 499），
-/// 而场景只画到 573 —— 只有最上面 74 pt 落在画面里，用户看到「键盘只显示工具栏」。
+/// 0.1.59/0.1.60/0.1.61 三版都在收 App 自己的窗口（`h = 键盘顶边 − 场景原点`），
+/// 理由是「窗口是 App 排版的根，收它 App 会重排」。Aevon(133) 把这条路否掉了，
+/// 而且否得很干净 —— 同一份日志里先有错值、后有对值：
 ///
-/// 于是改成：场景不动（`FloatHost.setKeyboardFill` 恒铺 430×717@215），只收
-/// **App 的窗口**。窗口是 App 自己排版的根，收它 App 会按新高度重排一次（原生键盘
-/// 就是这么做的），输入框落到窗口底边 = 键盘上沿；键盘在窗口外面，一个像素没动。
+///   kb: lead h=101.0 … scene=717.0 -> 101.0      ← 场景还在 0：键盘在窗口里只压住 101
+///   kb: lead h=289.0 … base=932.0  -> 289.0      ← 场景已到 215：真实让位量 289（= 932−643）
 ///
-/// 闸门：只在两次采样相差 < 40 时才落（键盘动画期间每帧都在变，照落就是
-/// 「一顿乱跳」）；目标必须 ≥ 240 且 ≤ 场景高 − 60。
-static void AevonKbFitWindow(CGFloat top, BOOL late) {
+/// 289 是**正确值**：App 自己按它把输入框抬到键盘上沿（643），我们一个像素都不用动。
+/// 三个 App（QQ / 微信 / 备忘录）都是这个时间线：第一问 101/74，第二问 289。
+/// 也就是说 —— **只要场景在 215，App 自己就会让位**；0.1.55~0.1.58 失败的原因是场景
+/// 根本没搬（`lead` 一路 101/74），不是 App 不肯让。
+///
+/// 收了窗口反而有害：QQ 的 `DrawerTransitionView` 是 0,0,430x932，按场景高度排版，
+/// 窗口被收到 358 之后，它那条输入栏就落在窗口外面被裁掉 —— 用户看到的就是
+/// 「0.1.61 输入框出现次数明显低于 0.1.60」+「内容缩成一条」+「尺寸乱跳」。
+///
+/// 所以本版把这条路整个撤掉：窗口高度一个字节都不写，只在开键盘时留一行读数，
+/// 让下一份日志能直接读出「我们没动它」与「App 自己让了多少」。
+static void AevonKbKeepWindow(void) {
     if (![NSThread isMainThread]) return;
-    if (AevonKbOn == 0) return;
-    if (top < 240.0 || top > 4000.0) return;
     UIWindow *window = AevonKbAppWindow();
     if (window == nil) return;
     CGRect box = AevonKbSceneRectOnScreen();
     CGFloat sceneY = CGRectIsNull(box) ? 0.0 : box.origin.y;
     CGFloat sceneH = AevonKbSceneHeightNow();
-    if (sceneH < 200.0) return;
-    // 0.1.61 — **场景原点还是 0 就先别收**。
-    //
-    // Aevon(132) 的 QQ 段：
-    //   kb: top publish door=3 top=573 measure=1
-    //   kb: win fit h=573 top=573 sceneY=0 sceneH=717 was=717
-    // 这时宿主已经把卡片铺成键盘态（`band report 430x783 at 0,149`，底边 932 = 屏底），
-    // 场景本该在 215，可 App 这边读到的还是 0 —— 它下一拍才落地（同屏还有
-    // `win: frame drift now=430x717@0 want=430x717@215`）。按 0 算出来的 h=573 让
-    // 窗口底边落到屏幕 788，比键盘顶还低 215，App 按这个高度排一次版，输入框就被
-    // 压到键盘底下；等它 0.6 s 后纠正成 358 时，那个 App 未必再排第二次 ——
-    // 用户看到的就是「输入框偶尔才出来」。
-    //
-    // 判据就是宿主自己的 band：只有键盘态卡片才会把底边铺到屏底（平时是
-    // `400x582 at 22,165`，底边 747）。它说在键盘态、场景却读 0 ⇒ 一定是在半路上，
-    // 等下一拍。`late` 那次（1.6 s）放行：到那时场景还没搬，说明宿主真的没搬，
-    // 按 0 算才是对的，不能让闸门把这种情况也饿死。
-    if (!late) {
-        CGFloat fullH = AevonKbNativeBounds(nil).size.height;
-        CGFloat bandBottom = AevonKbBandBottomEdge();
-        BOOL hostFilled = (bandBottom > 200.0 && fullH > 200.0
-                           && bandBottom >= fullH - 2.0);
-        if (hostFilled && sceneY < 1.0) {
-            static int waited = 0;
-            if (waited < 3) {
-                waited += 1;
-                char line[160];
-                snprintf(line, sizeof(line), "kb: win fit wait sceneY=0 top=%.0f sceneH=%.0f\n",
-                         top, sceneH);
-                AevonKbLog(line);
-            }
-            return;
-        }
-    }
-    CGFloat want = top - sceneY;
-    if (want < 240.0 || want > sceneH - 60.0) {
-        static int rejected = 0;
-        if (rejected < 3) {
-            rejected += 1;
-            char line[180];
-            snprintf(line, sizeof(line), "kb: win fit reject want=%.0f top=%.0f sceneY=%.0f sceneH=%.0f\n",
-                     want, top, sceneY, sceneH);
-            AevonKbLog(line);
-        }
-        return;
-    }
-    CGRect frame = window.frame;
-    if (fabs(frame.size.height - want) < 1.0) return;
-    window.frame = CGRectMake(frame.origin.x, frame.origin.y, frame.size.width, want);
-    char line[200];
-    snprintf(line, sizeof(line), "kb: win fit h=%.0f top=%.0f sceneY=%.0f sceneH=%.0f was=%.0f\n",
-             want, top, sceneY, sceneH, frame.size.height);
+    char line[180];
+    snprintf(line, sizeof(line), "kb: win keep h=%.0f sceneY=%.0f sceneH=%.0f\n",
+             window.frame.size.height, sceneY, sceneH);
     AevonKbLog(line);
 }
 
@@ -4980,18 +4932,8 @@ static void AevonKbUnfitWindow(void) {
 }
 
 /// 一次采样：发布顶边 + 稳定时收窗口。三次采样共用，见 `AevonKbEvaluate`。
-static CGFloat AevonKbTopPrev = 0.0;
-
-static void AevonKbSample(BOOL late) {
-    CGFloat top = AevonKbVisualTop();
+static void AevonKbSample(void) {
     AevonKbTopPublish(0.0);
-    // `late` 那次不看「两次读数相近」：它存在的意义就是兜住「场景迟迟没搬」这种
-    // 情况，再被前一道闸门挡住就等于白排一次。
-    if (top > 240.0
-        && (late || (AevonKbTopPrev > 240.0 && fabs(top - AevonKbTopPrev) < 40.0))) {
-        AevonKbFitWindow(top, late);
-    }
-    AevonKbTopPrev = top;
 }
 
 static void AevonKbEvaluate(NSDictionary *info) {
@@ -5004,27 +4946,22 @@ static void AevonKbEvaluate(NSDictionary *info) {
     // 它报的是「键盘超出场景的那部分」，本机恒为 717 一带）。顶边改成量键盘视图，
     // 而且要在**动画结束之后**量 —— 动画中键盘视图一路从 932 升到 616，中途量到的
     // 每个值都会变成一次卡片重排，那正是用户看到的「一顿乱跳」。
-    // 这里只在**状态翻转那一拍**安排三次采样（`AevonKbOn` 还没置 1），值相同的
+    // 这里只在**状态翻转那一拍**安排四次采样（`AevonKbOn` 还没置 1），值相同的
     // 会被 `AevonKbTopPublish` 自己去重。中途换高度（候选栏收放）不重新采，
     // 因为那只会多一次重排。
-    // 0.1.59 — 三次采样交给 `AevonKbSample`：它除了发布顶边，还会在两次读数
-    // 稳定（差 < 40）时收一次 App 窗口。0.15 s 那次几乎一定还在动画里，读数与
-    // 0.35 s 差得远，于是不落；0.60 s 那次才落地。
     if (on && AevonKbOn == 0) {
-        AevonKbTopPrev = 0.0;
+        // 0.1.62 — 采样只剩一个用途：把实测的键盘顶边发给宿主（`AevonKbTopPublish`）。
+        // 0.1.59~0.1.61 它顺带收窗口，那条路已被 Aevon(133) 否掉（见 `AevonKbKeepWindow`）。
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbSample(NO); });
+                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbSample(NO); });
+                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbSample(NO); });
+                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.95 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbSample(NO); });
-        // 0.1.61 — 第五次、也是最后一次兜底。前四次都可能撞上「场景还没搬」而被
-        // `AevonKbFitWindow` 的新闸门放过去（见那段注释）；到 1.6 s 场景还在 0，
-        // 那就是宿主真没搬，按 0 收才是对的。
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.60 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbSample(YES); });
+                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
+        // 开键盘这一拍留一行「我们没动窗口」的读数（每次弹起一行，不刷屏）。
+        AevonKbKeepWindow();
     }
     if (on == (AevonKbOn != 0)) {
         // 状态没变也要续一次：键盘一直开着的时候，租约靠这一点续命。
@@ -5054,8 +4991,9 @@ static void AevonKbEvaluate(NSDictionary *info) {
     } else {
         // 0.1.18 — 收起要**立刻**告诉桌面，不等租约过期。
         AevonKbPostOff();
-        // 0.1.59 — 窗口还回场景高，并把顶边读数清零（下一次弹起从干净状态开始）。
-        AevonKbTopPrev = 0.0;
+        // 0.1.62 — 窗口高度本版一次都没写过；这一行只是**清残留**：如果某个版本
+        // 或某个 App 的窗口还停在矮的一档（比如从 0.1.61 热更新过来），收起时把它
+        // 还回场景高。本来就等于场景高的话，`AevonKbUnfitWindow` 自己判重、不写。
         AevonKbUnfitWindow();
     }
     AevonRawNote(on ? "app: keyboard up (bridge)\n"
