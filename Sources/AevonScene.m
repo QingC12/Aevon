@@ -1873,7 +1873,6 @@ CGFloat AevonAppKbTop(NSString *bundleID) {
     NSMutableArray<NSString *> *paths = [NSMutableArray array];
     if (dir.length > 0) [paths addObject:[dir stringByAppendingPathComponent:@"tmp/aevon-kb"]];
     [paths addObject:@"/var/mobile/Aevon.kb"];
-    NSFileManager *manager = [NSFileManager defaultManager];
     for (NSString *path in paths) {
         NSString *text = [NSString stringWithContentsOfFile:path
                                                    encoding:NSUTF8StringEncoding error:NULL];
