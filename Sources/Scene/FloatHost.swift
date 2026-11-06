@@ -1118,6 +1118,15 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 键盘弹起那 0.25 s 里场景必须已经在 215 上，慢了就会先按 0 画一帧。
     var isKeyboardFilled: Bool { kbFilled }
 
+    /// 0.1.66 — 键盘刚收起、正在等场景搬回 0 的那段时间。
+    ///
+    /// 这一段里 `kbFilled` 已经是 false，可场景还没落地，守护循环若按常规退回
+    /// 「每 10 拍查一次」，就要再等 2 s 才把 215 改回 0 —— 卡片已经收成小窗，
+    /// 那一秒里 App 按 215 画、卡片按 0 装，正是用户报的「关闭键盘时闪黑一下」。
+    var isKeyboardSettling: Bool {
+        kbSettleUntil > 0 && CFAbsoluteTimeGetCurrent() < kbSettleUntil
+    }
+
     /// Answers a host only when the window is really up and really holds the
     /// view. A nil answer means "activate nothing": a presenter whose view is
     /// not in a window is 0.0.20's black screen, and that is not worth one more
@@ -3462,6 +3471,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var kbSavedOriginY: CGFloat = 0
     /// 0.1.56 — 键盘态之前场景的高度（0 = 跟随 `natural.height`）。
     private var kbSavedHeight: CGFloat = 0
+    /// 0.1.66 — 收起过程中「守着守护循环快查」的截止时刻（秒，0 = 不在收）。
+    private var kbSettleUntil: CFAbsoluteTime = 0
 
     /// 全体宿主里挑主窗让位。
     ///
@@ -3556,6 +3567,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 // 目标几何与当前一致就一个字节都不写，也不打日志 —— 0.1.60 的日志里
                 // 一秒能刷八条 `fill on`，既是噪声也是每拍一次 `reportBand` 的开销。
                 if card.frame == target, canvasOriginY == y, canvasHeight == 0 { return }
+            } else if kbSettleUntil > 0 {
+                // 0.1.66 — 收起还没落完（卡片仍是键盘态几何）时又起来了。
+                // 这时**不能**把当前几何当成「收起时几何」再存一遍，否则下一次
+                // 收起会把 430×717@215 还回去，小窗永远回不来。沿用上一份存档。
+                kbSettleUntil = 0
+                kbFilled = true
             } else {
                 kbSavedFrame = card.frame
                 kbSavedCrop = kbTopCrop
@@ -3616,33 +3633,64 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                                Double(canvasHeight > 16 ? canvasHeight : natural.height))
             var door: Int = 0
             if let sc = window.windowScene { door = Int(AevonPushSceneFrame(sc)) }
-            if !kbSavedFrame.isNull { card.frame = kbSavedFrame }
-            kbTopCrop = kbSavedCrop
-            followContent()
-            applyGlow()
-            Log.write("win: keyboard fill off card=" + size(card.frame.size)
-                      + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
-                      + " scene=" + String(format: "%.0f", canvasOriginY)
-                      + " crop=" + String(format: "%.0f", kbTopCrop)
-                      + " push=" + String(format: "%d", door))
-            // 0.1.53 — 上报推到下一拍。
+            // 0.1.66 — **卡片要等场景真回到 0 再收。**
             //
-            // Aevon(125) 的关键盘序列是：
-            //   win: keyboard fill off card=345x575 at 46,203     ← 卡片已经回到默认
-            //   win: band report 430x692 at 0,144                 ← 上报的却是过渡几何
-            //   （稳态应报 373x543 at 32,219）
+            // 0.1.56 把顺序摆对了（先放场景、再收卡片），可这两条指令之间没有
+            // 任何等待：`AevonPushSceneFrame` 走的是
+            // `updateSettings:withTransitionContext:`，写完即刻返回，真正落地还要
+            // 等 SceneProbe 那一拍。Aevon(137) 把中间态拍下来了：
             //
-            // 卡片从 430×932 收回 345×575 时，`bandRect` 依赖的 `reach` 与卡片
-            // 自己的布局还没走完这一拍，同拍上报就会把键盘态与默认态之间的插值
-            // （430x692@0,144）推给 App。App 按它重排一次、再按稳定值重排一次，
-            // 用户看到的就是「回到默认大小时内容排版错乱」。
+            //   win: keyboard fill off card=376x627 at 34,144 scene=0
+            //   win: frame drift now=430x717@215 want=430x717@0 door=3 wrote=3
             //
-            // 同一个函数里刚设完 frame，布局要等这一轮 runloop 才结算，所以推到
-            // 下一拍再报 —— 那时卡片和 `reach` 都已经是稳定值。
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self, !self.kbFilled else { return }
-                self.reportBand()
+            // 卡片已经收回小窗，场景还停在 215..932 —— 这一拍 App 的内容按 215 摆、
+            // 卡片按 0 装，两边错开 215 pt，缺的地方只能填黑。用户看到的就是
+            // 「关闭键盘时闪黑一下」。
+            //
+            // 现在卡片等回读确认（每 0.1 s 一次，最多 8 次＝0.8 s，等不到也照收，
+            // 绝不能因为回读不可用就卡住不回去）。这期间 `isKeyboardSettling`
+            // 让守护循环每拍都查，场景通常一拍就到位。
+            kbSettleUntil = CFAbsoluteTimeGetCurrent() + 1.2
+            finishKeyboardUnfill(bundle: bundle, door: door, tries: 0)
+        }
+    }
+
+    /// 0.1.66 — 收起流程的落点：场景回读到 0 才收卡片，等不到就按超时收。
+    ///
+    /// 回读不可用（`AevonSceneFrameOf` 在部分版本里恒返回 0x0@0）时不能当成
+    /// 「已经到位」，否则又回到闪黑那一版；给它 3 次机会（0.3 s）再放行。
+    private func finishKeyboardUnfill(bundle: String, door: Int, tries: Int) {
+        guard let card = card, let window = window else { return }
+        if kbFilled { return }              // 期间又开了 ⇒ 这次收起作废
+        var readable = false
+        var landed = false
+        if let sc = window.windowScene {
+            let frame = AevonSceneFrameOf(sc)
+            readable = frame.size.width > 1
+            landed = readable && abs(frame.origin.y) < 1
+        }
+        if !landed && tries < 8 && (readable || tries < 3) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
+                self?.finishKeyboardUnfill(bundle: bundle, door: door, tries: tries + 1)
             }
+            return
+        }
+        kbSettleUntil = 0
+        if !kbSavedFrame.isNull { card.frame = kbSavedFrame }
+        kbTopCrop = kbSavedCrop
+        followContent()
+        applyGlow()
+        Log.write("win: keyboard fill off card=" + size(card.frame.size)
+                  + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
+                  + " scene=" + String(format: "%.0f", canvasOriginY)
+                  + " crop=" + String(format: "%.0f", kbTopCrop)
+                  + " push=" + String(format: "%d", door)
+                  + " land=" + (landed ? "ok" : String(format: "%d", tries)))
+        // 0.1.53 — 上报推到下一拍（理由见原先这一段注释：卡片收回默认大小时
+        // `bandRect` 还在插值，同拍上报会把中间态推给 App）。
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, !self.kbFilled else { return }
+            self.reportBand()
         }
     }
 

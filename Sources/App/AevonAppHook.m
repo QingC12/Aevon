@@ -4768,6 +4768,12 @@ static CGFloat AevonKbSceneHeightNow(void);
 /// 0.1.65 — 系统算出来的「键盘遮住场景多少」（`AevonKbIntersection` 的返回值，
 /// 写在键盘段后部）。本机稳定 289 ⇒ 键盘顶 643，这是四个 App 唯一一致的锚点。
 static CGFloat AevonKbLeadSeen;
+/// 两次连续一致的交集值（＝键盘结算完）。锚点只认它，不认单次读数。
+static CGFloat AevonKbLeadStable;
+/// 0.1.66 — 上一次真的改了 App 窗口高度的时刻。`measure=0` 的假读数只出现在
+/// 这之后两秒内（见 `AevonKbIdleCheck`），空窗兜底要躲开它。
+static CFAbsoluteTime AevonKbFitAt;
+static CGFloat AevonKbAnchorValue(CGFloat full);
 static CGRect AevonKbNativeBounds(UIScreen *screen);
 /// 0.1.57 — **三条通道一起写**，因为 0.1.56 只写了最没希望的那一条。
 ///
@@ -4939,22 +4945,67 @@ static UIWindow *AevonKbAppWindow(void) {
 ///
 /// 只在「两个来源相差 120 pt 以内」时才采用系统值：键盘还没弹完、场景还没搬的那
 /// 两拍系统会报 74 / 101（⇒ 858 / 831），差得远，一律不理，宁可维持原值。
+///
+/// **0.1.66 — 锚点必须一次学到、之后每次都用，不能每拍现算。**
+///
+/// 0.1.65 是「用当前这一拍的交集值反推锚点」。Aevon(137) 把它证伪了：
+///
+/// · 抖音：`kb: lead h=101.0` / `h=74.0` 连着两次，`kb: win fit h=318 top=533
+///   raw=533` —— 差 110 在 120 以内其实该采用，但当时读到的 lead 是 74
+///   （锚点算成 858，差 298）⇒ **一次都没校正**，窗口底边停在 533，键盘顶在
+///   643，中间 110 pt 全是卡片底色，就是用户说的「抖音输入框距键盘还有空白」。
+///   同一份日志后半段抖音又报过 289 ⇒ 交集值在动画里先小后大，拿「这一拍」
+///   当锚点必然看运气。
+/// · QQ/微信：289 稳定、`top=643` 落地了，可同一秒里 `settle keep` 紧跟着
+///   `settle gone measure=0`（16 次 fit 配 16 次 unfit），窗口在 428 与 717 之间
+///   来回 —— 输入框只在那零点几秒里露出来，正是「无法百分百出现」。
+///
+/// 所以把「键盘顶在哪」和「这一拍读到多少」拆开：前者一次学到就固定（
+/// `AevonKbAnchorValue`），后者只用来判「这次读到的值值不值得信」。
+static CGFloat AevonKbAnchorFixed = 0.0;
+static CGFloat AevonKbAnchorGuess = 0.0;
+
+/// 键盘顶边在屏幕上的锚点。学到之前用 `整屏高 − 289` 兜底。
+///
+/// 289 是本机系统结算后的交集值（932−289=643），QQ/微信/抖音三个 App 都给出过
+/// 同一个数。上界取 310 是因为 316 只在 willShow 那一拍出现（＝整块键盘矩形，
+/// 含键盘上方那 27 pt 底衬），结算后会被 289 覆盖；宁可先不学，也不拿它当锚点。
+static CGFloat AevonKbAnchorValue(CGFloat full) {
+    if (AevonKbAnchorFixed > 240.0 && AevonKbAnchorFixed < full - 120.0) return AevonKbAnchorFixed;
+    CGFloat lead = AevonKbLeadStable;
+    if (lead > 240.0 && lead < 310.0) {
+        CGFloat anchor = full - lead;
+        if (anchor > 240.0 && anchor < full - 120.0) {
+            AevonKbAnchorFixed = anchor;
+            char line[160];
+            snprintf(line, sizeof(line), "kb: anchor learned lead=%.0f -> %.0f\n", lead, anchor);
+            AevonKbLog(line);
+            return anchor;
+        }
+    }
+    if (AevonKbAnchorGuess < 240.0) {
+        AevonKbAnchorGuess = full - 289.0;
+        char line[160];
+        snprintf(line, sizeof(line), "kb: anchor fallback -> %.0f\n", AevonKbAnchorGuess);
+        AevonKbLog(line);
+    }
+    return AevonKbAnchorGuess;
+}
+
 static CGFloat AevonKbTopCorrected(CGFloat measured) {
-    if (measured < 240.0) return measured;
     CGFloat full = AevonKbNativeBounds(nil).size.height;
     if (full < 400.0) return measured;
-    CGFloat lead = AevonKbLeadSeen;
-    if (lead < 200.0 || lead > 500.0) return measured;
-    CGFloat anchor = full - lead;
+    CGFloat anchor = AevonKbAnchorValue(full);
     if (anchor < 240.0 || anchor > full - 120.0) return measured;
-    CGFloat gap = anchor - measured;
-    if (gap <= 1.0 || gap > 120.0) return measured;
+    // 两个来源差太远 ⇒ 谁都不信，维持量到的那个（量视图在通知里全程有效，
+    // 差得远只可能是键盘还没结算完，或锚点还是上一把键盘的）。
+    if (measured > 200.0 && fabs(anchor - measured) > 120.0) return measured;
     static int notes = 0;
-    if (notes < 8) {
+    if (notes < 10) {
         notes += 1;
         char line[180];
-        snprintf(line, sizeof(line), "kb: top correct measured=%.0f lead=%.0f -> %.0f\n",
-                 measured, lead, anchor);
+        snprintf(line, sizeof(line), "kb: top anchor measured=%.0f -> %.0f\n",
+                 measured, anchor);
         AevonKbLog(line);
     }
     return anchor;
@@ -4989,6 +5040,7 @@ static void AevonKbFitWindow(CGFloat top) {
     CGRect frame = window.frame;
     if (fabs(frame.size.height - want) < 1.0) return;
     window.frame = CGRectMake(frame.origin.x, frame.origin.y, frame.size.width, want);
+    AevonKbFitAt = CFAbsoluteTimeGetCurrent();
     char line[200];
     snprintf(line, sizeof(line),
              "kb: win fit h=%.0f top=%.0f raw=%.0f sceneY=%.0f sceneH=%.0f was=%.0f\n",
@@ -5102,13 +5154,22 @@ static void AevonKbEvaluate(NSDictionary *info) {
     // 0.1.59 — 三次采样交给 `AevonKbSample`：它除了发布顶边，还会在两次读数
     // 稳定（差 < 40）时收一次 App 窗口。0.15 s 那次几乎一定还在动画里，读数与
     // 0.35 s 差得远，于是不落；0.60 s 那次才落地。
-    // 0.1.64 — 「收起」不再当场落状态：见上面 `AevonKbSettleOff`。这条通知在我们
-    // 收过窗口之后会假报一次，照落就是那个 0.5 s 的自激环。
-    if (!on) {
-        if (AevonKbOn == 0) return;
-        AevonKbSettleOff();
-        return;
-    }
+    // 0.1.64 — 「收起」不再当场落状态，先压 0.30 s 到点量一次再定。
+    // 0.1.66 — **但这条通知不再算「收起」的理由。**
+    //
+    // Aevon(137) 数出来的是 16 次 fit 配 16 次 unfit，同一秒成对；`kb: lead`
+    // 在这一串里反复出现 74 / 101 —— 那正是**我们自己收窗口**之后 UIKit 补发的
+    // `willChangeFrame`：它给的 `UIKeyboardFrameEndUserInfoKey` 是相对新窗口算的，
+    // 键盘落在窗口下方，`origin.y < screenHeight−1` 不成立 ⇒ `on = NO`。
+    // 收一次窗口就换来一次「收起」，于是 0.5 s 一圈地放大缩小，输入框只在一瞬间
+    // 露头（用户说的「无法百分百出现输入框」），卡片每收一次还闪一下黑。
+    //
+    // 所以这条路上 `on = NO` 一律**什么都不做**（连 settle 都不排，否则还是会被
+    // 自己排出来的收起打中）。真正的收起只有一个来源：
+    // `UIKeyboardWillHideNotification`（见 `AevonKbObserve`），那一条我们改窗口
+    // 生成不出来。它到了之后仍然压 0.30 s 再量一次（`AevonKbSettleOff`），
+    // 留作「通知到了但键盘其实还在」的保险。
+    if (!on) return;
     AevonKbSettleCancel();
     if (AevonKbOn != 0) {
         // 状态没变也要续一次：键盘一直开着的时候，租约靠这一点续命。
@@ -5146,6 +5207,46 @@ static void AevonKbEvaluate(NSDictionary *info) {
     AevonRawNote("app: keyboard up (bridge)\n");
 }
 
+/// 0.1.66 — 真的收起只有这一个来源：`UIKeyboardWillHideNotification`。
+///
+/// 我们改 App 窗口只会换来 `willChangeFrame`，从来生不出 hide 通知 —— 所以
+/// 「谁才是收起」这件事不用猜。到了之后不立刻落状态，仍交给 `AevonKbSettleOff`
+/// 压 0.30 s 再量一次：万一是「通知到了、键盘其实还在」，量到就续租。
+static void AevonKbHideNote(void) {
+    static int notes = 0;
+    if (notes < 6) {
+        notes += 1;
+        AevonKbLog("kb: hide note seen\n");
+    }
+    if (AevonKbOn == 0) return;
+    AevonKbSettleOff();
+}
+
+/// 0.1.66 — 兜底：收起通知万一没送到（交互式下滑收起在某些 App 里只改帧），
+/// 键盘窗量两次都空、而且距离上一次收窗口已经过去 2 s，就按收起处理。
+///
+/// 2 s 这道闸是给 `measure=0` 那个假读数留的：Aevon(137) 里 0 只出现在**刚收完
+/// 窗口**的几拍，静置之后量到的都是 573。所以「静置 2 s 且连续两次为空」不会
+/// 被自己惹出来的假读数打中。
+static int AevonKbZeroHits = 0;
+
+static void AevonKbIdleCheck(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (AevonKbOn == 0) return;
+        if (CFAbsoluteTimeGetCurrent() - AevonKbFitAt < 2.0) return;
+        CGFloat top = AevonKbVisualTop();
+        if (top > 200.0) {
+            AevonKbZeroHits = 0;
+            return;
+        }
+        AevonKbZeroHits += 1;
+        if (AevonKbZeroHits < 2) return;
+        AevonKbZeroHits = 0;
+        AevonKbLog("kb: idle zero close\n");
+        AevonKbSettleOff();
+    });
+}
+
 /// 构造函数里调一次。观察者与心跳都只在**真的弹过键盘**之后才有开销。
 static void AevonKbObserve(void) {
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
@@ -5155,6 +5256,13 @@ static void AevonKbObserve(void) {
                     usingBlock:^(NSNotification *note) {
         AevonKbEvaluate(note.userInfo);
     }];
+    // 0.1.66 — 收起的唯一来源，见 `AevonKbHideNote`。
+    [center addObserverForName:UIKeyboardWillHideNotification
+                        object:nil
+                         queue:nil
+                    usingBlock:^(NSNotification *note) {
+        AevonKbHideNote();
+    }];
     AevonKbTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                                           dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0));
     if (AevonKbTimer == NULL) return;
@@ -5162,7 +5270,9 @@ static void AevonKbObserve(void) {
                               dispatch_time(DISPATCH_TIME_NOW, (int64_t)NSEC_PER_SEC),
                               NSEC_PER_SEC, NSEC_PER_SEC / 10);
     dispatch_source_set_event_handler(AevonKbTimer, ^{
-        if (AevonKbOn) AevonKbPost();
+        if (AevonKbOn == 0) return;
+        AevonKbPost();
+        AevonKbIdleCheck();
     });
     // **不 resume。** `dispatch_source_create` 出来就是挂起态，键盘第一次起来时
     // 由 `AevonKbArm(YES)` 放行；在那之前这个进程一次都不醒。
@@ -6334,7 +6444,18 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     // 说明场景没被收下来（宿主侧 `kbtop` 读到 0 → 退回铺满屏底），那不是这里的事。
     if (AevonKbOn == 0) return answer;
     // 0.1.65 — 留一份给 `AevonKbTopCorrected`（只接受 200..500 的合理值）。
-    if (answer > 200.0 && answer < 500.0) AevonKbLeadSeen = (CGFloat)answer;
+    // 0.1.66 — 再分一层：**两次连续一致**才算「结算完」（`AevonKbLeadStable`）。
+    //
+    // 收过窗口之后这里还会被问一次，答案是 74/101（键盘相对新窗口的遮拦量），
+    // 那是我们自己造成的，不能拿去当锚点 —— 所以稳定值只认 240..340 这一段：
+    // 本机结算值是 289，动画中间的半截值全在它下面，willShow 那一拍的 316 在它上面。
+    if (answer > 200.0 && answer < 500.0) {
+        if (fabs((CGFloat)answer - AevonKbLeadSeen) < 1.5
+            && answer > 240.0 && answer < 340.0) {
+            AevonKbLeadStable = (CGFloat)answer;
+        }
+        AevonKbLeadSeen = (CGFloat)answer;
+    }
     AevonKbLeadNote(answer, screenHeight, fullHeight, AevonKbBandBottomEdge(),
                     sceneHeight, answer, 0);
     return answer;
