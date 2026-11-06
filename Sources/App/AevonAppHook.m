@@ -4777,8 +4777,12 @@ static CGFloat AevonKbSceneHeightNow(void);
 /// 0.1.65 — 系统算出来的「键盘遮住场景多少」（`AevonKbIntersection` 的返回值，
 /// 写在键盘段后部）。本机稳定 289 ⇒ 键盘顶 643，这是四个 App 唯一一致的锚点。
 static CGFloat AevonKbLeadSeen;
-/// 0.1.68 — 宿主把场景摆到哪了（屏幕原点 Y，本机 215）。只在主线程写，钩子里读。
-/// 键盘求交要用它：系统按「窗口在 0」算，我们在 215，差的就是这一个数。
+/// 0.1.68 — 宿主把场景摆到哪了（屏幕原点 Y，本机 215）。键盘求交要用它：
+/// 系统按「窗口在 0」算，我们在 215，差的就是这一个数。
+/// 0.1.69 — 写点有两个：`AevonKbSample`（主线程）与 `AevonKbIntersection`
+/// （UIKit 问交集的那个线程，**不一定是主线程**）。后者是给 QQ 补的：它的键盘
+/// 通知不在主线程投递，`AevonKbSceneRectOnScreen` 因此恒返回 `CGRectNull`，
+/// 原点一直读成 0，六个通知全部 shift=0。
 static volatile CGFloat AevonKbSceneOriginCache = 0.0;
 /// 两次连续一致的交集值（＝键盘结算完）。锚点只认它，不认单次读数。
 static CGFloat AevonKbLeadStable;
@@ -5236,6 +5240,14 @@ static void AevonKbEvaluate(NSDictionary *info) {
     // 0.1.67 — 0.75 s：收窗口（0.60 s 那一拍）之后 App 的重排已经跑完，这时
     // 量到的光标位置才是「用户实际看到的那条输入框」。每个周期一条。
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbCaretNote(); });
+    // 0.1.69 — 再补一次 1.9 s。
+    //
+    // 0.75 s 那一条落在 App 自己的滑入动画里：Aevon(140) 里抖音两次读数
+    // 516..536 → 543..563，同一只键盘越测越低，说明那一刻还在动。只看动着的
+    // 那一条，任何修法都判不了对错。1.9 s 是键盘动画（0.25 s）+ App 重排 +
+    // 我们自己的排程之后，稳态值。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.9 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ AevonKbCaretNote(); });
     AevonRawNote("app: keyboard up (bridge)\n");
 }
@@ -6443,7 +6455,7 @@ static void AevonKbCaretNote(void) {
         dispatch_async(dispatch_get_main_queue(), ^{ AevonKbCaretNote(); });
         return;
     }
-    if (AevonKbCaretNotes >= 12) return;
+    if (AevonKbCaretNotes >= 24) return;
     UIWindow *found = nil;
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
@@ -6469,16 +6481,26 @@ static void AevonKbCaretNote(void) {
     UITextRange *range = field.selectedTextRange;
     if (range != nil) caret = [field caretRectForPosition:range.end];
     CGRect box = CGRectNull;
-    if (!CGRectIsNull(caret) && found.windowScene != nil) {
+    CGRect bar = CGRectNull;
+    if (found.windowScene != nil) {
         box = [input convertRect:caret toCoordinateSpace:found.windowScene.screen.coordinateSpace];
+        // 0.1.69 — 光标之外再给一条**输入框自己那一条**的屏幕矩形。
+        //
+        // 0.1.67/0.1.68 只有光标，于是「输入框被挡住」只能靠光标推：光标在
+        // 604..625 时到底是「输入框整体在下面」还是「输入框在上面、只有光标
+        // 冒出去」，两种情形给出的修法完全相反。`bar` 就是 `UITextView` /
+        // `UITextField` 自己的矩形，底边 ≤ 键盘顶 ⇒ 看得见。
+        bar = [input convertRect:input.bounds toCoordinateSpace:found.windowScene.screen.coordinateSpace];
     }
     snprintf(line, sizeof(line),
-             "kb: caret cls=%s y=%.0f..%.0f x=%.0f win=%.0f kb=%.0f\n",
+             "kb: caret cls=%s y=%.0f..%.0f x=%.0f win=%.0f kb=%.0f bar=%.0f..%.0f\n",
              NSStringFromClass([input class]).UTF8String,
              CGRectIsNull(box) ? -1.0 : box.origin.y,
              CGRectIsNull(box) ? -1.0 : CGRectGetMaxY(box),
              CGRectIsNull(box) ? -1.0 : box.origin.x,
-             found.bounds.size.height, kbTop);
+             found.bounds.size.height, kbTop,
+             CGRectIsNull(bar) ? -1.0 : bar.origin.y,
+             CGRectIsNull(bar) ? -1.0 : CGRectGetMaxY(bar));
     AevonKbLog(line);
 }
 
@@ -6595,24 +6617,53 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     // 215..932，真实交集是 316。差的那 215 就是「输入框被键盘盖住」的全部原因 ——
     // Aevon(139) 里 QQ 的 `kb: lead h=101.0` 正是这个数。
     //
-    // 真实交集 =（场景原点 + 场景高）− 键盘顶。两个量都是几何量，不受动画影响：
+    // 真实交集 =（场景原点 + 场景高）− 键盘顶。三个量都是几何量，不受动画影响：
     // 场景原点取缓存（宿主搬完场景时写入），没有缓存就按「场景贴屏底」反推
-    // `整屏高 − 场景高`；键盘顶优先用 `DidShow` 记下的实体顶边，没记到就按本机
-    // 键盘高 316 兜底。返回的是「键盘遮住这个窗口多少」，不是「键盘多高」。
+    // `整屏高 − 场景高`。返回的是「键盘遮住这个窗口多少」，不是「键盘多高」。
+    //
+    // 0.1.69 — 键盘顶改成**视图几何**。0.1.68 用的是 `AevonKbTopSeen`（`DidShow`
+    // 那条通知的 `origin.y`），Aevon(140) 把它证伪了：同一个 App 的同一个键盘，
+    // 报出来的顶边是
+    //   761 / 788 / 806 / 906 / 721 / 826 / 748 / 638
+    // 那是**动画途中的帧**，不是结算值。于是 `truth` 在 26..316 之间乱跳，App 每
+    // 收到一个新值就重排一次：QQ 的光标在 608 / 635 / 938 三个位置，微信在
+    // 862 / 682 —— 输入框一会儿被盖住、一会儿被推到屏幕外面去。
+    //
+    // 所以键盘顶改取**视图几何**。`AevonKbVisualTop()` 在键盘窗里找「满宽 + 底边贴窗底 + 高 200..460」最靠上的
+    // 那一块，量的是**窗口坐标**（与键盘窗自己的 frame 动画无关）⇒ 同一次键盘从
+    // willShow 到 didShow 都是同一个数。Aevon(140) 里四个 App 的读数：
+    //   QQ 573 / 微信 573 / 抖音 533 / 备忘录 529
+    // 这几个数就是各自键盘的上沿 —— 包括 App 自己的 `inputAccessoryView`（那条
+    // 工具栏本来就画在键盘窗里）。输入框该停的就是这条线：
+    //   · QQ 停在 616（＝按键顶，把工具栏那 43 pt 当成不存在）⇒ 它的输入框
+    //     585..625 整条压在 573..616 下面 ⇒ 用户说的「完全不出现」；
+    //   · 抖音 0.1.68 由通知平移算出 533 ⇒ 输入框 536，只差 3 pt ⇒ 用户说的
+    //     「紧贴键盘、但偏下一点被挡住一点」。
+    // 所以按 App 各自的上沿走，而不是写死 316/616。
+    CGFloat kbTop = AevonKbVisualTop();
+    if (kbTop < 200.0 || kbTop > fullHeight - 60.0) kbTop = AevonKbAnchorValue(fullHeight);
+    CGFloat kbHeight = fullHeight - kbTop;
     CGFloat sceneOrigin = AevonKbSceneOriginCache;
     if (sceneOrigin < 1.0 && fullHeight > sceneHeight) sceneOrigin = fullHeight - sceneHeight;
-    CGFloat kbTop = AevonKbTopSeen;
-    if (kbTop < 240.0 || kbTop > fullHeight) kbTop = fullHeight - 316.0;
+    // 0.1.69 — 顺手把原点缓存补上：`AevonKbSceneOriginY`（平移通知那一路）要在
+    // 任何线程上都读得到，而它自己那条「转坐标」的路要求主线程，QQ 的通知不在
+    // 主线程投递 ⇒ 恒返回 0 ⇒ 只有 QQ 收不到平移（Aevon(140)：六个通知全 shift=0）。
+    if (sceneOrigin > 1.0 && sceneOrigin < 400.0) AevonKbSceneOriginCache = sceneOrigin;
     CGFloat truth = (sceneOrigin + sceneHeight) - kbTop;
     if (truth < 0.0) truth = 0.0;
     if (truth > sceneHeight) truth = sceneHeight;
     static int interNotes = 0;
-    if (fabs(truth - answer) > 1.0 && interNotes < 8) {
+    static CGFloat lastTruth = -1.0;
+    static CGFloat lastHeight = -1.0;
+    if ((fabs(truth - lastTruth) > 1.0 || fabs(kbHeight - lastHeight) > 1.0)
+        && interNotes < 14) {
         interNotes += 1;
-        char line[200];
+        lastTruth = truth;
+        lastHeight = kbHeight;
+        char line[220];
         snprintf(line, sizeof(line),
-                 "kb: inter true=%.0f sys=%.0f origin=%.0f sceneH=%.0f top=%.0f\n",
-                 truth, answer, sceneOrigin, sceneHeight, kbTop);
+                 "kb: inter true=%.0f sys=%.0f origin=%.0f sceneH=%.0f top=%.0f kbH=%.0f\n",
+                 truth, answer, sceneOrigin, sceneHeight, kbTop, kbHeight);
         AevonKbLog(line);
     }
     return truth;
@@ -6623,6 +6674,19 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
 /// 微信/QQ 一次都没让对）。这个函数现在只服务一行读数，留在日志里是为了
 /// 「场景到底搬到哪了」还能对账。
 static CGFloat AevonKbSceneOriginY(void) {
+    // 0.1.69 — **缓存优先，且不要求主线程。**
+    //
+    // 下面那条「把 key window 的 bounds 转到屏幕坐标系」的路要求主线程，而 QQ 的
+    // 键盘通知不在主线程投递 ⇒ `AevonKbSceneRectOnScreen` 直接返回 `CGRectNull`
+    // ⇒ 原点算成 0 ⇒ 只有 QQ 收不到平移。Aevon(140) 的读数把这条钉死了：
+    //   com.tencent.mqq  六个通知全部 shift=0
+    //   其余三个 App（备忘录/微信/抖音）后四条 shift=215
+    // 而 QQ 的 `kb: lead h=101.0`（＝717−616）正是「按屏幕坐标算避让」的产物。
+    //
+    // 缓存由 `AevonKbIntersection` 写入，值是 `整屏高 − 场景高`，纯几何、任何线程
+    // 都读得到。所以先看它。
+    CGFloat cached = AevonKbSceneOriginCache;
+    if (cached > 1.0 && cached < 400.0) return cached;
     // 0.1.54 — 顺序**反过来**：坐标转换优先，band 只在「卡片真的贴屏底」时兜底。
     //
     // 0.1.53 是 band 优先，Aevon(126) 把它证伪了：
