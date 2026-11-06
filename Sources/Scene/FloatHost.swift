@@ -3495,10 +3495,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             card.frame = CGRect(x: 0, y: y, width: visible.width, height: visible.height)
             kbTopCrop = 0
             canvasOriginY = y
-            // 场景跟着卡片走。目标登记在 C 侧，SceneProbe 的守护循环下一拍就把它
-            // 写进 `settings.frame`（键盘态改成每拍检查，见那里的注释）。
+            // 场景跟着卡片走。目标登记在 C 侧，这里**当拍就推一次**。
+            //
+            // 0.1.55 — 原来是只登记、等 SceneProbe 守护循环下一拍才写。Aevon(127)
+            // 的日志里那一条 `win: frame drift now=430x717@0 want=430x717@215`
+            // 就是这段空档：卡片已经铺到 215..932，场景还停在 0..717 —— 于是这一拍
+            // 画面是「按旧几何画的」，下一拍才补成新几何。用户快速开关时看到的
+            // 「内容先跳一下、跳完才完成重排」正是它。
+            //
+            // 卡片 frame 与 settings.frame 必须在**同一拍**里落地，屏幕才只画一次。
+            // `AevonPushSceneFrame` 是同步的，且自己判重（尺寸与原点都没变就返回 0）。
             AevonSceneFrameSet(bundle, 0, Double(y),
                                Double(visible.width), Double(visible.height))
+            if let sc = window.windowScene { _ = AevonPushSceneFrame(sc) }
             followContent()
             applyGlow()
             Log.write("win: keyboard fill on card=" + size(card.frame.size)
@@ -3516,6 +3525,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             canvasOriginY = kbSavedOriginY
             AevonSceneFrameSet(bundle, 0, Double(canvasOriginY),
                                Double(natural.width), Double(natural.height))
+            // 0.1.55 — 收起时同样当拍推（理由见 `fill on` 那段）。
+            if let sc = window.windowScene { _ = AevonPushSceneFrame(sc) }
             followContent()
             applyGlow()
             Log.write("win: keyboard fill off card=" + size(card.frame.size)

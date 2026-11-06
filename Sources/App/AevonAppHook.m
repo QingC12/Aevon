@@ -4774,6 +4774,11 @@ static void AevonKbEvaluate(NSDictionary *info) {
         // 这一行才是 App 实际把内容压到哪。顶边 ≈ 401 就是让位真的生效。
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ AevonKbGuideNote(); });
+        // 0.1.55 — 再补一次 0.95 s。Aevon(127) 只有 0.45 s 那一行，而那一行正好落在
+        // UIKit 的 `keyboardSceneDelegate` 还没把 guide 结算完的时刻（`h=0`）。
+        // 两个时刻读数不同 ⇒ 只是先后；两个都 0 ⇒ UIKit 真的没认。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.95 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ AevonKbGuideNote(); });
     } else {
         // 0.1.18 — 收起要**立刻**告诉桌面，不等租约过期。
         AevonKbPostOff();
@@ -5447,6 +5452,20 @@ static IMP AevonOrigIntersection = NULL;
 static volatile int AevonKbLeadNotes = 0;
 static volatile int AevonKbMissNotes = 0;
 
+/// 0.1.55 — 键盘**实体**顶边在屏幕上的 Y（本机 616）。
+///
+/// `UIKeyboardDidShowNotification` 的 `UIKeyboardFrameEndUserInfoKey.origin.y` 原值。
+/// 只取 `DidShow` —— `WillChangeFrame` 在弹出动画里每帧都发（Aevon(124) 记过
+/// 502/573/674/775 四个值），拿它当基准会把让位量算成动画中间态。`DidShow` 是
+/// 动画结束后那一次，值稳定。
+///
+/// 为什么要它：Aevon(127) 里系统给的 `answer` 稳定值是 **289**（键盘顶 643），
+/// 而备忘录弹出的瞬间给过 **316**（键盘顶 616）。两个数差 27，说明系统在某些
+/// 时刻会少算一截。让位量一旦少给，输入框就压在键盘下面 —— 这是微信/QQ
+/// 「永远看不见输入框」的最后一层。所以这里留一份实测顶边，`AevonKbIntersection`
+/// 用它兜一层底（只往大了取）。
+static volatile CGFloat AevonKbTopSeen = 0.0;
+
 static void AevonKbLog(const char *line) {
     if (line == NULL) return;
     AevonAppLogWrite(line);
@@ -5790,7 +5809,7 @@ static void AevonKbGuideNote(void) {
         dispatch_async(dispatch_get_main_queue(), ^{ AevonKbGuideNote(); });
         return;
     }
-    if (AevonKbGuideNotes >= 3) return;
+    if (AevonKbGuideNotes >= 8) return;
     UIWindow *found = nil;
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
@@ -5809,9 +5828,9 @@ static void AevonKbGuideNote(void) {
     CGRect box = ((CGRect (*)(id, SEL))objc_msgSend)(guide, frameSel);
     AevonKbGuideNotes += 1;
     char line[220];
-    snprintf(line, sizeof(line), "kb: guide win=%.0fx%.0f top=%.0f h=%.0f\n",
+    snprintf(line, sizeof(line), "kb: guide win=%.0fx%.0f top=%.0f h=%.0f seen=%.0f\n",
              found.bounds.size.width, found.bounds.size.height,
-             box.origin.y, box.size.height);
+             box.origin.y, box.size.height, (double)AevonKbTopSeen);
     AevonKbLog(line);
 }
 
@@ -5929,6 +5948,32 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     // 唯一要的数：`kb: lead h=316.0 … -> 316.0 took=0`。
     double lifted = answer;
     int took = 0;
+    // 0.1.55 — 实测顶边兜底：`整屏高 − 键盘实体顶边`（本机 932 − 616 = 316）。
+    //
+    // Aevon(127) 把「系统少算一截」量出来了：
+    //
+    //   kb: lead h=316.0 … -> 316.0 took=0     ← 备忘录弹出那一瞬
+    //   kb: lead h=289.0 … -> 289.0 took=0     ← 稳定后，差 27
+    //   kb: lead h=101.0 … -> 101.0 took=0     ← 微信/QQ，场景还没搬
+    //
+    // 289 与 316 之间那 27 pt 正好把输入框压到键盘下沿以下。让位量只能多不能少：
+    // 少给就是「输入框被盖」，多给只是「输入框离键盘高一点」。所以这里用
+    // `DidShow` 的实测顶边再算一遍，比系统的大就采信。
+    //
+    // ⛔ 三条闸门缺一不可：
+    //   · 场景**已经搬到 215**（`sceneBox.origin.y > 1`）—— 没搬时窗口还贴着屏幕
+    //     顶，按 932 算出来的 316 会把内容顶到半空，正是 0.1.53 的错；
+    //   · 结果不超过场景高（键盘不可能比它所在的场景还高）；
+    //   · 与系统值差 < 260（再大就不是「少算一截」，是读数坏了）。
+    if (AevonKbTopSeen > 100.0 && fullHeight > 100.0
+        && !CGRectIsNull(sceneBox) && sceneBox.origin.y > 1.0) {
+        double realCut = (double)fullHeight - (double)AevonKbTopSeen;
+        double cap = sceneHeight > 100.0 ? (double)sceneHeight : (double)screenHeight;
+        if (realCut > lifted + 0.5 && realCut <= cap + 0.5 && realCut - lifted < 260.0) {
+            lifted = realCut;
+            took = 4;
+        }
+    }
     AevonKbLeadNote(answer, screenHeight, fullHeight, baseBottom, sceneHeight, lifted, took);
     return lifted;
 }
@@ -6007,6 +6052,21 @@ static BOOL AevonKbIsKeyboardNote(NSNotificationName name) {
 static void AevonKbPostNote(id self, SEL _cmd, NSNotificationName name, id object, NSDictionary *info) {
     NSDictionary *send = info;
     if (info != nil && AevonKbOn != 0 && AevonKbHostGate() && AevonKbIsKeyboardNote(name)) {
+        // 0.1.55 — 先记**原值**，再谈换算。
+        //
+        // `DidShow` 是动画结束那一次，`origin.y` 就是键盘实体顶边（本机 616）。
+        // 这一段必须在下面 `rect.origin.y -= shift` 之前跑，否则记下来的是减过
+        // 215 的场景坐标（401），下次拿 932 减它就得到 531 —— 让位量直接顶飞。
+        if ([name isEqualToString:UIKeyboardDidShowNotification]) {
+            NSValue *endValue = [info objectForKey:UIKeyboardFrameEndUserInfoKey];
+            if (endValue != nil) {
+                CGRect raw = [endValue CGRectValue];
+                CGFloat full = AevonKbNativeBounds(nil).size.height;
+                if (raw.origin.y > 100.0 && raw.origin.y < full + 1.0) {
+                    AevonKbTopSeen = raw.origin.y;
+                }
+            }
+        }
         CGFloat shift = AevonKbSceneOriginY();
         if (shift > 1.0) {
             NSMutableDictionary *copy = [[info mutableCopy] autorelease];
