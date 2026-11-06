@@ -4745,6 +4745,8 @@ static void AevonKbArm(BOOL on) {
 static void AevonKbLiftApply(BOOL on);
 /// 0.1.48 — 连提三拍的那层壳（见定义处）。定义在键盘段后部。
 static void AevonKbLiftRepeat(void);
+/// 0.1.49 — 让位判据（读 App 自己的 `keyboardLayoutGuide`）。定义在键盘段后部。
+static void AevonKbGuideNote(void);
 
 static void AevonKbEvaluate(NSDictionary *info) {
     NSValue *value = info[UIKeyboardFrameEndUserInfoKey];
@@ -4767,6 +4769,11 @@ static void AevonKbEvaluate(NSDictionary *info) {
     });
     if (on) {
         AevonKbPost();
+        // 0.1.49 — 判据：0.45 s 后（键盘动画 + App 重排都跑完）读一次 App 自己
+        // 的键盘布局参考线。它比「我们返回了 316」硬得多 —— 那只是我们说了什么，
+        // 这一行才是 App 实际把内容压到哪。顶边 ≈ 401 就是让位真的生效。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ AevonKbGuideNote(); });
     } else {
         // 0.1.18 — 收起要**立刻**告诉桌面，不等租约过期。
         AevonKbPostOff();
@@ -5647,6 +5654,47 @@ static void AevonKbLiftRepeat(void) {
                    dispatch_get_main_queue(), ^{ AevonKbLiftApply(AevonKbOn != 0); });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.24 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ AevonKbLiftApply(AevonKbOn != 0); });
+}
+
+/// 0.1.49 — 让位判据：App 主窗口的 `keyboardLayoutGuide.layoutFrame`。
+///
+/// 这一行回答的是 0.1.48 唯一没有取证的那件事 —— `intersectionHeight` 返回 316
+/// 之后，**App 到底有没有真的把内容让出 316**。日志里 `-> 316.0` 只证明我们说了，
+/// 不证明它被消费了。参考线是 UIKit 自己算给 App 用的，App 的输入框就贴在它的
+/// 上沿：`top≈401` 说明让位生效（输入框会被摆在 401 之上）；`top≈0 / h≈0` 说明
+/// 参考线还没动，那么卡片再怎么摆都没用，下一版只能改场景高度。
+///
+/// 只问 `respondsToSelector:` + 读 `layoutFrame`，不调任何可能抛异常的路径。
+static volatile int AevonKbGuideNotes = 0;
+
+static void AevonKbGuideNote(void) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ AevonKbGuideNote(); });
+        return;
+    }
+    if (AevonKbGuideNotes >= 3) return;
+    UIWindow *found = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *cand in ((UIWindowScene *)scene).windows) {
+            if (cand.isKeyWindow) { found = cand; break; }
+        }
+        if (found != nil) break;
+    }
+    if (found == nil) return;
+    SEL guideSel = sel_registerName("keyboardLayoutGuide");
+    if (![found respondsToSelector:guideSel]) return;
+    id guide = ((id (*)(id, SEL))objc_msgSend)(found, guideSel);
+    if (guide == nil) return;
+    SEL frameSel = sel_registerName("layoutFrame");
+    if (![guide respondsToSelector:frameSel]) return;
+    CGRect box = ((CGRect (*)(id, SEL))objc_msgSend)(guide, frameSel);
+    AevonKbGuideNotes += 1;
+    char line[220];
+    snprintf(line, sizeof(line), "kb: guide win=%.0fx%.0f top=%.0f h=%.0f\n",
+             found.bounds.size.width, found.bounds.size.height,
+             box.origin.y, box.size.height);
+    AevonKbLog(line);
 }
 
 /// 母本 0x5284 的原式：`(原值 × 屏幕高 ÷ 键盘窗高) × 1.0 + 键盘窗高 − 屏幕高`。

@@ -1514,6 +1514,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // `kbFilled = true` 会让新卡按 1:1 贴底打开。
         kbFilled = false
         kbSavedFrame = .null
+        // 0.1.49 — 顶对齐补偿也要跟着拆，理由同上：残留一个 215 会让新卡一开窗
+        // 就把画布顶出卡片外一截。
+        kbTopCrop = 0
+        kbSavedCrop = 0
         card = nil
         content = nil
         visible = .zero
@@ -3373,7 +3377,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard let card = card, let content = content, visible.height > 16 else { return }
         let scale = FloatHost.fitScale(for: visible, in: card.bounds.size)
         content.center = CGPoint(x: card.bounds.midX,
-                                 y: card.bounds.midY - cropTop * scale / 2)
+                                 y: card.bounds.midY - (cropTop + kbTopCrop) * scale / 2)
         content.transform = CGAffineTransform(scaleX: scale, y: scale)
         // A resized card is the same device at another scale, so the corner is
         // the same screen corner at another scale. Leaving the old radius on a
@@ -3393,6 +3397,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var kbFilled = false
     /// 让位前的卡片几何，收起时原样还回去。
     private var kbSavedFrame: CGRect = .null
+    /// 0.1.49 — 键盘态的「画布顶对齐」补偿量（pt），收起时清零。
+    ///
+    /// 与 `cropTop` 分开记是必须的：`cropTop` 会参与 `resetToPlan` 的尺寸计算
+    /// （`base.frame.height - cropTop * scale`），借它做键盘对齐会让「长按复位」
+    /// 在打字时算出一个矮一截的默认尺寸。这里只是一次临时的视觉平移。
+    private var kbTopCrop: CGFloat = 0
+    /// 键盘态之前那个补偿量，收起时还回去。
+    private var kbSavedCrop: CGFloat = 0
 
     /// 全体宿主里挑主窗让位。
     ///
@@ -3406,45 +3418,55 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         host.setKeyboardFill(on)
     }
 
-    /// 0.1.47 — 卡片让位：**画布 1:1，卡片贴到屏幕底**。
+    /// 0.1.49 — 卡片让位：**画布 1:1，画布顶对齐卡片顶（不是贴屏底）**。
     ///
-    /// Aevon(119) 与视频（Stheno 分屏）给的形状是同一个：
+    /// 0.1.47/0.1.48 把卡片摆成「高 = 画布高、贴屏幕底」（`y = 932 − 717 = 215`），
+    /// 于是 App 内容被整体推到屏幕 215..932。Aevon(121) 的反馈是「键盘完整了，但
+    /// 输入框被挡住」—— 几何上完全对得上：
     ///
-    ///   · 画布是「和手机一样宽、高 717」的一块屏幕，卡片平时是它的等比缩小
-    ///     （430 → 344，scale 0.80）；
-    ///   · 键盘窗在场景里的位置是 `401..717`（0.1.47 由 App 侧整体上移得到），
-    ///     宽 430 —— **按 0.80 缩的卡片只有 344 宽，左右会把键盘各裁掉 43 pt**。
+    ///   · App 侧收到让位量 316（`kb: lead … -> 316.0`），它把输入框摆在**内容
+    ///     坐标的 401**（= 717 − 316），401 以上是它自己让出来的空档；
+    ///   · 卡片却从屏幕 215 起，`401 + 215 = 616` 落在键盘（401..717）里面 ⇒ 输入框
+    ///     被键盘盖住。
     ///
-    /// 所以打字期间卡片必须回到 1:1、撑满屏宽：`content` 的 `transform` 由
-    /// `followContent()` 按 `fitScale(visible, card.bounds)` 重算，卡片一旦等于
-    /// 画布尺寸，那个比例自然就是 1.0 —— 不需要另写一套缩放。
+    /// 所以卡片必须跟**场景原点**对齐而不是跟屏幕底对齐：卡片铺满整块屏幕
+    /// （430×932）、`kbTopCrop = 932 − 717 = 215` 把画布顶到卡片顶，于是内容坐标
+    /// 401 正好映射到屏幕 401 —— 键盘上沿那一线，输入框完整露在键盘之上。
     ///
-    /// 纵向贴屏幕底（`y = 屏高 − 画布高`）：键盘在画布 401..717，贴底之后正好落在
-    /// 屏幕最下方，上面 215 pt 让给桌面。这与视频一致 —— 卡片"让"出下半屏，
-    /// 键盘占着它，App 内容被压到上半部分。
+    /// 卡片高 932 还有第二个用处：屏幕 717..932 这 215 pt 在承载场景之外，
+    /// 卡片盖住它之后 `applyBars()` 会填黑，不再把桌面透出来。
     ///
-    /// ⛔ 只碰 `card.frame` 与 `content` 的 `center/transform`：**不写 `content.bounds`**
-    /// （0.0.67 的「应用打不开 + 桌面黑屏」就是替 presenter 写那个 bounds）。
+    /// ⛔ 只碰 `card.frame`、`content` 的 `center/transform` 与 `kbTopCrop`：
+    /// **不写 `content.bounds`**（0.0.67 的「应用打不开 + 桌面黑屏」就是替 presenter
+    /// 写那个 bounds），也**不动场景尺寸**（那是 0.0.6x 黑屏那一族）。
     func setKeyboardFill(_ on: Bool) {
         guard let card = card, let window = window, visible.height > 16 else { return }
         if on {
             guard !kbFilled else { return }
             kbFilled = true
             kbSavedFrame = card.frame
+            kbSavedCrop = kbTopCrop
             let screen = window.bounds.size
-            var y = screen.height - visible.height
-            if y < 0 { y = 0 }
-            card.frame = CGRect(x: 0, y: y, width: visible.width, height: visible.height)
+            card.frame = CGRect(x: 0, y: 0, width: screen.width, height: screen.height)
+            // 画布顶对齐卡片顶：多出来的那一截（932 − 717）全部记在顶部裁切上。
+            kbTopCrop = Swift.max(0, screen.height - visible.height)
             followContent()
+            // 0.1.49 — 光晕是卡片外面那一圈柔光，卡片整块换了尺寸就必须跟着走，
+            // 否则键盘态会在屏幕上方留下一个 342×570 的旧影子。
+            applyGlow()
             Log.write("win: keyboard fill on card=" + size(card.frame.size)
-                      + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY))
+                      + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
+                      + " crop=" + String(format: "%.0f", kbTopCrop))
         } else {
             guard kbFilled else { return }
             kbFilled = false
             if !kbSavedFrame.isNull { card.frame = kbSavedFrame }
+            kbTopCrop = kbSavedCrop
             followContent()
+            applyGlow()
             Log.write("win: keyboard fill off card=" + size(card.frame.size)
-                      + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY))
+                      + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
+                      + " crop=" + String(format: "%.0f", kbTopCrop))
         }
     }
 
@@ -3491,7 +3513,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard let card = card, let content = content, visible.height > 16 else { return false }
         let scale = FloatHost.fitScale(for: visible, in: card.bounds.size)
         let center = CGPoint(x: card.bounds.midX,
-                             y: card.bounds.midY - cropTop * scale / 2)
+                             y: card.bounds.midY - (cropTop + kbTopCrop) * scale / 2)
         let at = content.transform
         let off = abs(at.a - scale) > 0.004 || abs(at.d - scale) > 0.004
             || abs(content.center.x - center.x) > 0.5
