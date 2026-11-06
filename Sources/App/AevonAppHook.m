@@ -4968,6 +4968,69 @@ static void AevonKbSample(void) {
     AevonKbTopPrev = top;
 }
 
+/// 0.1.64 — 「收起」要等 0.30 s 再信，因为这条通知可能是我们自己惹出来的。
+///
+/// 起因（Aevon(135)）：每一条 `kb: win fit` 后面都紧跟一条 `kb: win unfit`，同一秒内：
+///
+///   kb: win fit h=358 top=573 sceneY=215 sceneH=717 was=717
+///   kb: guide win=430x358 top=0 h=0 seen=761
+///   kb: win unfit h=717 scene=717
+///   app: keyboard gone (bridge)
+///
+/// 链条是全闭环的：我们把 App 的 key window 收到 358 之后，UIKit 补发一次
+/// `UIKeyboardWillChangeFrame`，而它给的 `UIKeyboardFrameEndUserInfoKey` 是
+/// **相对新窗口**的 —— 键盘整个落在 358 之下，于是 `frame.size.height > 40` 不成立
+/// （或被判出界）⇒ `on = NO` ⇒ 翻成收起 ⇒ `AevonKbUnfitWindow` 把窗口还回 717 ⇒
+/// 键盘相对 717 又「在窗口里」⇒ 又一次 up ⇒ 再 fit …… 一个 0.5 s 周期的自激环。
+/// 用户看到的是「开键盘时悬浮窗大小自动跳动」、QQ 输入框被连着裁两次而显示不完整。
+///
+/// 0.1.60 里同一个环也在跑（那份日志同样有 fit 紧跟 unfit 的对），只是当时收起分支
+/// 什么都不做（`kbFilled` 从未置真），所以看不出来；0.1.63 把还原修好之后，它才
+/// 变成肉眼可见的跳动。所以这不是「还原引入的 bug」，而是还原把旧环照亮了。
+///
+/// 分开「真收了」与「我们在自激」只有量视图靠得住：`AevonKbVisualTop()` 在键盘窗里
+/// BFS，键盘还在屏上就一定能量到（这份日志里 `kb: top publish … measure=1` 全程成立）。
+/// 所以所有「收起」一律先压 0.30 s，到点再量一次：
+///   · 量到键盘 ⇒ 这条通知是误报，续租、继续开着（`kb: settle keep top=`）；
+///   · 量不到   ⇒ 真收了，此时才落状态、才把窗口还回去（`kb: settle gone`）。
+/// 代价：真收起时卡片与触发条晚 0.30 s 回来（原来是立刻）。
+static int AevonKbSettleSeq = 0;
+
+/// 任何一次「起来」都作废待定的收起。
+static void AevonKbSettleCancel(void) {
+    AevonKbSettleSeq += 1;
+}
+
+static void AevonKbSettleOff(void) {
+    int seq = AevonKbSettleSeq + 1;
+    AevonKbSettleSeq = seq;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (seq != AevonKbSettleSeq) return;   // 期间又起来了 ⇒ 这次「收起」作废
+        if (AevonKbOn == 0) return;            // 已经处理过
+        CGFloat top = AevonKbVisualTop();
+        char line[160];
+        if (top > 200.0) {
+            // 键盘还在屏上 ⇒ 通知是误报（几乎都是我们改窗口高惹的）。续租，什么都不动。
+            snprintf(line, sizeof(line), "kb: settle keep top=%.0f\n", top);
+            AevonKbLog(line);
+            AevonKbPost();
+            return;
+        }
+        snprintf(line, sizeof(line), "kb: settle gone measure=%.0f\n", top);
+        AevonKbLog(line);
+        AevonKbOn = 0;
+        AevonKbArm(NO);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonKbLiftRepeat();
+        });
+        AevonKbPostOff();
+        AevonKbTopPrev = 0.0;
+        AevonKbUnfitWindow();
+        AevonRawNote("app: keyboard gone (bridge)\n");
+    });
+}
+
 static void AevonKbEvaluate(NSDictionary *info) {
     NSValue *value = info[UIKeyboardFrameEndUserInfoKey];
     if (value == nil) return;
@@ -4984,51 +5047,48 @@ static void AevonKbEvaluate(NSDictionary *info) {
     // 0.1.59 — 三次采样交给 `AevonKbSample`：它除了发布顶边，还会在两次读数
     // 稳定（差 < 40）时收一次 App 窗口。0.15 s 那次几乎一定还在动画里，读数与
     // 0.35 s 差得远，于是不落；0.60 s 那次才落地。
-    if (on && AevonKbOn == 0) {
-        AevonKbTopPrev = 0.0;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.95 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbSample(); });
-    }
-    if (on == (AevonKbOn != 0)) {
-        // 状态没变也要续一次：键盘一直开着的时候，租约靠这一点续命。
-        if (on) AevonKbPost();
+    // 0.1.64 — 「收起」不再当场落状态：见上面 `AevonKbSettleOff`。这条通知在我们
+    // 收过窗口之后会假报一次，照落就是那个 0.5 s 的自激环。
+    if (!on) {
+        if (AevonKbOn == 0) return;
+        AevonKbSettleOff();
         return;
     }
-    AevonKbOn = on ? 1 : 0;
-    AevonKbArm(on);
+    AevonKbSettleCancel();
+    if (AevonKbOn != 0) {
+        // 状态没变也要续一次：键盘一直开着的时候，租约靠这一点续命。
+        AevonKbPost();
+        return;
+    }
+    AevonKbOn = 1;
+    AevonKbArm(YES);
+    AevonKbTopPrev = 0.0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbSample(); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbSample(); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbSample(); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.95 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbSample(); });
     // 0.1.47 — 键盘窗整体上移，1/3 节见 `AevonKbLiftApply` 上面那段。
     // 推到下一拍：`willChangeFrame` 这一刻 UIKit 还没写完键盘窗的最终几何，
     // 当场写会被紧接着的那次布局覆盖（0.1.34 那条「早半步的写入被抹掉」同形）。
     dispatch_async(dispatch_get_main_queue(), ^{
         AevonKbLiftRepeat();
     });
-    if (on) {
-        AevonKbPost();
-        // 0.1.49 — 判据：0.45 s 后（键盘动画 + App 重排都跑完）读一次 App 自己
-        // 的键盘布局参考线。它比「我们返回了 316」硬得多 —— 那只是我们说了什么，
-        // 这一行才是 App 实际把内容压到哪。顶边 ≈ 401 就是让位真的生效。
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbGuideNote(); });
-        // 0.1.55 — 再补一次 0.95 s。Aevon(127) 只有 0.45 s 那一行，而那一行正好落在
-        // UIKit 的 `keyboardSceneDelegate` 还没把 guide 结算完的时刻（`h=0`）。
-        // 两个时刻读数不同 ⇒ 只是先后；两个都 0 ⇒ UIKit 真的没认。
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.95 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonKbGuideNote(); });
-    } else {
-        // 0.1.18 — 收起要**立刻**告诉桌面，不等租约过期。
-        AevonKbPostOff();
-        // 0.1.59 — 窗口还回场景高，并把顶边读数清零（下一次弹起从干净状态开始）。
-        AevonKbTopPrev = 0.0;
-        AevonKbUnfitWindow();
-    }
-    AevonRawNote(on ? "app: keyboard up (bridge)\n"
-                    : "app: keyboard gone (bridge)\n");
+    AevonKbPost();
+    // 0.1.49 — 判据：0.45 s 后（键盘动画 + App 重排都跑完）读一次 App 自己
+    // 的键盘布局参考线。它比「我们返回了 316」硬得多 —— 那只是我们说了什么，
+    // 这一行才是 App 实际把内容压到哪。顶边 ≈ 401 就是让位真的生效。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbGuideNote(); });
+    // 0.1.55 — 再补一次 0.95 s。Aevon(127) 只有 0.45 s 那一行，而那一行正好落在
+    // UIKit 的 `keyboardSceneDelegate` 还没把 guide 结算完的时刻（`h=0`）。
+    // 两个时刻读数不同 ⇒ 只是先后；两个都 0 ⇒ UIKit 真的没认。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.95 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbGuideNote(); });
+    AevonRawNote("app: keyboard up (bridge)\n");
 }
 
 /// 构造函数里调一次。观察者与心跳都只在**真的弹过键盘**之后才有开销。

@@ -979,6 +979,12 @@ def main():
                       b"kb: win fit h=%.0f",
                       b"kb: win unfit h=%.0f",
                       b"kb: win fit reject want=%.0f",
+                      # 0.1.64 — 「收起」不再当场落状态：先压 0.30 s，到点量一次键盘
+                      # 视图再定。`settle keep` = 通知是误报（键盘还在屏上），
+                      # `settle gone` = 真收了、这时才还窗口。两条都在才说明这个
+                      # 闸门没被写成「无脑延迟」。
+                      b"kb: settle keep top=%.0f",
+                      b"kb: settle gone measure=%.0f",
                       # 0.1.35 — 判不中的时候把坐标与两个矩形写下来。V111 里
                       # `app: band touch at` 是 0，而带子的值明明是对的 ⇒ 分不出
                       # 「这一拍没进来」还是「进来了被几何否掉」。有这一行就分得开。
