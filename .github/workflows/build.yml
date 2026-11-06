@@ -24,7 +24,10 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-14
+    # 0.1.46 — macos-14 已被 GitHub 退役：作业拿到 label 后立刻判
+    # `The configuration 'macos-14-arm64-us-default' is not supported` 并 cancelled（0 步）。
+    # 换成现行 arm64 标签 macos-15（官方支持 macos-15 / macos-26 / macos-latest）。
+    runs-on: macos-15
     timeout-minutes: 20
     env:
       THEOS: ${{ github.workspace }}/.theos
@@ -38,7 +41,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .theos
-          key: theos-roothide-macos14-sdk16.5-swift-v2
+          key: theos-roothide-macos15-sdk16.5-swift-v2
 
       - name: Install Theos (roothide branch)
         if: steps.cache.outputs.cache-hit != 'true'
