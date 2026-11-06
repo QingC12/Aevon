@@ -6007,41 +6007,66 @@ static volatile int AevonKbMissNotes = 0;
 /// 用它兜一层底（只往大了取）。
 static volatile CGFloat AevonKbTopSeen = 0.0;
 
-/// 0.1.70 — 本键盘会话里**结算后**的键盘顶边（屏幕坐标）。
+/// 0.1.70 — 结算后的键盘顶边（屏幕坐标），整个进程只降不升。
 ///
-/// 键盘是从屏幕下方滑上来的，`origin.y` 只会一路上降到最后那个数：动画途中的
-/// 读数（761 / 788 / 806 / 906）全在最终值**上面**。所以「本会话见过的最小顶边」
-/// 就是结算值，不需要等动画、也不读任何视图几何：
-///   QQ 616 · 微信 616 · 抖音 533 · 备忘录 616
-/// `WillShow` 那一刻清空重来（新会话）。
+/// 键盘是从屏幕下方滑上来的，`origin.y` 一路上降到最后那个数：动画途中的读数
+/// （721 / 761 / 788 / 818）全在最终值**上面**，所以「见过的最小顶边」就是
+/// 结算值，不需要等动画、也不读任何视图几何。
+///
+/// 注意这**不是**键盘像素的真实上沿（616）。各 App 通知里报的是它自己认为的
+/// 键盘矩形顶，实测：QQ 639 · 微信 601 · 抖音 611 —— 与真实上沿的差由
+/// `AevonKbNoteCalibration` 抹平，别在这里硬凑 616。
+///
+/// 0.1.71 — 跨会话**不清零**（见 `AevonKbPostNote` 里的推导）。`WillShow` 也
+/// 不能当会话边界：同一个键盘会连发两轮 WillChangeFrame/WillShow，第二轮一
+/// 重置就把第一轮结算好的值抹掉。
 static volatile CGFloat AevonKbTopSettled = 0.0;
+
+/// 0.1.71 — `kb: top settle kept` 的日志配额（同一个 App 一个进程里只会写几条）。
+static volatile int AevonKbTopSettleNotes = 0;
 
 /// 0.1.70 — 每个 App 自己的输入条会额外吃掉的高度（实测标定，屏幕 pt）。
 ///
-/// 反解过程（Aevon(139)/(140)/(141) 三份日志 + 用户三次描述）：
+/// 0.1.71 起这三个数不再靠手调，而是由 `kb: caret … bar=` 与 `kb: inter true=`
+/// 两点解一元一次方程得到，推导写在函数体里。这里只留「为什么会有这个量」：
 ///
 /// 这几个 App 都用同一个公式算避让 —— `让位量 = UIScreen 高 − 键盘顶`，然后把
 /// 自己的输入条底边贴到 `窗口底 − 让位量`。我们的场景是 `430×717@215`，窗口高
-/// 717 而屏幕高 932，于是「窗口底 − 让位量」比真实键盘顶**低 215**；我们把通知
-/// 平移 215 本来是想补这一刀，结果 App 在平移前后各算了一次：
+/// 717 而屏幕高 932，于是「窗口底 − 让位量」比真实键盘顶**低 215**；0.1.69 把
+/// 通知平移 215 本来是想补这一刀，结果 App 在平移前后各算了一次：
 ///
 ///   抖音先收到未平移的（顶 533 ⇒ 让位 184），又收到平移的（顶 318 ⇒ 让位 399），
 ///   两次**累加** ⇒ 717−583＝134 ⇒ 屏幕 215+134＝**349**，与日志 `bar=329..349`
 ///   完全一致；用户看到的就是「输入框被抬高」。
 ///
-/// 而完全不平移（0.1.68 的 QQ）落在 625 —— 又低了一截。差的那一截正是**它自己
-/// 那条输入条的高度**：App 把「键盘顶」当成输入条的**上边**再往下铺一条，
-/// 于是底边多出自身高度。实测残差（顶边 → 需要再抬多少）：
-///   QQ 52pt（625 → 573）· 微信 90pt（706 → 616）· 抖音 0pt（536 → 533）
-/// 抖音 0 是因为它把工具栏算进了键盘矩形，自己不再重复铺。
-///
-/// ⚠️ 这是**按 Bundle 的标定值**，不是普适规律。新增 App 先看 `kb: caret … bar=`
-/// 的残差再决定要不要加一行。
+/// 所以 0.1.70 之后只做一件事：把「顶边」挪到一个能让**输入条底边正好落在
+/// 键盘上沿**的位置，挪多少由实测反解。抖音 0 因为它把工具栏算进了键盘矩形，
+/// 铺完正好 —— 不要给它加任何非零标定。
 static CGFloat AevonKbNoteCalibration(void) {
     NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
     if (bundle == nil) return 0.0;
-    if ([bundle isEqualToString:@"com.tencent.mqq"]) return 52.0;
-    if ([bundle isEqualToString:@"com.tencent.xin"]) return 90.0;
+    // 0.1.71 — 三个数全部改成**由 `kb: caret … bar=` 反解**，不再靠手调。
+    //
+    // 反解用的关系式（Aevon(142) 的读数，两处采样 1:1 吻合才敢用）：
+    //
+    //   QQ   输入条底 = 963 − truth   （truth 345 ⇒ 618；truth 318 ⇒ 645）
+    //   微信 输入条底 = 1190 − truth  （truth 421 ⇒ 769；truth 394 ⇒ 796）
+    //
+    // 两式斜率都是 −1 ⇒ 我们给的 `truth` 增 1，输入条就上移 1，方向与幅度都
+    // 精确。于是「让输入条底落在键盘上沿 616」变成一个一元一次方程：
+    //
+    //   QQ   truth = 963 − 616 = 347 ⇒ 顶边 585 ⇒ cal = 639 − 585 = 54
+    //   微信 truth = 1190 − 616 = 574 ⇒ 顶边 358 ⇒ cal = 601 − 358 = 243
+    //
+    // 两个常数差得远（54 vs 243）不是笔误：它们各自把输入条铺在自己以为的
+    // 「键盘顶」下沿，铺出来的厚度不同（微信多铺 258 pt，是它把 tabbar、
+    // 工具条都算进去的结果）。抖音 0 —— 它的键盘矩形 533 本来就含工具栏，
+    // 铺完正好，别动它（0.1.70 实测正常）。
+    //
+    // ⚠️ 仍然是**按 Bundle 的标定值**。新增 App 照上面两条式子：先看
+    // `kb: caret … bar=` 与 `kb: inter true=` 两点，解出斜率与截距再填。
+    if ([bundle isEqualToString:@"com.tencent.mqq"]) return 54.0;
+    if ([bundle isEqualToString:@"com.tencent.xin"]) return 243.0;
     return 0.0;
 }
 
@@ -6673,6 +6698,17 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     // 再减掉该 App 自己那条输入条的高度（`AevonKbNoteCalibration`）—— 它们把
     // 「键盘顶」当输入条上边再往下铺一条，底边于是多出自身高度。三条通道（通知
     // 矩形、这里的让位量）从此说同一个数。
+    //
+    // 0.1.71 — 这个返回值**不再等于真实键盘高度**，别再拿它跟 316 对账。
+    //
+    // 实测（Aevon(142)）两个 App 的输入条位置对 `truth` 都是 1:1 跟随：
+    //   QQ   caret底 = 963 − truth   微信 caret底 = 1190 − truth
+    // 斜率精确为 −1，方向也没错，只是截距不同。所以「让输入条底落在键盘上沿
+    // 616」反过来解出 QQ 要 347、微信要 574 —— 微信的 574 比键盘真实高度 316
+    // 还大 258，看着荒谬，但那正是它自己多铺的那一截（tabbar + 工具条）。
+    //
+    // 判据不要写死 316，要看 `kb: inter true=` 与 `kb: caret … bar=` 是否
+    // 满足上面两条式子。
     // 这几个数就是各自键盘的上沿（`AevonKbVisualTop` 在键盘窗里量的结果，含
     // App 自己的工具栏）—— 0.1.69 用它做顶边，但它随调用时机漂（501/528/573），
     // 已改走 `AevonKbTopSettled`；这组读数留作对照。
@@ -6806,29 +6842,54 @@ static void AevonKbPostNote(id self, SEL _cmd, NSNotificationName name, id objec
     // 「是本进程 + 这个 App 正被托管」，键盘在不在屏上由 `AevonKbNoteActive`
     // 单独记，两件事分开。
     if (info != nil && AevonKbHostGate() && AevonKbIsKeyboardNote(name)) {
-        // 0.1.70 — 键盘顶只认**本会话见过的最小值**。
+        // 0.1.70 — 键盘顶只认**见过的最小值**。
         //
-        // 键盘从屏幕下方滑上来，`origin.y` 一路上降：932 → 906 → 806 → 761 → 616。
+        // 键盘从屏幕下方滑上来，`origin.y` 一路上降：932 → 906 → 806 → 761 → 601。
         // 动画途中的读数全在最终值上面，所以「取最小」＝取结算值，不需要等动画、
         // 也不读任何视图几何。0.1.68 取 `DidShow` 那一条（读到 761/788/806 ——
         // 它在动画中途就发了），0.1.69 改读视图（读到 501/528/573 三个数 ——
         // 调用时机不同结果不同），都不稳。
         //
-        // 门槛 `> 350` 是为了滤掉「键盘已收、origin.y 落到 401/318」的平移态读数
+        // 门槛 `> 350` 是为了滤掉「键盘已收、origin.y 落到 401/318」的读数
         // 和 0 值；`< full` 滤掉完全收起的 932。
         //
-        // 「新会话」的判据是 `AevonKbNoteActive == 0`（收起时清零），**不能**用
-        // `WillShow`：这份日志里同一个键盘会连发两轮 WillChangeFrame/WillShow
-        // （Aevon(141) 的 QQ 就发了两次），第二轮若重置，正好把第一轮结算好的
-        // 616 抹掉、退回动画起点。
+        // 0.1.71 — **没有「新会话」这回事了**，值跨会话保留（推导见下）。既不能
+        // 用 `WillShow` 当边界（同一个键盘会连发两轮，第二轮一重置就把第一轮
+        // 结算好的值抹掉），也不能用 `AevonKbNoteActive == 0` —— Aevon(142) 的
+        // QQ 就是被它坑的：第一次结算 639、第二次结算 666。
         NSValue *endValue = [info objectForKey:UIKeyboardFrameEndUserInfoKey];
-        if (AevonKbNoteActive == 0) AevonKbTopSettled = 0.0;
         if (endValue != nil) {
             CGRect raw = [endValue CGRectValue];
             CGFloat full = AevonKbNativeBounds(nil).size.height;
             if (raw.size.height > 40.0 && raw.origin.y > 350.0 && raw.origin.y < full - 1.0) {
-                CGFloat seen = AevonKbTopSettled;
-                if (seen < 1.0 || raw.origin.y < seen) AevonKbTopSettled = raw.origin.y;
+                // 0.1.71 — **不再在会话开头清零，只降不升。**
+                //
+                // 0.1.70 的写法是「`AevonKbNoteActive == 0` 就当成新会话、把
+                // `AevonKbTopSettled` 清 0」。Aevon(142) 证明这会让同一个 App
+                // 在两次会话里拿到不同的顶边：QQ 第一次结算 639、第二次 666
+                // （它弹不弹候选栏差 27 pt），truth 于是 345 → 318 → 318。
+                // 而 App 侧是 1:1 跟随的（`caret底 + truth = 963` 两处采样严丝
+                // 合缝），truth 少 27，输入条就往下沉 27 —— 618 → 645，正好从
+                // 「压在键盘上沿、看得见」掉成「整条埋进键盘、看不见」。
+                //
+                // 键盘只会从屏幕下方往上滑，所以「历史最小」永远是一个已结算过
+                // 的真实顶边；用它做基准，同一个 App 在本次进程存活期间只会得
+                // 到一个数，App 不会因为值变了而重排第二次。
+                CGFloat settled = AevonKbTopSettled;
+                // 3 pt 容差：同一种键盘结算后会有 1~2 pt 抖动，不重复刷日志。
+                BOOL take = (settled < 1.0 || raw.origin.y < settled - 3.0);
+                if (take) AevonKbTopSettled = raw.origin.y;
+                if (AevonKbTopSettleNotes < 8
+                    && (take || fabs(raw.origin.y - settled) > 3.0)) {
+                    AevonKbTopSettleNotes += 1;
+                    char line[200];
+                    // `take=0` 说明这次读数比已结算的更大、被挡住了 —— 这一行
+                    // 正是「只降不升」在起作用的证词，不要只记成功的那些。
+                    snprintf(line, sizeof(line),
+                             "kb: top settle kept=%.0f raw=%.0f was=%.0f take=%d\n",
+                             AevonKbTopSettled, raw.origin.y, settled, take ? 1 : 0);
+                    AevonKbLog(line);
+                }
                 AevonKbTopSeen = raw.origin.y;
             }
         }
