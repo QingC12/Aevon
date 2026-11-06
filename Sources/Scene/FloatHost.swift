@@ -3457,6 +3457,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     /// 键盘在屏时卡片是不是已经让过位。
     private var kbFilled = false
+    /// 0.1.80 — 这一次张开是什么时候、张开到哪里。
+    ///
+    /// 键盘弹出的同一秒里，App 会连发 3~4 条通知（WillChangeFrame / WillShow /
+    /// DidChangeFrame / DidShow），每一条都过桥变成一次「键盘起来了」，于是
+    /// `keyboardFill(true)` 被调 2~3 次（Aevon(150) 里 63 次 `fill on` 对应
+    /// 20 次真正的张开）。第二条起就是**重复工作**：场景帧再推一次、`UIView.animate`
+    /// 用 `beginFromCurrentState` 从半路重新起跑、`followContent()` 再写一次内容
+    /// 变换 —— 肉眼看到的就是「放大时闪一下」。
+    ///
+    /// 0.1.71 的 `card.frame == target` 判重挡不住它：动画中用 `beginFromCurrentState`
+    /// 时 `card.frame` 已经是终点值，可内容和呈现层还在半路。
+    private var kbFillAt: CFTimeInterval = 0
+    private var kbFillTarget: CGRect = .null
     /// 让位前的卡片几何，收起时原样还回去。
     private var kbSavedFrame: CGRect = .null
     /// 0.1.49 — 键盘态的「画布顶对齐」补偿量（pt），收起时清零。
@@ -3552,6 +3565,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // （`AevonKbFitWindow`）。窗口不是场景，收它不会带动键盘。
             let height = visible.height
             let target = CGRect(x: 0, y: y, width: visible.width, height: height)
+            // 0.1.80 — **同一次张开只跑一次。**
+            //
+            // 判据是「已经填过 + 目标一模一样 + 距上次开跑不到 0.5 s」。0.5 s 比
+            // 动画（0.24 s）长一倍，够覆盖那一串连发通知；真要有第二次张开，
+            // 目标一定不同（用户换了位置/尺寸），不会被它误挡。
+            let fillNow = CFAbsoluteTimeGetCurrent()
+            if kbFilled, kbFillTarget == target, fillNow - kbFillAt < 0.5 { return }
             // 0.1.61 — **进来先存，出去才还得回去**。
             //
             // 0.1.60 重写这一段时把 `kbFilled = true` 与四个 `kbSaved*` 一起删掉了，
@@ -3583,6 +3603,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             kbTopCrop = 0
             canvasOriginY = y
             canvasHeight = 0
+            // 0.1.80 — 记下这一次张开的时刻与目标（判重用的就是这两个）。
+            kbFillAt = fillNow
+            kbFillTarget = target
             // 场景跟着卡片走。目标登记在 C 侧，这里**当拍就推一次**。
             //
             // 0.1.55 — 原来是只登记、等 SceneProbe 守护循环下一拍才写。Aevon(127)
@@ -3597,22 +3620,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                                Double(visible.width), Double(height))
             var door: Int = 0
             if let sc = window.windowScene { door = Int(AevonPushSceneFrame(sc)) }
-            // 0.1.78 — **卡片等场景落地再动。**
+            // 0.1.80 — **撤掉 0.1.78 的「等两拍再动卡片」。**
             //
-            // 0.1.77 在这里只做了「door=0 就下一拍再推一次」，卡片在同一拍里照样
-            // 开始张。Aevon(149) 第一次张开还是原样：
+            // 0.1.78 看到 `fill on … push=0` 紧跟一条 `frame drift now=@0
+            // want=@215`，判断「场景还没落地」，于是把动卡片延后两拍。Aevon(150)
+            // 把代价拍出来了：那两拍里场景已经按 215 在画，卡片还停在 189..578，
+            // 露出来的是内容中间的一条横带 —— 两帧（约 32 ms）的错位正好是一
+            // 次「闪」。这一版真正要修的是**同一次张开被跑了 2~3 遍**（见
+            // `kbFillAt` 那段），重复那一刻既推了场景又重起了动画；延后只是把
+            // 同一个错位换个时间点发生。
             //
-            //   win: keyboard fill on card=430x717 at 0,215 scene=215 crop=0 push=0
-            //   win: frame drift now=430x717@0 want=430x717@215 door=3 wrote=2 armed=1
-            //
-            // 卡片已经铺到 215..932，场景还停在 0..717 —— 这一拍画面是「内容按 0
-            // 画、窗口按 215 装」，底下露出 215 pt 黑的。0.24 s 的动画把它摊成了
-            // 一闪，用户的原话就是「放大时会闪一下」。
-            //
-            // 现在把「动卡片」整段收进 `grow`：场景真写进去了（door != 0）才当场跑，
-            // door == 0 就先推一拍、下一拍再跑。最多晚一帧（约 16 ms），换掉一次
-            // 215 pt 的错位。这个顺序不能反过来 —— 0.1.56 已经证明「先动卡片」会在
-            // 整段动画里露出按旧画布画的内容。
+            // 所以回到「同一拍里推场景 + 动卡片」：`AevonSceneFrameSet` 先把目标
+            // 登记进 C 侧，`AevonPushSceneFrame` 当拍就写一次，动画从第一帧起
+            // 就朝目标走。`push=0` 只说明这一拍没写（目标已登记或已等于目标），
+            // 不再当成「没落地」。
             let grow = { [weak self] in
                 guard let self = self, self.kbFilled else { return }
                 // 0.1.76 — **卡片用 ease-out 张开**（0.1.77 起 0.24 s，与系统键盘
@@ -3639,20 +3660,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 // 就得立刻把新几何推过去（`reportBand` 自己判重，没变不会重复发）。
                 self.reportBand()
             }
-            if door == 0, let sc = window.windowScene {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self = self, self.kbFilled else { return }
-                    _ = AevonPushSceneFrame(sc)
-                    // 再让一拍：跨进程的 settings 写入要等 SceneProbe 那一拍才落地，
-                    // 但按帧算已经够了；再等下去就变成「键盘到位、窗口还没动」。
-                    DispatchQueue.main.async { grow() }
-                }
-            } else {
-                grow()
-            }
+            grow()
         } else {
             guard kbFilled else { return }
             kbFilled = false
+            kbFillTarget = .null
             // 0.1.56 — **先放场景，再改卡片**。
             //
             // 原来是先 `card.frame = kbSavedFrame`（430×717@215 一步收回

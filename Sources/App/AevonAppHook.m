@@ -4792,9 +4792,6 @@ static CFAbsoluteTime AevonKbFitAt;
 /// 0.1.67 — 输入框光标读数（定义在 `AevonKbGuideNote` 之后）。
 static void AevonKbCaretNote(void);
 static CGFloat AevonKbAnchorValue(CGFloat full);
-/// 0.1.77 — 本会话有没有真的喂过键盘布局参考线（定义见 `AevonKbGuideFrame`）。
-/// 提前声明是因为 `AevonKbNoteCalibration`（更靠前）要读它来避免「让两次」。
-static volatile int AevonKbGuideFilled;
 /// 0.1.77 — 挂 `-[UILayoutGuide layoutFrame]`（定义在键盘段后部）。
 static void AevonKbGuideHookInstall(void);
 /// 0.1.78 — 安全区让位（定义在 `AevonKbExtraStore` 之后）。收起时要用，
@@ -5341,23 +5338,44 @@ static void AevonKbEvaluate(NSDictionary *info) {
 /// 窗口不足 0.8 s 的 hide 一律**否决**（`kb: hide note veto`），真收起交给
 /// `AevonKbIdleCheck`（键盘窗连量两次空 ⇒ `kb: idle zero close`）兜底，最多晚
 /// 一次心跳。宁可晚 1~2 s 还原，也不能把刚弹起来的输入框又按回去。
-static void AevonKbHideNote(void) {
+static void AevonKbHideNote(NSDictionary *info) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     CGFloat gap = (AevonKbFitAt > 0) ? (CGFloat)(now - AevonKbFitAt) : 999.0;
+    // 0.1.80 — **先看这条 hide 的原始矩形落到哪里。**
+    //
+    // Aevon(150) 里 `hide note seen gap=0.97` 出现在键盘弹起后 1 秒、而键盘
+    // 一直没走 —— 说明 `UIKeyboardWillHideNotification` 在这套环境里**不代表
+    // 键盘离开**（0.1.77 已经发现它每 2~3 s 来一条）。能代表离开的只有它带的
+    // 那个矩形：真收起时 `origin.y` 落到屏幕底（932），假的那条还在屏内。
+    //
+    // 这一行把 raw 和判定结果一起写进日志：下一份日志里 `off=1` 的条数就该
+    // 等于用户真的关了几次键盘，`off=0` 的条数就是被拦下的假收起。
+    CGFloat full = AevonKbNativeBounds(nil).size.height;
+    CGFloat raw = -1.0;
+    CGFloat rawH = -1.0;
+    NSValue *boxed = [info objectForKey:UIKeyboardFrameEndUserInfoKey];
+    if (boxed != nil) {
+        CGRect box = [boxed CGRectValue];
+        raw = box.origin.y;
+        rawH = box.size.height;
+    }
+    // 三种「键盘离开」的形状都算：矩形落到屏外（932）、退化成零高、或者根本没带矩形。
+    BOOL off = (raw < 0.0) || (full < 1.0) || (raw >= full - 8.0) || (rawH > -1.0 && rawH < 1.0);
     static int notes = 0;
-    if (notes < 8) {
+    if (notes < 12) {
         notes += 1;
-        char line[120];
-        snprintf(line, sizeof(line), "kb: hide note seen gap=%.2f\n", gap);
+        char line[170];
+        snprintf(line, sizeof(line), "kb: hide note gap=%.2f raw=%.0f h=%.0f off=%d\n",
+                 gap, raw, rawH, off ? 1 : 0);
         AevonKbLog(line);
     }
     if (AevonKbOn == 0) return;
-    if (gap < 0.8) {
+    if (!off) {
         static int vetoes = 0;
         if (vetoes < 8) {
             vetoes += 1;
-            char line[120];
-            snprintf(line, sizeof(line), "kb: hide note veto gap=%.2f\n", gap);
+            char line[140];
+            snprintf(line, sizeof(line), "kb: hide note veto raw=%.0f gap=%.2f\n", raw, gap);
             AevonKbLog(line);
         }
         return;
@@ -5418,7 +5436,7 @@ static void AevonKbObserve(void) {
                         object:nil
                          queue:nil
                     usingBlock:^(NSNotification *note) {
-        AevonKbHideNote();
+        AevonKbHideNote(note.userInfo);
     }];
     AevonKbTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                                           dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0));
@@ -6440,13 +6458,10 @@ static CGFloat AevonKbNoteCalibration(void) {
     // 表外 App：默认 0 —— 它们自己会 convert，给了真值就正确。只有被量到「确实
     // 被盖」时才靠 `AevonKbExtraCal` 补上（见 `AevonKbCaretNote` 末尾的学习段）。
     //
-    // 0.1.77 — **走 guide 的那种就不再加通知补偿。**
-    //
-    // `AevonKbGuideFilled` 一旦置位，说明这个 App 的 `keyboardLayoutGuide` 原本是
-    // `h=0`、被我们喂上了真值（Safari 正是这一类，见 `AevonKbGuideFrame`）。
-    // 它按那条线已经会自己让位，再叠一层通知平移就会「让两次」—— 0.1.69 的坑。
-    // 所以这里直接归零，两条通道只留 guide 那一条。
-    if (AevonKbGuideFilled != 0) return 0.0;
+    // 0.1.80 — 删掉 0.1.77 的「走 guide 的就不再加通知补偿」。那条分支的前提是
+    // `AevonKbGuideFilled` 会被置位，而 0.1.80 起参考线不再喂值（理由写在
+    // `AevonKbGuideFrame`），标志永远不会亮 —— 留着只会让下一版读代码的人
+    // 以为还有第二条通道在生效。
     return extra;
 }
 
@@ -6561,6 +6576,13 @@ static volatile int AevonKbLiftNotes = 0;
 /// 指向野指针的引用（窗口被回收时对象仍在，写 transform 是无害的空操作）。
 static UIView *AevonKbKeptWindow = nil;
 static int AevonKbKeptSource = 0;   // 1 = intersection 钩子给的，2 = 扫场景给的
+/// 0.1.80 — 最近一次**真的量到**的键盘顶边（屏幕坐标）。
+///
+/// 只用来回答一个问题：「窗还在屏上、可这一拍量不到」时，键盘到底还在不在。
+/// Aevon(150) 的 31 条 `top zero` 全是这个形状（满屏、可见、sub=1），而它们
+/// 前后 0.75 s 的读数都是 573/616 —— 键盘一直在。缓存在这里，量不到时把它
+/// 还回去，上层就不会再把「重排空窗」读成「键盘收了」。
+static CGFloat AevonKbLastTop = 0.0;
 
 /// 键盘窗本体。App 进程里它是 `UIRemoteKeyboardWindow` 的实例，挂在承载场景的
 /// `windows` 数组里。**只用运行时事实取**：类名比对 + 数组遍历，不问任何可能抛
@@ -6598,8 +6620,21 @@ static UIView *AevonKbWindowScan(void) {
 /// 贴屏幕底 932）里那块真键盘是可见的：宽≈窗宽、底边≈窗底、高在 200..460 之间。
 /// 取最靠上的那个（完整键盘 316 比只剩候选栏时高）。整条链只读 `bounds`/`frame`，
 /// 不碰任何 UIKit 的几何返回值。
+/// 0.1.80 — 返回值分成三种，**这是这一版最要紧的一处**。
+///
+///   > 0  屏幕坐标的键盘顶边（真的量到了）
+///     0  窗在屏、也不是透明的，但这一拍没找到键盘视图 —— **重排中的空壳**
+///   < 0  这只窗根本不是「在屏的键盘」：nil / hidden / 透明 / 尺寸不对 / 已经不在
+///        场景的窗口栈里
+///
+/// 0.1.78 把前两种都返回 0，于是「这一拍没量到」被上层当成了「键盘收了」。
+/// Aevon(150) 把这件事钉死了：31 条 `kb: top zero win=430x932@0 hid=0 sub=1`
+/// —— **每一条的窗都是满屏、可见、没隐藏**，只有子视图数掉到 1（`UIWindow`
+/// 本来就只有 `UIInputSetContainerView` 一个子视图，重排时它下面那一层还没接上）。
+/// 也就是说这 31 次「量不到」没有一次是键盘真的走了，可它们各自触发了一次
+/// `settle gone`（22 次）→ `app: keyboard gone` → `fill off`。
 static CGFloat AevonKbTopInWindow(UIView *keyboardWindow) {
-    if (keyboardWindow == nil) return 0.0;
+    if (keyboardWindow == nil) return -1.0;
     CGRect box = keyboardWindow.bounds;
     CGFloat winW = box.size.width;
     CGFloat winH = box.size.height;
@@ -6615,10 +6650,39 @@ static CGFloat AevonKbTopInWindow(UIView *keyboardWindow) {
     // 30 次假收起里每一次都跟着一条 `measure=0`，每一次 `settle gone` 后面
     // 一秒又被心跳重新张开 —— 用户看到的就是「先缩小再放大」和「不还原」。
     // 所以高度闸门放到 120：完整键盘 316、只剩候选栏 291、带工具栏 401 全过。
-    if (winW < 200.0 || winH < 120.0) return 0.0;
+    if (winW < 200.0 || winH < 120.0) return -1.0;
     // 窗被藏起来 / 透明 / 停在屏外 = 真的收了。这三条比视图遍历硬得多，也不受
     // 「这一拍布局还没结算」影响 —— 收起判定最先该看的就是它们。
-    if (keyboardWindow.hidden || keyboardWindow.alpha < 0.05) return 0.0;
+    if (keyboardWindow.hidden || keyboardWindow.alpha < 0.05) {
+        // 0.1.80 — **这一行是「真收起」的唯一证词**。
+        //
+        // 旧版把这条与「量不到」混在一起返回 0，日志里根本分不清是哪种，
+        // 于是 0.1.78 只能靠猜。现在真收起有自己的一行，下一次日志里
+        // `kb: gone` 的出现次数就该和用户真的关了几次键盘一一对应。
+        static int goneNotes = 0;
+        if (goneNotes < 8) {
+            goneNotes += 1;
+            char line[160];
+            snprintf(line, sizeof(line), "kb: gone hid=%d alpha=%.2f win=%.0fx%.0f\n",
+                     keyboardWindow.hidden ? 1 : 0, keyboardWindow.alpha, winW, winH);
+            AevonKbLog(line);
+        }
+        return -1.0;
+    }
+    // 0.1.80 — **还在不在窗口栈里**。
+    //
+    // `AevonKbKeptWindow` 是 retain 住的（换窗才放），所以键盘被系统收走之后
+    // 那个对象可能还活着。只读 `hidden` 有一个洞：对象被我们攥着不放，系统未必
+    // 来得及把它标成 hidden。窗口栈的成员关系是运行时事实，一次指针比较就够。
+    BOOL attached = NO;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *cand in ((UIWindowScene *)scene).windows) {
+            if ((UIView *)cand == keyboardWindow) { attached = YES; break; }
+        }
+        if (attached) break;
+    }
+    if (!attached) return -1.0;
     // 0.1.78 — 窗自己在屏幕上的原点：满屏时 0，收短时 616。返回值要加它。
     //
     // `windowScene` 是 `UIWindow` 的属性，不是 `UIView` 的（0.1.78 第一版直接
@@ -6664,11 +6728,13 @@ static CGFloat AevonKbTopInWindow(UIView *keyboardWindow) {
         static int zeros = 0;
         if (zeros < 8) {
             zeros += 1;
-            char line[180];
-            snprintf(line, sizeof(line), "kb: top zero win=%.0fx%.0f@%.0f hid=%d sub=%lu\n",
+            char line[200];
+            snprintf(line, sizeof(line),
+                     "kb: top zero win=%.0fx%.0f@%.0f hid=%d sub=%lu last=%.0f\n",
                      winW, winH, originY,
                      keyboardWindow.hidden ? 1 : 0,
-                     (unsigned long)keyboardWindow.subviews.count);
+                     (unsigned long)keyboardWindow.subviews.count,
+                     AevonKbLastTop);
             AevonKbLog(line);
         }
         return 0.0;
@@ -6681,31 +6747,40 @@ static CGFloat AevonKbTopInWindow(UIView *keyboardWindow) {
     return originY + best;
 }
 
-/// 0.1.78 — **量到 0 分两种**：键盘真的走了，或者这一拍没量到。
+/// 0.1.80 — **0 现在只有一个含义：键盘窗不在屏上。**
 ///
-/// Aevon(149) 把第二种钉死了。整份日志 26 条 `hide note seen`、31 条
-/// `settle gone measure=0 note=0`，而每个周期里紧挨着的 0.75 s 读数是
-/// `bar=487..511 kb=573` —— 键盘明明在。逐条对齐之后规律是固定的：
+/// 0.1.78 想靠「两次独立测量都为 0」拦住假收起，Aevon(150) 证明这条路走不通：
+/// 22 次 `settle gone` 里 retry 全是 1（0.40 s 复量也跑了），**两次都是 0** ——
+/// 因为那个 0 不是抖动，是键盘每次弹起约 1 s 后都会出现的一段稳定空窗
+/// （`top zero win=430x932@0 hid=0 sub=1`，31/31 一模一样）。多量几次只是把
+/// 同一个错答案抄两遍。
 ///
-///   kb: caret cls=… kb=573 bar=487..511     ← 0.75 s 那一拍
-///   kb: caret none win=717 kb=0 scout=413   ← 1.9 s 那一拍
+/// 所以判据改成问**窗**，不再问子视图遍历：
 ///
-/// 不是随机抖动，是**同一个键盘在 1.9 s 时换了一副形状**：键盘窗从 430×932
-/// 收成 430×316 并成为 key window。旧 `AevonKbTopInWindow` 的 `winH < 400`
-/// 闸门当场把它判成 0（详见那里的注释）。修在量处，不在这里兜。
+///   窗 hidden / 透明 / 尺寸不对 / 已不在窗口栈  ⇒ 真的收了 ⇒ 0
+///   窗在屏、只是这一拍没量到子视图            ⇒ 键盘还在 ⇒ 还回上一次的真值
 ///
-/// 这里只留一层保险：缓存窗量不到时重扫一次场景。缓存窗可能是上一次会话
-/// 留下来的、已经 `hidden` 的对象 —— 重扫能把当前那只拣回来。
+/// 后一种情况下还回去的是「上一次真的量到的顶边」，不是常量 —— 带候选栏时它是
+/// 643，只有主键盘时是 616，两种形状都不会被抹平。
 static CGFloat AevonKbVisualTop(void) {
     if (![NSThread isMainThread]) return 0.0;
     CGFloat best = AevonKbTopInWindow(AevonKbKeptWindow);
-    if (best > 1.0) return best;
+    if (best < 0.0) return 0.0;
+    if (best > 1.0) {
+        AevonKbLastTop = best;
+        return best;
+    }
     UIView *fresh = AevonKbWindowScan();
     if (fresh != nil && fresh != AevonKbKeptWindow) {
         CGFloat again = AevonKbTopInWindow(fresh);
-        if (again > best) best = again;
+        if (again < 0.0) return 0.0;
+        if (again > 1.0) {
+            AevonKbLastTop = again;
+            return again;
+        }
     }
-    return best;
+    if (AevonKbLastTop > 200.0) return AevonKbLastTop;
+    return 0.0;
 }
 
 /// 承载场景的高（本机 717）。取不到返回 0。
@@ -6979,46 +7054,28 @@ static void AevonKbGuideNote(void) {
 /// 「让两次」那个坑）。名单外（Safari / 酷安 / 贴吧 …）才是这条线唯一该服务的人。
 static CGRect (*AevonKbGuideOrig)(id, SEL);
 static Class AevonKbGuideClass;
-static int AevonKbGuideFillNotes;
-
-static BOOL AevonKbGuideWanted(void) {
-    NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
-    if (bundle == nil) return NO;
-    if ([bundle isEqualToString:@"com.tencent.mqq"]) return NO;
-    if ([bundle isEqualToString:@"com.tencent.xin"]) return NO;
-    if ([bundle isEqualToString:@"com.ss.iphone.ugc.Aweme"]) return NO;
-    return YES;
-}
 
 static CGRect AevonKbGuideFrame(id self, SEL _cmd) {
     CGRect box = AevonKbGuideOrig != NULL ? AevonKbGuideOrig(self, _cmd) : CGRectZero;
-    if (box.size.height > 1.0) return box;                 // 系统给了真值 ⇒ 不插手
-    if (AevonKbNoteActive == 0) return box;                // 键盘不在屏 ⇒ 不插手
-    if (AevonKbGuideClass == Nil || ![self isKindOfClass:AevonKbGuideClass]) return box;
-    if (!AevonKbGuideWanted()) return box;
-    SEL ownSel = sel_registerName("owningView");
-    if (![self respondsToSelector:ownSel]) return box;
-    UIView *owner = ((id (*)(id, SEL))objc_msgSend)(self, ownSel);
-    if (owner == nil) return box;
-    CGFloat ownW = owner.bounds.size.width;
-    CGFloat ownH = owner.bounds.size.height;
-    if (ownW < 60.0 || ownH < 60.0) return box;
-    CGFloat full = AevonKbNativeBounds(nil).size.height;
-    if (full < 400.0) return box;
-    CGFloat top = AevonKbTopFixed(full);                   // 屏幕坐标键盘真实上沿
-    if (top < 200.0) top = AevonKbAnchorValue(full);
-    if (top < 200.0) return box;
-    CGFloat cover = full - top;
-    if (cover < 40.0 || cover > ownH - 40.0) return box;
-    AevonKbGuideFilled = 1;
-    if (AevonKbGuideFillNotes < 6) {
-        AevonKbGuideFillNotes += 1;
-        char line[200];
-        snprintf(line, sizeof(line), "kb: guide fill h=%.0f own=%.0fx%.0f cover=%.0f\n",
-                 cover, ownW, ownH, cover);
-        AevonKbLog(line);
-    }
-    return CGRectMake(0.0, ownH - cover, ownW, cover);
+    // 0.1.80 — **停止喂值。**（0.1.77 起这条通道一直是「假设」，从没被证实过）
+    //
+    // Aevon(150) 把代价摆出来了：Safari 的输入框这次出来了（安全区那条通道），
+    // 而酷安的输入框**整套消失**。同一个键盘会话里，酷安拿到的让位是三份叠加：
+    //
+    //   kb: note rect raw=761 out=407 cal=209 fixed=616 nh=525   ← ① 通知矩形平移 209
+    //   kb: guide fill h=316 own=430x717 cover=316               ← ② 参考线补 316
+    //   kb: safe inset bottom=316 was=0 cover=316                ← ③ 安全区再加 316
+    //   kb: caret cls=CoolMarket.KAAttributedTextView bar=681..775
+    //
+    // ①+②+③ 一共 841 pt，一根底部工具栏从 775 被顶到卡片上沿之外 —— 那就是
+    // 「输入框消失了」。聊天类 App 读通知矩形、现代控件读参考线、WebKit 读安全区，
+    // 三份让位本来就是给三种不同的 App 准备的，同时生效就是 0.1.69「让两次」的
+    // 加强版。
+    //
+    // 三者里只有安全区是 UIKit 的**公开约定**（App 一定按它排版），而且 Safari
+    // 已经证明它有用。所以留安全区，撤参考线 —— 这条通道从来没有一份日志能证明
+    // 「喂了之后 bar 上移」，却有酷安这份反证。
+    return box;
 }
 
 static void AevonKbGuideHookInstall(void) {
@@ -7135,20 +7192,43 @@ static void AevonKbCaretNote(void) {
         if (!skip && bottom > 100.0 && target > 200.0) {
             CGFloat need = bottom - target;
             CGFloat cur = AevonKbExtraCal;
-            // 0.1.78 — **两条补救通道，依次升级，绝不叠加。**
+            // 0.1.80 — **一次只开一条通道，而且要有复量做证词。**
             //
-            //   ① 通知矩形（`AevonKbExtra2`）：默认那一条。差多少补多少，
-            //      绝大多数 App 一次就够。
-            //   ② 安全区（`AevonKbSafe`）：① 已经补过（cur ≥ 60）却还差 60 以上
-            //      ⇒ 说明这个 App 根本不读通知矩形（Safari 就是），换通道。
+            // 0.1.78 的升级条件是「①补过（cur ≥ 60）却还差 60 以上」，判据本身
+            // 没错，错在**①补过的证据是上一个键盘会话留下的**：酷安这次进来
+            // `cur` 已经是 209（上一轮学的），于是它当场跳到 ②，而这一拍的
+            // `need=209` 是**还没看到①效果之前**量的。三条通道（通知 / 参考线 /
+            // 安全区）就这样在同一秒里全打开了。
             //
-            // 升级判据用的是「①补过了、还是被盖」这个**已发生的事实**，不是类名
-            // 也不是猜测。反过来，②一旦生效就停止 ① 的累加 —— 两条同时让位就是
-            // 0.1.69 的「让两次」。
+            // 现在把「先补①、0.70 s 后复量、仍被盖才升级②」写成一条真正的时间
+            // 顺序：① 只在本会话第一次量到被盖时补一次，补完立刻排一次复量；
+            // 复量那一拍读到的 `bar` 才是判决书 —— 它要么被①救回来了（`need`
+            // 掉到 60 以下，什么都不做），要么证明这个 App 不读通知矩形，才轮到②。
+            // ② 生效后再复量一次，仍被盖就只记 `kb: learn stuck`，不再叠第三条。
             if (AevonKbSafeFlag == 1) {
-                // 已经在走安全区这条路：不再叠通知补偿。
-            } else if (cur >= 60.0 && need > 60.0) {
-                // ① 补过（extra ≥ 60）却还差 60 以上 ⇒ 它不读通知矩形，升级到 ②。
+                // 已经在走安全区：只观测，不再动任何东西。
+                if (need > 60.0) {
+                    char stuck[200];
+                    snprintf(stuck, sizeof(stuck),
+                             "kb: learn stuck safe=1 bar=%.0f target=%.0f need=%.0f\n",
+                             bottom, target, need);
+                    AevonKbLog(stuck);
+                }
+            } else if (cur < 15.0) {
+                // ① 这一轮还没补过 ⇒ 按差额补通知矩形，然后**等复量**。
+                if (need > 15.0 && need < 340.0) {
+                    AevonKbExtraStore(need);
+                    char learn[200];
+                    snprintf(learn, sizeof(learn),
+                             "kb: learn bar=%.0f target=%.0f need=%.0f extra=%.0f -> %.0f\n",
+                             bottom, target, need, cur, need);
+                    AevonKbLog(learn);
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                 (int64_t)(0.70 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{ AevonKbCaretNote(); });
+                }
+            } else if (need > 60.0) {
+                // ② ① 补过（`cur ≥ 15`）却还差 60 以上 ⇒ 它不读通知矩形，换安全区。
                 // 判据不能用 `need > cur + 15`：Aevon(149) 里 Safari 的 `need` 与
                 // `cur` 都是 192（补多少就原样剩多少），用「增量」判永远不触发 ——
                 // 那正是它连着三版没被救回来的原因。
@@ -7164,16 +7244,9 @@ static void AevonKbCaretNote(void) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                              (int64_t)(0.70 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{ AevonKbCaretNote(); });
-            } else if (need > cur + 15.0 && need < 340.0) {
-                // 只往「多让」方向走，且要比现有值多 15 才动 —— 同一份读数重复
-                // 采样时是幂等的，不会一次次累加。
-                AevonKbExtraStore(need);
-                char learn[200];
-                snprintf(learn, sizeof(learn),
-                         "kb: learn bar=%.0f target=%.0f need=%.0f extra=%.0f -> %.0f\n",
-                         bottom, target, need, cur, need);
-                AevonKbLog(learn);
             }
+            // `need ≤ 60` 一律当「已经看得见」：误差 60 pt 以内是多让一行工具条
+            // 的量级，再追下去只会把输入框推到卡片上沿之外（酷安就是这样消失的）。
         }
     }
 }
@@ -7562,6 +7635,28 @@ static void AevonKbPostNote(id self, SEL _cmd, NSNotificationName name, id objec
                 if (boxed == nil) continue;
                 CGRect rect = [boxed CGRectValue];
                 if (rect.size.height < 40.0) continue;
+                // 0.1.80 — **收起的那一帧一个字节都不改。**
+                //
+                // 上面这条平移的用意是「让 App 以为键盘比它看到的更靠上」。
+                // 可它没有方向：收起时 `origin.y` 落到屏幕底（932），照样会被
+                // 改写成 356/611 —— 等于把一条「键盘走了」的通知改成了「键盘
+                // 来了」，而且高度还按 `full − 356` 补成 576，比屏幕还高。
+                //
+                // Aevon(150) 的证词：每个键盘周期里 `hide note` 都出现在弹起后
+                // 约 1 秒（gap=0.97 / 1.10 / 1.02），紧跟一条 `top zero` 和
+                // `caret none` —— App 收到「键盘又来了」就会重排/重开输入会话，
+                // 那正是「放大时闪一下」和「关键盘不还原」的共同上游。
+                if (rect.origin.y >= full - 8.0) {
+                    static int offNotes = 0;
+                    if (offNotes < 8) {
+                        offNotes += 1;
+                        char line[160];
+                        snprintf(line, sizeof(line), "kb: note off raw=%.0f name=%.32s\n",
+                                 rect.origin.y, [(NSString *)name UTF8String]);
+                        AevonKbLog(line);
+                    }
+                    continue;
+                }
                 rect.origin.y = target - cal;
                 // 0.1.76 — **高度必须跟着一起改。**
                 //
