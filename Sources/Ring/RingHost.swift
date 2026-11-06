@@ -1243,6 +1243,11 @@ final class RingHost: NSObject {
             Log.write(keyboard
                       ? "ring: keyboard up, edge band stepped aside"
                       : "ring: keyboard gone, edge band back")
+            // 0.1.47 — 键盘在屏期间主卡片让位（画布 1:1、贴屏幕底、撑满屏宽）。
+            // 放在这一位翻转的时刻而不是每拍都调：`setKeyboardFill` 自己有幂等
+            // 判据，但每 0.2 秒写一次 `card.frame` 会让 `followContent` 反复重算
+            // 圆角与底色。
+            FloatHost.keyboardFill(keyboard)
         }
         let hidden = (overlayStrikes >= 2 || keyboard) && !barHeld
         // 0.1.24 — 只剩呼盘垫这一层要藏（竖条已下线）。藏起来之后这一根手指

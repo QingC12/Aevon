@@ -1510,6 +1510,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // `bouncePending = true` 会让新卡在首帧到达时莫名弹一下。
         bouncePending = false
         entering = false
+        // 0.1.47 — 让位标志跟着拆：这个 host 会被下一张卡复用，残留一个
+        // `kbFilled = true` 会让新卡按 1:1 贴底打开。
+        kbFilled = false
+        kbSavedFrame = .null
         card = nil
         content = nil
         visible = .zero
@@ -3381,6 +3385,67 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.0.67 — 拖动的每一帧传 false：圆角在 `dragEnd` 里一次算准。
         if updateCorner { applyCorner() }
         applyBars()
+    }
+
+    // MARK: - 0.1.47 键盘让位（视频里的那条形状）
+
+    /// 键盘在屏时卡片是不是已经让过位。
+    private var kbFilled = false
+    /// 让位前的卡片几何，收起时原样还回去。
+    private var kbSavedFrame: CGRect = .null
+
+    /// 全体宿主里挑主窗让位。
+    ///
+    /// 只让**主窗**：键盘来自哪个 App 通过 Darwin 通道传不过来（`com.aevon.kb.up`
+    /// 不带 bundle），而主窗是最常见的打字场景。停靠小窗里打字这条先不动 ——
+    /// 让它跟着变大反而更怪。
+    static func keyboardFill(_ on: Bool) {
+        ensureSlots()
+        let host = slots[mainIndex]
+        guard host.window != nil, !host.onMini else { return }
+        host.setKeyboardFill(on)
+    }
+
+    /// 0.1.47 — 卡片让位：**画布 1:1，卡片贴到屏幕底**。
+    ///
+    /// Aevon(119) 与视频（Stheno 分屏）给的形状是同一个：
+    ///
+    ///   · 画布是「和手机一样宽、高 717」的一块屏幕，卡片平时是它的等比缩小
+    ///     （430 → 344，scale 0.80）；
+    ///   · 键盘窗在场景里的位置是 `401..717`（0.1.47 由 App 侧整体上移得到），
+    ///     宽 430 —— **按 0.80 缩的卡片只有 344 宽，左右会把键盘各裁掉 43 pt**。
+    ///
+    /// 所以打字期间卡片必须回到 1:1、撑满屏宽：`content` 的 `transform` 由
+    /// `followContent()` 按 `fitScale(visible, card.bounds)` 重算，卡片一旦等于
+    /// 画布尺寸，那个比例自然就是 1.0 —— 不需要另写一套缩放。
+    ///
+    /// 纵向贴屏幕底（`y = 屏高 − 画布高`）：键盘在画布 401..717，贴底之后正好落在
+    /// 屏幕最下方，上面 215 pt 让给桌面。这与视频一致 —— 卡片"让"出下半屏，
+    /// 键盘占着它，App 内容被压到上半部分。
+    ///
+    /// ⛔ 只碰 `card.frame` 与 `content` 的 `center/transform`：**不写 `content.bounds`**
+    /// （0.0.67 的「应用打不开 + 桌面黑屏」就是替 presenter 写那个 bounds）。
+    func setKeyboardFill(_ on: Bool) {
+        guard let card = card, let window = window, visible.height > 16 else { return }
+        if on {
+            guard !kbFilled else { return }
+            kbFilled = true
+            kbSavedFrame = card.frame
+            let screen = window.bounds.size
+            var y = screen.height - visible.height
+            if y < 0 { y = 0 }
+            card.frame = CGRect(x: 0, y: y, width: visible.width, height: visible.height)
+            followContent()
+            Log.write("win: keyboard fill on card=" + size(card.frame.size)
+                      + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY))
+        } else {
+            guard kbFilled else { return }
+            kbFilled = false
+            if !kbSavedFrame.isNull { card.frame = kbSavedFrame }
+            followContent()
+            Log.write("win: keyboard fill off card=" + size(card.frame.size)
+                      + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY))
+        }
     }
 
     /// 画布在这张卡片里有没有留边。有就填黑，没有就透明 —— 一个判断，两个
