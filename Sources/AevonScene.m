@@ -42,6 +42,9 @@ extern int AevonCardIsUpFor(const char *bundle);
 // 0.1.91 — 「卡在路上」。`openCard` 一接手就答 1，卡片真正占上槽之前它比
 // `AevonCardIsUpFor` 早开口。收面板要靠这一位把「在等卡」那半秒让开。
 extern int AevonCardIsComingFor(const char *bundle);
+// 0.1.92 — 分享面板那条路的独立开关（`share.off`）。`notify.off` 仍然是总闸：
+// 两个文件任一存在，分享一律不接管。
+extern int AevonShareSwitchOff(void);
 
 /// The scene manager is a singleton with no public door, and its spelling has
 /// changed across releases. Resolving it here keeps the class-method dispatch
@@ -2786,6 +2789,43 @@ static id AevonOpenBundleOf(id request) {
     return [bundle isKindOfClass:[NSString class]] ? bundle : nil;
 }
 
+/// 这次「开 App」是谁发起的。
+///
+/// `__PayloadOptions[UIApplicationLaunchOptionsSourceApplicationKey]`。0.1.88 起
+/// 这一格在快照里一直有打印，两种真机结果都见过：
+///
+///   · 点通知：`src=-` —— 这一层根本没有 `__PayloadOptions` 这个键（Aevon(155)）；
+///   · 分享面板：`src=com.apple.sharingd`（Aevon(155) 同一份日志里那句
+///     `notify: hit op=open b=- src=com.apple.sharingd act=- n=0 req=org.coolstar.SileoStore`）。
+///
+/// 0.1.92 起它不再只是日志：分享面板的判据就是这一格。抽成函数是为了让快照与
+/// 判据读**同一个地方** —— 两处各写一遍，迟早出现「日志说 sharingd 但没分流」。
+static id AevonOpenPayload(id request, id options) {
+    id payload = AevonActRead(options, @"__PayloadOptions");
+    if (payload == nil) payload = AevonActRead(request, @"__PayloadOptions");
+    if (payload == nil) payload = AevonActRead(options, @"payloadOptions");
+    return payload;
+}
+
+static id AevonOpenSourceApp(id request, id options) {
+    id payload = AevonOpenPayload(request, options);
+    if (payload == nil) return nil;
+    id from = AevonActRead(payload, @"UIApplicationLaunchOptionsSourceApplicationKey");
+    return [from isKindOfClass:[NSString class]] ? from : nil;
+}
+
+/// 分享这一次是不是带着 URL 来的（`UIApplicationLaunchOptionsURLKey`）。
+///
+/// 0.1.92 先把这一位记下来，原因很实际：分享给别的 App 时，**文件交接本身就是这次
+/// 打开的意义**。我们吞掉原实现之后，App 拿不到那条 launch option，文件可能不会落地
+/// （进 Inbox / 走 URL 交接）。这一位是 1 就说明这一下真的带东西 —— 真机上如果用户报
+/// 「打开是空的」，日志里这一格能把责任指到交接上，而不是让我们再猜一遍。
+static int AevonOpenShareHasURL(id request, id options) {
+    id payload = AevonOpenPayload(request, options);
+    if (payload == nil) return 0;
+    return AevonActRead(payload, @"UIApplicationLaunchOptionsURLKey") != nil ? 1 : 0;
+}
+
 /// `options.__Actions` 的第一个元素 —— 点通知时它就是 `UINotificationResponseAction`。
 /// 键名是私有键，换系统版本可能变，所以退路依次是 `request` 和 `actions`。
 static id AevonOpenFirstAction(id request, id options) {
@@ -2804,6 +2844,20 @@ static BOOL AevonOpenIsNotificationAction(id action) {
     if (action == nil) return NO;
     const char *name = class_getName([action class]);
     return name != NULL && strstr(name, "NotificationResponseAction") != NULL;
+}
+
+/// 「这是一次分享面板的跳转」唯一的判据：来源进程是 `sharingd`。
+///
+/// 判据不猜名字、也不看 action 数量（分享是 `act=- n=0`，但点图标也是 0）：
+/// 只看来源。0.1.87 的真机日志里那句分享对照行是唯一的证据 —— `src=com.apple.sharingd`。
+/// **取不到来源就一律不开**：`src` 为空时可能是点图标、也可能是别的系统路径，
+/// 把它们一起吞掉就是「点图标没反应」，比不做这个功能糟得多。
+static BOOL AevonOpenIsShareSource(id request, id options) {
+    id from = AevonOpenSourceApp(request, options);
+    if (from == nil) return NO;
+    const char *raw = [(NSString *)from UTF8String];
+    if (raw == NULL) return NO;
+    return strstr(raw, "sharingd") != NULL;
 }
 
 /// `options` 里有没有某个键。
@@ -2837,14 +2891,25 @@ static int AevonOpenDecide(id request, id options,
     // SpringBoard 自己也有开请求（解锁后回到主屏之类）。吞掉它就是吞掉主屏。
     if (strncmp(bundle, "com.apple.springboard", 21) == 0) { *why = "springboard"; return 0; }
 
-    // 判据先于「同一次点击的第二条」：先确认这是一次通知回应，再谈它是不是
-    // 上一次的后续。顺序反过来，用户在 1.5 秒内点桌面图标也会被当成链条吞掉 ——
-    // 那是一个真实的「点了没反应」。
-    if (!AevonOpenIsNotificationAction(AevonOpenFirstAction(request, options))) {
+    // 两条路，判据都在这一个 if 里定死；其余一律原样转发。
+    //
+    // 0.1.92 起多了第二条：分享面板。它的判据不是 action（分享是 `act=- n=0`，
+    // 与点图标一样），而是**来源进程** —— 真机日志里那一条对照行是
+    // `src=com.apple.sharingd`。取不到来源就不接管。
+    const char *kind = NULL;
+    if (AevonOpenIsNotificationAction(AevonOpenFirstAction(request, options))) {
+        kind = "notify";
+    } else if (!AevonShareSwitchOff() && AevonOpenIsShareSource(request, options)) {
+        kind = "share";
+    } else {
         *why = "plain";
         return 0;
     }
 
+    // 判据先于「同一次点击的第二条」：先确认这是要接管的那两种之一，再谈它是不是
+    // 上一次的后续。顺序反过来，用户在 1.5 秒内点桌面图标也会被当成链条吞掉 ——
+    // 那是一个真实的「点了没反应」。
+    //
     // 同一次点击的第二条（open → trusted 之间只隔几毫秒）。第一条被吞掉之后
     // 链条通常就断了；真来了也不能再开一次卡片，否则屏幕上一大一小的两个。
     double now = CFAbsoluteTimeGetCurrent();
@@ -2854,7 +2919,7 @@ static int AevonOpenDecide(id request, id options,
         return 2;
     }
 
-    *why = "notify";
+    *why = kind;
     AevonDivertAt = now;
     snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
     return 1;
@@ -2950,12 +3015,7 @@ static void AevonOpenSnapshot(int slot, id request, id options,
         urlText[0] = '-';
         urlText[1] = '\0';
 
-        id payload = AevonActRead(options, @"__PayloadOptions");
-        if (payload == nil) payload = AevonActRead(request, @"__PayloadOptions");
-        if (payload == nil) payload = AevonActRead(options, @"payloadOptions");
-        id from = payload != nil
-                ? AevonActRead(payload, @"UIApplicationLaunchOptionsSourceApplicationKey")
-                : nil;
+        id from = AevonOpenSourceApp(request, options);
 
         id first = nil;
         int actionCount = 0;
@@ -3461,6 +3521,229 @@ static id AevonCleanDispatcher(void) {
 static int AevonCleanRuns = 0;
 #define AEVON_CLEAN_MAX 6
 
+// MARK: - 0.1.92 清掉那条通知（点开 = 已读）
+//
+// 证据不是推的，是母版线（`stheno-逆向分析/analysis/roadmap-0.7-2026-10-17.md`，真机
+// log67~log71）用四版试出来的：
+//
+//   · 动作对象 `options.__Actions.firstObject` 是 `UINotificationResponseAction`
+//     （`BSAction` 子类），内容在 `-info` 那一侧；
+//   · 公开链 `action.notificationResponse.notification.request.identifier` 在真机上
+//     **取不到**（log68 三次 `UUID=(无)`）。能取到的是**无参只读 getter**：
+//     `notificationRequestIdentifier` / `requestIdentifier` / `notificationIdentifier` /
+//     `notificationUUID` / `uuid`。**故意不试 `identifier`** —— `BSAction` 自己也有一个
+//     36 位标识，抓错了后面的匹配必然落空，而「落空」在这条路上等于静默失效；
+//   · 清一条的成功实证是 `SBNotificationBannerDestination -withdrawNotificationRequest:`
+//     （log71 ×2，`已清除 … 的 1 条`）。也就是说请求真正挂在 **destination** 上，
+//     不在 dispatcher 本身（iOS 17 如此，0.7.9 在 dispatcher 上找了两版没找到）；
+//   · 0.7.8 在动作对象上深挖对象图，把整条「点通知」打死了（log69）⇒ 这里**不做图遍历**，
+//     只走已知 getter，外加对 getter 返回的数组做一层扫描。深度固定为一层。
+//
+// 三条「拿不到就什么都不做」：取不到标识 / 找不到请求对象 / 宿主上没有那个方法。
+// 三种都只写一行日志，绝不用「清空这个 App 的全部通知」当兜底 —— 那会连没读的一起删掉。
+//
+// 时机 0.60 秒：0.10 秒那一拍我们还在 open 请求的栈里，收面板那条线已经证明 0.10 秒
+// 只够动面板本身；清通知要跨到 destination 里改数据，放在卡片与面板都落定之后更稳
+// （母版用 0.45 秒，那一版同时还挂着一个真实的 OpenApplication 事务；我们没有，留到
+// 0.60 秒是让轮询那几拍先跑完，不与之抢主队列）。
+
+static int AevonClearRuns = 0;
+#define AEVON_CLEAR_MAX 6
+
+/// 一个对象上的「通知标识」候选读数。无参、只读，每一步都过 `respondsToSelector` + `@try`。
+static NSString *AevonClearIdentifierOf(id object) {
+    if (object == nil) return nil;
+    static const char *names[5] = {
+        "notificationRequestIdentifier", "requestIdentifier",
+        "notificationIdentifier", "notificationUUID", "uuid",
+    };
+    for (int i = 0; i < 5; i++) {
+        id value = AevonCleanRead(object, names[i]);
+        if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 3) {
+            return (NSString *)value;
+        }
+    }
+    return nil;
+}
+
+/// 这次要清掉的那一条的标识。先走无参 getter，再走公开链（后者在真机上多半是空，
+/// 留着是因为它零风险，且换一代系统可能反过来）。
+static NSString *AevonClearIdentifier(id request, id options) {
+    id action = AevonOpenFirstAction(request, options);
+    if (action == nil) return nil;
+    NSString *identifier = AevonClearIdentifierOf(action);
+    if (identifier != nil) return identifier;
+
+    id response = AevonCleanRead(action, "notificationResponse");
+    id notification = response != nil ? AevonCleanRead(response, "notification") : nil;
+    id note = notification != nil ? AevonCleanRead(notification, "request") : nil;
+    id raw = note != nil ? AevonCleanRead(note, "identifier") : nil;
+    if ([raw isKindOfClass:[NSString class]] && [(NSString *)raw length] > 3) return (NSString *)raw;
+    return nil;
+}
+
+/// 这个对象是不是那一条请求？只比标识，不碰别的字段。
+static BOOL AevonClearRequestMatches(id candidate, NSString *identifier) {
+    if (candidate == nil || identifier == nil) return NO;
+    NSString *value = AevonClearIdentifierOf(candidate);
+    return value != nil && [value isEqualToString:identifier];
+}
+
+/// 在某个宿主上找「标识等于 identifier 的请求对象」。
+/// 先问「按标识取」（一次到位），再扫三个列表型 getter，最后一张字典。
+static id AevonClearFindRequest(id host, NSString *identifier) {
+    if (host == nil || identifier == nil) return nil;
+
+    static const char *direct[2] = { "notificationRequestForIdentifier:", "requestForIdentifier:" };
+    for (int i = 0; i < 2; i++) {
+        SEL sel = sel_registerName(direct[i]);
+        Method method = class_getInstanceMethod([host class], sel);
+        if (method == NULL) continue;
+        char compact[24];
+        AevonCleanCompact(method_getTypeEncoding(method), compact, sizeof(compact));
+        if (strcmp(compact, "@@:@") != 0) continue;     // 一个对象参数、返回对象
+        id got = nil;
+        @try {
+            got = ((id (*)(id, SEL, id))objc_msgSend)(host, sel, (id)identifier);
+        } @catch (NSException *exception) {
+            got = nil;
+        }
+        if (AevonClearRequestMatches(got, identifier)) return got;
+    }
+
+    static const char *lists[3] = {
+        "notificationRequests", "allNotificationRequests", "presentedNotificationRequests",
+    };
+    for (int i = 0; i < 3; i++) {
+        // 带参数的 section 容器（`notificationRequestsForSectionIdentifier:`）故意不试：
+        // 猜 section 等于猜「这个 App 的通知都在这」，猜错就清错别人的。
+        id list = AevonCleanRead(host, lists[i]);
+        if (![list isKindOfClass:[NSArray class]]) continue;
+        for (id item in (NSArray *)list) {
+            if (AevonClearRequestMatches(item, identifier)) return item;
+        }
+    }
+
+    id map = AevonCleanRead(host, "notificationRequestsByIdentifier");
+    if ([map isKindOfClass:[NSDictionary class]]) {
+        id hit = [(NSDictionary *)map objectForKey:identifier];
+        if (hit != nil) return hit;
+    }
+    return nil;
+}
+
+/// 在某个宿主上清一条。四个候选，每个都过「编码逐字符等于 `v@:@`」才调。
+static BOOL AevonClearWithdraw(id host, id requestObject, char *how, size_t size) {
+    if (host == nil || requestObject == nil) return NO;
+    static const char *names[4] = {
+        "withdrawNotificationRequest:", "_withdrawNotificationRequest:",
+        "removeNotificationRequest:", "clearNotificationRequest:",
+    };
+    for (int i = 0; i < 4; i++) {
+        SEL sel = sel_registerName(names[i]);
+        Method method = class_getInstanceMethod([host class], sel);
+        if (method == NULL) continue;
+        char compact[24];
+        AevonCleanCompact(method_getTypeEncoding(method), compact, sizeof(compact));
+        if (strcmp(compact, "v@:@") != 0) continue;
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(host, sel, requestObject);
+            if (how != NULL && size > 0) snprintf(how, size, "%s", names[i]);
+            return YES;
+        } @catch (NSException *exception) {
+            // 这个候选调不通，试下一个。异常不外传：这条链在 SpringBoard 主队列上。
+        }
+    }
+    return NO;
+}
+
+/// 能力地图。一次开机一行：哪几个宿主上真的有那两个入口。
+///
+/// 这一行的作用是「下一版不用再装一次机」—— 0.1.89 那次六个候选全没进闸、日志里
+/// 连编码长什么样都没有，白丢一版。这里一次把类名、方法在不在、请求列表能读多长写全。
+static void AevonClearMap(id dispatcher) {
+    static int dumped = 0;
+    if (dumped) return;
+    dumped = 1;
+    char line[420];
+    size_t used = 0;
+    used += (size_t)snprintf(line + used, sizeof(line) - used, "notify: clear map");
+    static const char *roles[4] = {
+        "bannerDestination", "dashBoardDestination",
+        "notificationCenterDestination", "lockScreenDestination",
+    };
+    for (int i = 0; i < 4 && used + 60 < sizeof(line); i++) {
+        id host = AevonCleanRead(dispatcher, roles[i]);
+        if (host == nil) {
+            used += (size_t)snprintf(line + used, sizeof(line) - used, " %s=-", roles[i]);
+            continue;
+        }
+        BOOL withdraw = class_getInstanceMethod([host class],
+                            sel_registerName("withdrawNotificationRequest:")) != NULL;
+        id list = AevonCleanRead(host, "notificationRequests");
+        long count = [list isKindOfClass:[NSArray class]] ? (long)[(NSArray *)list count] : -1;
+        const char *cls = class_getName([host class]);
+        used += (size_t)snprintf(line + used, sizeof(line) - used, " %s=%s w=%d l=%ld",
+                                 roles[i], cls != NULL ? cls : "?", withdraw ? 1 : 0, count);
+    }
+    AevonLogRaw(line);
+}
+
+/// 真正去做那件事。`bundle` / `identifier` 都是 C 串（跨帧传，自己复制的一份）。
+static void AevonClearNotification(const char *bundle, const char *identifier) {
+    if (bundle == NULL || identifier == NULL) return;
+    if (AevonActivateSwitchOff()) return;
+    if (AevonClearRuns >= AEVON_CLEAR_MAX) return;
+    AevonClearRuns += 1;
+
+    NSString *want = [NSString stringWithUTF8String:identifier];
+    if (want.length < 4) return;
+
+    id dispatcher = AevonCleanDispatcher();
+    AevonClearMap(dispatcher);
+
+    char how[64], line[300];
+    how[0] = '\0';
+
+    // 先 dispatcher 自己（有的系统版本把请求留在它身上），再四个 destination。
+    static const char *roles[4] = {
+        "bannerDestination", "dashBoardDestination",
+        "notificationCenterDestination", "lockScreenDestination",
+    };
+    for (int i = -1; i < 4; i++) {
+        id host = (i < 0) ? dispatcher : AevonCleanRead(dispatcher, roles[i]);
+        if (host == nil) continue;
+        id requestObject = AevonClearFindRequest(host, want);
+        if (requestObject == nil) continue;
+        if (AevonClearWithdraw(host, requestObject, how, sizeof(how))) {
+            snprintf(line, sizeof(line), "notify: clear b=%s id=%s via=%s sel=%s",
+                     bundle, identifier,
+                     i < 0 ? "dispatcher" : roles[i], how);
+            AevonLogRaw(line);
+            return;
+        }
+    }
+
+    snprintf(line, sizeof(line), "notify: clear b=%s id=%s clear=noreq", bundle, identifier);
+    AevonLogRaw(line);
+}
+
+/// 排到 0.60 秒之后。字符串自己复制一份带进块里：这个工程按 MRC 编译。
+static void AevonClearLater(const char *bundle, NSString *identifier) {
+    if (bundle == NULL) return;
+    const char *raw = [identifier UTF8String];
+    if (raw == NULL || strlen(raw) < 4) return;
+    char *b1 = strdup(bundle);
+    char *b2 = strdup(raw);
+    if (b1 == NULL || b2 == NULL) { free(b1); free(b2); return; }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonClearNotification(b1, b2);
+        free(b1);
+        free(b2);
+    });
+}
+
 /// 点通知那一刻的绝对时间。只给日志里的 `at=` 用 —— 0.1.90 说「慢了」，那就得有一个
 /// 从手指到面板开始走的毫秒数，否则下一版只能靠感觉再调一次。
 static double AevonCleanTap = 0;
@@ -3632,15 +3915,37 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             // 0.1.90：横幅在这里收，面板不在这里收 —— 面板要等卡片，见
             // `AevonCleanCoverAfterCard`。字符串必须自己复制一份带进块里。
             // 0.1.91：0.45 秒压到 0.10 秒，并且先记下手指这一刻（`at=` 的零点）。
-            AevonCleanTap = CFAbsoluteTimeGetCurrent();
-            char *cleanBundle = strdup(bundle);
-            if (cleanBundle != NULL) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                             (int64_t)(AEVON_CLEAN_DELAY * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{
-                    AevonNotifyCleanup(cleanBundle);
-                    free(cleanBundle);
-                });
+            //
+            // 0.1.92：这两件（收面板/收横幅）与清通知**只属于通知那条路**。分享面板
+            // 没有面板要收、没有横幅要撤、更没有「这一条已读」这回事 —— 对它照跑一遍
+            // 只会去碰不相干的对象。所以按 `why` 分开，而不是把两件事都堆在分流里。
+            if (strcmp(why, "share") == 0) {
+                const char *srcRaw = [AevonOpenSourceApp(request, options) UTF8String];
+                AevonLogRaw([[NSString stringWithFormat:@"notify: share b=%@ src=%s url=%d n=%d",
+                              target, srcRaw != NULL ? srcRaw : "-",
+                              AevonOpenShareHasURL(request, options), AevonDivertCount]
+                             UTF8String]);
+            } else {
+                // 0.1.92：清掉这一条 —— 「点开 = 已读」。标识在这一拍就取好（只读几个
+                // getter），真正动手排到 0.60 秒之后，见 `AevonClearNotification`。
+                NSString *clear = AevonClearIdentifier(request, options);
+                if (clear.length > 3) {
+                    AevonClearLater(bundle, clear);
+                } else if (AevonDivertNotes < 6) {
+                    AevonDivertNotes += 1;
+                    AevonLogRaw([[NSString stringWithFormat:@"notify: clear b=%@ clear=noid",
+                                  target] UTF8String]);
+                }
+                AevonCleanTap = CFAbsoluteTimeGetCurrent();
+                char *cleanBundle = strdup(bundle);
+                if (cleanBundle != NULL) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                 (int64_t)(AEVON_CLEAN_DELAY * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        AevonNotifyCleanup(cleanBundle);
+                        free(cleanBundle);
+                    });
+                }
             }
             AevonOpenWatch(self, _cmd, request, options, settings, origin, replay,
                            AevonOpenOrig[slot], target);

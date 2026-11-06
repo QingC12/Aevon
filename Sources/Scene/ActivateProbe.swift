@@ -65,6 +65,15 @@
 //      最多问到 3.6 秒 —— 0.1.90 的安全判据原样保留。
 //    · 日志多了 `at=`（手指 → 面板开始走，毫秒）与 `f=1`（在「卡在路上」时收的）。
 //
+//  0.1.92 加了两条新进项，一条动的还是这里，一条在 C 侧：
+//
+//    · **清通知**（「点开 = 已读」）：分流那一拍取标识，0.60 秒后到
+//      `bannerDestination` 等宿主上 withdraw 那一条。取不到就一行都不做。
+//      实现与三条「拿不到就什么都不做」都在 `AevonScene.m` 的 `AevonClearNotification`。
+//    · **分享面板 → 浮窗**：判据是来源进程 `sharingd`（0.1.87 真机日志里的分享对照行），
+//      与通知那条共用 `AevonOpenDecide` 的同一段分流，但**不跑通知那套收尾**（没有面板
+//      要收、没有横幅要撤、也没有「这条已读」）。开关是 `share.off`，`notify.off` 仍是总闸。
+//
 
 import Foundation
 
@@ -80,6 +89,18 @@ private func AevonActivateProbeInstall()
 @_cdecl("AevonActivateSwitchOff")
 public func AevonActivateSwitchOff() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.activateOffPath) ? 1 : 0
+}
+
+/// 0.1.92 — 分享面板那条路的独立开关。
+///
+/// 与上面那位同一个理由（热路径上每次都要问一遍），但语义不同：`notify.off` 是
+/// 「别动我的 App 打开」的总闸，`share.off` 只关分享这一条。两个任一存在，
+/// 分享一律不接管 —— 总闸的语义不能因为多了一个新功能而被稀释。
+@_cdecl("AevonShareSwitchOff")
+public func AevonShareSwitchOff() -> Int32 {
+    let manager = FileManager.default
+    if manager.fileExists(atPath: Aevon.activateOffPath) { return 1 }
+    return manager.fileExists(atPath: Aevon.shareOffPath) ? 1 : 0
 }
 
 enum ActivateProbe {

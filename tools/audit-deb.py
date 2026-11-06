@@ -689,6 +689,38 @@ def main():
                   b"_dismissCoverSheetAnimated:withCompletion:",
                   b"dismissCoverSheetAnimated:completion:",
                   b"dismissCoverSheet",
+                  # 0.1.92 — 清通知（点开 = 已读）。母版线 log67~log71 四版试出来的落点，
+                  # 每一条都要能在产物里找到，否则「没清」与「没试」在日志里长得一样：
+                  #   clear b=… id=… via=… sel=… = 清成功了，写清走的是哪个宿主/哪个方法
+                  #   clear=noid                 = 取不到标识（这一版的安全出口）
+                  #   clear=noreq                = 标识有了，但没有哪个宿主认这条请求
+                  #   clear map                  = 一次开机的「能力地图」，下一版据此改名字
+                  #   clear b=%@ clear=noid      = 上面那条的 Swift 版（分流那一拍就写）
+                  b"notify: clear b=%s id=%s via=%s sel=%s",
+                  b"notify: clear b=%s id=%s clear=noreq",
+                  b"notify: clear b=%@ clear=noid",
+                  b"notify: clear map",
+                  # 取标识的五条无参 getter。`identifier` 故意不在里面（BSAction 自己也有），
+                  # 这几条同时是「这一版到底问过哪些名字」的证词。
+                  b"notificationRequestIdentifier",
+                  b"requestIdentifier",
+                  b"notificationUUID",
+                  # 找请求：一个按标识取 + 三个列表 + 一张字典。
+                  b"notificationRequestForIdentifier:",
+                  b"requestForIdentifier:",
+                  b"notificationRequestsByIdentifier",
+                  b"presentedNotificationRequests",
+                  # 四个清除方法 + 四个 destination 宿主。
+                  b"withdrawNotificationRequest:",
+                  b"_withdrawNotificationRequest:",
+                  b"removeNotificationRequest:",
+                  b"clearNotificationRequest:",
+                  b"lockScreenDestination",
+                  # 0.1.92 — 分享面板 → 浮窗。判据只有一个字符串：来源进程。
+                  b"notify: share b=%@ src=%s url=%d n=%d",
+                  b"sharingd",
+                  b"UIApplicationLaunchOptionsSourceApplicationKey",
+                  b"UIApplicationLaunchOptionsURLKey",
                   # 形状闸的六个期望值。它们同时是「这一版到底校验了什么」的证词。
                   b"v@:BB@",
                   b"v@:BB@B",

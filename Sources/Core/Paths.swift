@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.1.91"
+    public static let version = "0.1.92"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -120,6 +120,12 @@ public enum Aevon {
     /// 而这个判断必须在任何进程里都读到同一份。
     public static let activateArmedPath = "/var/mobile/Library/Logs/Aevon/notify.armed"
     public static let activateOffPath   = "/var/mobile/Library/Logs/Aevon/notify.off"
+
+    /// 0.1.92 — 分享面板那条路自己的开关。与 `notify.off` 分开是因为两者风险不同：
+    /// 「分享文件给别的 App」带交接，出问题时往往只是「打开是空的」，而通知那条是
+    /// 「点了没反应」；把两条路绑在一个开关上，想收一条就得把另一条也关掉。
+    /// **`notify.off` 仍然是总闸**：两个任一存在，分享一律不接管。
+    public static let shareOffPath      = "/var/mobile/Library/Logs/Aevon/share.off"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"
