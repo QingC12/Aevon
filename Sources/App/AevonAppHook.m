@@ -5796,7 +5796,9 @@ static void AevonKbNativeInstall(void) {
     int screenOK = 0;
     Method boundsMethod = class_getInstanceMethod([UIScreen class], sel_registerName("bounds"));
     if (boundsMethod != NULL) {
-        AevonOrigScreenBounds = method_getImplementation(boundsMethod);
+        // CI 是 -Werror：IMP 与具体签名不同型，必须显式转，否则
+        // `incompatible function pointer types assigning to 'CGRect (*)(id, SEL)'` 直接红。
+        AevonOrigScreenBounds = (CGRect (*)(id, SEL))method_getImplementation(boundsMethod);
         if (AevonOrigScreenBounds != NULL) {
             method_setImplementation(boundsMethod, (IMP)AevonScreenBoundsHook);
             screenOK = 1;
