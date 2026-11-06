@@ -6007,6 +6007,44 @@ static volatile int AevonKbMissNotes = 0;
 /// 用它兜一层底（只往大了取）。
 static volatile CGFloat AevonKbTopSeen = 0.0;
 
+/// 0.1.70 — 本键盘会话里**结算后**的键盘顶边（屏幕坐标）。
+///
+/// 键盘是从屏幕下方滑上来的，`origin.y` 只会一路上降到最后那个数：动画途中的
+/// 读数（761 / 788 / 806 / 906）全在最终值**上面**。所以「本会话见过的最小顶边」
+/// 就是结算值，不需要等动画、也不读任何视图几何：
+///   QQ 616 · 微信 616 · 抖音 533 · 备忘录 616
+/// `WillShow` 那一刻清空重来（新会话）。
+static volatile CGFloat AevonKbTopSettled = 0.0;
+
+/// 0.1.70 — 每个 App 自己的输入条会额外吃掉的高度（实测标定，屏幕 pt）。
+///
+/// 反解过程（Aevon(139)/(140)/(141) 三份日志 + 用户三次描述）：
+///
+/// 这几个 App 都用同一个公式算避让 —— `让位量 = UIScreen 高 − 键盘顶`，然后把
+/// 自己的输入条底边贴到 `窗口底 − 让位量`。我们的场景是 `430×717@215`，窗口高
+/// 717 而屏幕高 932，于是「窗口底 − 让位量」比真实键盘顶**低 215**；我们把通知
+/// 平移 215 本来是想补这一刀，结果 App 在平移前后各算了一次：
+///
+///   抖音先收到未平移的（顶 533 ⇒ 让位 184），又收到平移的（顶 318 ⇒ 让位 399），
+///   两次**累加** ⇒ 717−583＝134 ⇒ 屏幕 215+134＝**349**，与日志 `bar=329..349`
+///   完全一致；用户看到的就是「输入框被抬高」。
+///
+/// 而完全不平移（0.1.68 的 QQ）落在 625 —— 又低了一截。差的那一截正是**它自己
+/// 那条输入条的高度**：App 把「键盘顶」当成输入条的**上边**再往下铺一条，
+/// 于是底边多出自身高度。实测残差（顶边 → 需要再抬多少）：
+///   QQ 52pt（625 → 573）· 微信 90pt（706 → 616）· 抖音 0pt（536 → 533）
+/// 抖音 0 是因为它把工具栏算进了键盘矩形，自己不再重复铺。
+///
+/// ⚠️ 这是**按 Bundle 的标定值**，不是普适规律。新增 App 先看 `kb: caret … bar=`
+/// 的残差再决定要不要加一行。
+static CGFloat AevonKbNoteCalibration(void) {
+    NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
+    if (bundle == nil) return 0.0;
+    if ([bundle isEqualToString:@"com.tencent.mqq"]) return 52.0;
+    if ([bundle isEqualToString:@"com.tencent.xin"]) return 90.0;
+    return 0.0;
+}
+
 static void AevonKbLog(const char *line) {
     if (line == NULL) return;
     AevonAppLogWrite(line);
@@ -6621,27 +6659,30 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     // 场景原点取缓存（宿主搬完场景时写入），没有缓存就按「场景贴屏底」反推
     // `整屏高 − 场景高`。返回的是「键盘遮住这个窗口多少」，不是「键盘多高」。
     //
-    // 0.1.69 — 键盘顶改成**视图几何**。0.1.68 用的是 `AevonKbTopSeen`（`DidShow`
-    // 那条通知的 `origin.y`），Aevon(140) 把它证伪了：同一个 App 的同一个键盘，
-    // 报出来的顶边是
-    //   761 / 788 / 806 / 906 / 721 / 826 / 748 / 638
-    // 那是**动画途中的帧**，不是结算值。于是 `truth` 在 26..316 之间乱跳，App 每
-    // 收到一个新值就重排一次：QQ 的光标在 608 / 635 / 938 三个位置，微信在
-    // 862 / 682 —— 输入框一会儿被盖住、一会儿被推到屏幕外面去。
+    // 0.1.70 — 键盘顶取「本会话见过的最小通知顶边」，不读视图、不用动画帧。
     //
-    // 所以键盘顶改取**视图几何**。`AevonKbVisualTop()` 在键盘窗里找「满宽 + 底边贴窗底 + 高 200..460」最靠上的
-    // 那一块，量的是**窗口坐标**（与键盘窗自己的 frame 动画无关）⇒ 同一次键盘从
-    // willShow 到 didShow 都是同一个数。Aevon(140) 里四个 App 的读数：
-    //   QQ 573 / 微信 573 / 抖音 533 / 备忘录 529
-    // 这几个数就是各自键盘的上沿 —— 包括 App 自己的 `inputAccessoryView`（那条
-    // 工具栏本来就画在键盘窗里）。输入框该停的就是这条线：
-    //   · QQ 停在 616（＝按键顶，把工具栏那 43 pt 当成不存在）⇒ 它的输入框
-    //     585..625 整条压在 573..616 下面 ⇒ 用户说的「完全不出现」；
-    //   · 抖音 0.1.68 由通知平移算出 533 ⇒ 输入框 536，只差 3 pt ⇒ 用户说的
-    //     「紧贴键盘、但偏下一点被挡住一点」。
-    // 所以按 App 各自的上沿走，而不是写死 316/616。
-    CGFloat kbTop = AevonKbVisualTop();
+    // 0.1.68 取 `DidShow` 那一条（761/788/806 —— 它在动画中途就发了），0.1.69
+    // 改读视图几何（同一会话读到 501/528/573 三个数 —— 调用线程与时机不同结果
+    // 不同）。两条都不稳，而**不稳定本身就是这三个报障的根源**：让位量每变一次，
+    // App 就重排一次，最后停在哪个值全看运气。
+    //
+    // `AevonKbTopSettled` 是「本会话见过的最小 origin.y」：键盘只会从屏幕下方
+    // 往上滑，动画途中的读数全在结算值上面，所以取最小＝取结算值。这个量在
+    // 通知线程上就能算，不碰主线程要求，也不受动画影响。
+    //
+    // 再减掉该 App 自己那条输入条的高度（`AevonKbNoteCalibration`）—— 它们把
+    // 「键盘顶」当输入条上边再往下铺一条，底边于是多出自身高度。三条通道（通知
+    // 矩形、这里的让位量）从此说同一个数。
+    // 这几个数就是各自键盘的上沿（`AevonKbVisualTop` 在键盘窗里量的结果，含
+    // App 自己的工具栏）—— 0.1.69 用它做顶边，但它随调用时机漂（501/528/573），
+    // 已改走 `AevonKbTopSettled`；这组读数留作对照。
+    CGFloat cal = AevonKbNoteCalibration();
+    CGFloat kbTop = AevonKbTopSettled;
     if (kbTop < 200.0 || kbTop > fullHeight - 60.0) kbTop = AevonKbAnchorValue(fullHeight);
+    // 和上面发出去的那条通知**必须同源**：通知里给的顶边是 `kbTop − cal`，
+    // 这里返回的让位量就是 `整屏高 − (kbTop − cal)`。两条通道说同一个数，
+    // App 用哪条都落在同一处，也不会因为值变了而重排第二次。
+    kbTop -= cal;
     CGFloat kbHeight = fullHeight - kbTop;
     CGFloat sceneOrigin = AevonKbSceneOriginCache;
     if (sceneOrigin < 1.0 && fullHeight > sceneHeight) sceneOrigin = fullHeight - sceneHeight;
@@ -6673,6 +6714,10 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
 /// ⚠️ 0.1.56 起**不再拿它改任何通知的坐标**（0.1.53~0.1.55 用它平移键盘 frame，
 /// 微信/QQ 一次都没让对）。这个函数现在只服务一行读数，留在日志里是为了
 /// 「场景到底搬到哪了」还能对账。
+// 0.1.70 — 通知不再按场景原点平移（见 `AevonKbPostNote` 的注释），这条函数暂时
+// 没有调用点。留着是因为它记录了 0.1.53~0.1.55 与 0.1.69 两轮踩过的坑（三条
+// 回退路径为什么都不该优先），下一版若要恢复平移可直接接回来。
+static CGFloat AevonKbSceneOriginY(void) __attribute__((unused));
 static CGFloat AevonKbSceneOriginY(void) {
     // 0.1.69 — **缓存优先，且不要求主线程。**
     //
@@ -6761,19 +6806,30 @@ static void AevonKbPostNote(id self, SEL _cmd, NSNotificationName name, id objec
     // 「是本进程 + 这个 App 正被托管」，键盘在不在屏上由 `AevonKbNoteActive`
     // 单独记，两件事分开。
     if (info != nil && AevonKbHostGate() && AevonKbIsKeyboardNote(name)) {
-        // 0.1.55 — 先记**原值**，再谈换算。
+        // 0.1.70 — 键盘顶只认**本会话见过的最小值**。
         //
-        // `DidShow` 是动画结束那一次，`origin.y` 就是键盘实体顶边（本机 616）。
-        // 这一段必须在下面 `rect.origin.y -= shift` 之前跑，否则记下来的是减过
-        // 215 的场景坐标（401），下次拿 932 减它就得到 531 —— 让位量直接顶飞。
-        if ([name isEqualToString:UIKeyboardDidShowNotification]) {
-            NSValue *endValue = [info objectForKey:UIKeyboardFrameEndUserInfoKey];
-            if (endValue != nil) {
-                CGRect raw = [endValue CGRectValue];
-                CGFloat full = AevonKbNativeBounds(nil).size.height;
-                if (raw.origin.y > 100.0 && raw.origin.y < full + 1.0) {
-                    AevonKbTopSeen = raw.origin.y;
-                }
+        // 键盘从屏幕下方滑上来，`origin.y` 一路上降：932 → 906 → 806 → 761 → 616。
+        // 动画途中的读数全在最终值上面，所以「取最小」＝取结算值，不需要等动画、
+        // 也不读任何视图几何。0.1.68 取 `DidShow` 那一条（读到 761/788/806 ——
+        // 它在动画中途就发了），0.1.69 改读视图（读到 501/528/573 三个数 ——
+        // 调用时机不同结果不同），都不稳。
+        //
+        // 门槛 `> 350` 是为了滤掉「键盘已收、origin.y 落到 401/318」的平移态读数
+        // 和 0 值；`< full` 滤掉完全收起的 932。
+        //
+        // 「新会话」的判据是 `AevonKbNoteActive == 0`（收起时清零），**不能**用
+        // `WillShow`：这份日志里同一个键盘会连发两轮 WillChangeFrame/WillShow
+        // （Aevon(141) 的 QQ 就发了两次），第二轮若重置，正好把第一轮结算好的
+        // 616 抹掉、退回动画起点。
+        NSValue *endValue = [info objectForKey:UIKeyboardFrameEndUserInfoKey];
+        if (AevonKbNoteActive == 0) AevonKbTopSettled = 0.0;
+        if (endValue != nil) {
+            CGRect raw = [endValue CGRectValue];
+            CGFloat full = AevonKbNativeBounds(nil).size.height;
+            if (raw.size.height > 40.0 && raw.origin.y > 350.0 && raw.origin.y < full - 1.0) {
+                CGFloat seen = AevonKbTopSettled;
+                if (seen < 1.0 || raw.origin.y < seen) AevonKbTopSettled = raw.origin.y;
+                AevonKbTopSeen = raw.origin.y;
             }
         }
         // 0.1.68 — 先按**原始矩形**判一次「键盘在不在屏上」，这是 UIKit 问交集
@@ -6789,20 +6845,19 @@ static void AevonKbPostNote(id self, SEL _cmd, NSNotificationName name, id objec
             if (raw.origin.y >= full - 1.0) AevonKbNoteActive = 0;
             else if (raw.size.height > 40.0) AevonKbNoteActive = 1;
         }
-        // 0.1.68 — 重新平移键盘矩形，这次窗口是对的。
+        // 0.1.70 — **只抬每个 App 自己那条输入条，不再按场景原点平移。**
         //
-        // 0.1.53~0.1.55 也平移过（减 215），三版没让对，0.1.56 于是撤掉、改去收
-        // 窗口。现在能说清当时错在哪：那三版里 UIKit 的让位量走的是另一条路
-        // （`intersectionHeightForWindowScene:` 仍返回 101），用 guide 的 App
-        // 根本看不到我们的平移。0.1.68 两条路一起改 —— 这里平移通知，那条钩子
-        // 返回真实交集 —— 并且**窗口高度不再改**，所以不会再有「窗口 401 /
-        // 场景 717 / 通知按 932」三套坐标系互相打架。
-        //
-        // 换算：系统给的是屏幕坐标（顶边 616），App 窗口坐标系的原点在屏幕 215
-        // ⇒ 窗口坐标里顶边是 401，遮住窗口 316。App 用 `场景高 − 顶边` 就能算出
-        // 316，输入框落在 375..401（屏幕 590..616），正好在键盘上沿。
-        CGFloat shift = AevonKbSceneOriginY();
-        if (shift > 1.0 && shift < 400.0) {
+        // 0.1.68/0.1.69 把 `origin.y` 减掉场景原点 215，本意是「换成窗口坐标」。
+        // Aevon(141) 证明这个动作对这三个 App 都是**重复让位**：它们自己就用
+        // `UIScreen 高 − 键盘顶` 算，减完 215 让它算出的让位量再多 215。而同一个
+        // 会话里第一条通知往往读不到场景原点（缓存还没写）⇒ 先给未平移的、
+        // 再给平移的 ⇒ App 把两次让位**累加**：
+        //   抖音 184 + 399 = 583 ⇒ 输入条底边到屏幕 349（日志 `bar=329..349`）
+        // 现在只留一个方向、一个来源：顶边减掉该 App 输入条自身高度。
+        CGFloat cal = AevonKbNoteCalibration();
+        CGFloat rawTop = -1.0;
+        CGFloat outTop = -1.0;
+        if (cal > 0.5) {
             NSMutableDictionary *copy = [[NSMutableDictionary alloc] initWithDictionary:info];
             BOOL moved = NO;
             NSArray *keys = @[UIKeyboardFrameBeginUserInfoKey, UIKeyboardFrameEndUserInfoKey];
@@ -6811,18 +6866,24 @@ static void AevonKbPostNote(id self, SEL _cmd, NSNotificationName name, id objec
                 if (boxed == nil) continue;
                 CGRect rect = [boxed CGRectValue];
                 if (rect.size.height < 40.0) continue;
-                rect.origin.y -= shift;
+                if ([key isEqualToString:UIKeyboardFrameEndUserInfoKey]) rawTop = rect.origin.y;
+                rect.origin.y -= cal;
+                if ([key isEqualToString:UIKeyboardFrameEndUserInfoKey]) outTop = rect.origin.y;
                 [copy setObject:[NSValue valueWithCGRect:rect] forKey:key];
                 moved = YES;
             }
             if (moved) shifted = copy;
             else [copy release];
+        } else if (endValue != nil) {
+            rawTop = [endValue CGRectValue].origin.y;
+            outTop = rawTop;
         }
-        if (AevonKbNoteNotes < 6) {
+        if (AevonKbNoteNotes < 8) {
             AevonKbNoteNotes += 1;
             char line[220];
-            snprintf(line, sizeof(line), "kb: note shift=%.0f name=%.48s\n",
-                     shift, [(NSString *)name UTF8String]);
+            snprintf(line, sizeof(line),
+                     "kb: note rect raw=%.0f out=%.0f cal=%.0f name=%.40s\n",
+                     rawTop, outTop, cal, [(NSString *)name UTF8String]);
             AevonKbLog(line);
         }
     }
