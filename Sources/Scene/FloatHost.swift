@@ -3462,14 +3462,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var kbSavedOriginY: CGFloat = 0
     /// 0.1.56 — 键盘态之前场景的高度（0 = 跟随 `natural.height`）。
     private var kbSavedHeight: CGFloat = 0
-    /// 0.1.62 — 场景帧落地看护还剩几次。
-    ///
-    /// 键盘态要求「卡片在 215..932、场景也在 215..932」同时成立：场景一旦落后，
-    /// 键盘（它挂在场景底边上）就被裁在场景旧底边 717 —— 用户看到的就是
-    /// 「只显示键盘顶部工具栏」。`AevonPushSceneFrame` 走的是 transition 门，
-    /// 写进去要等一次事务提交，回读在同一拍往往是旧值，所以这里不指望一次成功，
-    /// 而是换几何之后隔 50 ms 对一次账、连对三次，对不上就再推一次。
-    private var sceneNudgeLeft = 0
 
     /// 全体宿主里挑主窗让位。
     ///
@@ -3589,7 +3581,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                                Double(visible.width), Double(height))
             var door: Int = 0
             if let sc = window.windowScene { door = Int(AevonPushSceneFrame(sc)) }
-            nudgeSceneFrame("on")
             followContent()
             applyGlow()
             Log.write("win: keyboard fill on card=" + size(card.frame.size)
@@ -3625,7 +3616,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                                Double(canvasHeight > 16 ? canvasHeight : natural.height))
             var door: Int = 0
             if let sc = window.windowScene { door = Int(AevonPushSceneFrame(sc)) }
-            nudgeSceneFrame("off")
             if !kbSavedFrame.isNull { card.frame = kbSavedFrame }
             kbTopCrop = kbSavedCrop
             followContent()
@@ -3653,38 +3643,6 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 guard let self = self, !self.kbFilled else { return }
                 self.reportBand()
             }
-        }
-    }
-
-    /// 0.1.62 — 换完几何之后，隔 50 ms 对一次账，共三次（覆盖前 150 ms）。
-    ///
-    /// 只对账、不改目标：目标已经在 `AevonSceneFrameSet` 登记好了，这里只负责
-    /// 让它在**这一拍附近**真的落下。对不上就再推一次并打一行
-    /// `win: scene lag now=`；对上了就安静退出（正常情况一条日志都没有）。
-    private func nudgeSceneFrame(_ why: String) {
-        sceneNudgeLeft = 3
-        nudgeSceneFrameTick(why: why)
-    }
-
-    private func nudgeSceneFrameTick(why: String) {
-        guard sceneNudgeLeft > 0 else { return }
-        sceneNudgeLeft -= 1
-        let left = sceneNudgeLeft
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            guard let self = self, let window = self.window else { return }
-            let want = self.canvasFrame
-            guard let sc = window.windowScene else { return }
-            let got = AevonSceneFrameOf(sc)
-            let behind = abs(got.origin.y - want.origin.y) > 1
-                || abs(got.height - want.height) > 1
-            if behind {
-                let door = Int(AevonPushSceneFrame(sc))
-                Log.write("win: scene lag now="
-                          + String(format: "%.0fx%.0f@%.0f", got.width, got.height, got.origin.y)
-                          + " want=" + String(format: "%.0fx%.0f@%.0f", want.width, want.height, want.origin.y)
-                          + " why=" + why + " door=" + String(door) + " left=" + String(left))
-            }
-            self.nudgeSceneFrameTick(why: why)
         }
     }
 
