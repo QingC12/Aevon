@@ -612,25 +612,29 @@ def main():
                   # 两条都断言，缺一条就是这条路又断了半边。
                   b"win: keyboard fill on card=",
                   b"win: keyboard fill off card=",
-                  # 0.1.85 — 通知点击观察器（只取证、不接管）。母本的正解是
-                  # SpringBoard 的激活总入口，而前五版挂错了地方，所以这一版
-                  # 只装一个「读一遍参数、原样转发、写一行日志」的替身。
+                  # 0.1.87 — 激活入口观察器。名字不是猜的：0.1.86 的普查在真机上
+                  # 把四条同形状的方法列了出来（`surf: SBMainWorkspace~activ
+                  # n=16/170`），这一版按真名装，闸二改成**逐字节比对参数编码**。
                   #
-                  # 六道闸的每一条都要在二进制里，否则「装不上」与「装了但
-                  # 形状不对」在日志里分不开：
-                  #   armed     = 装上了，附类型编码与真实参数个数
-                  #   shape off = 类在、方法在，但参数个数不是 6 ⇒ 主动不装
-                  #   absent    = 类或方法不存在 ⇒ 不装，改列真名
-                  b"notify: activate armed args=%d types=%s back=%@",
-                  b"notify: activate shape off args=%d want=6 types=%s",
-                  b"notify: activate absent reason=no-class",
-                  # 取证行本身。字段顺序就是判据顺序：先看 `act` 是不是
-                  # `UINotificationResponseAction`，再看 `b` 是不是被点的那个
-                  # App；`src` / `org` 两者对照才能分清「点通知」与「点图标」。
-                  b"notify: act b=%s src=%s org=%s act=%s opt=%s trust=%d n=%d url=%s",
-                  # 闸五：预算用尽后闭嘴的那一行。它出现而 `notify: act`
-                  # 只有 60 条，是正常收工；只有它而没有前一条，是格式串坏了。
-                  b"notify: act budget spent n=60",
+                  # 四条选择子都要在二进制里 —— 少一条就是「少装一路观察」，
+                  # 而那在日志里只表现为「某条从来没命中」，与「这条路不走」
+                  # 分不开。
+                  b"_handleOpenApplicationRequest:options:activationSettings:origin:withResult:",
+                  b"_handleUntrustedOpenRequestForApplication:options:activationSettings:origin:withResult:",
+                  b"_handleTrustedOpenRequestForApplication:options:activationSettings:origin:withResult:",
+                  b"_handleUserActionRequest:options:activationSettings:origin:withResult:",
+                  # 形状闸：真机量到的编码就是这 21 个字节。它同时是「装没装」的
+                  # 判据和下一版的 ABI 依据，所以必须能在产物里 grep 到。
+                  b"v56@0:8@16@24@32@40@?48",
+                  #   armed  = 四条里装上了几条，skip= 写清每条为什么没装
+                  #            （absent / shape(真实编码) / inherited / no-orig）
+                  b"notify: open armed n=%d/%d shape=%s skip=%@",
+                  b"notify: open absent reason=no-class",
+                  # 取证行本身。op 是四条里的哪一条，b/src/act/url 是母本当年
+                  # 那三个字段的真值，req/opt/set/org 是四个参数的真实类名。
+                  b"notify: hit op=%s b=%s src=%s act=%s n=%d url=%s req=%s opt=%s set=%s org=%s",
+                  # 闸五：预算用尽后闭嘴的那一行（四条合计 32 行）。
+                  b"notify: open budget spent n=32",
                   # 闸四（Swift 侧）：闩的三态。三条缺一条，「上次死在这条钩子
                   # 上」这个结论就落不下来 —— 而这正是这一版唯一的安全网。
                   b"notify: activate latch held, previous boot died while armed",

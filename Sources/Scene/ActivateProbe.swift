@@ -1,34 +1,36 @@
 //
 //  ActivateProbe.swift — Aevon, SpringBoard side.
 //
-//  0.1.85 — 「通知点击 → 浮窗」的第一步：**只取证，不接管**。
+//  0.1.87 — 「通知点击 → 浮窗」的取证：**只读，不接管**。
 //
-//  为什么这一步单独一版：stheno 的正解是 SpringBoard 的 App 激活总入口
+//  落点是 0.1.86 的真机普查定的，不是猜的。母本那条
 //
 //      SBMainWorkspace -_activateBundleID:requestID:isTrusted:options:
 //                       source:originalSource:withResult:
 //
-//  它每一行都在决定「这个 App 要不要起来」。0.1.40~0.1.45 在这条路上已经
-//  失败过五次（`_executeTransitionRequest:` 挂上了但零调用、三个「通知」类
-//  在 SpringBoard 里根本不存在），而每一次失败都是靠一份真机日志才认出来的。
-//  所以这一版不写任何行为判定：钩子进去只读一次参数、写一行日志、原样转发。
+//  在真机上 `no-method`（0.1.85 的日志）。普查把 `activ` 系全列出来后，真身是
+//  SBMainWorkspace 自己实现的四条**同形状**方法：
+//
+//      _handleOpenApplicationRequest:options:activationSettings:origin:withResult:
+//      _handleUntrustedOpenRequestForApplication:options:...
+//      _handleTrustedOpenRequestForApplication:options:...
+//      _handleUserActionRequest:options:...
+//
+//  四条编码逐字相同（`v56@0:8@16@24@32@40@?48`，5 参数 + 结果块）。这一版把
+//  四条一起装成观察器：读一遍参数、原样转发、异步写一行日志，不写行为判定。
+//  它们每一行都在决定「这个 App 要不要起来」，所以闸必须硬，见 `AevonScene.m`
+//  里 `AevonActivateProbeInstall` 的四道闸（存在 / 逐字节形状 / 归属 / 原实现）。
 //
 //  这道口子的危险不在「写错一个 if」，而在「装上去之后才发现形状不对」。
-//  因此装配前后一共六道闸，任何一道不成立就什么都不做：
+//  装配侧的闸（存在 / 逐字节形状 / 归属 / 原实现）在 `AevonScene.m` 里；这一侧
+//  负责剩下的两道：
 //
-//    闸一 · 存在性   类或方法不在 ⇒ 不装，并把 `activate` / `bundle` 的真名
-//                    列出来（下一版按真名改，不按名字赌）。
-//    闸二 · 参数形状 对象参数必须正好 6 个。差一个就是错位调用 —— 那是
-//                    SpringBoard 的崩溃，不是一行日志。0.0.53 已经在这上面
-//                    吃过一次：`AevonObjectArgs` 数错，两个候选一个都没装上，
-//                    而日志看起来一切正常。
-//    闸三 · 方法归属 必须由 `SBMainWorkspace` 自己实现。`class_getInstanceMethod`
-//                    会沿父类链找，改到父类上等于同时改了所有兄弟类。
 //    闸四 · 启动闩   装配前写 `notify.armed`，活到 180 秒才摘。它还在 ⇒ 上一次
 //                    就是死在这条钩子上 ⇒ 这次不装，并落下 `notify.off`。
-//    闸五 · 调用预算 最多 60 行，然后闭嘴（钩子留着，只是不再取证）。
 //    闸六 · 延迟装载 装载后 3 秒才装。那时主屏已经在，`AevonStart` 里任何一行
 //                    都不可能再是「开不了机」的原因。
+//
+//  调用预算（四条合计 32 行）在替身里。
 //
 //  这六道之外还有一条不写在代码里、写在顺序里的：**快照在原实现之前，落盘在原
 //  实现之后**。快照只读、不分配、不写盘 —— 它不改任何参数，所以系统那一段照旧
