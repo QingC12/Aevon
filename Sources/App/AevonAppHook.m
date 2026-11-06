@@ -5465,7 +5465,7 @@ static void AevonKbLeadNote(double h, double screen, double full, double kbwin, 
     AevonKbLeadNotes += 1;
     char line[260];
     snprintf(line, sizeof(line),
-             "kb: lead h=%.1f screen=%.1f full=%.1f kbwin=%.1f scene=%.1f -> %.1f took=%d\n",
+             "kb: lead h=%.1f screen=%.1f full=%.1f base=%.1f scene=%.1f -> %.1f took=%d\n",
              h, screen, full, kbwin, scene, out, took);
     AevonKbLog(line);
 }
@@ -5681,26 +5681,34 @@ static void AevonKbLiftApply(BOOL on) {
         source = keyboardWindow != nil ? 2 : 0;
     }
     CGFloat sceneHeight = AevonKbSceneHeightNow();
-    // 0.1.52 — 基准 = **承载场景在屏幕上的底边**，由坐标转换量出来。
+    // 0.1.53 — 基准**优先用宿主推来的卡片底边（band）**，坐标转换降为备用。
     //
-    // 0.1.51 用「主窗 `frame.origin.y` + 场景高」。那个原点恒为 0（窗口坐在
-    // 场景坐标空间的 (0,0)，宿主搬场景它不知道）⇒ 底边算成 717 ⇒ 键盘被上移
-    // 215 ⇒ 场景明明已经在 215..932，键盘却浮到 401..717。这就是 Aevon(124)
-    // 的「键盘直接悬空」。
+    // 0.1.52 把坐标转换放在第一位，结果是一条抖动链（Aevon(125) 备忘录）：
     //
-    // 现在三级：
-    //   ① 坐标转换（`AevonKbSceneRectOnScreen`）—— 搬成 932、没搬 717，都是事实；
-    //   ② 转换失败 ⇒ 用宿主推来的卡片底边（band，搬成时也是 932）；
-    //   ③ 都没有 ⇒ 场景高（0..717 的老形状，键盘会被搬 −215，0.1.48 的已知可形状）。
+    //   kb: lift applied dy=-215 base=717 top=0    ← 场景还没搬完，转换给 0..717
+    //   kb: lift applied dy=-215 base=717 top=0
+    //   kb: lift aligned dy=0    base=932 top=215  ← 场景搬到位，键盘又搬回 0
+    //
+    // 场景原点由**宿主**写进 `settings.frame`，写入到生效差好几拍。在这几拍里
+    // 坐标转换读到的是旧位置 ⇒ 键盘被搬 −215，等场景搬好又搬回 0 —— 用户看到的
+    // 「打开键盘时抖动」就是这一来一回。
+    //
+    // band 是宿主主动推过来的**意图**：键盘态卡片就是 `215..932`，底边 932，
+    // 与场景搬没搬没关系。用它算 `932 − 932 = 0`，键盘从一开始就不搬，只等
+    // 场景自己搬到位（200 ms 内），全程没有第二次动作。
+    CGFloat bandBottom = AevonKbBandBottomEdge();
     CGRect sceneBox = AevonKbSceneRectOnScreen();
-    CGFloat sceneTop = 0.0;
+    CGFloat convBottom = CGRectIsNull(sceneBox) ? 0.0 : CGRectGetMaxY(sceneBox);
+    CGFloat sceneTop = CGRectIsNull(sceneBox) ? -1.0 : sceneBox.origin.y;
+    if (!CGRectIsNull(sceneBox) && sceneHeight < 200.0) sceneHeight = sceneBox.size.height;
     CGFloat sceneBottom = 0.0;
-    if (!CGRectIsNull(sceneBox)) {
-        sceneTop = sceneBox.origin.y;
-        sceneBottom = CGRectGetMaxY(sceneBox);
-        if (sceneHeight < 200.0) sceneHeight = sceneBox.size.height;
+    if (bandBottom > 200.0) {
+        // 宿主的意图优先：它说键盘态卡片铺到 932，那就按 932 算。
+        sceneBottom = bandBottom;
+    } else if (convBottom > 200.0) {
+        // 没有 band（卡片还没上报 / 不是悬浮窗态）才用本进程量到的真值。
+        sceneBottom = convBottom;
     }
-    if (sceneBottom < 200.0) sceneBottom = AevonKbBandBottomEdge();
     if (sceneBottom < 200.0) sceneBottom = sceneHeight;
     if (keyboardWindow == nil || sceneBottom < 200.0) {
         if (AevonKbLiftNotes < 8) {
@@ -5862,27 +5870,50 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
     CGFloat screenHeight = (sceneHeight > 40 && sceneHeight < fullHeight - 8)
                          ? sceneHeight : fullHeight;
     if (screenHeight < 1 || keyboardHeight < 40) return answer;
+    // 0.1.53 — 平移式的基准从「键盘窗高」换成「**场景底边在屏幕的位置**」。
+    //
+    // 老式子 `h + (kbWinH − screenH)` 里 `kbWinH`（932）被当成「场景底边」，
+    // 只在「场景贴着屏幕顶」时成立。场景搬到 215..932 之后这个前提没了，式子变成
+    // `h + 215`：系统给的真值 316 被抬成 531，给 289 抬成 504 —— Aevon(125) 里
+    // 那一串 `-> 531.0 / -> 504.0 / -> 289.0` 全是它。App 每次收到一个新数字都
+    // 重排一遍，输入框就在这一串重排里被推到看不见的地方（微信、QQ 的反馈）。
+    //
+    // 正确写法只差一个量：`needed = h + (整屏高 − 场景底边)`。两段场景都自洽 ——
+    //
+    //   · 场景 0..717：   h=101 ⇒ 101 + (932 − 717) = 316
+    //   · 场景 215..932： h=316 ⇒ 316 + (932 − 932) = 316
+    //
+    // 恒等于 316，与「场景搬没搬」无关。`h` 是系统按场景算的交集（几何量），
+    // 场景底边来自 band / 坐标转换（也都是事实），两个都不吃键盘弹出动画。
+    CGFloat baseBottom = AevonKbBandBottomEdge();
+    if (baseBottom < 200.0) {
+        CGRect box = AevonKbSceneRectOnScreen();
+        if (!CGRectIsNull(box)) baseBottom = CGRectGetMaxY(box);
+    }
+    if (baseBottom < 200.0 || baseBottom > fullHeight + 40.0) baseBottom = screenHeight;
+    // 只在「键盘真的在屏」时才做换算。键盘收起过程中系统仍会问，那时 h 一路
+    // 变小（289 → 74 → 0），照算会把让位量一路推成 215 → 0，内容跟着弹一次；
+    // 而且 App 已经自己在恢复，我们不该再插手。
+    if (AevonKbOn == 0) return answer;
     // 两个式子取大的那个，各自都只往「变大」的方向走：
     //
     //   ① 母本原式 `h×screenH÷kbWinH + kbWinH − screenH` —— 适用于「场景是被缩放
     //      过的坐标系」（scene 宽 ≠ 屏宽）。本机不是这种：日志里屏宽 430、场景宽
     //      也 430，说明只是被裁短，没有缩放 ⇒ 这一项会把 h 缩小到 0.769 倍，
     //      算出来偏小（101 → 292.7）。
-    //   ② 平移式 `h + (kbWinH − screenH)` —— 无缩放、只是场景比屏矮时精确。
-    //      同一个数代入：101 + (932 − 717) = 316，而键盘真实高度就是
-    //      932 − 616 = 316（h=101 表示键盘顶边落在场景内 616 处）。两个独立算法
-    //      互相印证，所以本机的正确值是 316，不是 292.7。
+    //   ② 平移式 `h + (整屏高 − 场景底边)` —— 无缩放、只改场景原点时精确，
+    //      见上面 0.1.53 的说明。
     //
     // 取大者 = 两种场景都不吃亏；上限是场景高（键盘不可能比它所在的场景还高）。
     double scaled = (answer * screenHeight / keyboardHeight) + keyboardHeight - screenHeight;
-    double shifted = answer + (keyboardHeight - screenHeight);
+    double shifted = answer + (fullHeight - baseBottom);
     double lifted = answer;
     int took = 0;
     if (isfinite(scaled) && scaled > lifted + 0.5 && scaled <= screenHeight) {
         lifted = scaled;
         took = 1;
     }
-    if (isfinite(shifted) && shifted > lifted + 0.5 && shifted <= screenHeight) {
+    if (isfinite(shifted) && shifted > lifted + 0.5 && shifted <= fullHeight) {
         lifted = shifted;
         took = 3;
     }
@@ -5894,8 +5925,91 @@ static double AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BO
             took = 2;
         }
     }
-    AevonKbLeadNote(answer, screenHeight, fullHeight, keyboardHeight, sceneHeight, lifted, took);
+    AevonKbLeadNote(answer, screenHeight, fullHeight, baseBottom, sceneHeight, lifted, took);
     return lifted;
+}
+
+/// 场景原点在屏幕上的 Y（本机 215），取不到返回 0。
+///
+/// 两个来源都只认「事实」：band 底边（宿主推的卡片底边 932）减场景高 717；
+/// 次选坐标转换的 `origin.y`。范围卡在 1..400 之内，任何异常值都当 0 处理 ——
+/// 这个数会被用来平移键盘通知，宁可不改，也不能改错。
+static CGFloat AevonKbSceneOriginY(void) {
+    CGFloat bandBottom = AevonKbBandBottomEdge();
+    CGFloat sceneH = AevonKbSceneHeightNow();
+    if (bandBottom > 200.0 && sceneH > 200.0) {
+        CGFloat off = bandBottom - sceneH;
+        if (off > 1.0 && off < 400.0) return off;
+    }
+    CGRect box = AevonKbSceneRectOnScreen();
+    if (!CGRectIsNull(box)) {
+        CGFloat off = box.origin.y;
+        if (off > 1.0 && off < 400.0) return off;
+    }
+    return 0.0;
+}
+
+// ===== 0.1.53 — 键盘通知里的坐标换算 =====
+//
+// **这是「微信 / QQ 不显示输入框」的真正根因**，前六版一直没找到。
+//
+// 场景原点被宿主搬到 215 之后，App 的窗口坐标系原点在屏幕 215，而系统广播的
+// `UIKeyboardFrameEndUserInfoKey` 是**屏幕坐标**（顶边 616）。两者差 215。
+//
+//   · 用 `keyboardLayoutGuide` 的 App：UIKit 内部自己处理，不受影响；
+//   · 自己按 frame 算避让的 App：算出 `717 − 616 = 101`，只让出 101，
+//     输入框被键盘盖住 215 pt —— **完全看不见**。
+//
+// 日志把这一条钉死了：`kb: guide win=430x717 top=0 h=0` —— 微信和 QQ 的
+// layoutGuide 根本没被驱动，说明它们不走 UIKit 那条路，而是自己读 frame。
+//
+// 时间线也吻合：0.1.48 之前场景原点恒为 0（frame 616 是对的，输入框正常），
+// 0.1.50 起才开始搬场景，也正是用户第一次报「输入框不见了」的那一版。
+//
+// 所以这里把广播里的 keyboard frame 从屏幕坐标换成场景坐标（减 215）。
+// ⛔ 只在「卡片态 + 键盘在屏 + 场景原点真的 > 0」时才改；任何一个条件不成立就
+// 原样透传。改的是通知里的**值**，不碰任何视图几何。
+static void (*AevonOrigPostNote)(id, SEL, NSNotificationName, id, NSDictionary *);
+static volatile int AevonKbNoteNotes = 0;
+
+static BOOL AevonKbIsKeyboardNote(NSNotificationName name) {
+    if (name == nil) return NO;
+    return [name isEqualToString:UIKeyboardWillChangeFrameNotification]
+        || [name isEqualToString:UIKeyboardDidChangeFrameNotification]
+        || [name isEqualToString:UIKeyboardWillShowNotification]
+        || [name isEqualToString:UIKeyboardDidShowNotification];
+}
+
+static void AevonKbPostNote(id self, SEL _cmd, NSNotificationName name, id object, NSDictionary *info) {
+    NSDictionary *send = info;
+    if (info != nil && AevonKbOn != 0 && AevonKbHostGate() && AevonKbIsKeyboardNote(name)) {
+        CGFloat shift = AevonKbSceneOriginY();
+        if (shift > 1.0) {
+            NSMutableDictionary *copy = [[info mutableCopy] autorelease];
+            BOOL changed = NO;
+            for (NSString *key in @[UIKeyboardFrameEndUserInfoKey,
+                                    UIKeyboardFrameBeginUserInfoKey]) {
+                NSValue *value = copy[key];
+                if (value == nil) continue;
+                CGRect rect = [value CGRectValue];
+                if (rect.size.height < 1.0) continue;
+                rect.origin.y -= shift;
+                copy[key] = [NSValue valueWithCGRect:rect];
+                changed = YES;
+            }
+            if (changed) {
+                send = copy;
+                if (AevonKbNoteNotes < 4) {
+                    AevonKbNoteNotes += 1;
+                    char line[220];
+                    snprintf(line, sizeof(line), "kb: note shift=%.0f name=%.48s\n",
+                             shift, [(NSString *)name UTF8String]);
+                    AevonKbLog(line);
+                }
+            }
+        }
+    }
+    AevonOrigPostNote(self, _cmd, name, object, send);
 }
 
 /// 构造函数里调一次。只装 `intersectionHeight` 这一条 —— 它是母本五条钩子里
@@ -5922,6 +6036,22 @@ static void AevonKbNativeInstall(void) {
     snprintf(line, sizeof(line), "kb: armed pid=%d inter=%d bundle=%.60s\n",
              (int)getpid(), interOK, [bundle UTF8String]);
     AevonKbLog(line);
+    // 0.1.53 — 键盘通知的坐标换算（见 `AevonKbPostNote` 上面那一整段）。
+    //
+    // 装不上不算错：行为退回 0.1.52（自己算避让的 App 少让 215，输入框被盖）。
+    // 装上了这份日志里会出现 `kb: note shift=215 name=…` —— 那是本版在动手。
+    int noteOK = 0;
+    Method post = class_getInstanceMethod([NSNotificationCenter class],
+                                          sel_registerName("postNotificationName:object:userInfo:"));
+    if (post != NULL) {
+        AevonOrigPostNote = (void (*)(id, SEL, NSNotificationName, id, NSDictionary *))
+                            method_getImplementation(post);
+        method_setImplementation(post, (IMP)AevonKbPostNote);
+        noteOK = 1;
+    }
+    char noteLine[160];
+    snprintf(noteLine, sizeof(noteLine), "kb: note hook=%d\n", noteOK);
+    AevonKbLog(noteLine);
     // 0.1.47 — 键盘窗上移要在**布局完成之后**再确认一次。
     //
     // `willChangeFrame` 只报「将要变成什么」，UIKit 在它之后还会给键盘窗写一次

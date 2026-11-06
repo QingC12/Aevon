@@ -3522,7 +3522,24 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                       + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
                       + " scene=" + String(format: "%.0f", canvasOriginY)
                       + " crop=" + String(format: "%.0f", kbTopCrop))
-            reportBand()
+            // 0.1.53 — 上报推到下一拍。
+            //
+            // Aevon(125) 的关键盘序列是：
+            //   win: keyboard fill off card=345x575 at 46,203     ← 卡片已经回到默认
+            //   win: band report 430x692 at 0,144                 ← 上报的却是过渡几何
+            //   （稳态应报 373x543 at 32,219）
+            //
+            // 卡片从 430×932 收回 345×575 时，`bandRect` 依赖的 `reach` 与卡片
+            // 自己的布局还没走完这一拍，同拍上报就会把键盘态与默认态之间的插值
+            // （430x692@0,144）推给 App。App 按它重排一次、再按稳定值重排一次，
+            // 用户看到的就是「回到默认大小时内容排版错乱」。
+            //
+            // 同一个函数里刚设完 frame，布局要等这一轮 runloop 才结算，所以推到
+            // 下一拍再报 —— 那时卡片和 `reach` 都已经是稳定值。
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, !self.kbFilled else { return }
+                self.reportBand()
+            }
         }
     }
 
