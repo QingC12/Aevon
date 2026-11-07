@@ -727,7 +727,11 @@ def main():
                   # 0.1.95 — 分享带 payload 时必须交回系统的那一次调用。
                   #   ActivateSuspended = 只写这一个键，让 App 不上前台但 launch option 送到
                   #   forward done ok=1 / ok=0 / err = 交回去之后系统怎么回的
-                  b"FBSOpenApplicationOptionKeyActivateSuspended",
+                  # 0.1.98 — 挂起键的**值**才是要写进字典的键名。0.1.95~97 写的是常量名，
+                  #   系统不认，于是分享时全屏和卡片一起被拉起（Aevon(165) 回环那行的 keys
+                  #   里能直接看到那个长名字躺着）。
+                  b"__ActivateSuspended",
+                  b"notify: forward susp=%d keys=%lu",
                   b"notify: forward done ok=1",
                   b"notify: forward done ok=0",
                   b"notify: forward done err",

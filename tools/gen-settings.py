@@ -473,17 +473,17 @@ def build_root(panel_items, wired):
                                 f"承载形状：旧版圆盘 1:1 移入——右缘左滑呼出，划过跳跃、"
                                 f"阻尼旋转、逐点展开全是本体；应用在编辑器里增删排序"
                                 f"（上限 36，含截图 / 录屏动作槽）。"
-                                f"0.1.97 起：分享到第三方 App 也走小窗了。上一版的判据只认来源进程 sharingd，而真机上"
-                                f"QQ 走它自己的分享扩展（…ShareExtension）、微信走 …sharetimeline，两条都没被接住，"
-                                f"所以分享文件时是全屏打开 —— 现在判据补上这两条形状，并且加了一条更硬的证据："
-                                f"这次打开本身带不带东西（顶层 __PayloadURL / __PasteSharingToken / __PayloadOptions）。"
-                                f"第二处修正：上一版用来决定「要不要交回系统」的那一格读的是 payload 里的 URL 键，"
-                                f"真机上分享给 Sileo / Filza 读出来是空，于是转发一次都没触发。现在改读顶层 __PayloadURL，"
-                                f"并把结果写进日志的 pay= 一格（none / url / paste / payload）。"
-                                f"判据：notify: share … pay=url fwd=1 表示这次带东西且已交回系统；"
-                                f"notify: forward pass … 每出现一条，说明那次回环被认出来了、没有重复分流。"
-                                f"要停掉整个通知接管：在 /var/mobile/Library/Logs/Aevon/ 下建空文件 notify.off 再重启；"
-                                f"只想停分享（含带内容的打开）就建 share.off。所有改动只写 {DOMAIN}，不触碰系统文件。"})
+                                f"0.1.98 起：分享带文件时不再顺带把 App 全屏拉起来。上一版确实把文件送到"
+                                f"小窗了，但同一拍里系统还把那个 App 前台激活了一次 —— 因为「挂起启动」那个键"
+                                f"我们写错了：写进去的是常量名（FBSOpenApplicationOptionKeyActivate"
+                                f"Suspended），系统要的是它的值（__ActivateSuspended）。写错的键系统不认识，"
+                                f"等于没写，于是照常前台激活。现在写对，并在交回系统之前把这一格读回来"
+                                f"落一行日志（notify: forward susp=1 keys=N）。"
+                                f"判据：分享后应只见小窗、不见全屏；日志里 notify: forward susp=1，"
+                                f"紧跟的回环通知行 keys= 里应当出现 __ActivateSuspended，而不是那串长名字。"
+                                f"要停掉整个通知与分享接管：在 /var/mobile/Library/Logs/Aevon/ 下建空文件"
+                                f"notify.off 再重启；只想停分享（含带内容的打开）就建 share.off。"
+                                f"所有改动只写 {DOMAIN}，不触碰系统文件。"})
 
 
     return {"title": "Aevon", "items": items}

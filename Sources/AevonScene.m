@@ -4162,7 +4162,16 @@ static void AevonNotifyCleanup(const char *bundle) {
 /// `FBSOpenApplicationOptionKeyActivateSuspended` 写进 options 再走原生打开：
 /// **App 不上前台，但 launch options 一个不少**。这里照做，只加这一个键，其余原样复制。
 ///
-/// 只在「分享 + 带 URL」时调用。点通知没有 payload，走了也没东西可送，只会多一次开请求。
+/// ⛔ 0.1.95~0.1.97 的错：把**常量名**当键名写进去了
+///   （`forKey:@"FBSOpenApplicationOptionKeyActivateSuspended"`）。
+///   `FBSOpenApplicationOptionKeyActivateSuspended` 是 FrontBoard 里的 **C 常量**，
+///   它的**值**才是要写进字典的那个键 —— `@"__ActivateSuspended"`。
+///   写常量名等于塞了一个系统不认识的键：它被原封不动带进请求（Aevon(165) 的回环那行
+///   就把它当普通键列了出来），却什么也没约束 ⇒ 原实现照常**前台激活** ⇒
+///   卡片和全屏一起来了。同一份日志里系统自己那条相册请求 keys 是
+///   `__LaunchIntent,__LaunchSceneless,__ActivateSuspended,…` —— 键名的唯一证据面。
+///
+/// 只在「分享 + 带 payload」时调用。点通知没有 payload，走了也没东西可送，只会多一次开请求。
 static void (^AevonForwardBool)(BOOL) = ^(BOOL ok) {
     AevonLogRaw(ok ? "notify: forward done ok=1" : "notify: forward done ok=0");
 };
@@ -4198,7 +4207,14 @@ static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id o
         ? [options mutableCopy] : [[NSMutableDictionary alloc] init];
     if (forward == nil) return 0;
     [forward setObject:[NSNumber numberWithBool:YES]
-                forKey:@"FBSOpenApplicationOptionKeyActivateSuspended"];
+                forKey:@"__ActivateSuspended"];
+    // 键名的第二道确认：同一份 options 里若已经有别人写的 `__ActivateSuspended`（NO），
+    // 上面这一句本身就是覆盖（setObject 不做合并）。这里再读回来落一行日志 ——
+    // 「写了」和「写进去了」不是一件事，0.1.95 就是写了、但写的是错的键。
+    id susp = [forward objectForKey:@"__ActivateSuspended"];
+    AevonLogRaw([[NSString stringWithFormat:@"notify: forward susp=%d keys=%lu",
+                  susp != nil ? [(NSNumber *)susp intValue] : -1,
+                  (unsigned long)[forward count]] UTF8String]);
 
     // 结果块要同形状：系统一定会调它一次，形状不对就是当场崩。
     id done = (id)AevonForwardBool;
