@@ -737,6 +737,17 @@ def main():
                   b"notify: forward done err",
                   # 0.1.96 — 自己交回去的那条请求要认出来，只放行（不认就会二次分流）。
                   b"notify: forward pass b=%s op=%s",
+                  # 0.1.99 — 三条诊断。这一版不改行为，价值全在这三行能不能被真机读出来：
+                  #   pass      = 被放行的那条请求（哪一条、为什么、带没带东西）。
+                  #               Aevon(167) 里 QQ 有一条 op=user 被放行，而 Sileo 没有，
+                  #               全屏的来源高度怀疑就在它身上。
+                  #   fwd settings = 第 4 个参数（SBActivationSettings）认不认「挂起」相关选择子。
+                  #   clear probe  = 点通知时公开链断在哪一跳（母版 log70 取到过标识，我们 6/6 没有）。
+                  b"notify: pass b=%s op=%s why=%s src=%s pay=%s n=%d",
+                  b"notify: fwd settings c=%s setSusp=%d setFlag=%d getSusp=%d",
+                  b"notify: clear probe a=%s l1=%s l2=%s l3=%s id=%d info=%s keys=%s n=%d",
+                  # 0.1.99 — 能力地图加了 dispatcher 类名那一格（取不到是最要紧的一种结果）。
+                  b"notify: clear map d=%s",
                   b"sharingd",
                   b"UIApplicationLaunchOptionsSourceApplicationKey",
                   b"UIApplicationLaunchOptionsURLKey",

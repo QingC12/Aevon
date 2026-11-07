@@ -473,17 +473,17 @@ def build_root(panel_items, wired):
                                 f"承载形状：旧版圆盘 1:1 移入——右缘左滑呼出，划过跳跃、"
                                 f"阻尼旋转、逐点展开全是本体；应用在编辑器里增删排序"
                                 f"（上限 36，含截图 / 录屏动作槽）。"
-                                f"0.1.98 起：分享带文件时不再顺带把 App 全屏拉起来。上一版确实把文件送到"
-                                f"小窗了，但同一拍里系统还把那个 App 前台激活了一次 —— 因为「挂起启动」那个键"
-                                f"我们写错了：写进去的是常量名（FBSOpenApplicationOptionKeyActivate"
-                                f"Suspended），系统要的是它的值（__ActivateSuspended）。写错的键系统不认识，"
-                                f"等于没写，于是照常前台激活。现在写对，并在交回系统之前把这一格读回来"
-                                f"落一行日志（notify: forward susp=1 keys=N）。"
-                                f"判据：分享后应只见小窗、不见全屏；日志里 notify: forward susp=1，"
-                                f"紧跟的回环通知行 keys= 里应当出现 __ActivateSuspended，而不是那串长名字。"
-                                f"要停掉整个通知与分享接管：在 /var/mobile/Library/Logs/Aevon/ 下建空文件"
-                                f"notify.off 再重启；只想停分享（含带内容的打开）就建 share.off。"
-                                f"所有改动只写 {DOMAIN}，不触碰系统文件。"})
+                                f"0.1.99 起：这一版只取证，不改行为。上一版把挂起键写对了，越狱工具"
+                                f"（Sileo / TrollStore）分享过来已经只出小窗；QQ 和微信还是小窗加全屏黑底。"
+                                f"两者在日志里的差别只有入口（越狱工具走 op=open，聊天软件走 op=user）"
+                                f"和一条被放行的请求 —— 而那条请求为什么被放行，现在的日志刻意不说话。"
+                                f"所以这一版加三行诊断：notify: pass（被放行的请求带上原因、来源和"
+                                f"带没带东西）、notify: fwd settings（第 4 个参数认不认挂起类选择子）、"
+                                f"notify: clear probe（点通知时公开链断在哪一跳）。另外把通知栈的能力"
+                                f"地图从「点通知那一拍」挪到开机 25 秒，不点通知也能落盘。"
+                                f"功能行为与 0.1.98 完全一致，小窗、圆盘、键盘不受影响。"
+                                f"停掉整个通知与分享接管：在 /var/mobile/Library/Logs/Aevon/ 下建空文件"
+                                f"notify.off 再重启；只想停分享（含带内容的打开）就建 share.off。"})
 
 
     return {"title": "Aevon", "items": items}

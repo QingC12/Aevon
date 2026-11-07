@@ -2778,6 +2778,11 @@ static void AevonNotifyMethods(const char *className, const char *needle) {
 /// 而普查是纯只读的，晚一步再定义不影响阅读顺序。
 void AevonActivateSurfaceCensus(void);
 
+/// 0.1.99 — 同上。清通知那两件（取 dispatcher、打能力地图）定义在下面几千行处，
+/// 而开机取证要在这里排期。
+static id AevonCleanDispatcher(void);
+static void AevonClearMap(id dispatcher);
+
 void AevonNotificationOpenInstall(void) {
     static int installed = 0;
     if (installed) return;
@@ -2801,6 +2806,24 @@ void AevonNotificationOpenInstall(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
         AevonActivateSurfaceCensus();
+    });
+
+    // 0.1.99 — 清通知的能力地图改挂到**开机**，不再只挂在「点通知」那一拍。
+    //
+    // 它原来只被 `AevonNotifyCleanup` / `AevonClearNotification` 调用，而这两条路都
+    // 要求先点一次通知才进得去。Aevon(161) 之后的三份日志里，用户一次都没点通知 ——
+    // 于是「dispatcher 到底取到没有、四个 destination 叫什么、谁支持 withdraw」
+    // 这张地图从来没能保存到磁盘。没有它，下一版改清通知只能接着猜。
+    //
+    // 25 秒的由来：通知栈是懒加载的（真机实测 3 秒时 `NCNotificationDispatcher` 还不存在、
+    // 10 秒才出现），而四个 destination 比 dispatcher 更晚。给足余量不影响任何行为 ——
+    // 这一段只读，一个字节都不改。
+    //
+    // 必须在主队列：`AevonCleanDispatcher` 走 `UIApplication.sharedApplication.delegate`，
+    // 在后台线程读 UIApplication 是未定义行为。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(25.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonClearMap(AevonCleanDispatcher());
     });
 
     // 第二路（0.1.42 起）保留：只探不猜。类不存在就什么都不发生；真机上存在时
@@ -2994,6 +3017,18 @@ static BOOL AevonDivertExhausted(void) {
 /// 「认出来了却没分流」的解释行单独计数，不占 `AevonOpenKeyNotes` 的键名预算 ——
 /// 两个预算合用一个计数器，先跑完的那个会把另一个静音。
 static int AevonDivertNotes = 0;
+
+/// 0.1.99 — **放行也要说原因**，而且用独立的预算。
+///
+/// Aevon(167) 里 QQ 那一次分享有一条 `notify: hit op=user … src=…ShareExtension`，
+/// 后面紧跟的却是另一条请求的 divert 行 —— 也就是说这条被**放行**了。而同一份日志里
+/// Sileo / TrollStore 没有任何一条这样的请求，它们只出小窗不出全屏。全屏的来源因此
+/// 高度怀疑就在这条被放行的请求上，但现有代码对 `plain` / `nobundle` 刻意沉默，
+/// 于是「为什么放行」这一格永远是空的。
+///
+/// 预算 40 条、独立计数：它不能和 divert 的解释行共用一个计数器，
+/// 否则先跑完的那个会把另一个静音（0.1.93 那次六条配额用尽就是这么来的）。
+static int AevonPassNotes = 0;
 
 /// 下面几个取值函数都用 `AevonActRead`，而它写在更下面（读键的实现挨着读键的
 /// 注释）。C 里先声明后使用，这一行是声明。
@@ -3759,12 +3794,25 @@ static void AevonCleanCover(char *out, size_t size) {
 /// → `SBNCNotificationDispatcher` → 各 destination。三个名字都试，谁先答用谁；答不上就
 /// 记 `d=-`，本版退回「只有通知中心会被收、横幅照系统原样 5 秒后自己走」。
 static id AevonCleanDispatcherRef = nil;
-static int AevonCleanDispatcherTried = 0;
+/// 0.1.99 — 「取不到就永远不再取」改掉。
+///
+/// 原来是 `Tried = 1` 一次性：第一次问没答上，这一整次开机就再也不问了。而通知栈是
+/// 懒加载的 —— 0.1.94 的真机读数就是 3 秒时 `NCNotificationDispatcher` 还不存在、
+/// 10 秒才出现。现在开机 25 秒会主动问一次；万一那一刻它还没起来，这个一次性标记
+/// 就把「之后点通知时再问」的门也一起关上了，清通知会永久失效，而日志里只有一行
+/// `d=-`。改成「失败 3 秒后可重试、最多 20 次」。
+static CFAbsoluteTime AevonCleanDispatcherAt = 0;
+static int AevonCleanDispatcherTries = 0;
 
 static id AevonCleanDispatcher(void) {
     if (AevonCleanDispatcherRef != nil) return AevonCleanDispatcherRef;
-    if (AevonCleanDispatcherTried) return nil;
-    AevonCleanDispatcherTried = 1;
+    {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (AevonCleanDispatcherAt > 0 && now - AevonCleanDispatcherAt < 3.0) return nil;
+        if (AevonCleanDispatcherTries >= 20) return nil;
+        AevonCleanDispatcherAt = now;
+        AevonCleanDispatcherTries += 1;
+    }
 
     static const char *names[3] = { "notificationDispatcher", "ncDispatcher", "_notificationDispatcher" };
     id found = nil;
@@ -3882,6 +3930,56 @@ static NSString *AevonClearIdentifier(id request, id options) {
     return nil;
 }
 
+/// 0.1.99 — 点通知时的**结构取证**：这条公开链到底断在哪一跳。
+///
+/// 母版在 iOS 17 上取到过标识（roadmap-0.7 的 log70 打的是
+/// `UUID=2064220898762199564_2`），走的就是
+/// `action.notificationResponse.notification.request.identifier` 这条公开链；
+/// 而真正清成功的那一次落在 `SBNotificationBannerDestination`
+/// （log71：`withdrawNotificationRequest:`）。我们现在 6/6 是 `clear=noid` ——
+/// 连标识都拿不到，说明链断在 action 这一层，而每份日志都不告诉我们断在哪一跳。
+///
+/// 这一行只打**类名**：不比较内容、不 retain、不遍历对象图。母版 0.7.9 的教训是
+/// 诊断代码本身也可能抛异常（`valueForKey:` 对未定义键必抛），所以整段包在 @try 里，
+/// 且 `AevonCleanRead` 只走「先 respondsToSelector、再 objc_msgSend」这一条路。
+static void AevonClearProbe(id request, id options) {
+    static int notes = 0;
+    if (notes >= 6) return;
+    notes += 1;
+    id action = AevonOpenFirstAction(request, options);
+    const char *a = action != nil ? class_getName([action class]) : NULL;
+    id l1 = AevonCleanRead(action, "notificationResponse");
+    id l2 = l1 != nil ? AevonCleanRead(l1, "notification") : nil;
+    id l3 = l2 != nil ? AevonCleanRead(l2, "request") : nil;
+    id l4 = l3 != nil ? AevonCleanRead(l3, "identifier") : nil;
+    // `-info`：BSAction 的内容在它身上（母版 0.7.8 的结论，也是 0.7.9 的雷区）。
+    id info = AevonCleanRead(action, "info");
+    id infoDict = info != nil ? AevonCleanRead(info, "infoDictionary") : nil;
+    char keys[160];
+    keys[0] = '\0';
+    if ([infoDict isKindOfClass:[NSDictionary class]]) {
+        size_t used = 0;
+        for (id key in (NSDictionary *)infoDict) {
+            if (![key isKindOfClass:[NSString class]]) continue;
+            const char *ks = [(NSString *)key UTF8String];
+            if (ks == NULL) continue;
+            int n = snprintf(keys + used, sizeof(keys) - used, "%s%s", used > 0 ? "," : "", ks);
+            if (n < 0 || (size_t)n >= sizeof(keys) - used) break;
+            used += (size_t)n;
+        }
+    }
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"notify: clear probe a=%s l1=%s l2=%s l3=%s id=%d info=%s keys=%s n=%d",
+                  a != NULL ? a : "-",
+                  l1 != nil ? class_getName([l1 class]) : "-",
+                  l2 != nil ? class_getName([l2 class]) : "-",
+                  l3 != nil ? class_getName([l3 class]) : "-",
+                  [l4 isKindOfClass:[NSString class]] ? 1 : 0,
+                  info != nil ? class_getName([info class]) : "-",
+                  keys[0] != '\0' ? keys : "-", notes]
+                 UTF8String]);
+}
+
 /// 这个对象是不是那一条请求？只比标识，不碰别的字段。
 static BOOL AevonClearRequestMatches(id candidate, NSString *identifier) {
     if (candidate == nil || identifier == nil) return NO;
@@ -3962,12 +4060,22 @@ static BOOL AevonClearWithdraw(id host, id requestObject, char *how, size_t size
 /// 这一行的作用是「下一版不用再装一次机」—— 0.1.89 那次六个候选全没进闸、日志里
 /// 连编码长什么样都没有，白丢一版。这里一次把类名、方法在不在、请求列表能读多长写全。
 static void AevonClearMap(id dispatcher) {
+    // 0.1.99 — dispatcher 取不到时**不打、也不消耗这次机会**。
+    //
+    // 地图的价值全在四格 destination 上；打一行全 `-` 出去，读日志的人会以为
+    // 「四个 destination 都不存在」，而真实原因只是那一次 dispatcher 还没起来。
+    // 现在开机 25 秒会主动来一次，点通知那拍还会再来一次，先到先得。
+    if (dispatcher == nil) return;
     static int dumped = 0;
     if (dumped) return;
     dumped = 1;
-    char line[420];
+    char line[560];
     size_t used = 0;
-    used += (size_t)snprintf(line + used, sizeof(line) - used, "notify: clear map");
+    // 0.1.99 — 第一格是 dispatcher 自己的类名。取不到（`-`）是最要紧的一种结果：
+    // 它意味着整条清通知链路从入口就断了，后面四格全是 `-` 只是它的后果。
+    const char *dcls = dispatcher != nil ? class_getName([dispatcher class]) : NULL;
+    used += (size_t)snprintf(line + used, sizeof(line) - used, "notify: clear map d=%s",
+                             dcls != NULL ? dcls : "-");
     static const char *roles[4] = {
         "bannerDestination", "dashBoardDestination",
         "notificationCenterDestination", "lockScreenDestination",
@@ -4197,11 +4305,38 @@ static void (^AevonForwardVoid)(void) = ^{
 static __unsafe_unretained id AevonOpenForwardMark = nil;
 static CFAbsoluteTime AevonOpenForwardAt = 0;
 
+/// 0.1.99 — 转发前问一次：这次携带的 activation settings 能不能设「挂起」。
+///
+/// 键名写对之后（0.1.98）Sileo / TrollStore 正常了，QQ / 微信还是全屏。两处差别：
+/// 它们走 `op=user` / `op=untrusted`（越狱工具走 `op=open` / `op=trusted`），而且它们
+/// 本来就**在后台运行着**。`__ActivateSuspended` 的字面语义是「启动并挂起」——对已在
+/// 运行的 App，系统很可能直接走「激活它」，那个键根本用不上。
+///
+/// SpringBoard 这条路真正的开关也许是第 4 个参数（`SBActivationSettings`）上的某个
+/// 选择子。**问是不花钱的**：这里只 `respondsToSelector:`，一个都不调 ——
+/// 有结果才在下一版接上去，没结果就把这条排除掉。
+static void AevonForwardProbeSettings(id settings) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    const char *cls = settings != nil ? class_getName([settings class]) : NULL;
+    int suspSet = 0, flagSet = 0, suspGet = 0;
+    if (settings != nil) {
+        suspSet = [settings respondsToSelector:sel_registerName("setActivateSuspended:")] ? 1 : 0;
+        flagSet = [settings respondsToSelector:sel_registerName("setFlag:forActivationSetting:")] ? 1 : 0;
+        suspGet = [settings respondsToSelector:sel_registerName("activateSuspended")] ? 1 : 0;
+    }
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"notify: fwd settings c=%s setSusp=%d setFlag=%d getSusp=%d",
+                  cls != NULL ? cls : "-", suspSet, flagSet, suspGet] UTF8String]);
+}
+
 static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id options,
                                    id settings, id origin, char form) {
     if (slot < 0 || slot >= AevonOpenMax) return 0;
     IMP original = AevonOpenOrig[slot];
     if (original == NULL || form == 0) return 0;
+    AevonForwardProbeSettings(settings);
 
     NSMutableDictionary *forward = options != nil
         ? [options mutableCopy] : [[NSMutableDictionary alloc] init];
@@ -4347,6 +4482,8 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                               AevonDivertCount]
                              UTF8String]);
             } else {
+                // 0.1.99 — 先取证结构（哪一跳断），再按老路取标识。两件事都只读。
+                AevonClearProbe(request, options);
                 // 0.1.92：清掉这一条 —— 「点开 = 已读」。标识在这一拍就取好（只读几个
                 // getter），真正动手排到 0.60 秒之后，见 `AevonClearNotification`。
                 NSString *clear = AevonClearIdentifier(request, options);
@@ -4372,6 +4509,30 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                            AevonOpenOrig[slot], target);
         }
     } else if (verdict == 0) {
+        // 0.1.99 — 放行之前先把「哪一条、为什么、带没带东西」落下来。
+        //
+        // 这一段是**纯只读**的：只调几个返回对象的 getter（`AevonOpenSourceApp` /
+        // `AevonOpenPayloadKind` 内部全部包了 @try）。它必须写在调原实现**之前** ——
+        // 原实现一旦拉起 App，后面这一行还要不要打就已经不重要了；而且万一原实现
+        // 抛异常，写在后面就永远看不到这行。
+        if (slot >= 0 && AevonPassNotes < 40) {
+            AevonPassNotes += 1;
+            const char *passSrc = [AevonOpenSourceApp(request, options) UTF8String];
+            char passBuf[320];
+            snprintf(passBuf, sizeof(passBuf),
+                     "notify: pass b=%s op=%s why=%s src=%s pay=%s n=%d",
+                     bundle[0] != '\0' ? bundle : "-",
+                     AevonOpenTargets[slot].tag, why,
+                     passSrc != NULL ? passSrc : "-",
+                     AevonOpenPayloadKind(request, options), AevonPassNotes);
+            char *passCopy = strdup(passBuf);
+            if (passCopy != NULL) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    AevonLogRaw(passCopy);
+                    free(passCopy);
+                });
+            }
+        }
         IMP original = slot >= 0 ? AevonOpenOrig[slot] : NULL;
         if (original != NULL) {
             ((void (*)(id, SEL, id, id, id, id, id))original)
