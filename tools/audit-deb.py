@@ -717,7 +717,14 @@ def main():
                   b"clearNotificationRequest:",
                   b"lockScreenDestination",
                   # 0.1.92 — 分享面板 → 浮窗。判据只有一个字符串：来源进程。
-                  b"notify: share b=%@ src=%s url=%d n=%d",
+                  b"notify: share b=%@ src=%s url=%d fwd=%d n=%d",
+                  # 0.1.95 — 分享带 payload 时必须交回系统的那一次调用。
+                  #   ActivateSuspended = 只写这一个键，让 App 不上前台但 launch option 送到
+                  #   forward done ok=1 / ok=0 / err = 交回去之后系统怎么回的
+                  b"FBSOpenApplicationOptionKeyActivateSuspended",
+                  b"notify: forward done ok=1",
+                  b"notify: forward done ok=0",
+                  b"notify: forward done err",
                   b"sharingd",
                   b"UIApplicationLaunchOptionsSourceApplicationKey",
                   b"UIApplicationLaunchOptionsURLKey",

@@ -4110,6 +4110,55 @@ static void AevonNotifyCleanup(const char *bundle) {
     if (bundle != NULL && bundle[0] != '\0') AevonCleanCoverAfterCard(bundle, 0);
 }
 
+/// 0.1.95 — 「带着东西的打开」必须交回系统，只要求它别上全屏。
+///
+/// 事实链：0.1.92 把分享面板并进分流，Aevon(162) 用户回报「小窗开了，文件没到」。
+///   · 分享过来的文件不是「App 自己会去拿」，它是一条 launch option
+///     （`__PayloadOptions[UIApplicationLaunchOptionsURLKey]`），要由系统**处理这条
+///     打开请求时**把文件拷进目标 App 的 Inbox 并交给 `didFinishLaunching`；
+///   · 我们吞掉原实现之后只调 `launchApplicationWithIdentifier:suspended:`，它**不带
+///     options** ⇒ 进程起来了、launch option 一个没送到 ⇒ 卡片是空的；
+///   · 用户关掉小窗再全屏开一次文件又到了，因为那一次走的是系统原路。
+///
+/// 母版的做法（roadmap-0.7 的「关键顺序修正」）是把
+/// `FBSOpenApplicationOptionKeyActivateSuspended` 写进 options 再走原生打开：
+/// **App 不上前台，但 launch options 一个不少**。这里照做，只加这一个键，其余原样复制。
+///
+/// 只在「分享 + 带 URL」时调用。点通知没有 payload，走了也没东西可送，只会多一次开请求。
+static void (^AevonForwardBool)(BOOL) = ^(BOOL ok) {
+    AevonLogRaw(ok ? "notify: forward done ok=1" : "notify: forward done ok=0");
+};
+static void (^AevonForwardObj)(id) = ^(id error) {
+    AevonLogRaw(error == nil ? "notify: forward done ok=1" : "notify: forward done err");
+};
+/// 第三种形状：结果块不带参数（`v8@?0`）。三种形状必须各配一个块 —— 拿 BOOL 块
+/// 去顶 void 块，系统按自己的编码调过来，参数寄存器里是什么都不重要，坏在返回约定。
+static void (^AevonForwardVoid)(void) = ^{
+    AevonLogRaw("notify: forward done ok=1");
+};
+
+static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id options,
+                                   id settings, id origin, char form) {
+    if (slot < 0 || slot >= AevonOpenMax) return 0;
+    IMP original = AevonOpenOrig[slot];
+    if (original == NULL || form == 0) return 0;
+
+    NSMutableDictionary *forward = options != nil
+        ? [options mutableCopy] : [[NSMutableDictionary alloc] init];
+    if (forward == nil) return 0;
+    [forward setObject:[NSNumber numberWithBool:YES]
+                forKey:@"FBSOpenApplicationOptionKeyActivateSuspended"];
+
+    // 结果块要同形状：系统一定会调它一次，形状不对就是当场崩。
+    id done = (id)AevonForwardBool;
+    if (form == '@') done = (id)AevonForwardObj;
+    else if (form == 'v') done = (id)AevonForwardVoid;
+    ((void (*)(id, SEL, id, id, id, id, id))original)
+        (self, _cmd, request, forward, settings, origin, done);
+    [forward release];
+    return 1;
+}
+
 /// 替身。**顺序就是这里的全部安全设计**：
 ///   ① 快照 —— 只读，不改任何参数；
 ///   ② 分流判定 —— 只有「这一拍是一次通知点击」才改变行为，其余一个字节都不动；
@@ -4178,6 +4227,21 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             if (used + 16 < sizeof(line)) {
                 snprintf(line + used, sizeof(line) - used, " result=%s", shape);
             }
+            // 0.1.95：分享带 payload ⇒ 先把这条请求按「挂起启动」交回系统，让它把
+            // 文件/URL 交给目标 App；卡片照旧由下面那条路建。
+            //
+            // 顺序不能反过来：裸的挂起启动会先把 App 拉起来（不带 launch options），
+            // 之后再补交，App 已经在跑了 —— `didFinishLaunching` 早过了，只能等用户
+            // 关掉小窗再全屏开一次。这正是 Aevon(162) 里用户看到的那一幕。
+            int forwarded = 0;
+            if (strcmp(why, "share") == 0 && AevonOpenShareHasURL(request, options)) {
+                forwarded = AevonOpenForwardPayload(slot, self, _cmd, request, options,
+                                                    settings, origin, form);
+                size_t at = strlen(line);
+                if (at + 12 < sizeof(line)) {
+                    snprintf(line + at, sizeof(line) - at, " fwd=%d", forwarded);
+                }
+            }
             AevonOpenFromNotification(bundle);
             // 0.1.89：这次没转发，SpringBoard 就没有机会去收面板 / 收横幅 —— 那两件
             // 事本来挂在它的收尾里。自己补上。
@@ -4188,11 +4252,15 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             // 0.1.92：这两件（收面板/收横幅）与清通知**只属于通知那条路**。分享面板
             // 没有面板要收、没有横幅要撤、更没有「这一条已读」这回事 —— 对它照跑一遍
             // 只会去碰不相干的对象。所以按 `why` 分开，而不是把两件事都堆在分流里。
+            //
+            // 0.1.95：`fwd=1` 表示这条请求已经带着 payload 交回系统（挂起启动），
+            // 文件应该会到；`fwd=0` 表示没能交回去，目标 App 只会拿到一张空卡。
             if (strcmp(why, "share") == 0) {
                 const char *srcRaw = [AevonOpenSourceApp(request, options) UTF8String];
-                AevonLogRaw([[NSString stringWithFormat:@"notify: share b=%@ src=%s url=%d n=%d",
+                AevonLogRaw([[NSString stringWithFormat:@"notify: share b=%@ src=%s url=%d fwd=%d n=%d",
                               target, srcRaw != NULL ? srcRaw : "-",
-                              AevonOpenShareHasURL(request, options), AevonDivertCount]
+                              AevonOpenShareHasURL(request, options), forwarded,
+                              AevonDivertCount]
                              UTF8String]);
             } else {
                 // 0.1.92：清掉这一条 —— 「点开 = 已读」。标识在这一拍就取好（只读几个
