@@ -244,7 +244,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>Aevon 0.1.95 · Swift · arm64e · 8 个面板全部可进入。承载形状：旧版圆盘 1:1 移入——右缘左滑呼出，划过跳跃、阻尼旋转、逐点展开全是本体；应用在编辑器里增删排序（上限 36，含截图 / 录屏动作槽）。0.1.95 起：分享面板那条路的文件终于能到小窗。上一版把分享并进分流时只收了面板、建了卡片，没有把这条打开请求交回系统 —— 分享过来的文件不是 App 自己会去拿的，它是这条请求里的一个 launch option，系统在处理请求时才会把文件拷进目标 App 的 Inbox 并交给didFinishLaunching。上一版的表现因此是：小窗开了、里面是空的；关掉小窗再全屏开一次，文件又到了（那一次走的是系统原路）。现在分享且带地址时，先把请求按「挂起启动」原样交回系统（只多写一个 ActivateSuspended 键：App 不上前台，launch option 一个不少），卡片仍由自己建。判据：日志那一行 notify: share … fwd=1 表示交回去了；fwd=0 表示没交回去，那张卡片会是空的。要停掉整个通知接管：在 /var/mobile/Library/Logs/Aevon/ 下建空文件 notify.off 再重启；只想停分享就建 share.off。所有改动只写 com.aevon，不触碰系统文件。</string>
+			<string>Aevon 0.1.96 · Swift · arm64e · 8 个面板全部可进入。承载形状：旧版圆盘 1:1 移入——右缘左滑呼出，划过跳跃、阻尼旋转、逐点展开全是本体；应用在编辑器里增删排序（上限 36，含截图 / 录屏动作槽）。0.1.96 起：分享面板那条路的文件终于能到小窗。上一版把分享并进分流时只收了面板、建了卡片，没有把这条打开请求交回系统 —— 分享过来的文件不是 App 自己会去拿的，它是这条请求里的一个 launch option，系统在处理请求时才会把文件拷进目标 App 的 Inbox 并交给didFinishLaunching。上一版的表现因此是：小窗开了、里面是空的；关掉小窗再全屏开一次，文件又到了（那一次走的是系统原路）。现在分享且带地址时，先把请求按「挂起启动」原样交回系统（只多写一个 ActivateSuspended 键：App 不上前台，launch option 一个不少），卡片仍由自己建。这条转发有一段必须自己收的尾：原实现会把同一条请求继续往下交给另一个开 App 的入口，而那个入口也在接管名单里 —— 不认出来就会二次分流、开出第二张卡。所以交回去之前先给这条请求打个记号（指针 + 两秒窗口），带着记号回来的只放行、一个字节不改。判据：notify: share … fwd=1 表示交回去了（fwd=0 就是没交，卡片会是空的）；notify: forward pass … 每出现一条，说明那次回环被认出来了、没有重复分流。要停掉整个通知接管：在 /var/mobile/Library/Logs/Aevon/ 下建空文件 notify.off 再重启；只想停分享就建 share.off。所有改动只写 com.aevon，不触碰系统文件。</string>
 			<key>label</key>
 			<string>关于</string>
 		</dict>

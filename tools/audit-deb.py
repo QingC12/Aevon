@@ -725,6 +725,8 @@ def main():
                   b"notify: forward done ok=1",
                   b"notify: forward done ok=0",
                   b"notify: forward done err",
+                  # 0.1.96 — 自己交回去的那条请求要认出来，只放行（不认就会二次分流）。
+                  b"notify: forward pass b=%s op=%s",
                   b"sharingd",
                   b"UIApplicationLaunchOptionsSourceApplicationKey",
                   b"UIApplicationLaunchOptionsURLKey",

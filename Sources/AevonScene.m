@@ -4137,6 +4137,19 @@ static void (^AevonForwardVoid)(void) = ^{
     AevonLogRaw("notify: forward done ok=1");
 };
 
+/// 交回去的那条请求必须能被认出来。
+///
+/// `_handleOpenApplicationRequest:…` 的原实现会把同一条请求继续交给
+/// `_handleTrustedOpenRequestForApplication:…` —— 而那条**也在我们装的四条里**
+/// （0.1.87 真机日志就是这么看到落点的）。不认出来，同一条分享会在我们自己的
+/// 转发里被分流第二次：第二张卡、第二次转发，最坏是无限套。
+///
+/// 判据用「对象指针 + 2 秒窗口」，不用线程局部：原实现可能换个队列再往下走，
+/// 线程局部在那儿就失效了。只比指针，**不 retain**：请求对象释放之后这次比较
+/// 也只是一次整数比较，不会碰已释放的内存。
+static __unsafe_unretained id AevonOpenForwardMark = nil;
+static CFAbsoluteTime AevonOpenForwardAt = 0;
+
 static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id options,
                                    id settings, id origin, char form) {
     if (slot < 0 || slot >= AevonOpenMax) return 0;
@@ -4153,6 +4166,8 @@ static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id o
     id done = (id)AevonForwardBool;
     if (form == '@') done = (id)AevonForwardObj;
     else if (form == 'v') done = (id)AevonForwardVoid;
+    AevonOpenForwardMark = request;
+    AevonOpenForwardAt = CFAbsoluteTimeGetCurrent();
     ((void (*)(id, SEL, id, id, id, id, id))original)
         (self, _cmd, request, forward, settings, origin, done);
     [forward release];
@@ -4179,7 +4194,22 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
     int verdict = 0;
 
     // 分流判定只对「我们装上的那四条」做。父类链上万一还有人来，走原样转发。
-    if (slot >= 0 && AevonOpenOrig[slot] != NULL) {
+    //
+    // 0.1.95：先认一眼「这条请求是不是我们自己刚交回去的那条」。是的话**只放行**，
+    // 一个字节都不改 —— 认不出来的后果见 `AevonOpenForwardMark` 上面那段。
+    int passThrough = (request != nil && request == AevonOpenForwardMark &&
+                       AevonOpenForwardAt > 0 &&
+                       CFAbsoluteTimeGetCurrent() - AevonOpenForwardAt < 2.0);
+    if (passThrough) {
+        verdict = 0;
+        why = "fwd";
+        id pb = AevonOpenBundleOf(request);
+        snprintf(line, sizeof(line), "notify: forward pass b=%s op=%s",
+                 [pb isKindOfClass:[NSString class]] ? [pb UTF8String] : "-",
+                 slot >= 0 ? AevonOpenTargets[slot].tag : "?");
+        AevonLogRaw(line);
+        line[0] = '\0';
+    } else if (slot >= 0 && AevonOpenOrig[slot] != NULL) {
         @try {
             verdict = AevonOpenDecide(request, options, bundle, sizeof(bundle), &why);
         } @catch (NSException *exception) {
