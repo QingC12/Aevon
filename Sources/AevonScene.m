@@ -3047,18 +3047,6 @@ static id AevonOpenSourceApp(id request, id options) {
     return [from isKindOfClass:[NSString class]] ? from : nil;
 }
 
-/// 分享这一次是不是带着 URL 来的（`UIApplicationLaunchOptionsURLKey`）。
-///
-/// 0.1.92 先把这一位记下来，原因很实际：分享给别的 App 时，**文件交接本身就是这次
-/// 打开的意义**。我们吞掉原实现之后，App 拿不到那条 launch option，文件可能不会落地
-/// （进 Inbox / 走 URL 交接）。这一位是 1 就说明这一下真的带东西 —— 真机上如果用户报
-/// 「打开是空的」，日志里这一格能把责任指到交接上，而不是让我们再猜一遍。
-static int AevonOpenShareHasURL(id request, id options) {
-    id payload = AevonOpenPayload(request, options);
-    if (payload == nil) return 0;
-    return AevonActRead(payload, @"UIApplicationLaunchOptionsURLKey") != nil ? 1 : 0;
-}
-
 /// `options.__Actions` 的第一个元素 —— 点通知时它就是 `UINotificationResponseAction`。
 /// 键名是私有键，换系统版本可能变，所以退路依次是 `request` 和 `actions`。
 static id AevonOpenFirstAction(id request, id options) {
@@ -3079,10 +3067,10 @@ static BOOL AevonOpenIsNotificationAction(id action) {
     return name != NULL && strstr(name, "NotificationResponseAction") != NULL;
 }
 
-/// 「这是一次分享面板的跳转」唯一的判据：来源进程是 `sharingd`。
+/// 「这是一次分享面板的跳转」的第一条判据：来源进程是分享链路。
 ///
 /// 判据不猜名字、也不看 action 数量（分享是 `act=- n=0`，但点图标也是 0）：
-/// 只看来源。0.1.87 的真机日志里那句分享对照行是唯一的证据 —— `src=com.apple.sharingd`。
+/// 只看来源。0.1.87 的真机日志里那句分享对照行是第一条证据 —— `src=com.apple.sharingd`。
 /// **取不到来源就一律不开**：`src` 为空时可能是点图标、也可能是别的系统路径，
 /// 把它们一起吞掉就是「点图标没反应」，比不做这个功能糟得多。
 static BOOL AevonOpenIsShareSource(id request, id options) {
@@ -3090,7 +3078,49 @@ static BOOL AevonOpenIsShareSource(id request, id options) {
     if (from == nil) return NO;
     const char *raw = [(NSString *)from UTF8String];
     if (raw == NULL) return NO;
-    return strstr(raw, "sharingd") != NULL;
+    if (strstr(raw, "sharingd") != NULL) return YES;
+    // 0.1.97：Aevon(163) 真机把「分享给第三方 App」的另外两条形状也照下来了 ——
+    // QQ 走它自己的分享扩展 `src=com.tencent.mqq.ShareExtension`，微信走
+    // `src=com.tencent.xin.sharetimeline`。它们不经过 sharingd，所以旧判据一条都没放进来，
+    // 表现就是用户看到的「分享文件时全屏打开、没有浮窗」。
+    if (strstr(raw, "ShareExtension") != NULL) return YES;
+    if (strstr(raw, "sharetimeline") != NULL) return YES;
+    return NO;
+}
+
+/// 顶层 payload 的三种痕迹任取其一。键都在 `options` 上，`request` 兜一次。
+///
+/// Aevon(163) 的真机形状（`keys=` 那一格就是 options 的全部键）：
+///   · 分享给 QQ：`keys=__PayloadOptions,__PayloadURL,__PasteSharingToken`
+///   · 分享给微信：`keys=`（空 —— 所以只能靠来源进程认）
+///   · 打开相册：`keys=__LaunchIntent,__LaunchSceneless,__ActivateSuspended,…`
+///   · 点桌面图标：没有 `keys=` 这一格
+static id AevonOpenAnyValue(id request, id options, NSString *key) {
+    id value = AevonActRead(options, key);
+    if (value == nil) value = AevonActRead(request, key);
+    return value;
+}
+
+/// 「这一次打开带没带东西」——`none` / `url` / `paste` / `payload`。
+///
+/// 这一格同时是日志判据和转发闸：**只有带东西才值得交回系统**（交回去是为了让系统
+/// 把文件拷进目标 App 的 Inbox）。0.1.96 用的是
+/// `__PayloadOptions[UIApplicationLaunchOptionsURLKey]`，而 Aevon(163) 里 Sileo / Filza
+/// 那条路读出来是 `url=0` —— 真正装着东西的是**顶层 `__PayloadURL`**，所以那一版的
+/// 转发一次都没触发。
+static const char *AevonOpenPayloadKind(id request, id options) {
+    if (AevonOpenAnyValue(request, options, @"__PayloadURL") != nil) return "url";
+    if (AevonOpenAnyValue(request, options, @"__PasteSharingToken") != nil) return "paste";
+    id payload = AevonOpenPayload(request, options);
+    if (payload != nil) {
+        if (AevonActRead(payload, @"UIApplicationLaunchOptionsURLKey") != nil) return "url";
+        return "payload";
+    }
+    return "none";
+}
+
+static BOOL AevonOpenCarriesPayload(id request, id options) {
+    return strcmp(AevonOpenPayloadKind(request, options), "none") != 0;
 }
 
 /// `options` 里有没有某个键。
@@ -3129,10 +3159,18 @@ static int AevonOpenDecide(id request, id options,
     // 0.1.92 起多了第二条：分享面板。它的判据不是 action（分享是 `act=- n=0`，
     // 与点图标一样），而是**来源进程** —— 真机日志里那一条对照行是
     // `src=com.apple.sharingd`。取不到来源就不接管。
+    //
+    // 0.1.97：来源进程这一条只盖住了 sharingd。Aevon(163) 里分享给 QQ / 微信走的是
+    // 各自的分享扩展（`…ShareExtension` / `…sharetimeline`），旧判据一条没接住 ⇒
+    // 全屏打开。所以再加一条**更硬的证据：这次打开带没带东西**（顶层 `__PayloadURL` /
+    // `__PasteSharingToken` / `__PayloadOptions`）。带东西的打开就是交接文件的那种打开，
+    // 不管它是谁发起的 —— 「系统 URL 打开 App」也走这条，正是下一步要的。
     const char *kind = NULL;
     if (AevonOpenIsNotificationAction(AevonOpenFirstAction(request, options))) {
         kind = "notify";
-    } else if (!AevonShareSwitchOff() && AevonOpenIsShareSource(request, options)) {
+    } else if (!AevonShareSwitchOff() &&
+               (AevonOpenIsShareSource(request, options) ||
+                AevonOpenCarriesPayload(request, options))) {
         kind = "share";
     } else {
         *why = "plain";
@@ -4264,7 +4302,7 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             // 之后再补交，App 已经在跑了 —— `didFinishLaunching` 早过了，只能等用户
             // 关掉小窗再全屏开一次。这正是 Aevon(162) 里用户看到的那一幕。
             int forwarded = 0;
-            if (strcmp(why, "share") == 0 && AevonOpenShareHasURL(request, options)) {
+            if (strcmp(why, "share") == 0 && AevonOpenCarriesPayload(request, options)) {
                 forwarded = AevonOpenForwardPayload(slot, self, _cmd, request, options,
                                                     settings, origin, form);
                 size_t at = strlen(line);
@@ -4287,9 +4325,9 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             // 文件应该会到；`fwd=0` 表示没能交回去，目标 App 只会拿到一张空卡。
             if (strcmp(why, "share") == 0) {
                 const char *srcRaw = [AevonOpenSourceApp(request, options) UTF8String];
-                AevonLogRaw([[NSString stringWithFormat:@"notify: share b=%@ src=%s url=%d fwd=%d n=%d",
+                AevonLogRaw([[NSString stringWithFormat:@"notify: share b=%@ src=%s pay=%s fwd=%d n=%d",
                               target, srcRaw != NULL ? srcRaw : "-",
-                              AevonOpenShareHasURL(request, options), forwarded,
+                              AevonOpenPayloadKind(request, options), forwarded,
                               AevonDivertCount]
                              UTF8String]);
             } else {

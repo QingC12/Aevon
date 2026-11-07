@@ -717,7 +717,13 @@ def main():
                   b"clearNotificationRequest:",
                   b"lockScreenDestination",
                   # 0.1.92 — 分享面板 → 浮窗。判据只有一个字符串：来源进程。
-                  b"notify: share b=%@ src=%s url=%d fwd=%d n=%d",
+                  b"notify: share b=%@ src=%s pay=%s fwd=%d n=%d",
+                  # 0.1.97 — 判据从「只有 sharingd」扩到「来源是分享扩展 或 这次打开带东西」。
+                  # 四个字面量就是这两条判据的全部证据面。
+                  b"__PayloadURL",
+                  b"__PasteSharingToken",
+                  b"ShareExtension",
+                  b"sharetimeline",
                   # 0.1.95 — 分享带 payload 时必须交回系统的那一次调用。
                   #   ActivateSuspended = 只写这一个键，让 App 不上前台但 launch option 送到
                   #   forward done ok=1 / ok=0 / err = 交回去之后系统怎么回的
