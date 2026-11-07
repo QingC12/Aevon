@@ -730,6 +730,9 @@ def main():
                   b"com.aevon.pulse.monitor",
                   # 0.1.93 — 手势那条广播挪去后台队列：串行队列的名字要在产物里。
                   b"com.aevon.band.publish",
+                  # 0.1.94 — 开机清理小窗标记时「没清掉的留在名单里」那一行。
+                  # 没有它，「这条标记会不会永久残留」就又从日志里消失了。
+                  b"win: mini flag clear stuck n=%d keep",
                   # 形状闸的六个期望值。它们同时是「这一版到底校验了什么」的证词。
                   b"v@:BB@",
                   b"v@:BB@B",

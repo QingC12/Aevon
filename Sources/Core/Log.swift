@@ -23,7 +23,25 @@ public enum Log {
         return formatter
     }()
 
+    /// 0.1.94 — **这条写日志的路不是单线程的，而它里面有两样东西怕并发。**
+    ///
+    /// `stamp` 是一个共享的 `DateFormatter`（苹果明说不保证线程安全），`stamp.string`
+    /// 内部会动它自己的缓冲；而文件那一头是 `open → seekToEnd → write → close`，
+    /// 两个线程同时进来会互相把写位置拨走。
+    ///
+    /// 谁在后台写：`Boot.swift` 的 `scheduleStableReset()`（开机 60 s，utility 队列）
+    /// 与 `ActivateProbe` 的松闩块（开机 180 s，utility 队列）。两条都在 SpringBoard
+    /// 里，撞上主线程正在写的次数不算多，但**撞上就是格式化器内部崩**，日志上只会
+    /// 看到「SpringBoard 突然重启」，看不出是我们。
+    ///
+    /// 这把锁的开销是一次无争用 `lock/unlock`（几十纳秒），而这条路的调用频率是
+    /// 「每秒一行」。用最笨的 `NSLock` 而不是 `os_unfair_lock`：后者要拿 `UnsafeMutablePointer`
+    /// 存全局，在这个被两个二进制共用的文件里不值得。
+    private static let lock = NSLock()
+
     public static func write(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
         let manager = FileManager.default
         // stat(2) rather than FileManager attributes: no Swift-Foundation
         // overlay symbol needed, and this file has to stay linkable with

@@ -1803,24 +1803,42 @@ NSInteger AevonIdleTimerEnd(void) {
 // Filza 里直接拿出来。
 //
 
-/// App 的数据容器。`LSApplicationProxy` 在 SpringBoard 里是现成的；取不到就扫
-/// 容器目录的元数据（每份都记着 bundle id）。两条路都失败返回 nil。
-static NSString *AevonAppContainer(NSString *bundleID) {
-    if (bundleID.length == 0) return nil;
-    Class proxyClass = NSClassFromString(@"LSApplicationProxy");
-    if (proxyClass != Nil) {
-        SEL factory = NSSelectorFromString(@"applicationProxyForIdentifier:");
-        if ([proxyClass respondsToSelector:factory]) {
-            id proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyClass, factory, bundleID);
-            if (proxy != nil) {
-                SEL getter = NSSelectorFromString(@"dataContainerURL");
-                if ([proxy respondsToSelector:getter]) {
-                    id url = ((id (*)(id, SEL))objc_msgSend)(proxy, getter);
-                    if ([url isKindOfClass:[NSURL class]]) return [(NSURL *)url path];
-                }
-            }
-        }
+/// 0.1.94 — 目录扫描的**结果**缓存，而不是「每问一次扫一遍」。
+///
+/// 0.1.93 把广播挪去后台队列之后，主线程上还剩一条同类路：停靠 / 取消停靠那一拍
+/// 会走 `AevonAppMiniFlagSet` → `AevonAppContainer`。`LSApplicationProxy` 答得上
+/// 时它是一步；答不上时（真机日志里 `mini flag armed … (no container)` 出现过 25
+/// 次，设置与 Sileo 各二十来次）就退到扫目录：四个根、每层几百个目录、每个再读一份
+/// metadata plist。一次几十到几百毫秒，正好落在用户松手那一刻的主线程上。
+///
+/// 这里改成「扫一次、留一份 bundle→dir 的表，十秒内复用」。几个事实支撑这个做法：
+///   · 同一个 App 的容器路径在一次开机里不变（装/卸 App 才会变）；
+///   · 这张表只增不减地覆盖所有容器，一次扫描能回答所有 bundle，而不是每问一次
+///     为某一个 bundle 从头扫一遍；
+///   · 十秒的窗口足够让「刚装完的 App」在下一拍被看见，又不会把一次拖动里的十几次
+///     询问变成十几次扫描。
+///
+/// 锁是必须的：`AevonBandPublishNow` 在后台队列上也会问容器（卡片自己那个 App 的
+/// 文件兜底）。表换出去时是**不可变快照**，并且留一代再释放（见下面 `gAevonContainerPrev`）。
+static NSDictionary *gAevonContainerMap = nil;
+/// 上一代快照。换表时**留一代**再释放：读的人拿到的是一个裸指针，若正好撞上
+/// 另一次扫描把整张表换掉，那个指针就悬空了。留一代之后，任何在飞的读者至少还有
+/// 十秒的余量 —— 而这里的读者只做「拼一个路径、立刻用」，是微秒级的事。
+///
+/// 不用 `autorelease` 是因为 `AevonAppMiniFlagsClearAll` 是在构造函数那一拍被调的，
+/// 那条路上没有 autorelease pool（这个工程的注释里记着这个坑）。
+static NSDictionary *gAevonContainerPrev = nil;
+static CFAbsoluteTime gAevonContainerAt = 0;
+static NSString *gAevonContainerLock = nil;
+#define AEVON_CONTAINER_TTL 10.0
+
+/// 调用方必须已经持有 `gAevonContainerLock`。
+static NSDictionary *AevonContainerMapLocked(void) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (gAevonContainerMap != nil && now - gAevonContainerAt < AEVON_CONTAINER_TTL) {
+        return gAevonContainerMap;
     }
+    NSMutableDictionary *map = [[NSMutableDictionary alloc] init];
     NSFileManager *manager = [NSFileManager defaultManager];
     // 0.1.9 — 只扫 Application 那一层是不够的：Aevon(96) 的日志里
     // `win: mini flag armed com.apple.Preferences (no container)` 出现 25 次、
@@ -1838,13 +1856,51 @@ static NSString *AevonAppContainer(NSString *bundleID) {
             NSString *meta = [dir stringByAppendingPathComponent:
                               @".com.apple.mobile_container_manager.metadata.plist"];
             NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:meta];
-            if ([info isKindOfClass:[NSDictionary class]]
-                && [[info objectForKey:@"MCMMetadataIdentifier"] isEqualToString:bundleID]) {
-                return dir;
+            if (![info isKindOfClass:[NSDictionary class]]) continue;
+            id identifier = [info objectForKey:@"MCMMetadataIdentifier"];
+            // 同一 bundle 有多个容器时（插件容器），保留先扫到的那个 —— 与 0.1.9
+            // 那次「逐个根目录按顺序找、找到就返回」的顺序一致。
+            if ([identifier isKindOfClass:[NSString class]]
+                && [map objectForKey:identifier] == nil) {
+                [map setObject:dir forKey:identifier];
             }
         }
     }
-    return nil;
+    [gAevonContainerPrev release];
+    gAevonContainerPrev = gAevonContainerMap;   // 已经是 +1，直接移交给「上一代」
+    gAevonContainerMap = [map copy];            // 不可变快照：换出去之后没人能改它
+    gAevonContainerAt = now;
+    [map release];
+    return gAevonContainerMap;
+}
+
+/// App 的数据容器。`LSApplicationProxy` 在 SpringBoard 里是现成的；取不到就查
+/// 上面那张表（原来是逐次扫目录）。两条路都失败返回 nil。
+static NSString *AevonAppContainer(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+    Class proxyClass = NSClassFromString(@"LSApplicationProxy");
+    if (proxyClass != Nil) {
+        SEL factory = NSSelectorFromString(@"applicationProxyForIdentifier:");
+        if ([proxyClass respondsToSelector:factory]) {
+            id proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyClass, factory, bundleID);
+            if (proxy != nil) {
+                SEL getter = NSSelectorFromString(@"dataContainerURL");
+                if ([proxy respondsToSelector:getter]) {
+                    id url = ((id (*)(id, SEL))objc_msgSend)(proxy, getter);
+                    if ([url isKindOfClass:[NSURL class]]) return [(NSURL *)url path];
+                }
+            }
+        }
+    }
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        gAevonContainerLock = [[NSString alloc] initWithString:@"com.aevon.container.map"];
+    });
+    @synchronized (gAevonContainerLock) {
+        // 表在十秒后会被整张换掉；读的人在锁内取到指针就够了 —— 上一代快照在我们
+        // 手里多留了一份，所以即使紧接着有人换表，这个指针也不会悬空。
+        return [AevonContainerMapLocked() objectForKey:bundleID];
+    }
 }
 
 /// 桥接那份日志的路径。取不到容器返回 nil —— 日志里要能区分「没写」和「没找到」。
@@ -1992,16 +2048,44 @@ int AevonAppMiniFlagSet(NSString *bundleID, BOOL mini) {
 }
 
 /// 0.1.8 — 启动时把上一次留下的标记全撤掉。返回清掉的个数（写进启动日志）。
+/// 0.1.94 — **没清掉的条目要留在名单里。**
+///
+/// 原来这里无论成败，最后都把 `mini-armed.txt` 整个删掉。可是「这一条没清掉」恰恰
+/// 是最需要下一次开机再试的情形：容器没找到、文件被锁、App 那一刻的沙盒还没起来。
+/// 名单一删，那条标记就再也没人管 —— 而它的后果是那个 App **永久**收不到落在小窗
+/// 那一块的单指触摸，用户只能重装或者等我们想起来。
+///
+/// 现在的判据是**结果**而不是返回值：调完之后再问一次「那个文件还在不在」。还在就
+/// 把它写回名单；`AevonAppMiniFlagSet` 的位掩码只说明「哪条通道发了」，不说明
+/// 「App 那边真的解锁了」。
 int AevonAppMiniFlagsClearAll(void) {    NSString *armed = AevonMiniArmedPath();
     NSString *text = [NSString stringWithContentsOfFile:armed
                                                encoding:NSUTF8StringEncoding
                                                   error:NULL];
     int count = 0;
+    int stuckN = 0;
+    NSMutableString *stuck = [[NSMutableString alloc] init];
+    NSFileManager *manager = [NSFileManager defaultManager];
     for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
         if (line.length == 0) continue;
-        if (AevonAppMiniFlagSet(line, NO)) count += 1;
+        AevonAppMiniFlagSet(line, NO);
+        NSString *path = AevonAppMiniFlagPath(line);
+        if (path != nil && [manager fileExistsAtPath:path]) {
+            [stuck appendFormat:@"%@\n", line];
+            stuckN += 1;
+            continue;
+        }
+        count += 1;
     }
-    if (armed != nil) [[NSFileManager defaultManager] removeItemAtPath:armed error:NULL];
+    if (stuckN > 0) {
+        [stuck writeToFile:armed atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        char line[96];
+        snprintf(line, sizeof(line), "win: mini flag clear stuck n=%d keep", stuckN);
+        AevonLogRaw(line);
+    } else if (armed != nil) {
+        [manager removeItemAtPath:armed error:NULL];
+    }
+    [stuck release];
     return count;
 }
 
