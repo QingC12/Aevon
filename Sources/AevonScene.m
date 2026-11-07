@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 #include <unistd.h>
 
 // 0.1.40 — 这两个符号由 Swift 侧（`Log.swift` / `SceneProbe.swift`）用
@@ -2037,6 +2038,81 @@ BOOL AevonSystemCovered(void) {
     return NO;
 }
 
+// MARK: - 0.1.93 主线程看门狗
+
+/// 主线程最后一次应答的时刻（`CFAbsoluteTimeGetCurrent`）。
+/// 后台队列读、主线程写，一个 `double` 的撕裂读最坏也只是差一拍，不影响判断。
+static double AevonMainBeat = 0;
+static char *AevonStallVersion = NULL;
+
+/// 从**后台线程**直接写一行日志。
+///
+/// 不能借 `AevonLogRaw`/`Log.write`：那条路里有一个共享的 `DateFormatter`，
+/// 它没有线程安全保证，而这里恰恰是在主线程被卡住的时候用 —— 拿它去写日志，
+/// 最坏的情况是把「卡住」升级成「崩掉」，那会把线索一起带走。
+/// 所以自己取时间、自己 `open/write/close`：全部是 async-signal-safe 的那一套。
+static void AevonStallLog(const char *text) {
+    if (text == NULL) return;
+    time_t now = time(NULL);
+    struct tm part;
+    localtime_r(&now, &part);
+    char stamp[24] = {0};
+    strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &part);
+    char line[360];
+    int n = snprintf(line, sizeof(line), "%s [%s] %s\n", stamp,
+                     AevonStallVersion != NULL ? AevonStallVersion : "?", text);
+    if (n <= 0) return;
+    int fd = open("/var/mobile/Aevon.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    size_t left = strnlen(line, sizeof(line));
+    const char *cur = line;
+    while (left > 0) {
+        ssize_t done = write(fd, cur, left);
+        if (done <= 0) break;
+        cur += done;
+        left -= (size_t)done;
+    }
+    close(fd);
+}
+
+void AevonMainStallWatchdogStart(const char *version) {
+    static int started = 0;
+    if (started) return;
+    started = 1;
+    if (version != NULL && AevonStallVersion == NULL) AevonStallVersion = strdup(version);
+    AevonMainBeat = CFAbsoluteTimeGetCurrent();
+
+    dispatch_queue_t queue = dispatch_queue_create("com.aevon.pulse.monitor", DISPATCH_QUEUE_SERIAL);
+    if (queue == NULL) return;
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    if (timer == NULL) return;
+    dispatch_source_set_timer(timer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                              (uint64_t)(1.0 * NSEC_PER_SEC),
+                              (uint64_t)(0.1 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(timer, ^{
+        double now = CFAbsoluteTimeGetCurrent();
+        double gap = now - AevonMainBeat;
+        // 2.5 秒：正常的一次建卡动画是 0.44 秒，一次 prefs 批量写也就几十毫秒。
+        // 超过 2.5 秒没应答就不叫「慢」了，叫「卡住」。
+        if (gap > 2.5) {
+            char text[200];
+            snprintf(text, sizeof(text), "win: main stall %.0fms (no main beat %.1fs ago)",
+                     gap * 1000.0, gap);
+            AevonStallLog(text);
+            // 报过一次就把尺子挪到现在：卡住期间每 ~3 秒报一行，既证明它一直卡着，
+            // 又能在恢复时从最后一行算出卡了多久。
+            AevonMainBeat = now;
+        }
+        // 探针。主线程空闲时这一拍什么也不做；被卡住时它排在队列里，
+        // 一恢复就落地，心跳随之复活。
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonMainBeat = CFAbsoluteTimeGetCurrent();
+        });
+    });
+    dispatch_resume(timer);
+}
+
 // MARK: - 0.1.29 主窗四边热区 → 应用侧
 
 /// 0.1.29 — 主窗手势环的矩形，交给 App 进程做「同一根手指也收走」。
@@ -2075,6 +2151,70 @@ static BOOL AevonBandLocked = NO;
 /// 所以这一版不赌：值走偏好域（系统为跨进程传值准备的那条，不依赖容器），
 /// 名字固定成 `com.aevon.band.<bundle>`（两端精确匹配，不依赖通配）。文件那条
 /// 留着当兜底。App 侧新增两行证词把「通知到没到」和「值读到没」分开。
+/// 0.1.93 — **这条广播必须离开主线程。**
+///
+/// Aevon(161) 是一份「主线程死了」的日志：12:23:38 用户按住卡片左下角开始缩放
+/// （`win: resize canvas=…`、`win: raw touch grab zone=bottom-left`），12:23:39
+/// 还有一条 `win: touch in=40 eat=2`，之后三十五分钟里**一行日志都没有** ——
+/// 没有崩溃、没有 `boot ok`、没有触摸、连每秒一次的结算行都停了。手指一直落在
+/// 屏幕上，`sendEvent` 却一次都没再被调用：主线程被卡在某个同步调用里。
+///
+/// 卡在哪：那次手势的第一条 `dragMove` 会走 `lockBand()` → `AevonAppBandLock`
+/// → 对**十个正在运行的 App** 各写一次偏好域。每个 App 一次
+/// `CFPreferencesSetAppValue` + 一次 `CFPreferencesSynchronize`，后者是**同步**
+/// 打给 cfprefsd、要等它把整个域刷到磁盘才回来；卡片自己那个还多一次
+/// `AevonAppContainer`（LSApplicationProxy + 目录扫描）与一次 `atomic:YES` 落盘
+/// （临时文件 + rename）；最后每条还带一个 `deliverImmediately:YES` 的达尔文通知。
+/// 一次广播 ≈ 20 次跨进程往返 + 1 次磁盘写，全部压在主线程上。cfprefsd 只要在
+/// 忙（别家 App 正在写同一个域），这一趟就无限期等下去。
+///
+/// 这条纪律 `MEMORY.md` 里早写着「触摸路径上不许 CFPreferencesSynchronize」，
+/// 0.1.35 加广播时漏在了外面 —— 单次看着只慢几毫秒，撞上就是整机死。
+///
+/// 所以：正文在主线程算好（它只读几个静态量，不花时间），真正的写盘与通知
+/// 一律丢进一条串行队列。串行保证「锁」与「矩形」的先后不被调换；每条带着
+/// 自己那一刻的完整快照，晚到也只是晚到，不会写错值。
+static dispatch_queue_t AevonBandQueue = NULL;
+
+static dispatch_queue_t AevonBandQueueGet(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        AevonBandQueue = dispatch_queue_create("com.aevon.band.publish", DISPATCH_QUEUE_SERIAL);
+    });
+    return AevonBandQueue;
+}
+
+/// 真正的写入。只在 `AevonBandQueue` 上跑，参数全是 C 串（块跨队列存活，
+/// 这个工程按 MRC 编译，捕获 `NSString *` 的去留不由自己决定）。
+static void AevonBandPublishNow(const char *bundleID, const char *body, int owner, int off) {
+    @autoreleasepool {
+        if (bundleID == NULL || body == NULL) return;
+        NSString *bid = [NSString stringWithUTF8String:bundleID];
+        NSString *text = [NSString stringWithUTF8String:body];
+        if (bid.length == 0 || text == nil) return;
+        CFStringRef app = (__bridge CFStringRef)bid;
+        CFPreferencesSetAppValue(CFSTR("AevonBand"), (__bridge CFStringRef)text, app);
+        CFPreferencesSynchronize(app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        // 容器那条兜底只给卡片自己那个 App 做：`AevonAppContainer` 要过一次
+        // LSApplicationProxy 加目录扫描，广播时对每个前台 App 都做一次就是白花。
+        if (owner) {
+            NSString *dir = AevonAppContainer(bid);
+            if (dir != nil) {
+                NSString *path = [dir stringByAppendingPathComponent:@"tmp/aevon-band"];
+                if (off) {
+                    [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+                } else {
+                    [text writeToFile:path atomically:YES
+                            encoding:NSUTF8StringEncoding error:NULL];
+                }
+            }
+        }
+        NSString *name = [NSString stringWithFormat:@"com.aevon.band.%@", bid];
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             (__bridge CFStringRef)name, NULL, NULL, true);
+    }
+}
+
 static void AevonBandPublish(NSString *bundleID, BOOL owner) {
     if (bundleID.length == 0) return;
     BOOL off = CGRectIsNull(AevonBandShown) || AevonBandShown.size.width < 1
@@ -2089,25 +2229,16 @@ static void AevonBandPublish(NSString *bundleID, BOOL owner) {
            AevonBandHoleShown.origin.x, AevonBandHoleShown.origin.y,
            AevonBandHoleShown.size.width, AevonBandHoleShown.size.height,
            AevonBandLocked ? 1 : 0];
-    CFStringRef app = (__bridge CFStringRef)bundleID;
-    CFPreferencesSetAppValue(CFSTR("AevonBand"), (__bridge CFStringRef)body, app);
-    CFPreferencesSynchronize(app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
-    // 容器那条兜底只给卡片自己那个 App 做：`AevonAppContainer` 要过一次
-    // LSApplicationProxy 加目录扫描，广播时对每个前台 App 都做一次就是白花。
-    if (owner) {
-        NSString *dir = AevonAppContainer(bundleID);
-        if (dir != nil) {
-            NSString *path = [dir stringByAppendingPathComponent:@"tmp/aevon-band"];
-            if (off) {
-                [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
-            } else {
-                [body writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-            }
-        }
-    }
-    NSString *name = [NSString stringWithFormat:@"com.aevon.band.%@", bundleID];
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                         (__bridge CFStringRef)name, NULL, NULL, true);
+    char *bid = strdup([bundleID UTF8String]);
+    char *text = strdup([body UTF8String]);
+    if (bid == NULL || text == NULL) { free(bid); free(text); return; }
+    int isOwner = owner ? 1 : 0;
+    int isOff = off ? 1 : 0;
+    dispatch_async(AevonBandQueueGet(), ^{
+        AevonBandPublishNow(bid, text, isOwner, isOff);
+        free(bid);
+        free(text);
+    });
 }
 
 /// 0.1.35 — **这条带子必须发给「真正会收到那根手指的进程」，不是卡片里的那个。**
@@ -2753,10 +2884,28 @@ static int AevonOpenKeyNotes = 0;
 static double AevonDivertAt = 0;
 static char AevonDivertBundle[64] = {0};
 
-/// 一次开机最多分流几次。真机上「点了通知却什么都没有」是最难受的失败，所以
-/// 宁可少分几次 —— 用满之后一律回到 0.1.87 的行为。
+/// 分流频率上限。真机上「点了通知却什么都没有」是最难受的失败，所以宁可少分几次。
+///
+/// 0.1.93 — 这里原来是「**一次开机**最多 24 次」。Aevon(161) 把它照出来了：
+/// 十二小时里 n 一路加到最后一次 `n=23`（12:07:08），再点一条就是第 24 次，
+/// 之后整台机器上所有通知、所有分享都会走 `why=cap` 原样转发 —— 浮窗再也打不开，
+/// 而用户看不出任何原因，只能重启。上限的用意是「万一分流逻辑坏了，别一直吞」，
+/// 而「坏」是**当下**的事，不是「今天失败过 24 次」的事。
+///
+/// 所以换成滑动窗口：24 次 / 10 分钟。窗口一过自动归零，不需要重启。
 static int AevonDivertCount = 0;
+static double AevonDivertWindow = 0;
 #define AEVON_DIVERT_MAX 24
+#define AEVON_DIVERT_WINDOW 600.0
+
+static BOOL AevonDivertExhausted(void) {
+    double now = CFAbsoluteTimeGetCurrent();
+    if (AevonDivertWindow <= 0 || now - AevonDivertWindow > AEVON_DIVERT_WINDOW) {
+        AevonDivertWindow = now;
+        AevonDivertCount = 0;
+    }
+    return AevonDivertCount >= AEVON_DIVERT_MAX;
+}
 
 /// 「认出来了却没分流」的解释行单独计数，不占 `AevonOpenKeyNotes` 的键名预算 ——
 /// 两个预算合用一个计数器，先跑完的那个会把另一个静音。
@@ -2880,7 +3029,7 @@ static int AevonOpenDecide(id request, id options,
     *why = "-";
 
     if (AevonActivateSwitchOff()) { *why = "off"; return 0; }
-    if (AevonDivertCount >= AEVON_DIVERT_MAX) { *why = "cap"; return 0; }
+    if (AevonDivertExhausted()) { *why = "cap"; return 0; }
 
     id target = AevonOpenBundleOf(request);
     if (target == nil) { *why = "nobundle"; return 0; }
@@ -3517,9 +3666,25 @@ static id AevonCleanDispatcher(void) {
     return found;
 }
 
-/// 一次分流最多收几次。用满之后一律回到 0.1.88 的行为（面板与横幅都不动）。
+/// 收尾频率上限。用满之后一律回到 0.1.88 的行为（面板与横幅都不动）。
+///
+/// 0.1.93 — 同样是「一次开机 6 次」改成滑动窗口。Aevon(161) 里这条上限在
+/// **01:27** 就用满了（`notify: clean … n=6`），此后到 12:23 一次都没再收过 ——
+/// 用户那天后半程的「面板不收了 / 横幅不收了」不是判据坏了，是配额早用完了。
+/// 上限要挡的是「一次坏掉的循环连着收」，不是「今天已经成功过六次」。
 static int AevonCleanRuns = 0;
+static double AevonCleanWindow = 0;
 #define AEVON_CLEAN_MAX 6
+#define AEVON_CLEAN_WINDOW 120.0
+
+static BOOL AevonCleanExhausted(void) {
+    double now = CFAbsoluteTimeGetCurrent();
+    if (AevonCleanWindow <= 0 || now - AevonCleanWindow > AEVON_CLEAN_WINDOW) {
+        AevonCleanWindow = now;
+        AevonCleanRuns = 0;
+    }
+    return AevonCleanRuns >= AEVON_CLEAN_MAX;
+}
 
 // MARK: - 0.1.92 清掉那条通知（点开 = 已读）
 //
@@ -3547,8 +3712,21 @@ static int AevonCleanRuns = 0;
 // （母版用 0.45 秒，那一版同时还挂着一个真实的 OpenApplication 事务；我们没有，留到
 // 0.60 秒是让轮询那几拍先跑完，不与之抢主队列）。
 
+/// 清通知的频率上限。0.1.93 — 与另外两处一样，从「一次开机 6 次」改成滑动窗口；
+/// 理由见 `AevonCleanExhausted`：一次开机型的配额会让功能在某个时刻悄悄永久失效。
 static int AevonClearRuns = 0;
+static double AevonClearWindow = 0;
 #define AEVON_CLEAR_MAX 6
+#define AEVON_CLEAR_WINDOW 120.0
+
+static BOOL AevonClearExhausted(void) {
+    double now = CFAbsoluteTimeGetCurrent();
+    if (AevonClearWindow <= 0 || now - AevonClearWindow > AEVON_CLEAR_WINDOW) {
+        AevonClearWindow = now;
+        AevonClearRuns = 0;
+    }
+    return AevonClearRuns >= AEVON_CLEAR_MAX;
+}
 
 /// 一个对象上的「通知标识」候选读数。无参、只读，每一步都过 `respondsToSelector` + `@try`。
 static NSString *AevonClearIdentifierOf(id object) {
@@ -3693,7 +3871,7 @@ static void AevonClearMap(id dispatcher) {
 static void AevonClearNotification(const char *bundle, const char *identifier) {
     if (bundle == NULL || identifier == NULL) return;
     if (AevonActivateSwitchOff()) return;
-    if (AevonClearRuns >= AEVON_CLEAR_MAX) return;
+    if (AevonClearExhausted()) return;
     AevonClearRuns += 1;
 
     NSString *want = [NSString stringWithUTF8String:identifier];
@@ -3824,10 +4002,17 @@ static void AevonCleanCoverAfterCard(const char *bundle, int tick) {
 /// 面板交给 `AevonCleanCoverAfterCard` 等卡片。
 static void AevonNotifyCleanup(const char *bundle) {
     if (AevonActivateSwitchOff()) return;          // 闸一：开关每拍都查
-    if (AevonCleanRuns >= AEVON_CLEAN_MAX) return;
+    if (AevonCleanExhausted()) return;
     AevonCleanRuns += 1;
 
     id dispatcher = AevonCleanDispatcher();
+    // 0.1.93 — 把能力地图提前到收尾这一拍。
+    //
+    // 它原来只挂在 `AevonClearNotification` 里，而那条路要先拿到通知标识才进得去。
+    // Aevon(161) 里六次全是 `clear=noid`（标识没取到），于是一次也没走到 ——
+    // `notify: clear map` 那行「下一版不用再装一次机」的地图，整整一版都没落盘。
+    // 「取不到标识」到底卡在哪一格，日志里因此分不出来。挪到这里：收尾一定会跑。
+    AevonClearMap(dispatcher);
     char banner[128], line[360];
     banner[0] = '\0';
 

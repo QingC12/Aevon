@@ -78,6 +78,14 @@ public func AevonStart() {
 
     Log.write("boot ok: version \(Aevon.version), pid \(getpid())")
 
+    // 0.1.93 — 主线程心跳。Aevon(161) 最后三十五分钟一行日志都没有：手指按在
+    // 屏幕上，`sendEvent` 一次都没再被调用。那种「什么都停了」有两种完全不同的
+    // 成因 —— 主线程被卡死，或者窗口根本收不到触摸 —— 而日志上长得一模一样。
+    // 这个看门狗在后台队列上每秒问主线程一次「你还在吗」：主线程真卡了，它会
+    // 从后台直接写一行 `win: main stall …ms`（不走 `Log.write`，那条路的日期
+    // 格式化器不是线程安全的）；心跳照常在写、只是没有触摸，就说明卡的不是主线程。
+    Aevon.version.withCString { AevonMainStallWatchdogStart($0) }
+
     // 0.1.8 — 上一次留下的停靠标记。桌面进程崩掉时标记会留在 App 容器里，那个
     // App 从此收不到触摸；这一拍按名单清干净。个数写进启动日志，下次看日志就能
     // 分清「没清过」和「清了几条」。

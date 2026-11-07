@@ -721,6 +721,15 @@ def main():
                   b"sharingd",
                   b"UIApplicationLaunchOptionsSourceApplicationKey",
                   b"UIApplicationLaunchOptionsURLKey",
+                  # 0.1.93 — 主线程看门狗。这一整版的价值就是「下次卡死能被一句话
+                  # 说清」，所以这两条必须在产物里：
+                  #   win: main stall …ms (no main beat …s) = 主线程真被卡住了，毫秒数是时长
+                  # 两条队列标签（名字都刻意长过 16 字节：15 字节以内会被编成立即数，
+                  # 二进制里根本搜不到 —— 这是这个工程记了很久的坑）。
+                  b"win: main stall %.0fms (no main beat %.1fs ago)",
+                  b"com.aevon.pulse.monitor",
+                  # 0.1.93 — 手势那条广播挪去后台队列：串行队列的名字要在产物里。
+                  b"com.aevon.band.publish",
                   # 形状闸的六个期望值。它们同时是「这一版到底校验了什么」的证词。
                   b"v@:BB@",
                   b"v@:BB@B",
