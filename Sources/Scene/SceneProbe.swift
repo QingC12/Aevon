@@ -2693,6 +2693,13 @@ zStackParticipantDidChange:
             Log.write("win: empty page not found for " + bundle)
             return "notfound"
         }
+        // 藏之前先认一眼：如果屏幕中间这一页**已经是桌面**，说明 home 那一步其实
+        // 成了、只是读数没读到（`isSpringBoardActive` 在有些版本上不存在）。这时
+        // 再藏一次就是把桌面藏掉 —— 宁可什么都不做。
+        if isHomePage(empty) {
+            Log.write("win: empty page is home, left alone")
+            return "home"
+        }
         hiddenPage = (empty, empty.alpha, empty.isUserInteractionEnabled)
         empty.alpha = 0
         empty.isUserInteractionEnabled = false
