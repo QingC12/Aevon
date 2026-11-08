@@ -1713,10 +1713,7 @@ zStackParticipantDidChange:
             // 0.0.98 — 按名字拆自己那一块。多窗之后「拆唯一那个宿主」会让关掉
             // 主窗时连带干掉停靠小窗。
             FloatHost.hide(bundle: closingBundle)
-            // 0.2.20 — 开卡时藏起来的全屏容器，按同一个 bundle 还回去。
-            // 放在拆完 presenter 之后：这时 system 的容器重新接回画面，
-            // 先露出来再拆我们的，中间不会有一帧两边都没有。
-            restoreFullScreen(closingBundle)
+            // 0.2.22 — 全屏容器这一版没有动过，关闭时也就不需要还原。
             // 0.0.82 — 交还后台这一拍搬到拆完 presenter 之后。
             //
             // Aevon(73) 里每一张卡关掉都是同一个形状：`background door=1 fg=yes`
@@ -1941,26 +1938,17 @@ zStackParticipantDidChange:
         // 上面那段：写在 `activate` 之前的那一次不算「App 的窗口变了」。
         host.reassertCanvas()
 
-        // 0.2.20 — 这一张卡接的是**系统已经摆在眼前的全屏 App**（`own live
-        // attach`），不是我们自己起的 scene。它的画面被新 presenter 接走之后，
-        // 系统原来那个全屏容器就空了，而空容器会自己画一层黑：用户看到的是
-        // 「卡片里有 QQ，卡片外面整个屏幕黑，也不回桌面」。
+        // 0.2.22 — 这一张卡接的是**系统已经摆在眼前的全屏 App**（`own live
+        // attach`）。它的画面被新 presenter 接走之后，系统原来那个全屏容器
+        // 就空了，用户看到「卡片里有 QQ，卡片外面整屏黑，也不回桌面」。
         //
-        // 0.0.24 当时用「把那个全屏容器 alpha 置 0」解决过同一个现象，0.0.27
-        // 因为 0.0.25/0.0.26 连续藏错对象（藏到了窗口和桌面）把整条撤掉。这里
-        // 只恢复 0.0.24 的窄口径：只认名字里带 scene 标识、且标识里含目标
-        // bundle 的那一个祖先视图，跳过我们自己的 FloatWindow，也拒绝 HomeScreen
-        // / Icon / Wallpaper / StatusBar。匹配不到就什么都不做。
+        // 0.2.20 藏内层 UIView、0.2.21 藏 SBMainSwitcherWindow，黑色都没消失，
+        // 说明前两次对「黑在哪一层」的判断都是错的（后者还把桌面一起藏了）。
+        // 这一版不再盲改：只把 scene → 祖先链 → 窗口的实际层级写进日志，
+        // 拿到现场再决定动哪一层。
         if let b = bundleID, AevonOwnIsOwned(b) == 0 {
-            demoteFullScreen(b)
-            // 藏掉之后如果这一秒里卡片是空的，多半是把 scene 一起藏睡了：
-            // 立刻把全屏还回去。0.0.24 的 `card went empty` 是同一个判据。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak view] in
-                guard let view = view else { return }
-                if (view.layer.sublayers?.count ?? 0) == 0 {
-                    restoreFullScreen(b)
-                    Log.write("win: card empty, fullscreen put back for " + b)
-                }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                demoteFullScreen(b)
             }
         }
 
@@ -2639,17 +2627,7 @@ zStackParticipantDidChange:
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { tick() }
     }
 
-    // MARK: - 0.2.20 taking the emptied full screen out of sight
-
-    /// 一个把 scene 画面端到屏幕上的视图，以及窗口实际持有的那一层祖先。
-    private struct FullScreenCover {
-        let window: UIWindow
-        let topName: String
-        let windowName: String
-        let previous: CGFloat
-    }
-
-    private static var fullScreenCovers: [String: FullScreenCover] = [:]
+    // MARK: - 0.2.22 全屏副本：只取证，不动手
 
     /// SpringBoard 放在窗口和 scene 画面之间的类。口径与 0.0.24 一样窄：
     /// 桌面、图标层、状态栏、壁纸都必须活下来，名字里提到它们的永远不是候选。
@@ -2697,13 +2675,13 @@ zStackParticipantDidChange:
         return current.superview === window ? current : nil
     }
 
-    /// 找到目标 App 的全屏承载容器，把它的 alpha 置 0。
+    /// 0.2.22 — 只取证，不动手。
     ///
-    /// 只认 **scene 标识里含目标 bundle** 的那一个；匹配不到就什么都不做。
-    /// 0.0.25 藏窗口、0.0.26 清所有 App 级窗口，都是在这条路上把桌面一起
-    /// 藏掉，才有了「黑屏八秒还不回来」。这里不猜：没有名字就不动。
+    /// 0.2.20 把内层 UIView 的 alpha 置 0、0.2.21 把 `SBMainSwitcherWindow`
+    /// 整个置 0，两次都没能让黑色消失，说明「黑在哪一层」的判断连着错了两回。
+    /// 这一版不改任何 alpha，只把 scene 画面到窗口的祖先链、以及 SpringBoard
+    /// 的全部窗口原样写进日志；层级拿到之后再决定藏谁。
     private static func demoteFullScreen(_ bundle: String) {
-        if fullScreenCovers[bundle] != nil { return }
         guard let application = sharedApplication() else {
             Log.write("win: no application to look for the full screen")
             return
@@ -2731,47 +2709,56 @@ zStackParticipantDidChange:
             }
             if chosen != nil { break }
         }
+
+        for (index, window) in application.windows.enumerated() {
+            Log.write("win: fs window " + String(index) + " "
+                      + NSStringFromClass(type(of: window))
+                      + " lvl=" + String(Int(window.windowLevel.rawValue))
+                      + " a=" + alphaText(window.alpha)
+                      + " hid=" + (window.isHidden ? "1" : "0")
+                      + " f=" + rectText(window.frame)
+                      + " subs=" + String(window.subviews.count))
+        }
+
         guard let hit = chosen else {
             Log.write("win: no fullscreen carrier for " + bundle
                       + " (windows=" + String(windows) + ")")
             return
         }
-        let topName = NSStringFromClass(type(of: hit.top))
-        if topName.contains("HomeScreen") || topName.contains("Icon")
-            || topName.contains("StatusBar") || topName.contains("Wallpaper") {
-            Log.write("win: refused to demote " + topName)
-            return
+        Log.write("win: fs found " + hit.name + " ident=" + hit.ident
+                  + " top=" + NSStringFromClass(type(of: hit.top)))
+        var node: UIView? = hit.node
+        var depth = 0
+        while let view = node, depth < 12 {
+            Log.write("win: fs chain " + String(depth) + " "
+                      + NSStringFromClass(type(of: view))
+                      + " f=" + rectText(view.frame)
+                      + " a=" + alphaText(view.alpha)
+                      + " hid=" + (view.isHidden ? "1" : "0")
+                      + " subs=" + String(view.subviews.count))
+            if view is UIWindow { break }
+            node = view.superview
+            depth += 1
         }
-        // 0.2.21 — 只把 `hit.top` 的 alpha 置 0 时，日志里它是一层裸 UIView；
-        // 藏完屏幕还是黑的：黑来自它所在的**窗口**背景，不是这层视图。
-        // 所以改藏窗口本体，但仍然只藏承载这个 scene 的那一个窗口。
-        guard let window = hit.node.window, !(window is FloatWindow) else {
-            Log.write("win: no window for the fullscreen carrier")
-            return
+        if let window = hit.node.window {
+            for (index, sibling) in window.subviews.enumerated() where sibling !== hit.top {
+                Log.write("win: fs sib " + String(index) + " "
+                          + NSStringFromClass(type(of: sibling))
+                          + " f=" + rectText(sibling.frame)
+                          + " a=" + alphaText(sibling.alpha)
+                          + " hid=" + (sibling.isHidden ? "1" : "0")
+                          + " subs=" + String(sibling.subviews.count))
+            }
         }
-        let windowName = NSStringFromClass(type(of: window))
-        if windowName.contains("HomeScreen") || windowName.contains("Icon")
-            || windowName.contains("StatusBar") || windowName.contains("Wallpaper") {
-            Log.write("win: refused to demote window " + windowName)
-            return
-        }
-        let previous = window.alpha
-        fullScreenCovers[bundle] = FullScreenCover(window: window, topName: topName,
-                                                  windowName: windowName,
-                                                  previous: previous)
-        window.alpha = 0
-        Log.write("win: fullscreen window demoted " + windowName
-                  + " alpha " + String(format: "%.1f", previous) + "->0"
-                  + " top=" + topName + " ident=" + hit.ident
-                  + " from=" + hit.name)
     }
 
-    /// 按 bundle 还回去。没有藏过就是空操作。
-    private static func restoreFullScreen(_ bundle: String) {
-        guard let saved = fullScreenCovers.removeValue(forKey: bundle) else { return }
-        saved.window.alpha = saved.previous
-        Log.write("win: fullscreen window restored " + saved.windowName + " for " + bundle
-                  + " alpha=" + String(format: "%.1f", saved.previous))
+    private static func alphaText(_ value: CGFloat) -> String {
+        String(format: "%.2f", value)
+    }
+
+    private static func rectText(_ rect: CGRect) -> String {
+        String(format: "%.0f,%.0f %.0fx%.0f", rect.origin.x, rect.origin.y,
+               rect.size.width, rect.size.height)
     }
 
     // MARK: - Runtime helpers
