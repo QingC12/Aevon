@@ -764,11 +764,18 @@ def main():
                   b"notify: shareprobe b=%s src=%s pay=%s form=%c fwd=%d origin=%s ac=%s"
                   b" susp=%d fsusp=%d set=%s setSusp=%d setFlag=%d getSusp=%d getFlag=%d"
                   b" pid=%d seen=%d purl=%s keys=%s",
-                  # 0.2.8 —— 激活标志表。挂起语义挂在 settings 的标志位上（`setSusp=0`
-                  # 说明没有 `setActivateSuspended:`），而 options 里的 `__ActivateSuspended`
-                  # 只对冷启动成立。这一行把 24 位全读一遍，靠「转发并挂起 / 普通打开」两组
-                  # 现场对比定位真正的挂起位 —— 只读，不猜，也不置位。
-                  b"win: act flags tag=%s bits=%s set=%s n=%d",
+                  # 0.2.9 —— 激活设置的**形状**转储（只读内存，一次 msgSend 都没有）。
+                  # 0.2.8 那版按下标问 `flagForActivationSetting:` 被真机否掉：
+                  # Aevon(177) 九行全是 bits=1111…（问法错，不是数据错），所以换口径。
+                  b"win: act dump tag=%s c=%s n=%u %s",
+                  # 一次开机一遍：这一族到底有哪些手段。真 API 名靠 census 不靠 strings。
+                  b"win: act api set=SBActivationSettings n=%u %@",
+                  b"win: act api set=absent",
+                  # 「按回后台 / 别前台激活」这一族的存在性（-1 类不在 / 0 方法不在 / 1 可调）。
+                  b"win: ability bg app=%d ctrl=%d mainws=%d sbws=%d set=%d susp=%d fg=%d",
+                  b"win: ability deact2 sbws=%d fbmgr=%d fluid=%d coord=%d",
+                  # 因果读数：转发前/后目标 App 在系统眼里是不是前台。
+                  b"win: pose b=%@ phase=%s front=%d bg=%d run=%d pid=%d",
                   b"notify: forward adopt b=%s op=%s",
                   b"win: ability app forceBg=%d ctrl forceBg=%d app dehost=%d ctrl dehost=%d",
                   b"win: ability scene deact=%d/%d overlay=%d txn=%d openurl=%d",

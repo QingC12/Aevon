@@ -83,21 +83,86 @@ void AevonEnumerateScenes(id manager, void (^block)(id scene)) {
 /// 全部经 `respondsToSelector:` 问过才调用，整段 `@try` —— 这是诊断路上的一个
 /// 读数，它不许把进程带走。取不到的每一种情况都折成 `-1`，与「进程不在」同值：
 /// 诊断行里少一个区分，好过为了区分去猜一个可能不存在的 selector。
+/// 0.2.9 — 把 `SBApplication` 本体拿出来（pid 与「前台/后台」都从它读）。
+/// 找不到就返回 nil；调用方一律 `@try` 包住。
+static id AevonAppObject(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+    Class cls = NSClassFromString(@"SBApplicationController");
+    if (cls == Nil) return nil;
+    SEL sharedSel = NSSelectorFromString(@"sharedInstance");
+    if (![cls respondsToSelector:sharedSel]) return nil;
+    id shared = ((id (*)(id, SEL))objc_msgSend)((id)cls, sharedSel);
+    if (shared == nil) return nil;
+    SEL appSel = NSSelectorFromString(@"applicationWithBundleIdentifier:");
+    if (![shared respondsToSelector:appSel]) return nil;
+    id app = ((id (*)(id, SEL, id))objc_msgSend)(shared, appSel, bundleID);
+    if (app != nil) return app;
+    SEL altSel = NSSelectorFromString(@"applicationWithDisplayIdentifier:");
+    if ([shared respondsToSelector:altSel]) {
+        app = ((id (*)(id, SEL, id))objc_msgSend)(shared, altSel, bundleID);
+    }
+    return app;
+}
+
+/// 0.2.9 — 「这一拍目标 App 在系统眼里是不是前台」。**只调 BOOL getter**，每次都先问存在性。
+///
+/// 这是唯一能证明因果的读数：分享那一刻 `forward` 之前 `front=0`、之后 `front=1`，
+/// 就把「全屏是那次转发拉起来的」从推断变成实测（Aevon(177) 里那条对照实验只是
+/// 「通知打开没有全屏」，还不是同一 App 的前后对比）。
+/// 选择子不存在时打 -1，绝不拿 `perform` 去读标量（那条路 0.1.38 崩过五次）。
+static void AevonAppPose(const char *phase, id request) {
+    static int notes = 0;
+    if (notes >= 24) return;
+    NSString *bid = nil;
+    if ([request isKindOfClass:[NSString class]]) {
+        bid = (NSString *)request;
+    } else if (request != nil) {
+        id shown = nil;
+        @try {
+            SEL sel = sel_registerName("bundleIdentifier");
+            if ([request respondsToSelector:sel]) {
+                shown = ((id (*)(id, SEL))objc_msgSend)(request, sel);
+            }
+        } @catch (__unused NSException *exception) { shown = nil; }
+        if ([shown isKindOfClass:[NSString class]]) bid = shown;
+    }
+    if (bid.length == 0) return;
+    notes += 1;
+    @try {
+        id app = AevonAppObject(bid);
+        int front = -1, back = -1, running = -1, pid = -2;
+        if (app != nil) {
+            SEL f = sel_registerName("isFrontmost");
+            if ([app respondsToSelector:f]) {
+                front = ((BOOL (*)(id, SEL))objc_msgSend)(app, f) ? 1 : 0;
+            }
+            SEL b = sel_registerName("isBackgrounded");
+            if ([app respondsToSelector:b]) {
+                back = ((BOOL (*)(id, SEL))objc_msgSend)(app, b) ? 1 : 0;
+            }
+            SEL r = sel_registerName("isRunning");
+            if ([app respondsToSelector:r]) {
+                running = ((BOOL (*)(id, SEL))objc_msgSend)(app, r) ? 1 : 0;
+            }
+            SEL p = sel_registerName("pid");
+            if ([app respondsToSelector:p]) {
+                pid = ((int (*)(id, SEL))objc_msgSend)(app, p);
+            }
+        }
+        AevonLogRaw([[NSString stringWithFormat:@"win: pose b=%@ phase=%s front=%d bg=%d run=%d pid=%d",
+                      bid, phase != NULL ? phase : "-", front, back, running, pid] UTF8String]);
+    } @catch (__unused NSException *exception) {
+        AevonLogRaw("win: pose threw");
+    }
+}
+
 int AevonAppPid(NSString *bundleID) {
     if (bundleID.length == 0) return -1;
     @try {
-        Class cls = NSClassFromString(@"SBApplicationController");
-        if (cls == Nil) return -1;
-        SEL sharedSel = NSSelectorFromString(@"sharedInstance");
-        if (![cls respondsToSelector:sharedSel]) return -1;
-        id shared = ((id (*)(id, SEL))objc_msgSend)((id)cls, sharedSel);
-        if (shared == nil) return -1;
-        SEL appSel = NSSelectorFromString(@"applicationWithBundleIdentifier:");
-        if (![shared respondsToSelector:appSel]) return -1;
-        id app = ((id (*)(id, SEL, id))objc_msgSend)(shared, appSel, bundleID);
+        id app = AevonAppObject(bundleID);
         if (app == nil) return -1;
         SEL pidSel = NSSelectorFromString(@"pid");
-        if (![app respondsToSelector:pidSel]) return -1;
+        if (![app respondsToSelector:pidSel]) return -2;
         // 标量返回值只走强转过的函数指针读 x0，不用 `perform`（它会把一个
         // `int` 当成对象指针 retain —— 0.1.38 那五次安全模式就是这么来的）。
         return ((int (*)(id, SEL))objc_msgSend)(app, pidSel);
@@ -3600,12 +3665,13 @@ static void AevonOpenKeysOf(id options, char *out, size_t size) {
 /// 记录：bundle / 来源进程 / payload 类型 / 动作类名 / LaunchOrigin /
 ///      结果块形状 / 挂起键读回值 / settings 四个能力 / options 全部键。
 static int AevonShareNotes = 0;
-/// 0.2.8 — 激活标志表的行数预算。每一条打开请求一行，80 行足够覆盖
-/// 「冷启动分享 / 热启动分享 / 通知 / 点图标」四种现场各若干次。
+/// 0.2.9 — 激活设置转储的**调用**预算：一条打开请求算一次，一次最多打三层（自己+两层父类）。
+/// 60 次足够覆盖「点图标 / 通知打开 / 分享转发 / 我们自己重入那条」四种现场各若干次。
 static int AevonFlagsNotes = 0;
 /// 0.2.8 — 上一次转发真正写进去的 `__ActivateSuspended` 值。
 /// 分享现场行原来读的是**原始** options（我们写的是副本），所以恒为 -1；
 /// 这个变量记的是写后回读到的真值，`fsusp=` 就是它。
+/// 0.2.9 — 只有 `AevonOpenForwardPayload` 写它，任何地方都不再复位：重入会把复位吃掉。
 static int AevonForwardSuspLast = -1;
 
 /// 把一个可能是 NSString 也可能是 NSURL 的值变成可读文本。**只读**。
@@ -3634,43 +3700,105 @@ static void AevonOpenValueText(id value, char *out, size_t size) {
     }
 }
 
-/// 0.2.8 — 激活标志表。**只读**：只问「这一位是不是 1」，一个 setter 都不碰。
+/// 0.2.9 — 激活设置的**形状**转储。**只读内存**：一次 msgSend 都没有（除了类名）。
 ///
-/// Aevon(176) 定下两件事：
-///   · `SBActivationSettings` 上有 `setFlag:forActivationSetting:` 与
-///     `flagForActivationSetting:`，**没有** `setActivateSuspended:`；
-///   · options 里的 `__ActivateSuspended` 只对**冷启动**成立 —— 目标 App 已经在跑时
-///     系统照常前台激活，于是「全屏先出来 → scene 被卡片搬走 → 那一层变黑」。
+/// 0.2.8 那版按「下标 0..23 逐个问 `flagForActivationSetting:`」写，被真机当场否掉：
+/// Aevon(177) 九行全是 `bits=111111111111111111111111`。24 个下标全返回 1 不代表
+/// 「24 个标志都开着」，只代表**问法不对**（那个入口不是按下标取的）。读数作废 → 换口径。
 ///
-/// 真正的挂起位如果存在，只可能在这一排标志里。这一版**不猜它是第几位**：把 0..23
-/// 全部读一遍打成一行。判读方法只有一条 —— 拿「转发并挂起」与「普通打开」两组现场
-/// 对比，哪一位只在挂起那一组是 1，它就是挂起位；下一版才在转发前按那一位置位。
+/// 这一版改成把 settings 对象（自己 + 最多两层父类）的每个 ivar 原样读 8 字节打出来，
+/// 用四组现场做差：
+///   · `tag=open`   —— 点图标 / 系统普通打开（**必然全屏**，对照组 A）
+///   · `tag=trusted`—— 同上，另一条入口
+///   · 分享转发     —— 出问题这组（**出了全屏**）
+///   · 通知打开     —— 同一份日志里**没有全屏**（对照组 B，Aevon(177) 17:52:18 实证）
+/// 哪一位只在「出全屏」的那组不同，就是下一版要置/要清的位。
 ///
-/// 读 BOOL 是免费的，24 次 objc_msgSend 在打开请求那一拍可以忽略。整段 @try 包着：
-/// 下标越界若抛异常，只丢这一行，不影响分流。
+/// 三个刻意的选择：
+///   ① 对象指针只打「有没有」（1/0）—— 地址每次都变，留着会把真正的差异位淹掉；
+///   ② 标量打十六进制原值，不猜类型 —— 这一族里 BOOL/int/位域混在一起，按类型读会串；
+///   ③ 先按 `class_getInstanceSize` 夹住「偏移 + 长度」，越界就跳过 —— 绝不读别人的内存。
+static void AevonActAppend(char *out, size_t size, const char *name, uint64_t value) {
+    size_t used = strlen(out);
+    if (used + 40 >= size) return;
+    snprintf(out + used, size - used, "%s%s=0x%llx",
+             used > 0 ? "," : "", name != NULL ? name : "?",
+             (unsigned long long)value);
+}
+
+static void AevonActDumpLevel(id obj, Class cls, const char *tag) {
+    unsigned int count = 0;
+    Ivar *ivars = class_copyIvarList(cls, &count);
+    if (ivars == NULL) return;
+    NSUInteger total = class_getInstanceSize(object_getClass(obj));
+    char body[420];
+    body[0] = '\0';
+    for (unsigned int i = 0; i < count; i++) {
+        Ivar iv = ivars[i];
+        const char *name = ivar_getName(iv);
+        const char *type = ivar_getTypeEncoding(iv);
+        if (name == NULL) continue;
+        ptrdiff_t at = ivar_getOffset(iv);
+        NSUInteger span = 0;
+        if (type != NULL) NSGetSizeAndAlignment(type, &span, NULL);
+        if (span == 0) span = 8;
+        if (at < 0 || (NSUInteger)at + span > total) continue;
+        uint64_t raw = 0;
+        memcpy(&raw, (const char *)obj + at, span >= 8 ? 8 : span);
+        if (type != NULL && (type[0] == '@' || type[0] == '#')) raw = (raw != 0) ? 1 : 0;
+        AevonActAppend(body, sizeof(body), name, raw);
+    }
+    free(ivars);
+    AevonLogRaw([[NSString stringWithFormat:@"win: act dump tag=%s c=%s n=%u %s",
+                  tag != NULL ? tag : "-", class_getName(cls), count,
+                  body[0] != '\0' ? body : "-"] UTF8String]);
+}
+
 static void AevonOpenActFlags(id settings, const char *tag) {
-    if (AevonFlagsNotes >= 80) return;
     if (settings == nil) return;
-    SEL getSel = sel_registerName("flagForActivationSetting:");
-    if (![settings respondsToSelector:getSel]) return;
+    if (AevonFlagsNotes >= 60) return;
     AevonFlagsNotes += 1;
-    enum { AEVON_FLAG_SLOTS = 24 };
-    char bits[AEVON_FLAG_SLOTS + 1];
-    bits[AEVON_FLAG_SLOTS] = '\0';
-    for (int i = 0; i < AEVON_FLAG_SLOTS; i++) bits[i] = '0';
     @try {
-        for (int i = 0; i < AEVON_FLAG_SLOTS; i++) {
-            BOOL on = ((BOOL (*)(id, SEL, unsigned long))objc_msgSend)
-                (settings, getSel, (unsigned long)i);
-            if (on) bits[i] = '1';
+        Class cls = object_getClass(settings);
+        for (int lvl = 0; lvl < 3 && cls != Nil && cls != [NSObject class]; lvl++) {
+            AevonActDumpLevel(settings, cls, tag);
+            cls = class_getSuperclass(cls);
         }
-        const char *cls = object_getClassName(settings);
-        char line[220];
-        snprintf(line, sizeof(line), "win: act flags tag=%s bits=%s set=%s n=%d",
-                 tag != NULL ? tag : "-", bits, cls != NULL ? cls : "-", AevonFlagsNotes);
-        AevonLogRaw(line);
     } @catch (NSException *exception) {
-        AevonLogRaw("win: act flags threw");
+        AevonLogRaw("win: act dump threw");
+    }
+}
+
+/// 一次开机一遍：`SBActivationSettings` 这一族到底有哪些手段。
+/// 真 API 名靠 census，不靠 strings —— 三家的 `__objc_selrefs` 里有名字 ≠ 那一版真能调
+/// （0.2.8 的 `forceBg=0/0` 就是这么翻掉的）。有了这份全表，下一版接线不用再猜。
+static void AevonActApiCensus(void) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    @try {
+        Class cls = objc_getClass("SBActivationSettings");
+        if (cls == Nil) {
+            AevonLogRaw("win: act api set=absent");
+            return;
+        }
+        unsigned int count = 0;
+        Method *methods = class_copyMethodList(cls, &count);
+        NSMutableArray *names = [[NSMutableArray alloc] init];
+        for (unsigned int i = 0; methods != NULL && i < count; i++) {
+            const char *raw = sel_getName(method_getName(methods[i]));
+            if (raw == NULL) continue;
+            [names addObject:[NSString stringWithUTF8String:raw]];
+        }
+        if (methods != NULL) free(methods);
+        [names sortUsingSelector:@selector(compare:)];
+        NSString *joined = [names componentsJoinedByString:@","];
+        if (joined.length > 1500) joined = [joined substringToIndex:1500];
+        AevonLogRaw([[NSString stringWithFormat:@"win: act api set=SBActivationSettings n=%u %@",
+                      count, joined] UTF8String]);
+        [names release];
+    } @catch (NSException *exception) {
+        AevonLogRaw("win: act api threw");
     }
 }
 
@@ -4999,6 +5127,9 @@ static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id o
     IMP original = AevonOpenOrig[slot];
     if (original == NULL || form == 0) return 0;
     AevonForwardProbeSettings(settings);
+    // 0.2.9 — 转发前后各读一次「系统眼里它是不是前台」。这一对是因果证据：
+    // 前 0 后 1 ⇒ 全屏就是这次转发拉起来的；前后都 1 ⇒ 另有其人（得往上追）。
+    AevonAppPose("pre", request);
 
     NSMutableDictionary *forward = options != nil
         ? [options mutableCopy] : [[NSMutableDictionary alloc] init];
@@ -5024,6 +5155,7 @@ static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id o
     AevonOpenForwardAt = CFAbsoluteTimeGetCurrent();
     ((void (*)(id, SEL, id, id, id, id, id))original)
         (self, _cmd, request, forward, settings, origin, done);
+    AevonAppPose("post", request);
     [forward release];
     return 1;
 }
@@ -5040,9 +5172,10 @@ static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id o
 static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                          id settings, id origin, id result) {
     int slot = AevonOpenSlot(_cmd);
-    // 0.2.8 — 每一拍先清掉「上一次转发写进去的挂起值」，免得分享现场行把上一条的读数
-    // 当成这一条的（这是一次全局量，只在这一拍里有意义）。
-    AevonForwardSuspLast = -1;
+    // 0.2.9 — 这里原来每拍先把 `AevonForwardSuspLast` 清成 -1，导致分享现场行的
+    // `fsusp=` 恒为 -1：转发时原实现会**重入**本函数（`notify: forward pass … op=user`），
+    // 那次重入又把全局清掉了，外层回来读到的就只剩 -1。现在改成只有转发那一处写它，
+    // 读的时候连同 `fwd=` 一起看 —— `fwd=0` 时这个字段无意义（沿用上一条的值）。
     char line[640];
     line[0] = '\0';
     char bundle[64];
@@ -5340,6 +5473,13 @@ static void AevonAbilityProbe(void) {
         Class hostCls = objc_getClass("SBTransientOverlayWindow");
         Class txnCls = objc_getClass("FBApplicationProcessLaunchTransaction");
         Class wsCls = objc_getClass("SBMainWorkspace");
+        Class sbwsCls = objc_getClass("SBWorkspace");
+        Class setCls = objc_getClass("SBActivationSettings");
+        Class fbMgrCls = objc_getClass("FBSceneManager");
+        Class fluidCls = objc_getClass("SBFluidSwitcherViewController");
+        Class coordCls = objc_getClass("SBMainSwitcherControllerCoordinator");
+
+        AevonActApiCensus();
 
         AevonLogRaw([[NSString stringWithFormat:
                       @"win: ability app forceBg=%d ctrl forceBg=%d app dehost=%d ctrl dehost=%d",
@@ -5355,6 +5495,27 @@ static void AevonAbilityProbe(void) {
                       txnCls != Nil ? 1 : 0,
                       AevonClassHasMethod(wsCls,
                           "_openURLCore:display:animating:activationSettings:origin:withResult:")] UTF8String]);
+        // 0.2.9 — 「把一个已经在跑的 App 按回后台 / 让它不前台激活」这一族到底有哪些手段。
+        // 全部只问不调（-1 = 类不在，0 = 类在方法不在，1 = 可调）。0.2.8 的
+        // `forceBg=0/0` 已经证明「选择子在 __objc_selrefs 里 ≠ 这一版真能调」，
+        // 所以下一版接线之前，必须先把这张表拿到手。
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"win: ability bg app=%d ctrl=%d mainws=%d sbws=%d set=%d susp=%d fg=%d",
+                      AevonClassHasMethod(appCls, "setBackgrounded:"),
+                      AevonClassHasMethod(ctrlCls, "setBackgrounded:"),
+                      AevonClassHasMethod(wsCls, "setBackgrounded:"),
+                      AevonClassHasMethod(sbwsCls, "setBackgrounded:"),
+                      AevonClassHasMethod(setCls, "setBackgrounded:"),
+                      AevonClassHasMethod(setCls, "setActivateSuspended:"),
+                      AevonClassHasMethod(appCls, "setForeground:foregroundvalue:with169type:")]
+                     UTF8String]);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"win: ability deact2 sbws=%d fbmgr=%d fluid=%d coord=%d",
+                      AevonClassHasMethod(sbwsCls, "_setDeactivationReasons:onScene:withSettings:reason:"),
+                      AevonClassHasMethod(fbMgrCls, "_setDeactivationReasons:onScene:withSettings:reason:"),
+                      AevonClassHasMethod(fluidCls, "_setDeactivationReasons:onScene:withSettings:reason:"),
+                      AevonClassHasMethod(coordCls, "_setDeactivationReasons:onScene:withSettings:reason:")]
+                     UTF8String]);
     } @catch (NSException *exception) {
         AevonLogRaw("win: ability probe threw");
     }
