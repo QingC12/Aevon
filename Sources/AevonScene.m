@@ -6269,11 +6269,37 @@ static void AevonForwardDrop(const char *why) {
 /// App 侧那条链要 3 秒才出结论，1.6 秒的定时器先把它交回 SpringBoard 了。从这一版
 /// 起：只要还有一次投递挂着，就每 0.5 s 复检一次，最长 6 s。结论出来之后（成功走
 /// `AevonForwardDrop`、失败也走 Drop）这个定时器天然变成空操作。
+/// 0.2.18 — 「这次分享没进去」的唯一写法：一行 `share lost` + 就地销毁。
+///
+/// **绝不交回 SpringBoard**。Aevon(189) 已经证明交回的代价不是「晚一点」而是
+/// 「背景全屏变黑」：`notify: forward pass b=com.tencent.mqq` 之后 SB 把这个 App
+/// 的 scene 抢去整屏，卡片孤零零浮在黑底上（`win: scene frame after=430x717`
+/// 说明卡片自己是好的，黑的是它背后）。
+static void AevonForwardLost(const char *why) {
+    if (!AevonFwdHoldOn) return;
+    double ms = AevonFwdHoldAt > 0 ? (CFAbsoluteTimeGetCurrent() - AevonFwdHoldAt) * 1000.0 : 0;
+    AevonLogRaw([[NSString stringWithFormat:@"notify: share lost b=%@ why=%s at=%.0fms",
+                  AevonFwdHoldBundle != nil ? AevonFwdHoldBundle : @"-",
+                  why != NULL ? why : "-", ms] UTF8String]);
+    AevonForwardDrop(why != NULL ? why : "lost");
+}
+
+/// 0.2.18 — 两种「等」分开算，都不交回系统：
+///
+///   · 投递**已经发起**（`AevonAppOpenBusy()`）⇒ 等它的结论。App 侧重投最长
+///     6.3 秒（14 × 0.45），这里给 7 秒（14 拍）硬上限；超了算卡死（`appurl stuck`）。
+///   · 投递**一次都没发起** ⇒ 卡片还在建（或者这条请求根本走不到投递）。
+///     4 秒宽限（8 拍）。Aevon(189) 之所以 0 ms 就交回，就是把这个「还没发起」
+///     当成「不用等」了。
 static void AevonForwardHoldWatch(double waited) {
     if (!AevonFwdHoldOn) return;
-    if (!AevonAppOpenBusy()) { AevonForwardFlush("timeout"); return; }
-    if (waited >= 6.0 || AevonForwardWatchN >= 10) {
-        AevonForwardFlush("timeout-hard");
+    if (AevonAppOpenBusy()) {
+        if (waited >= 7.0 || AevonForwardWatchN >= 14) {
+            AevonForwardLost("appurl stuck");
+            return;
+        }
+    } else if (waited >= 4.0) {
+        AevonForwardLost("no deliver");
         return;
     }
     AevonForwardWatchN += 1;
@@ -6328,7 +6354,10 @@ static CFAbsoluteTime AevonAppOpenAt = 0;
 /// window scene 还没连上、分享路由还没装好 —— Aevon(186) 就是在第 207ms 问的，
 /// QQ 的 `application:openURL:options:` 当场回 NO，我们立刻退回转发，
 /// 于是又一次全屏+黑屏。8 次 × 0.35s ≈ 3 秒，够它把界面搭起来。
-static const int AevonAppOpenMaxTries = 10;
+// 0.2.18 — 10 → 14，间隔 0.35 → 0.45。App 侧现在会先等最多 4 秒的「界面长出来」，
+// 这段时间它**不写回执**；宿主如果还按 3.5 秒就放弃，那 4 秒的等待等于白等。
+// 14 × 0.45 = 6.3 秒，刚好盖住它，且与 `AevonForwardHoldWatch` 的 7 秒硬上限对齐。
+static const int AevonAppOpenMaxTries = 14;
 
 static NSString *AevonAppOpenLeaf(NSString *bundleID, NSString *leaf) {
     if (bundleID.length == 0 || leaf.length == 0) return nil;
@@ -6508,14 +6537,16 @@ static void AevonAppOpenCheck(void) {
         // 一两秒里 window scene 还没连上，问它等于问一个还没长出来的对象。
         // 这种答案不计入「拒绝」，继续重投（Aevon(188) 八次全是这一种）。
         int sc = -1;
-        NSRange scAt = [text rangeOfString:@"sc="];
+        // 0.2.18 — 前面加一个空格：回执里现在紧跟着就有 `wsc=`，而 `wsc=` 里
+        // 也含 `sc=` 这三个字符，不带前导空格的查找会看情况抓到错的字段。
+        NSRange scAt = [text rangeOfString:@" sc="];
         if (scAt.location != NSNotFound) {
             NSString *rest = [text substringFromIndex:scAt.location + scAt.length];
             sc = rest.intValue;
         }
         NSString *trimmed = [text stringByTrimmingCharactersInSet:
                              [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (trimmed.length > 96) trimmed = [trimmed substringToIndex:96];
+        if (trimmed.length > 160) trimmed = [trimmed substringToIndex:160];
         AevonLogRaw([[NSString stringWithFormat:
                       @"notify: appurl ack b=%@ ok=%d via=%@ at=%.0fms [%@]",
                       AevonAppOpenBundle != nil ? AevonAppOpenBundle : @"-",
@@ -6543,7 +6574,7 @@ static void AevonAppOpenCheck(void) {
                               @"notify: appurl retry n=%d via=%@",
                               AevonAppOpenTries, via] UTF8String]);
             }
-            AevonAppOpenNext(0.35);
+            AevonAppOpenNext(0.45);
             return;
         }
         AevonAppOpenGiveUp(sc == 0 ? "no-ui" : "refused");
@@ -6557,7 +6588,7 @@ static void AevonAppOpenCheck(void) {
             AevonAppOpenGiveUp("write");
             return;
         }
-        AevonAppOpenNext(0.35);
+        AevonAppOpenNext(0.45);
         return;
     }
     AevonAppOpenGiveUp("timeout");
@@ -6767,7 +6798,22 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                     snprintf(line + at, sizeof(line) - at, " fwd=%d", forwarded);
                 }
                 if (forwarded == 1) {
-                    AevonForwardHoldWatch(1.6);
+                    // 0.2.18 — 这一行原来是同步的 `AevonForwardHoldWatch(1.6)`，
+                    // 而它的第一句就是「投递不忙 ⇒ 立刻 flush」。Aevon(189) 把它拍死了：
+                    //
+                    //   notify: forward held slot=1 form=@
+                    //   notify: forward flush why=timeout after=0ms     ← 0 毫秒
+                    //   notify: forward pass b=com.tencent.mqq op=user   ← SB 全屏、背景黑
+                    //
+                    // 卡片要 100 ms 之后才把 scene 贴上、才调 `AevonForwardDeliver`，
+                    // 所以这一拍永远读到「不忙」，0.2.17 的「等投递结论」整段被跳过。
+                    // 首拍必须排到卡片之后：1.0 秒。之后由 `AevonForwardHoldWatch`
+                    // 自己每 0.5 秒续拍。
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                 (int64_t)(1.0 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        AevonForwardHoldWatch(1.0);
+                    });
                 }
             }
             AevonOpenFromNotification(bundle);

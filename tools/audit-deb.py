@@ -866,6 +866,12 @@ def main():
                   b"win: own staged %.0fx%.0f -> %.0fx%.0f b=%@",
                   b"com.ss.iphone.ugc.Aweme",
                   b"notify: share lost b=%@ why=%s",
+                  # 0.2.18 —— 0 ms 抢跑的修复：两种「等」各自的收尾词不能丢。
+                  #   no deliver    卡片 3 秒内一次投递都没发起 ⇒ 就地销毁
+                  #   appurl stuck  投递挂满 6 秒 ⇒ 也算失败，仍然不交回 SB
+                  b"notify: share lost b=%@ why=%s at=%.0fms",
+                  b"no deliver",
+                  b"appurl stuck",
                   b"notify: appurl ack b=%@ ok=%d via=%@ at=%.0fms [%@]",
                   b"notify: appurl ack b=%@ ok=%d via=%@ at=%.0fms",
                   b"notify: appurl give b=%@ why=%s at=%.0fms",
@@ -1544,9 +1550,10 @@ def main():
                       b"com.aevon.openurl.",
                       b"aevon-open.plist",
                       b"aevon-open-ack",
-                      b"app: openurl ok=%d via=%s u=%d opt=%d src=%d sc=%d wsc=%d rsp=%d dlg=%s",
-                      # 0.2.17 —— 回执里的现场（pid / scene 数 / delegate / 认不认）。
-                      b"ok=%d via=%s pid=%d sc=%d wsc=%d dlg=%s rsp=%d",
+                      b"app: openurl ok=%d via=%s u=%d opt=%d src=%d sc=%d wsc=%d wins=%d state=%d rsp=%d dlg=%s",
+                      # 0.2.18 —— 回执又加了 `wins` / `state`：区分「一条 scene 都没有」
+                      # 与「有窗口但没 scene」。两个字段都不进产物就等于这版白改。
+                      b"ok=%d via=%s pid=%d sc=%d wsc=%d wins=%d state=%d dlg=%s rsp=%d",
                       # 0.2.17 —— AppDelegate 的两条老入口。QQ 这类老工程常常只实现
                       # 这两条；名字写错一位就等于那条路从来没存在过。
                       b"application:openURL:sourceApplication:annotation:",

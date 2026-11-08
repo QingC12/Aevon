@@ -4723,15 +4723,33 @@ static NSString *AevonOpenURLPath(NSString *leaf) {
 /// delegate 不实现这条选择子；③实现了我却拿不到它。三种的修法完全不同，所以
 /// 从这一版起把这四个数写进回执，宿主原样打进主日志。
 static void AevonOpenURLAck(BOOL ok, const char *via, int scenes, int windowScenes,
-                            const char *dlg, int rsp) {
+                            const char *dlg, int rsp, int windows, int state) {
     NSString *path = AevonOpenURLPath(@"aevon-open-ack");
     if (path == nil) return;
     NSString *text = [NSString stringWithFormat:
-                      @"ok=%d via=%s pid=%d sc=%d wsc=%d dlg=%s rsp=%d\n",
+                      @"ok=%d via=%s pid=%d sc=%d wsc=%d wins=%d state=%d dlg=%s rsp=%d\n",
                       ok ? 1 : 0, via != NULL ? via : "-", (int)getpid(),
-                      scenes, windowScenes, dlg != NULL ? dlg : "-", rsp];
+                      scenes, windowScenes, windows, state,
+                      dlg != NULL ? dlg : "-", rsp];
     [text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
 }
+
+/// 0.2.18 — 「这个进程现在有几条窗口场景」。只在主线程调。
+static int AevonOpenURLWindowScenes(void) {
+    int n = 0;
+    UIApplication *app = [UIApplication sharedApplication];
+    for (UIScene *scene in app.connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) n += 1;
+    }
+    return n;
+}
+
+/// 等待状态。宿主每 0.35~0.45 秒重投一次，同一条请求会被这里看见很多次，
+/// 所以「已经等了多久」必须按**第一次看见**算，不能按次数算。
+static CFAbsoluteTime AevonOpenURLWaitAt = 0;
+static int AevonOpenURLWaitStep = 0;
+
+static void AevonOpenURLApply(void);
 
 /// 主线程执行：读投递文件 → 调 App 自己的 open URL 入口 → 写回执。
 static void AevonOpenURLApply(void) {
@@ -4740,6 +4758,37 @@ static void AevonOpenURLApply(void) {
     if (data == nil) {
         AevonAppLogWrite("app: openurl no file\n");
         return;
+    }
+    // 0.2.18 — 有文件，但先问自己一句「我现在有界面吗」。
+    //
+    // Aevon(188) 里 QQ 在 207 ms 就回了 `ok=0 via=noscene`；那时它刚被我们自建
+    // 的 scene 拉起来，UIKit 那边还没把 window scene 连上 —— 问它等于问一个还
+    // 没长出来的对象，答案没有信息量，却会被当成「拒绝」。这里最多等 4 秒
+    // （每 0.25 秒自己重看一次，期间**不消费文件、不写回执**），界面长出来
+    // 再投；真的等不到才照旧往下走（那时 AppDelegate 那三条老入口还在）。
+    int liveScenes = AevonOpenURLWindowScenes();
+    if (liveScenes == 0) {
+        if (AevonOpenURLWaitAt <= 0) AevonOpenURLWaitAt = CFAbsoluteTimeGetCurrent();
+        double waited = CFAbsoluteTimeGetCurrent() - AevonOpenURLWaitAt;
+        if (waited < 4.0 && AevonOpenURLWaitStep < 16) {
+            AevonOpenURLWaitStep += 1;
+            // 只在第 1、4、8、12、16 拍留痕：这条路每 0.25 秒跑一次，全打会淹掉日志。
+            if (AevonOpenURLWaitStep == 1 || AevonOpenURLWaitStep % 4 == 0) {
+                char waitLine[96];
+                snprintf(waitLine, sizeof(waitLine), "app: openurl wait n=%d at=%.0fms\n",
+                         AevonOpenURLWaitStep, waited * 1000.0);
+                AevonAppLogWrite(waitLine);
+            }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         (int64_t)(0.25 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                @autoreleasepool { AevonOpenURLApply(); }
+            });
+            return;
+        }
+    } else {
+        AevonOpenURLWaitAt = 0;
+        AevonOpenURLWaitStep = 0;
     }
     [[NSFileManager defaultManager] removeItemAtPath:file error:NULL];
     NSError *error = nil;
@@ -4756,7 +4805,7 @@ static void AevonOpenURLApply(void) {
     NSURL *url = raw.length > 0 ? [NSURL URLWithString:raw] : nil;
     if (![url isKindOfClass:[NSURL class]]) {
         AevonAppLogWrite("app: openurl bad plist\n");
-        AevonOpenURLAck(NO, "parse", 0, 0, "-", 0);
+        AevonOpenURLAck(NO, "parse", 0, 0, "-", 0, 0, 0);
         return;
     }
 
@@ -4910,12 +4959,31 @@ static void AevonOpenURLApply(void) {
         }
     }
 
-    char line[192];
-    snprintf(line, sizeof(line), "app: openurl ok=%d via=%s u=%d opt=%d src=%d sc=%d wsc=%d rsp=%d dlg=%s\n",
+    // 0.2.18 — 再补两个只有 App 进程自己知道的数：
+    //   `wins`  = `app.windows` 有几个窗口（有窗口没 scene ⇒ 这 App 不靠 scene 接 URL）；
+    //   `state` = `applicationState`（0 活跃 / 1 后台 / 2 未运行中）。
+    // Aevon(188) 只有 `ok=0 via=noscene` 一个事实，bundle 名和进程都看不出来，
+    // 这一版起每个答案都自带现场。
+    // `UIApplication.windows` 在 iOS 15 起被标了 deprecated，而 CI 是 `-Werror`
+    // ⇒ 走 KVC 摸同一个属性（运行时行为一模一样，只是不触发弃用警告）。
+    int windows = -1;
+    @try {
+        id list = [app valueForKey:@"windows"];
+        if ([list isKindOfClass:[NSArray class]]) windows = (int)[(NSArray *)list count];
+    } @catch (NSException *exception) {
+        windows = -1;
+    }
+    int state = (int)[app applicationState];
+    char line[224];
+    snprintf(line, sizeof(line),
+             "app: openurl ok=%d via=%s u=%d opt=%d src=%d sc=%d wsc=%d wins=%d state=%d rsp=%d dlg=%s\n",
              ok ? 1 : 0, via, (int)raw.length, (int)[options count],
-             source.length > 0 ? 1 : 0, scenes, windowScenes, rsp, dlg);
+             source.length > 0 ? 1 : 0, scenes, windowScenes, windows, state, rsp, dlg);
     AevonAppLogWrite(line);
-    AevonOpenURLAck(ok, via, scenes, windowScenes, dlg, rsp);
+    // 这一条请求到此结束 ⇒ 等待状态归零，下一条分享从 0 开始算。
+    AevonOpenURLWaitAt = 0;
+    AevonOpenURLWaitStep = 0;
+    AevonOpenURLAck(ok, via, scenes, windowScenes, dlg, rsp, windows, state);
 }
 
 static void AevonOpenURLNote(CFNotificationCenterRef __unused center,
