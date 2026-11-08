@@ -764,10 +764,21 @@ def main():
                   b"notify: shareprobe b=%s src=%s pay=%s form=%c fwd=%d origin=%s ac=%s"
                   b" susp=%d fsusp=%d set=%s setSusp=%d setFlag=%d getSusp=%d getFlag=%d"
                   b" pid=%d seen=%d purl=%s keys=%s",
-                  # 0.2.9 —— 激活设置的**形状**转储（只读内存，一次 msgSend 都没有）。
-                  # 0.2.8 那版按下标问 `flagForActivationSetting:` 被真机否掉：
-                  # Aevon(177) 九行全是 bits=1111…（问法错，不是数据错），所以换口径。
-                  b"win: act dump tag=%s c=%s n=%u %s",
+                  # 0.2.12 —— 挂起位写在 settings 对象上（不是 options 字典）。
+                  # 0.2.9 那版 `win: act dump` 已作废并删除（四个 tag 全是 n=1
+                  # _settings=0x1 —— 这个类只有一个 ivar，做差在数学上不可能有结果），
+                  # 它现在在反向断言表里。替代它的三件东西：
+                  #   act enc   setFlag/flagFor 两个方法的真实编码（接线前必须知道形状）
+                  #   act key   下标 → 名字 + 每个 flag 值的描述（挑挂起位靠它）
+                  #   suspbit   置位后立刻读回（「写了」和「生效了」不是一件事）
+                  b"win: act enc set=%s get=%s",
+                  b'win: act key %d "%.30s"%@',
+                  b"win: act key pick=%d flag=%d n=%d enc=%s",
+                  b"notify: forward suspbit idx=%d flag=%d read=%d enc=%s n=%d",
+                  # 0.2.12 —— 黑名单放行之后去目标 App 自己的容器里看一眼。
+                  # 微信「第一次分享就闪退」查了三轮没答案，根因是我们从来没读过
+                  # 它的日志（原来只在托管开卡/关卡时取）。
+                  b"notify: blacklist drain b=%@ when=%.0fs file=%d lines=%d",
                   # 一次开机一遍：这一族到底有哪些手段。真 API 名靠 census 不靠 strings。
                   b"win: act api set=SBActivationSettings n=%u %@",
                   b"win: act api set=absent",
@@ -802,7 +813,7 @@ def main():
                   b"surf: scn urln %s.%s{%s}",
                   b"notify: forward adopt b=%s op=%s",
                   b"win: ability app forceBg=%d ctrl forceBg=%d app dehost=%d ctrl dehost=%d",
-                  b"win: ability scene deact=%d/%d overlay=%d txn=%d openurl=%d",
+                  b"win: ability scene deact=%d/%d overlay=%d txn=%d openurl=%d/%d",
                   # settings 能力行补了两个读数（getFlag / n）。0.2.6 之前它是「一次开机
                   # 只记一次」，分享换一条路进来时日志里什么都没有。
                   b"notify: fwd settings c=%s setSusp=%d setFlag=%d getSusp=%d getFlag=%d n=%d",
@@ -957,7 +968,10 @@ def main():
                  # 自循环 + 10 秒同步 XPC 就是它）。0.2.4 恢复了「回落原生一次」，
                  # 但那是 `ring: launch` 这一条腿，与 `card route declined` 不是
                  # 一回事：后者是旧文件里那个会自己喂自己的闭包。
-                 b"ring: card route declined ("):                 # gone
+                 b"ring: card route declined (",                  # gone
+                 # 0.2.12 — 形状转储整块删除。四个 tag 全 `n=1 _settings=0x1`，
+                 # 它从来没有回答过任何问题，只会占预算。还能 grep 到就是没删干净。
+                 b"win: act dump tag=%s c=%s n=%u %s"):            # gone
         if gone in dylib_early:
             bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "
                 "back (hot zone 0.1.18 / summon bar 0.1.24 / cover lock gate 0.1.90)")
@@ -1241,7 +1255,11 @@ def main():
                       # 进程若被系统 SIGKILL，它就停在某一秒上，下一次 `boot` 就是
                       # 死亡时刻 —— 这种杀法谁都拦不住，只能靠「最后一秒」定位。
                       b"app: crash sig=%d step=%d sub=%d d=%d",
-                      b"app: crash exc %s: %s step=%d",
+                      # 0.2.12 — 异常行补 sub=/inSheet=，并加 14 帧调用栈
+                      # （`app: crash at <i> <符号>`）。判据只有一条：栈上有没有
+                      # `AevonApp` 这一族帧 —— 有才是我们抛的。
+                      b"app: crash exc %s: %s step=%d sub=%d inSheet=%d",
+                      b"app: crash at %lu %.220s",
                       b"alive t=%d",
                       # 0.0.94 — **卡死**（不是崩溃）的证词。Aevon(84) 里 App 侧日志
                       # 14 秒零输出、宿主 `cs=2 sublayers=1` 正常、随后 pid 换了，

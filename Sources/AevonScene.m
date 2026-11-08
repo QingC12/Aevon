@@ -3297,6 +3297,61 @@ static BOOL AevonWindowBlacklisted(const char *bundle) {
 ///
 /// 匹配用 `strstr`（同上面那张的理由）：`com.tencent.xin` 也该盖住
 /// `com.tencent.xin.sharetimeline` 这类扩展 bundle。
+/// 0.2.12 — 黑名单放行之后，去**目标 App 自己的容器**里看一眼它写了什么。
+///
+/// 这是「微信第一次分享就闪退」查了三轮查不出原因的真正原因：宿主原来只在
+/// 「开卡 / 关卡」时去取被托管 App 的 `tmp/aevon-app.log`，而黑名单这条路上微信
+/// **根本没被托管**，所以它的日志从来没被读过。Aevon(179) 之所以能看到
+/// `-[MBPublicService provideFileSystem] step=5`，是因为那一次微信恰好被托管了；
+/// Aevon(181) 微信走原生、零托管，整份日志里连一行 `applog[com.tencent.xin]` 都没有 ——
+/// 不是没崩，是我们没去看。
+///
+/// 两次取样（2 秒 / 7 秒）：崩溃现场落在哪一拍不确定，一次取样可能正好在它前面。
+/// 只在后台队列上做，主线程那一拍只排两个定时器 —— 触摸路径上不许有任何跨进程写盘，
+/// 这条在这个工程里是硬禁令。
+static int AevonBlacklistDrainNotes = 0;
+
+static void AevonBlacklistDrainAt(const char *bundle, double delay) {
+    // 用 strdup 而不是「局部数组 + 块捕获」：数组捕获在 clang 上虽然合法，但这一版
+    // 没有本地编译器可验证（本地无 Theos，CI 一次就是一次 run），所以选一条绝不会
+    // 有歧义的写法。所有权随块走：块里 free，不跨线程共享可变状态。
+    char *copy = strdup(bundle);
+    if (copy == NULL) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        NSString *target = [NSString stringWithUTF8String:copy];
+        if (target.length == 0) {
+            free(copy);
+            return;
+        }
+        NSString *path = AevonAppLogPathOf(target);
+        BOOL exists = (path != nil);
+        if (exists) {
+            exists = [[NSFileManager defaultManager] fileExistsAtPath:path];
+        }
+        // 取回来的原文会以 `applog[<bundle>]: ` 前缀直接写进主日志，并把源文件清空 ——
+        // 与开卡/关卡那条路完全同一个口径，读日志的人不必分辨两份来源。
+        NSString *text = AevonDrainAppLogText(target, 40);
+        int lines = 0;
+        if (text.length > 0) {
+            lines = (int)[[text componentsSeparatedByString:@"\n"] count] - 1;
+            if (lines < 0) lines = 0;
+        }
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: blacklist drain b=%@ when=%.0fs file=%d lines=%d",
+                      target, delay, exists ? 1 : 0, lines] UTF8String]);
+        free(copy);
+    });
+}
+
+static void AevonBlacklistDrain(const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return;
+    if (AevonBlacklistDrainNotes >= 12) return;
+    AevonBlacklistDrainNotes += 1;
+    AevonBlacklistDrainAt(bundle, 2.0);
+    AevonBlacklistDrainAt(bundle, 7.0);
+}
+
 static BOOL AevonShareNativeListed(const char *bundle) {
     static const char *names[] = { "com.tencent.xin" };
     if (bundle == NULL || bundle[0] == '\0') return NO;
@@ -3565,6 +3620,9 @@ static int AevonOpenDecide(id request, id options,
     // 原生分享反而少一环。
     if (kind != NULL && strcmp(kind, "share") == 0 && AevonShareNativeListed(bundle)) {
         *why = "shareBlacklist";
+        // 0.2.12 — 放行之后去它家看一眼（见 `AevonBlacklistDrain` 上方那段）：
+        // 只排两个后台定时器，主线程上不多一次读盘。
+        AevonBlacklistDrain(bundle);
         return 0;
     }
 
@@ -3703,9 +3761,6 @@ static void AevonOpenKeysOf(id options, char *out, size_t size) {
 /// 记录：bundle / 来源进程 / payload 类型 / 动作类名 / LaunchOrigin /
 ///      结果块形状 / 挂起键读回值 / settings 四个能力 / options 全部键。
 static int AevonShareNotes = 0;
-/// 0.2.9 — 激活设置转储的**调用**预算：一条打开请求算一次，一次最多打三层（自己+两层父类）。
-/// 60 次足够覆盖「点图标 / 通知打开 / 分享转发 / 我们自己重入那条」四种现场各若干次。
-static int AevonFlagsNotes = 0;
 /// 0.2.8 — 上一次转发真正写进去的 `__ActivateSuspended` 值。
 /// 分享现场行原来读的是**原始** options（我们写的是副本），所以恒为 -1；
 /// 这个变量记的是写后回读到的真值，`fsusp=` 就是它。
@@ -3738,72 +3793,137 @@ static void AevonOpenValueText(id value, char *out, size_t size) {
     }
 }
 
-/// 0.2.9 — 激活设置的**形状**转储。**只读内存**：一次 msgSend 都没有（除了类名）。
+/// 0.2.12 — 「挂起位到底叫什么」。这一版唯一要回答的问题，也是唯一没碰过的一层。
 ///
-/// 0.2.8 那版按「下标 0..23 逐个问 `flagForActivationSetting:`」写，被真机当场否掉：
-/// Aevon(177) 九行全是 `bits=111111111111111111111111`。24 个下标全返回 1 不代表
-/// 「24 个标志都开着」，只代表**问法不对**（那个入口不是按下标取的）。读数作废 → 换口径。
+/// 0.2.9 的 `win: act dump` 已作废：四个 tag（open / trusted / untrusted / user）
+/// 全是 `n=1 _settings=0x1` —— 这个类**只有一个 ivar，就是一个位掩码**，四组做差
+/// 在数学上不可能有结果。0.2.11 的 `win: act api` 给了 24 个方法，其中三个正是这里
+/// 要用的：
+///   · `keyDescriptionForSetting:`                    下标 → 名字（主读数）
+///   · `valueDescriptionForFlag:object:ofSetting:`     某下标下某个 flag 值 → 名字
+///   · `setFlag:forActivationSetting:` / `flagForActivationSetting:`  写 / 读
 ///
-/// 这一版改成把 settings 对象（自己 + 最多两层父类）的每个 ivar 原样读 8 字节打出来，
-/// 用四组现场做差：
-///   · `tag=open`   —— 点图标 / 系统普通打开（**必然全屏**，对照组 A）
-///   · `tag=trusted`—— 同上，另一条入口
-///   · 分享转发     —— 出问题这组（**出了全屏**）
-///   · 通知打开     —— 同一份日志里**没有全屏**（对照组 B，Aevon(177) 17:52:18 实证）
-/// 哪一位只在「出全屏」的那组不同，就是下一版要置/要清的位。
+/// 为什么这一次可能是对的：`__ActivateSuspended` 那个 **options 键** 改了两版都没用，
+/// 因为 options 是**输入**，SpringBoard 在进这几个入口之前就已经用
+/// `_updateActivationSettings:forRequestWithOptions:clientProcess:application:` 把它
+/// 折算成 settings 了（这个选择子本身就是证据）。我们改 options，改的是**已经被读过**
+/// 的东西；后续激活逻辑真正读的是第 4 个参数那个 `SBActivationSettings` 对象。
 ///
-/// 三个刻意的选择：
-///   ① 对象指针只打「有没有」（1/0）—— 地址每次都变，留着会把真正的差异位淹掉；
-///   ② 标量打十六进制原值，不猜类型 —— 这一族里 BOOL/int/位域混在一起，按类型读会串；
-///   ③ 先按 `class_getInstanceSize` 夹住「偏移 + 长度」，越界就跳过 —— 绝不读别人的内存。
-static void AevonActAppend(char *out, size_t size, const char *name, uint64_t value) {
-    size_t used = strlen(out);
-    if (used + 40 >= size) return;
-    snprintf(out + used, size - used, "%s%s=0x%llx",
-             used > 0 ? "," : "", name != NULL ? name : "?",
-             (unsigned long long)value);
+/// 挑选原则：只按名字找、只挑一个、只置一位、置完读回。名字与描述里一个
+/// suspend / background 都没有就**一位都不置** —— 宁可不生效，也不要盲置到别的语义位
+/// （唤醒屏幕、免打扰那些都在同一张表里）。
+static int AevonActSuspIndex = -1;
+static int AevonActSuspFlag = 0;
+static char AevonActSetEnc[32] = "-";
+static int AevonActKeyNotes = 0;
+/// `notify: forward suspbit` 的独立预算。理由同这个工程里每一条现场行：跟别人共用
+/// 一个计数器，就会在几次操作之后静默，而静默看起来跟「没发生」一模一样。
+static int AevonSuspBitNotes = 0;
+
+/// `method_getArgumentType` 的第 index 个参数，只取首字符；取不到返回 0。
+/// 这是「接线之前先看形状」的最小实现：选择子在不在是一件事，参数是什么类型是另一件。
+static char AevonActArgType(Method method, unsigned int index) {
+    if (method == NULL) return 0;
+    if (index >= method_getNumberOfArguments(method)) return 0;
+    char buf[24];
+    method_getArgumentType(method, index, buf, sizeof(buf));
+    return buf[0];
 }
 
-static void AevonActDumpLevel(id obj, Class cls, const char *tag) {
-    unsigned int count = 0;
-    Ivar *ivars = class_copyIvarList(cls, &count);
-    if (ivars == NULL) return;
-    NSUInteger total = class_getInstanceSize(object_getClass(obj));
-    char body[420];
-    body[0] = '\0';
-    for (unsigned int i = 0; i < count; i++) {
-        Ivar iv = ivars[i];
-        const char *name = ivar_getName(iv);
-        const char *type = ivar_getTypeEncoding(iv);
-        if (name == NULL) continue;
-        ptrdiff_t at = ivar_getOffset(iv);
-        NSUInteger span = 0;
-        if (type != NULL) NSGetSizeAndAlignment(type, &span, NULL);
-        if (span == 0) span = 8;
-        if (at < 0 || (NSUInteger)at + span > total) continue;
-        uint64_t raw = 0;
-        memcpy(&raw, (const char *)obj + at, span >= 8 ? 8 : span);
-        if (type != NULL && (type[0] == '@' || type[0] == '#')) raw = (raw != 0) ? 1 : 0;
-        AevonActAppend(body, sizeof(body), name, raw);
-    }
-    free(ivars);
-    AevonLogRaw([[NSString stringWithFormat:@"win: act dump tag=%s c=%s n=%u %s",
-                  tag != NULL ? tag : "-", class_getName(cls), count,
-                  body[0] != '\0' ? body : "-"] UTF8String]);
+/// 整数族。`@` 不在这里面 —— 把一个整数塞进对象参数是这一层唯一会当场崩的写法。
+static int AevonActIsInt(char type) {
+    return type == 'q' || type == 'Q' || type == 'i' || type == 'I' ||
+           type == 'l' || type == 'L' || type == 's' || type == 'S' ||
+           type == 'c' || type == 'C' || type == 'B';
 }
 
-static void AevonOpenActFlags(id settings, const char *tag) {
+static void AevonActSettingNames(id settings) {
+    static int done = 0;
+    if (done) return;
     if (settings == nil) return;
-    if (AevonFlagsNotes >= 60) return;
-    AevonFlagsNotes += 1;
+    done = 1;
     @try {
         Class cls = object_getClass(settings);
-        for (int lvl = 0; lvl < 3 && cls != Nil && cls != [NSObject class]; lvl++) {
-            AevonActDumpLevel(settings, cls, tag);
-            cls = class_getSuperclass(cls);
+        Method setter = class_getInstanceMethod(cls, sel_registerName("setFlag:forActivationSetting:"));
+        Method getter = class_getInstanceMethod(cls, sel_registerName("flagForActivationSetting:"));
+        const char *eset = setter != NULL ? method_getTypeEncoding(setter) : NULL;
+        const char *eget = getter != NULL ? method_getTypeEncoding(getter) : NULL;
+        if (eset != NULL && strlen(eset) < sizeof(AevonActSetEnc)) {
+            strncpy(AevonActSetEnc, eset, sizeof(AevonActSetEnc) - 1);
+            AevonActSetEnc[sizeof(AevonActSetEnc) - 1] = '\0';
         }
+        AevonLogRaw([[NSString stringWithFormat:@"win: act enc set=%s get=%s",
+                      eset != NULL ? eset : "-", eget != NULL ? eget : "-"] UTF8String]);
+
+        // 三道形状闸。名字问得到 ≠ 参数就是这么收的：`valueDescriptionForFlag:` 的第一个
+        // 参数如果其实是对象，我们按整数传进去就是往 SpringBoard 里扔一个野指针 ——
+        // 这条线上出过两次安全模式，所以宁可什么都不问，也不猜着调。
+        Method keym = class_getInstanceMethod(cls, sel_registerName("keyDescriptionForSetting:"));
+        Method valm = class_getInstanceMethod(
+            cls, sel_registerName("valueDescriptionForFlag:object:ofSetting:"));
+        char keyArg = AevonActArgType(keym, 2);
+        char valArg = AevonActArgType(valm, 2);
+        char valObj = AevonActArgType(valm, 3);
+        char setA = AevonActArgType(setter, 2);
+        char setB = AevonActArgType(setter, 3);
+        int keyOK = (keym != NULL) && (keyArg == 0 || AevonActIsInt(keyArg));
+        int valOK = (valm != NULL) && AevonActIsInt(valArg) && (valObj == 0 || valObj == '@');
+        int setOK = (setter != NULL) && AevonActIsInt(setA) && AevonActIsInt(setB);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"win: act guard key=%d(%c) val=%d(%c,%c) set=%d(%c,%c)",
+                      keyOK, keyArg != 0 ? keyArg : '-', valOK,
+                      valArg != 0 ? valArg : '-', valObj != 0 ? valObj : '-',
+                      setOK, setA != 0 ? setA : '-', setB != 0 ? setB : '-'] UTF8String]);
+        if (!setOK) AevonActSuspIndex = -1;   // 形状不对就不许置位
+
+        int named = 0;
+        for (int i = 0; keyOK && i < 32 && AevonActKeyNotes < 20; i++) {
+            @try {
+                id name = ((id (*)(id, SEL, NSInteger))objc_msgSend)(
+                    settings, sel_registerName("keyDescriptionForSetting:"), (NSInteger)i);
+                if (![name isKindOfClass:[NSString class]] || [(NSString *)name length] == 0) continue;
+                const char *nameraw = [(NSString *)name UTF8String];
+                if (nameraw == NULL) continue;
+                NSMutableString *desc = [NSMutableString string];
+                for (int f = 0; valOK && f < 4; f++) {
+                    @try {
+                        id text = ((id (*)(id, SEL, NSInteger, id, NSInteger))objc_msgSend)(
+                            settings, sel_registerName("valueDescriptionForFlag:object:ofSetting:"),
+                            (NSInteger)f, nil, (NSInteger)i);
+                        if (![text isKindOfClass:[NSString class]]) continue;
+                        const char *raw = [(NSString *)text UTF8String];
+                        if (raw == NULL || raw[0] == '\0') continue;
+                        [desc appendFormat:@" f%d=%.24s", f, raw];
+                        if (AevonActSuspIndex >= 0) continue;
+                        NSString *low = [[NSString stringWithUTF8String:raw] lowercaseString];
+                        if ([low rangeOfString:@"suspend"].location != NSNotFound ||
+                            [low rangeOfString:@"background"].location != NSNotFound) {
+                            AevonActSuspIndex = i;
+                            AevonActSuspFlag = f;
+                        }
+                    } @catch (NSException *exception) {
+                    }
+                }
+                // 名字本身也算：`keyDescriptionForSetting:` 直接给出 Suspend 之类时走这条。
+                if (AevonActSuspIndex < 0) {
+                    NSString *low = [[NSString stringWithUTF8String:nameraw] lowercaseString];
+                    if ([low rangeOfString:@"suspend"].location != NSNotFound ||
+                        [low rangeOfString:@"background"].location != NSNotFound) {
+                        AevonActSuspIndex = i;
+                        AevonActSuspFlag = 1;
+                    }
+                }
+                AevonLogRaw([[NSString stringWithFormat:@"win: act key %d \"%.30s\"%@",
+                              i, nameraw, desc] UTF8String]);
+                AevonActKeyNotes += 1;
+                named += 1;
+            } @catch (NSException *exception) {
+            }
+        }
+        AevonLogRaw([[NSString stringWithFormat:@"win: act key pick=%d flag=%d n=%d enc=%s",
+                      AevonActSuspIndex, AevonActSuspFlag, named, AevonActSetEnc] UTF8String]);
     } @catch (NSException *exception) {
-        AevonLogRaw("win: act dump threw");
+        AevonLogRaw("win: act key threw");
     }
 }
 
@@ -5185,6 +5305,41 @@ static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id o
                   susp != nil ? [(NSNumber *)susp intValue] : -1,
                   (unsigned long)[forward count]] UTF8String]);
 
+    // 0.2.12 — 挂起位写在**第 4 个参数那个 settings 对象**上，不是写在 options 里。
+    //
+    // 两个层面的区别是这一版的核心判断：options 是输入，SB 进这四个入口之前就已经用
+    // `_updateActivationSettings:forRequestWithOptions:clientProcess:application:` 把它
+    // 折算成 settings 了（Aevon(181) 的 `win: act api` 里有这条选择子）。也就是说
+    // 我们往 options 里加键，加进的是**已经被读过**的东西；0.1.95~0.2.11 六版都无效，
+    // 原因就在这里。真正被后续激活逻辑读的是这个对象。
+    //
+    // 三条硬约束：① 只有名字表里挑出 suspend/background 语义才置（`AevonActSuspIndex`
+    // 为 -1 就一位都不置）；② 只置这一条请求并且只置一位；③ 置完立刻读回，读回值
+    // 进日志 —— 「写了」和「生效了」不是一件事，这个工程在这上面栽过两次。
+    int suspbitRead = -1;
+    if (AevonActSuspIndex >= 0 && settings != nil && AevonSuspBitNotes < 8) {
+        @try {
+            SEL setter = sel_registerName("setFlag:forActivationSetting:");
+            SEL getter = sel_registerName("flagForActivationSetting:");
+            if ([settings respondsToSelector:setter]) {
+                ((void (*)(id, SEL, unsigned long, unsigned long))objc_msgSend)
+                    (settings, setter, (unsigned long)AevonActSuspFlag,
+                     (unsigned long)AevonActSuspIndex);
+                if ([settings respondsToSelector:getter]) {
+                    suspbitRead = (int)((unsigned long (*)(id, SEL, unsigned long))objc_msgSend)
+                        (settings, getter, (unsigned long)AevonActSuspIndex);
+                }
+            }
+        } @catch (NSException *exception) {
+            AevonLogRaw("notify: forward suspbit threw");
+        }
+        AevonSuspBitNotes += 1;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: forward suspbit idx=%d flag=%d read=%d enc=%s n=%d",
+                      AevonActSuspIndex, AevonActSuspFlag, suspbitRead, AevonActSetEnc,
+                      AevonSuspBitNotes] UTF8String]);
+    }
+
     // 结果块要同形状：系统一定会调它一次，形状不对就是当场崩。
     id done = (id)AevonForwardBool;
     if (form == '@') done = (id)AevonForwardObj;
@@ -5311,9 +5466,10 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
         AevonOpenSnapshot(slot, request, options, settings, origin, line, sizeof(line));
     }
 
-    // 0.2.8 — 激活标志表：四条入口的每一拍都记一行，**行为零改动**。
-    // 判读只靠两组对比（见 `AevonOpenActFlags`）：哪一位只在「转发并挂起」那一组是 1。
-    AevonOpenActFlags(settings, slot >= 0 ? AevonOpenTargets[slot].tag : "?");
+    // 0.2.12 — 原来这里每拍打一组 `win: act dump`。0.2.9 的形状转储已被证明没有
+    // 信息量（四个 tag 全是 `n=1 _settings=0x1`），整块删掉；现在只留一个「一次开机
+    // 一遍」的名字表，见 `AevonActSettingNames`。
+    AevonActSettingNames(settings);
 
     if (verdict == 1) {
         // 不转发。SpringBoard 那一段（建 app layout、全屏推前台）整段跳过，改由
@@ -5525,14 +5681,22 @@ static void AevonAbilityProbe(void) {
                       AevonClassHasMethod(ctrlCls, "forceBackgrounded:forApp:"),
                       AevonClassHasMethod(appCls, "dehost"),
                       AevonClassHasMethod(ctrlCls, "dehost")] UTF8String]);
+        // 0.2.12 — `openurl=` 这一栏原来是 0，一直看着像「这条路不存在」。Aevon(181)
+        // 的全类扫给了答案：`_openURLCore:display:animating:activationSettings:origin:withResult:`
+        // 只在类 **`SpringBoard`** 上（`i{v60@0:8@16@24B32@36@44@?52}`），SBMainWorkspace
+        // 上没有。所以这一栏改成两个数：`openurl=<mainws>/<springboard>`。
+        Class sbAppCls = objc_getClass("SpringBoard");
         AevonLogRaw([[NSString stringWithFormat:
-                      @"win: ability scene deact=%d/%d overlay=%d txn=%d openurl=%d",
+                      @"win: ability scene deact=%d/%d overlay=%d txn=%d openurl=%d/%d",
                       AevonClassHasMethod(mgrCls, "_setDeactivationReasons:onScene:withSettings:reason:"),
                       AevonClassHasMethod(mainMgr, "_setDeactivationReasons:onScene:withSettings:reason:"),
                       hostCls != Nil ? 1 : 0,
                       txnCls != Nil ? 1 : 0,
                       AevonClassHasMethod(wsCls,
-                          "_openURLCore:display:animating:activationSettings:origin:withResult:")] UTF8String]);
+                          "_openURLCore:display:animating:activationSettings:origin:withResult:"),
+                      AevonClassHasMethod(sbAppCls,
+                          "_openURLCore:display:animating:activationSettings:origin:withResult:")]
+                     UTF8String]);
         // 0.2.9 — 「把一个已经在跑的 App 按回后台 / 让它不前台激活」这一族到底有哪些手段。
         // 全部只问不调（-1 = 类不在，0 = 类在方法不在，1 = 可调）。0.2.8 的
         // `forceBg=0/0` 已经证明「选择子在 __objc_selrefs 里 ≠ 这一版真能调」，

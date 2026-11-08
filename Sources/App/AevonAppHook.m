@@ -131,6 +131,15 @@ static volatile sig_atomic_t AevonSub = 0;
 #define AEVON_SUB_BAND     8   // 画面区里找那块矩形
 #define AEVON_SUB_PICK     9   // 候选循环
 #define AEVON_SUB_TICK     10  // 心跳那一拍
+// 0.2.12 — sheet 钩子的语句级位置。Aevon(179) 里微信那次崩溃只有 `step=5`（=sheet），
+// 答不出「死在这一段里的哪一句」，所以这里把粒度再压一层。编号从 21 起，与上面那批
+// 不重叠：`sub=1..10` 已经有明确的旧含义，混用会让旧日志的判读全错。
+#define AEVON_SUB_SHEET_WIN   21   // 取 keyWindow
+#define AEVON_SUB_SHEET_ROOT  22   // 取 rootViewController
+#define AEVON_SUB_SHEET_CHAIN 23   // 沿 presentedViewController 链上溯
+#define AEVON_SUB_SHEET_GEOM  24   // convertRect / bounds（几何读数）
+#define AEVON_SUB_SHEET_WRITE 25   // setCenter 那一句（唯一改动 App 的地方）
+#define AEVON_SUB_SHEET_AGAIN 26   // 60 ms 后的复看
 
 /// 排版钩子的重入深度（线程私有）。
 ///
@@ -1671,6 +1680,22 @@ static double AevonLiftSight = 0.0;
 static int AevonLiftSoon = 0;
 
 static void AevonSheetLift(void);
+static void AevonSheetLiftBody(void);
+
+/// 0.2.12 — 「这个异常是不是从我们这句里抛出来的」。
+///
+/// Aevon(179) 微信那两次崩溃只有 `step=5`（=这个函数），而 `step=` 只说明**最后一个
+/// 写它的人是谁**，不说明异常是从谁的栈帧里抛出来的：App 自己的异步代码抛异常时，
+/// 我们同样可能是最后一个写 step 的人。这一位就是用来分开这两件事的 ——
+/// `app: crash exc … inSheet=1` ⇒ 异常发生在我们这次调用内部（可以 @try 兜住）；
+/// `inSheet=0` ⇒ 不是我们这条栈，继续往这条线上修就是白花时间。
+static volatile sig_atomic_t AevonInSheet = 0;
+
+static void AevonSheetLift(void) {
+    AevonInSheet = 1;
+    AevonSheetLiftBody();
+    AevonInSheet = 0;
+}
 
 /// 60 ms 后的补看。只在「第一次看见这张浮层」时排一次，不递归堆积。
 static void AevonSheetLiftAgain(void) {
@@ -1682,12 +1707,15 @@ static void AevonSheetLiftAgain(void) {
     });
 }
 
-static void AevonSheetLift(void) {
+static void AevonSheetLiftBody(void) {
     AevonStep = AEVON_STEP_SHEET;
+    AevonSub = AEVON_SUB_SHEET_WIN;
     UIWindow *win = AevonKeyWindow();
     if (win == nil) return;
+    AevonSub = AEVON_SUB_SHEET_ROOT;
     UIViewController *top = [win rootViewController];
     if (top == nil) return;
+    AevonSub = AEVON_SUB_SHEET_CHAIN;
     int hops = 0;
     while ([top presentedViewController] != nil && hops < 6) {
         top = [top presentedViewController];
@@ -1714,6 +1742,7 @@ static void AevonSheetLift(void) {
         AevonSheetReport();
     }
     if (AevonLiftCount >= 4) return;
+    AevonSub = AEVON_SUB_SHEET_GEOM;
     CGRect r = [sheet convertRect:[sheet bounds] toView:win];
     CGFloat winH = [win bounds].size.height;
     if (winH < 200.0 || r.size.height < 200.0) return;
@@ -1734,6 +1763,7 @@ static void AevonSheetLift(void) {
             AevonLiftSeen = over;
             return;
         }
+        AevonSub = AEVON_SUB_SHEET_WRITE;
         CGPoint center = [sheet center];
         [sheet setCenter:CGPointMake(center.x, center.y - over)];
         AevonLiftCount += 1;
@@ -1746,7 +1776,10 @@ static void AevonSheetLift(void) {
         return;
     }
     AevonLiftSeen = over;
-    if (fresh && !AevonLiftSoon) AevonSheetLiftAgain();
+    if (fresh && !AevonLiftSoon) {
+        AevonSub = AEVON_SUB_SHEET_AGAIN;
+        AevonSheetLiftAgain();
+    }
 }
 
 /// 0.0.84 — 抬得再早一点：不等心跳，从「要呈现了」这一声开始看。
@@ -4194,15 +4227,40 @@ static void AevonSignalNote(int sig) {
 
 /// `app: crash exc <名字>: <原因>` —— Objective-C 异常。
 /// 这一路不在 signal 上下文里，取字符串是安全的。
+///
+/// 0.2.12 — 补三样东西，为的是回答「微信第一次分享就闪退」：
+///   ① `sub=` 与 `inSheet=`：`step=5` 只说最后一个写步骤的人是我们，`inSheet=1`
+///      才说明异常发生在我们这次调用的**栈内**（那种可以 @try 兜住，也是该修的地方）；
+///   ② 调用栈 14 帧：判据就是栈上有没有 `AevonApp` 这一族帧；
+///   ③ 这一路原来只写一行，现在写 15 行 —— 崩溃现场只有一次，宁可多留。
 static void AevonExceptionNote(NSException *e) {
     if (e == nil) return;
-    char line[320];
+    char line[420];
     const char *name = [[e name] UTF8String];
     const char *why = [[e reason] UTF8String];
-    snprintf(line, sizeof(line), "%ld app: crash exc %s: %s step=%d\n",
+    snprintf(line, sizeof(line), "%ld app: crash exc %s: %s step=%d sub=%d inSheet=%d\n",
              (long)time(NULL), name != NULL ? name : "?",
-             why != NULL ? why : "?", (int)AevonStep);
+             why != NULL ? why : "?", (int)AevonStep, (int)AevonSub, (int)AevonInSheet);
     AevonRawNote(line);
+    @try {
+        NSArray *symbols = [e callStackSymbols];
+        if (![symbols isKindOfClass:[NSArray class]] || symbols.count == 0) {
+            symbols = [NSThread callStackSymbols];
+        }
+        NSUInteger limit = [symbols count] < 14 ? [symbols count] : 14;
+        for (NSUInteger i = 0; i < limit; i++) {
+            id one = [symbols objectAtIndex:i];
+            if (![one isKindOfClass:[NSString class]]) continue;
+            const char *raw = [(NSString *)one UTF8String];
+            if (raw == NULL) continue;
+            char frame[300];
+            snprintf(frame, sizeof(frame), "%ld app: crash at %lu %.220s\n",
+                     (long)time(NULL), (unsigned long)i, raw);
+            AevonRawNote(frame);
+        }
+    } @catch (NSException *exception) {
+        AevonRawNote("app: crash stack unavailable\n");
+    }
 }
 
 /// 0.0.94 — 栈溢出时用的备用栈。
