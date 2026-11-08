@@ -354,6 +354,16 @@ NSInteger AevonOwnState(void);
 /// 取走建好的 scene（状态回到 idle）。没有就返回 nil。
 id _Nullable AevonOwnFetch(void);
 
+// MARK: - 0.2.14 分享转发延后
+//
+// 分享那条请求（带 payload）不再在分流里立刻交回系统：先建卡、等 scene 到位，
+// 再由这里投出去。原因见 `AevonForwardHold` 上面那段 —— 交回系统那一瞬
+// SpringBoard 就把目标 App 摆成前台，那正是用户看到的「先全屏」。
+//
+// `why` 只进日志（`notify: forward flush why=…`）。任意线程调都安全，没有待发
+// 请求时什么都不做；不调用也不会丢分享（1.6 秒超时会自己发）。
+void AevonForwardFlush(const char *_Nullable why);
+
 /// 这一次卡片没有用自建的 scene（复用系统那个 / 走了老路）—— 关卡时不许销毁。
 void AevonOwnClear(void);
 

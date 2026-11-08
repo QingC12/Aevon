@@ -1041,16 +1041,28 @@ zStackParticipantDidChange:
         // 整条包在 ObjC 的 `@try` 里 —— 缺一样就退回 0.2.12 那条路，行为一字不改。
         let ownAt = CFAbsoluteTimeGetCurrent()
         // 「已经有一个活 scene」就不自建：那会跟系统自己那个 scene 撞同一个
-        // identity（`sceneID:<bundle>-default`）。第二次点同一个 App、刚退出
-        // 还没睡下去、图标路打开过 —— 全落在这一格里，走的还是 0.2.12 的链。
+        // identity（`sceneID:<bundle>-default`）。
+        //
+        // 0.2.14 — 这一格原来还会落下去走挂起启动，于是 Aevon(183) 的第二次分享
+        // （`own start door=-1 live=1` 紧跟着 `icon launch … door=1`）又多了一次
+        // 「把 App 摆成前台」的全屏。已经有活 scene 的时候根本没有启动的必要：
+        // `sceneFor` 用的就是下面那一步的同一个判据，所以「已经找到」等价于
+        // 「下一拍会立刻贴上」。这里直接贴，一个启动请求都不发。
         let alreadyLive = sceneFor(bundleID) != nil
-        if alreadyLive { AevonOwnClear() }
+        if alreadyLive {
+            AevonOwnClear()
+            Log.write(String(format: "win: own live attach %@ t=%ldms wait=%ldms",
+                             bundleID, Int((CFAbsoluteTimeGetCurrent() - ownAt) * 1000),
+                             Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
+            mark("OWN-live")
+            markHosted(bundleID)
+            pollForScene(bundleID, ticks: 0, start: Date(), fallback: fallback)
+            return
+        }
         let canvas = FloatHost.fatRender(in: UIScreen.main.bounds.size)
-        let started = alreadyLive
-            ? -1
-            : AevonOwnStart(bundleID, CGRect(origin: .zero, size: canvas), "openCard")
+        let started = AevonOwnStart(bundleID, CGRect(origin: .zero, size: canvas), "openCard")
         Log.write(String(format: "win: own start %@ door=%ld live=%d canvas=%.0fx%.0f t=%ldms wait=%ldms",
-                         bundleID, started, alreadyLive ? 1 : 0, canvas.width, canvas.height,
+                         bundleID, started, 0, canvas.width, canvas.height,
                          Int((CFAbsoluteTimeGetCurrent() - ownAt) * 1000),
                          Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
         if started == 1 {
@@ -1059,8 +1071,9 @@ zStackParticipantDidChange:
             pollForScene(bundleID, ticks: 0, start: Date(), fallback: fallback)
             return
         }
-        // 走到这里就是老路（闸不过 / 限流 / 已经有一个活 scene）：这一张卡的
-        // scene 将来是系统的那个，关卡时**不能**销毁 —— 见 `AevonOwnHeld`。
+        // 走到这里只剩两种情形：`AevonOwnGate` 说这套私有面在这台机器上不齐
+        // （连试都不试），或者已经有一次在跑（不重入）。这一张卡的 scene 将来是
+        // 系统的那个，关卡时**不能**销毁 —— 见 `AevonOwnHeld`。
         AevonOwnClear()
 
         // 老路一格没动。走到这里只有两种情形：`AevonOwnGate` 说这套私有面在
@@ -1305,6 +1318,10 @@ zStackParticipantDidChange:
             Log.write("win: own scene up after " + String(ms) + "ms ticks=" + String(ticks))
             emitNotes(AevonTakeNotes())
             float(built, bundleID: bundleID)
+            // 0.2.14 — 自建 scene 到位 ⇒ 现在才把分享那条请求投回系统。这一句
+            // 之前它一直挂在 `AevonForwardHold` 里（最多 1.6 秒），就是为了不让
+            // 系统先把 App 摆成前台。
+            AevonForwardFlush("own scene up")
             guard FloatHost.mainBundle == bundleID else {
                 AevonHookDisarm(bundleID)
                 if AevonSystemCovered() {
@@ -1340,6 +1357,8 @@ zStackParticipantDidChange:
             Log.write("win: icon scene up after " + String(ms) + "ms ticks=" + String(ticks))
             emitNotes(AevonTakeNotes())
             float(scene, bundleID: bundleID)
+            // 0.2.14 — 系统那条路也一样：scene 已经在手里了再投 payload。
+            AevonForwardFlush("scene up")
             // A hold with no card under it is a scene that never sleeps again.
             //
             // 0.0.98 — 判据从「有没有卡」换成「这个 App 是不是当前主窗」。旧主窗

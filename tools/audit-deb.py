@@ -833,6 +833,15 @@ def main():
                   b"win: own scene up after ",
                   b"win: own gave up door=%ld b=%@ after %ldms",
                   b"win: own destroyed %@",
+                  # 0.2.14 —— 两处修根因：
+                  #   own live attach   已经有活 scene ⇒ 直接贴，一个启动请求都不发
+                  #                     （0.2.13 这里还会落下去走挂起启动，等于自己
+                  #                      又补了一次「摆前台」）
+                  #   forward held      分享那条请求进入待发（这时还没交给系统）
+                  #   forward flush     scene 到位 / 超时之后真正投出去，带等了多久
+                  b"win: own live attach %@ t=%ldms wait=%ldms",
+                  b"notify: forward held slot=%d form=%c",
+                  b"notify: forward flush why=%s after=%.0fms",
                   # 这一字典的字面量是「自建」这件事在产物里的锚：三个类名任何一个
                   # 拼错，工程就编译成一条永远走不进去的路，而日志只会说 gate miss。
                   b"FBSMutableSceneDefinition",

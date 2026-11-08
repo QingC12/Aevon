@@ -726,9 +726,21 @@ NSInteger AevonOwnStart(NSString *bundleID, CGRect frame, const char *from) {
         // 它就是个野指针。显式 copy 到堆，并且**故意不 release** —— 每次开一张
         // 卡漏几十字节，换「不会因为一个不知道有没有 retain 的初始化器而崩」。
         id providerHeap = [provider copy];
-        id transaction = ((id (*)(id, SEL, id, id))objc_msgSend)(
-            txnCls, sel_registerName("initWithProcessIdentity:executionContextProvider:"),
-            identity, providerHeap);
+        // 0.2.14 — 这里原来是 `objc_msgSend(txnCls, init…)`：把**实例**初始化器
+        // 发给了类对象，于是 Aevon(183) 第一句就是
+        // `+[FBApplicationProcessLaunchTransaction initWithProcessIdentity:
+        //   executionContextProvider:]: unrecognized selector sent to class`
+        // —— 整条自建 scene 路一次都没走进去，每次都落回挂起启动，用户看到的
+        // 当然还是「先全屏、再浮窗、全屏黑屏」。
+        //
+        // 闸没拦住它不是闸的错：`class_getInstanceMethod` 问的正是实例方法，
+        // 它确实在（`miss=0` 是真的）。错在调用点少了一次 `alloc`。
+        id allocated = ((id (*)(id, SEL))objc_msgSend)(txnCls, sel_registerName("alloc"));
+        id transaction = allocated != nil
+            ? ((id (*)(id, SEL, id, id))objc_msgSend)(
+                  allocated, sel_registerName("initWithProcessIdentity:executionContextProvider:"),
+                  identity, providerHeap)
+            : nil;
         if (transaction == nil) {
             AevonOwnLog(@"win: own no transaction");
             AevonOwnPhase = 3;
@@ -5916,6 +5928,125 @@ static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id o
     return 1;
 }
 
+// MARK: - 0.2.14 分享转发延后
+
+/// Swift 侧调用，原型在 bridging header 里；这里再写一行是给这个 `.m` 用的
+/// （bridging header 不进 `.m`，`-Wmissing-prototypes` 会把它记成告警，CI 是 `-Werror`）。
+void AevonForwardFlush(const char *why);
+
+/// 「先把请求交回系统，再建卡」这个顺序，是 0.1.95 定的，理由是「裸的挂起启动
+/// 会先把 App 拉起来、不带 launch options」。那条理由在**老路**上成立，但它有
+/// 一个从没被单独量过的代价：交回系统那一瞬，SpringBoard 就按「用户点了图标」
+/// 把目标 App 摆成前台 —— 那是用户看到的全屏，而且它发生在我们的卡片之前。
+///
+/// Aevon(183) 把这条链一行不落地拍下来了：
+///   notify: forward susp=1 keys=4        ← 交回系统
+///   notify: forward pass b=com.tencent.mqq op=user
+///   notify: open com.tencent.mqq         ← 我们这边才开始建卡
+/// 中间那一次前台激活没有人能再收回：等卡片贴上 scene，屏幕上只剩那半截黑。
+///
+/// 0.2.13 换掉了「怎么打开」（自建 scene、launchIntent=4），可分享这一路连
+/// 自建 scene 都没走到 —— 转发先跑，`own start` 才轮上。所以这一版把顺序翻过来：
+/// 先让卡片把 process + scene 建起来，再把 payload 投进去。
+///
+/// 为什么这次可以翻：自建路本来就用 `launchIntent=4` 把进程拉起来了（不带
+/// launch options，和挂起启动一样），payload 晚到一点是「运行中的 App 收到一次
+/// open URL」，正是 Aevon(183) 里成功那两次的形状（App 已在跑，分享照样进得去）。
+///
+/// 兜底：1.6 秒还没等到卡片就照原样发出去 —— 慢的 App 不许把分享弄丢。
+static int AevonFwdHoldOn = 0;
+static int AevonFwdHoldSlot = -1;
+static char AevonFwdHoldForm = 0;
+static id AevonFwdHoldSelf = nil;
+static id AevonFwdHoldRequest = nil;
+static id AevonFwdHoldOptions = nil;
+static id AevonFwdHoldSettings = nil;
+static id AevonFwdHoldOrigin = nil;
+static SEL AevonFwdHoldCmd = NULL;
+static CFAbsoluteTime AevonFwdHoldAt = 0;
+static int AevonFwdHoldNotes = 0;
+
+static void AevonForwardFlushNow(const char *why);
+
+/// 只留一条。第二条分享进来时先把上一条发出去：丢掉一条 = 用户点的那次分享
+/// 什么都没发生，比晚一点严重得多。
+static int AevonForwardHold(int slot, id self, SEL _cmd, id request, id options,
+                            id settings, id origin, char form) {
+    if (slot < 0 || _cmd == NULL || request == nil) return 0;
+    if (AevonFwdHoldOn) AevonForwardFlushNow("replaced");
+    AevonFwdHoldOn = 1;
+    AevonFwdHoldSlot = slot;
+    AevonFwdHoldForm = form;
+    AevonFwdHoldCmd = _cmd;
+    AevonFwdHoldSelf = [(id)self retain];
+    AevonFwdHoldRequest = [(id)request retain];
+    AevonFwdHoldOptions = [(id)options retain];
+    AevonFwdHoldSettings = [(id)settings retain];
+    AevonFwdHoldOrigin = [(id)origin retain];
+    AevonFwdHoldAt = CFAbsoluteTimeGetCurrent();
+    if (AevonFwdHoldNotes < 12) {
+        AevonFwdHoldNotes += 1;
+        AevonLogRaw([[NSString stringWithFormat:@"notify: forward held slot=%d form=%c",
+                      slot, form != 0 ? form : '0'] UTF8String]);
+    }
+    return 1;
+}
+
+static void AevonForwardFlushNow(const char *why) {
+    if (!AevonFwdHoldOn) return;
+    int slot = AevonFwdHoldSlot;
+    char form = AevonFwdHoldForm;
+    SEL cmd = AevonFwdHoldCmd;
+    id self = AevonFwdHoldSelf;
+    id request = AevonFwdHoldRequest;
+    id options = AevonFwdHoldOptions;
+    id settings = AevonFwdHoldSettings;
+    id origin = AevonFwdHoldOrigin;
+    // 先清标志再调用：原实现会重入本文件的替身，状态必须先回到「没有待发」，
+    // 否则那次重入会以为自己还有一条要发。
+    AevonFwdHoldOn = 0;
+    AevonFwdHoldSlot = -1;
+    AevonFwdHoldCmd = NULL;
+    AevonFwdHoldSelf = nil;
+    AevonFwdHoldRequest = nil;
+    AevonFwdHoldOptions = nil;
+    AevonFwdHoldSettings = nil;
+    AevonFwdHoldOrigin = nil;
+    double waited = AevonFwdHoldAt > 0 ? (CFAbsoluteTimeGetCurrent() - AevonFwdHoldAt) : 0;
+    AevonFwdHoldAt = 0;
+    if (AevonFwdHoldNotes < 12) {
+        AevonFwdHoldNotes += 1;
+        AevonLogRaw([[NSString stringWithFormat:@"notify: forward flush why=%s after=%.0fms",
+                      why != NULL ? why : "-", waited * 1000.0] UTF8String]);
+    }
+    if (request != nil && cmd != NULL) {
+        AevonOpenForwardPayload(slot, self, cmd, request, options, settings, origin, form);
+    }
+    [self release];
+    // `request` **故意不 release**：`AevonOpenForwardPayload` 把它留在
+    // `AevonOpenForwardMark` 里，接下来 2 秒内的派生请求要靠这个指针认领，
+    // 其中 `adopted` 那条分支会真的去读它的 bundle（`AevonOpenBundleOf`）。
+    // 这里是 MRC，release 早了就是 use-after-free —— 一次分享漏一个请求对象
+    // 换「不会崩」，这个工程一贯这么选（同 `providerHeap` 那一处）。
+    [options release];
+    [settings release];
+    [origin release];
+}
+
+/// 卡片把 scene 贴上（或等超时）时由主线程调用。任意线程调都安全。
+void AevonForwardFlush(const char *why) {
+    if (!AevonFwdHoldOn) return;
+    if ([NSThread isMainThread]) {
+        AevonForwardFlushNow(why);
+        return;
+    }
+    char *copy = strdup(why != NULL ? why : "-");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        AevonForwardFlushNow(copy);
+        if (copy != NULL) free(copy);
+    });
+}
+
 /// 替身。**顺序就是这里的全部安全设计**：
 ///   ① 快照 —— 只读，不改任何参数；
 ///   ② 分流判定 —— 只有「这一拍是一次通知点击」才改变行为，其余一个字节都不动；
@@ -6056,16 +6187,30 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             // 0.1.95：分享带 payload ⇒ 先把这条请求按「挂起启动」交回系统，让它把
             // 文件/URL 交给目标 App；卡片照旧由下面那条路建。
             //
-            // 顺序不能反过来：裸的挂起启动会先把 App 拉起来（不带 launch options），
-            // 之后再补交，App 已经在跑了 —— `didFinishLaunching` 早过了，只能等用户
-            // 关掉小窗再全屏开一次。这正是 Aevon(162) 里用户看到的那一幕。
+            // 0.1.95：分享带 payload ⇒ 这条请求要交回系统，让它把文件/URL 交给
+            // 目标 App；卡片照旧由下面那条路建。
+            //
+            // 0.2.14 — 交回的**时机**挪到卡片之后（`AevonForwardHold`）。0.1.95
+            // 那句「顺序不能反过来」是针对老路的：那时卡片靠裸的挂起启动拉进程，
+            // 先交回系统就丢了 launch options。现在自建 scene 自己起进程
+            // （launchIntent=4），payload 晚到变成「运行中的 App 收到一次 open URL」，
+            // 而那正是 Aevon(183) 里成功的两次。
             int forwarded = 0;
             if (strcmp(why, "share") == 0 && AevonOpenCarriesPayload(request, options)) {
-                forwarded = AevonOpenForwardPayload(slot, self, _cmd, request, options,
-                                                    settings, origin, form);
+                // 不在这里发。先让 `AevonOpenFromNotification` 把卡片的 process +
+                // scene 建起来，再把这个请求投回去。超时 1.6 秒兜底。
+                forwarded = AevonForwardHold(slot, self, _cmd, request, options,
+                                             settings, origin, form);
                 size_t at = strlen(line);
                 if (at + 12 < sizeof(line)) {
                     snprintf(line + at, sizeof(line) - at, " fwd=%d", forwarded);
+                }
+                if (forwarded == 1) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                 (int64_t)(1.6 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        AevonForwardFlush("timeout");
+                    });
                 }
             }
             AevonOpenFromNotification(bundle);
