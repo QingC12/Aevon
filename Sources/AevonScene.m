@@ -2235,6 +2235,26 @@ BOOL AevonSystemCovered(void) {
     return NO;
 }
 
+/// 0.2.6 — 通知中心 / 控制中心 / 锁屏覆盖层在屏吗（**故意不含 `isUILocked`**）。
+///
+/// 与 `AevonSystemCovered` 只差第一条，而这一条差别就是全部：
+/// `SBLockScreenManager.isUILocked` 在「点通知那一刻」必然为真（那次点击自带
+/// `unlock=1`），拿它当「让卡片让开」的判据，每一次「通知 → 浮窗」都会先隐身一段，
+/// 等真正解锁才出现 —— 那正是 0.2.2 已经判过死刑的那条路（Aevon(171)）的变形。
+///
+/// 而 CoverSheet 本身就是锁屏界面：锁屏时 `isPresented` 为真、解锁后为假。
+/// 也就是说这一个判据已经覆盖了锁屏，不需要 `isUILocked` 参与。
+///
+/// 用 `AevonBoolOf`（IMP 直读）而不是 `AevonTruthy`（KVC）：后者对没有的键会抛，
+/// 而这条函数是在卡片保活时钟上每 0.2 秒跑一次的 —— 一次抛异常就是杀进程。
+BOOL AevonSystemPanelUp(void) {
+    id cover = AevonShared(@"SBCoverSheetPresentationManager");
+    if (AevonBoolOf(cover, @"isPresented") == 1 || AevonBoolOf(cover, @"isVisible") == 1) return YES;
+    id center = AevonShared(@"SBControlCenterController");
+    if (AevonBoolOf(center, @"isVisible") == 1 || AevonBoolOf(center, @"isPresented") == 1) return YES;
+    return NO;
+}
+
 // MARK: - 0.1.93 主线程看门狗
 
 /// 主线程最后一次应答的时刻（`CFAbsoluteTimeGetCurrent`）。
@@ -4120,8 +4140,22 @@ void AevonNotificationCaptureInstall(void) {
         return;
     }
     __block AevonHookSlot *mine = slot;
+    // ⛔ 0.2.5 的形状是错的，真机一次就照出来了（Aevon(174) 第 98 行）：
+    //
+    //   hook nc-cap cls=NCNotificationDispatcher skipped
+    //   types=v60@0:8@16@24@32B40@44@?52 args=5 want=6
+    //
+    // 真签名是 `destination:executeAction:forNotificationRequest:requestAuthentication:
+    // withParameters:completion:`，其中 **`requestAuthentication` 是 BOOL（`B40`）**，
+    // 不是对象。0.2.5 按「六个对象」写的 block，形状闸正确地把这一条拒了 ——
+    // 闸救了命：按六个 id 去调，parameters 与 completion 会从错位的寄存器里读。
+    // 现在的写法逐字节对上那串编码：五个 `@`（self/dest/action/request/params/
+    // completion 里去掉 self 是五个）+ 一个 `B`。
+    //
+    // 对象计数因此是 5（`AevonObjectArgs` 只数 `@`），形状闸照样开着：
+    // 换成没有 BOOL 的版本时会以 `args=6 want=5` 被拒，而那一行就是下一版的依据。
     id block = ^(id dispatcher, id destination, id action, id request,
-                 id authentication, id parameters, id completion) {
+                 BOOL authentication, id parameters, id completion) {
         long n = __sync_fetch_and_add(&AevonCapCalls, 1);
         // 顺序是按选择子名读的（destination / executeAction / forNotificationRequest /
         // requestAuthentication / withParameters / completion），但「读对了名字」不等于
@@ -4154,8 +4188,8 @@ void AevonNotificationCaptureInstall(void) {
                      isRequest ? 1 : 0);
             AevonLogRaw(capLine);
         }
-        void (*original)(id, SEL, id, id, id, id, id, id) =
-            (void (*)(id, SEL, id, id, id, id, id, id))mine->original;
+        void (*original)(id, SEL, id, id, id, BOOL, id, id) =
+            (void (*)(id, SEL, id, id, id, BOOL, id, id))mine->original;
         // 深度只在「这一次调用期间」抬着，让守护别在这段里写盘（同 intercept 那条路）。
         __sync_fetch_and_add(&AevonHookDepth, 1);
         if (original != NULL) {
@@ -4164,9 +4198,10 @@ void AevonNotificationCaptureInstall(void) {
         }
         __sync_fetch_and_sub(&AevonHookDepth, 1);
     };
+    // wantArgs=5：五个对象参数（`requestAuthentication` 是 BOOL，不计）。
     BOOL live = AevonAttachShaped(out, slot, cls,
         @"destination:executeAction:forNotificationRequest:requestAuthentication:withParameters:completion:",
-        6, block);
+        5, block);
     if (live) {
         AevonLogRaw([[NSString stringWithFormat:@"notify: capture live cls=%@", NSStringFromClass(cls)]
                      UTF8String]);

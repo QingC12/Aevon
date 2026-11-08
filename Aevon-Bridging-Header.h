@@ -254,6 +254,11 @@ void AevonAppStyleNotify(NSString *_Nullable bundleID, BOOL dark);
 /// 停靠小窗会出现在控制中心、通知中心、锁屏解锁后没上滑的那个页面上」。
 BOOL AevonSystemCovered(void);
 
+/// 0.2.6 — 只问「通知中心 / 控制中心 / 锁屏覆盖层在屏吗」，**不含 `isUILocked`**。
+/// 卡片让开（alpha 0）用这一条；`AevonSystemCovered` 留着当失败出口的闸，
+/// 两者差的那一条正是「点通知那一刻 `isUILocked` 必真」的教训（Aevon(171)）。
+BOOL AevonSystemPanelUp(void);
+
 /// 0.0.72 — 把 scene 的尺寸真正动一下再还回去，幅度由调用者给。
 ///
 /// 只改承载视图的 bounds 不会让 App 重排：视图变了、scene 没变。冷启的抖音

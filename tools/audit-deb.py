@@ -1579,6 +1579,13 @@ def main():
                   b"win: activate ran=",
                   b"win: state hosting=",
                   b"win: view sublayers=",
+                  # 0.2.6 — 系统面板在屏时卡片让开（alpha 0），退掉后回来。
+                  # 用户报「悬浮窗在通知中心和控制中心出现」，而 0.2.2 已经证明
+                  # 「遮挡就收卡」会把每次通知→浮窗自己拆掉 ⇒ 只能让开、不能拆。
+                  # 这两行是那条路的全部证词：一条进、一条出。任何一条不在产物里，
+                  # 「面板里还看得见卡」与「根本没试过让开」就分不开。
+                  b"win: card stepped aside (system overlay up)",
+                  b"win: card back (system overlay gone)",
                   b"win: scene layerManager layers=",
                   b"win: after 1s hosted=",
                   b"win: scale factor=",

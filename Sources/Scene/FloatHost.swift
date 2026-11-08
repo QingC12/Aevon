@@ -3518,6 +3518,38 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         host.setKeyboardFill(on)
     }
 
+    /// 0.2.6 — 系统面板（通知中心 / 控制中心 / 锁屏）在屏时把卡片让开。
+    ///
+    /// **只是让开，不关窗、不拆 scene、不动几何。** 这一条边界是从两次事故里划出来的：
+    /// 0.1.31 的「整层隐藏」用粘性标记，锁屏那拍置真后再没有现场刷新源 ⇒ 整台手机
+    /// 再也开不出浮窗（Aevon(168)）；0.2.0 的「盖着就收卡」把每一次「通知 → 浮窗」
+    /// 在建好之后自己拆掉（Aevon(171)）。两次都是**判据被当成了拆除的理由**。
+    ///
+    /// alpha 不具备任何粘性：它不改卡片状态、不改 scene、不改窗口列表，退掉面板后
+    /// 一次赋值就回来。所以它可以用在「每次点击都会命中」的判据上。
+    ///
+    /// 顺带把触摸也让开：`UIView.hitTest` 对 alpha ≤ 0.01 的视图返回 nil，面板在屏
+    /// 期间手指不会落到一张看不见的卡上。
+    ///
+    /// 每拍都调（保活时钟 0.2 s）：刚建的窗 alpha 默认 1，只有每拍对账才能保证
+    /// 「面板还在屏上时新建的卡也是隐身的」。真的变了才写一行日志 —— 否则 0.2 s
+    /// 一行会把日志刷满。
+    static func stepAside(_ hidden: Bool) {
+        ensureSlots()
+        let want: CGFloat = hidden ? 0 : 1
+        var changed = false
+        for host in slots {
+            guard let window = host.window else { continue }
+            if abs(window.alpha - want) > 0.01 {
+                window.alpha = want
+                changed = true
+            }
+        }
+        guard changed else { return }
+        Log.write(hidden ? "win: card stepped aside (system overlay up)"
+                         : "win: card back (system overlay gone)")
+    }
+
     /// 0.1.50 — 卡片摆回 0.1.48 的位置，**再把场景一起搬下去**。
     ///
     /// 前三版各修一半，把这件事的边界量清楚了：
