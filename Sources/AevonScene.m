@@ -529,7 +529,7 @@ static NSInteger AevonOwnAuditToken(id handle, AevonAuditToken *out) {
 /// 第一次打开那几拍要对得上。
 static int AevonOwnDisplayNotes = 0;
 static void AevonOwnDisplayLog(NSString *format, ...) {
-    if (AevonOwnDisplayNotes >= 8) return;
+    if (AevonOwnDisplayNotes >= 12) return;
     AevonOwnDisplayNotes += 1;
     va_list args;
     va_start(args, format);
@@ -569,8 +569,16 @@ static id AevonOwnDisplay(CGRect frame) {
         mutable = nil;
     }
     if (mutable == nil || ![mutable respondsToSelector:setBounds]) {
-        AevonOwnDisplayLog(@"win: own display keep %.0fx%.0f (no setBounds)",
-                           now.size.width, now.size.height);
+        // 只问不调：`mutableCopy` 出来的到底是什么类、另外两个可能的改名
+        // （`setNativeBounds:` / `setScale:`）在不在。Aevon(186) 高德仍然是
+        // `win=430x932`（它按 `UIScreen` 排版），要修它就得先知道这一格。
+        AevonOwnDisplayLog(@"win: own display keep %.0fx%.0f (no setBounds) cls=%s mut=%d"
+                           " native=%d scale=%d",
+                           now.size.width, now.size.height,
+                           mutable != nil ? object_getClassName(mutable) : "nil",
+                           mutable != nil ? 1 : 0,
+                           [mutable respondsToSelector:sel_registerName("setNativeBounds:")] ? 1 : 0,
+                           [mutable respondsToSelector:sel_registerName("setScale:")] ? 1 : 0);
         return base;
     }
     ((void (*)(id, SEL, CGRect))objc_msgSend)(mutable, setBounds, frame);
@@ -578,6 +586,59 @@ static id AevonOwnDisplay(CGRect frame) {
                        now.size.width, now.size.height,
                        frame.size.width, frame.size.height);
     return mutable;
+}
+
+/// 0.2.16 — 画布的「刘海那一条」必须是**这台机器此刻的真实值**。
+///
+/// 0.2.15 把 `setSafeAreaInsetsPortrait:` 显式设成了 0（当时的注释写的就是
+/// 「先不猜」）。Aevon(186) 的读数说清了这个「先不猜」的代价：
+///   `app: geom early screen=430x932@3 scene=430x717 win=430x717 safe=0/0`
+///   微信 `MMTabBar:0,666,430x51`（666+51 正好是 717 的底边）、
+///   `MMUINavigationBar:0,0,430x44`（顶边）
+/// 而旧路（0.2.12，系统建 scene）同一行是 `safe=59/34`，那时的底栏在 `0,632`。
+/// 也就是说：App 的**重排**没错（子视图都在 717 里），错的是它不知道自己头上
+/// 还有一条 59、脚下还有一条 34 —— 于是顶栏贴着上沿、底栏贴着下沿，被卡片的圆角
+/// 和屏幕边缘吃掉，看起来就是「被裁过的画面」。
+///
+/// 值从 SpringBoard 自己的窗口上读：它挂在同一个 windowScene 上，`safeAreaInsets`
+/// 就是平台算出来的事实（59/34），不是我写死的常量，换机器自动跟上。
+/// 一个窗口都读不到就退回 0 —— 宁可露出旧症状，也不编一个数进去。
+static UIEdgeInsets AevonOwnSafeInsets(void) {
+    SEL selSafe = sel_registerName("safeAreaInsets");
+    @try {
+        id app = [UIApplication sharedApplication];
+        SEL selWins = sel_registerName("windows");
+        if (app != nil && [app respondsToSelector:selWins]) {
+            NSArray *wins = ((id (*)(id, SEL))objc_msgSend)(app, selWins);
+            for (id win in wins) {
+                if (win == nil || ![win respondsToSelector:selSafe]) continue;
+                UIEdgeInsets in = ((UIEdgeInsets (*)(id, SEL))objc_msgSend)(win, selSafe);
+                if (in.top > 0.5 || in.bottom > 0.5) {
+                    AevonOwnDisplayLog(@"win: own safe top=%.0f bottom=%.0f src=win",
+                                       in.top, in.bottom);
+                    return in;
+                }
+            }
+        }
+        // 第二来源：状态栏高度。SpringBoard 的窗口有可能自己把安全区吃掉
+        // （它自己管刘海那一条），那时上面那个循环会全是 0。状态栏高度跟顶
+        // 安全区在这个系统上是同一个数，拿它兜住「顶栏被裁」这半边，脚下那
+        // 34 拿不到就留 0 —— 记清楚是从哪来的，下一版按日志再定。
+        SEL selBar = sel_registerName("statusBarFrame");
+        if (app != nil && [app respondsToSelector:selBar]) {
+            CGRect bar = ((CGRect (*)(id, SEL))objc_msgSend)(app, selBar);
+            if (bar.size.height > 0.5) {
+                AevonOwnDisplayLog(@"win: own safe top=%.0f bottom=0 src=statusbar",
+                                   bar.size.height);
+                return UIEdgeInsetsMake(bar.size.height, 0, 0, 0);
+            }
+        }
+    } @catch (NSException *exception) {
+        AevonOwnDisplayLog(@"win: own safe threw %s",
+                           exception.reason != nil ? [exception.reason UTF8String] : "-");
+    }
+    AevonOwnDisplayLog(@"win: own safe 0/0 (no window)");
+    return UIEdgeInsetsZero;
 }
 
 static id AevonOwnSettings(CGRect frame) {
@@ -609,11 +670,23 @@ static id AevonOwnSettings(CGRect frame) {
     NSString *token = [[NSUUID UUID] UUIDString];
     ((void (*)(id, SEL, id))objc_msgSend)(
         settings, sel_registerName("setPersistenceIdentifier:"), token);
-    // 安全区给 0：卡片是一整块屏幕，刘海那一条由 App 自己按 0 排。
-    // 给真机值（47/34）在 0.2.14 之后按日志里的实际留白再定，先不猜。
-    UIEdgeInsets none = UIEdgeInsetsZero;
-    ((void (*)(id, SEL, UIEdgeInsets))objc_msgSend)(
-        settings, sel_registerName("setSafeAreaInsetsPortrait:"), none);
+    // 安全区：真机值（0.2.16）。0.2.15 这里写的是 `UIEdgeInsetsZero`，就是
+    // 「所有 App 看起来被裁过」的全部原因 —— 见 `AevonOwnSafeInsets` 上面那段。
+    // 仍然先过形状闸：方法在 + 参数编码是 `{UIEdgeInsets=dddd}` + 三个参数，
+    // 少一条就不设（不设 = 维持 0，宁可旧症状，也不要发一个错的结构体进去）。
+    UIEdgeInsets safe = AevonOwnSafeInsets();
+    SEL selSafe = sel_registerName("setSafeAreaInsetsPortrait:");
+    Method safeMethod = class_getInstanceMethod(object_getClass(settings), selSafe);
+    const char *safeEnc = safeMethod != NULL ? method_getTypeEncoding(safeMethod) : NULL;
+    unsigned int safeArgs = safeMethod != NULL ? method_getNumberOfArguments(safeMethod) : 0;
+    if (safeMethod != NULL && safeArgs == 3 && safeEnc != NULL &&
+        strstr(safeEnc, "UIEdgeInsets") != NULL) {
+        ((void (*)(id, SEL, UIEdgeInsets))objc_msgSend)(settings, selSafe, safe);
+        AevonOwnDisplayLog(@"win: own safe set %.0f/%.0f enc=%s", safe.top, safe.bottom, safeEnc);
+    } else {
+        AevonOwnDisplayLog(@"win: own safe skip top=%.0f bottom=%.0f enc=%s n=%u",
+                           safe.top, safe.bottom, safeEnc != NULL ? safeEnc : "-", safeArgs);
+    }
     return settings;
 }
 
@@ -6156,7 +6229,15 @@ static int AevonAppOpenNotes = 0;   // 这组行最多 20 条：分享是低频�
 static int AevonAppOpenPending = 0;
 static int AevonAppOpenTries = 0;
 static NSString *AevonAppOpenBundle = nil;
+static NSString *AevonAppOpenURL = nil;
+static id AevonAppOpenOptions = nil;
+static NSString *AevonAppOpenSource = nil;
 static CFAbsoluteTime AevonAppOpenAt = 0;
+/// 每一轮最多投几次。App 刚被 `launchIntent=4` 拉起来的那一秒里，它的
+/// window scene 还没连上、分享路由还没装好 —— Aevon(186) 就是在第 207ms 问的，
+/// QQ 的 `application:openURL:options:` 当场回 NO，我们立刻退回转发，
+/// 于是又一次全屏+黑屏。8 次 × 0.35s ≈ 3 秒，够它把界面搭起来。
+static const int AevonAppOpenMaxTries = 8;
 
 static NSString *AevonAppOpenLeaf(NSString *bundleID, NSString *leaf) {
     if (bundleID.length == 0 || leaf.length == 0) return nil;
@@ -6207,6 +6288,12 @@ static void AevonAppOpenDrop(void) {
     AevonAppOpenAt = 0;
     [AevonAppOpenBundle release];
     AevonAppOpenBundle = nil;
+    [AevonAppOpenURL release];
+    AevonAppOpenURL = nil;
+    [AevonAppOpenOptions release];
+    AevonAppOpenOptions = nil;
+    [AevonAppOpenSource release];
+    AevonAppOpenSource = nil;
 }
 
 static void AevonAppOpenNext(double gap) {
@@ -6216,8 +6303,31 @@ static void AevonAppOpenNext(double gap) {
     });
 }
 
+/// 把「这一次投递」写进目标 App 容器并发一声通知。`send` 与 `retry` 共用：
+/// 两处的文件形状必须一模一样，一处改一处忘就是又一轮「为什么它读不到」。
+static int AevonAppOpenWrite(void) {
+    NSString *plist = AevonAppOpenLeaf(AevonAppOpenBundle, @"aevon-open.plist");
+    if (plist == nil || AevonAppOpenURL == nil) return 0;
+    NSDictionary *box = [NSDictionary dictionaryWithObjectsAndKeys:
+                         AevonAppOpenURL, @"url",
+                         AevonAppOpenOptions != nil ? AevonAppOpenOptions : [NSDictionary dictionary],
+                         @"options",
+                         AevonAppOpenSource != nil ? AevonAppOpenSource : @"", @"src", nil];
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:box
+                                                              format:NSPropertyListXMLFormat_v1_0
+                                                             options:0
+                                                               error:NULL];
+    if (data == nil) return 0;
+    if (![data writeToFile:plist atomically:YES]) return 0;
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)[NSString stringWithFormat:@"com.aevon.openurl.%@",
+                               AevonAppOpenBundle],
+        NULL, NULL, true);
+    return 1;
+}
+
 /// 1 = 已经发出去（正在等回执） / 0 = 发不出去（调用方立刻走老路）
-static int AevonAppOpenSend(NSString *bundleID, NSString *url, id options) {
+static int AevonAppOpenSend(NSString *bundleID, NSString *url, id options, NSString *src) {
     if (bundleID.length == 0 || url.length == 0) return 0;
     NSString *plist = AevonAppOpenLeaf(bundleID, @"aevon-open.plist");
     NSString *ack = AevonAppOpenLeaf(bundleID, @"aevon-open-ack");
@@ -6233,43 +6343,34 @@ static int AevonAppOpenSend(NSString *bundleID, NSString *url, id options) {
     id safe = AevonAppOpenSafe(options, 0, &dropped);
     if (safe == nil) safe = [NSDictionary dictionary];
     int kept = [safe isKindOfClass:[NSDictionary class]] ? (int)[(NSDictionary *)safe count] : 0;
-    NSDictionary *box = [NSDictionary dictionaryWithObjectsAndKeys:
-                         url, @"url", safe, @"options", nil];
-    NSError *error = nil;
-    NSData *data = [NSPropertyListSerialization dataWithPropertyList:box
-                                                              format:NSPropertyListXMLFormat_v1_0
-                                                             options:0
-                                                               error:&error];
-    if (data == nil) {
-        if (AevonAppOpenNotes < 20) {
-            AevonAppOpenNotes += 1;
-            AevonLogRaw("notify: appurl no plist");
-        }
-        return 0;
-    }
     // 上一轮的回执照删：留着会让这一轮读到别人的答案。
     [[NSFileManager defaultManager] removeItemAtPath:ack error:NULL];
-    if (![data writeToFile:plist atomically:YES]) {
+    [AevonAppOpenBundle release];
+    AevonAppOpenBundle = [bundleID copy];
+    [AevonAppOpenURL release];
+    AevonAppOpenURL = [url copy];
+    [AevonAppOpenOptions release];
+    AevonAppOpenOptions = [safe retain];
+    [AevonAppOpenSource release];
+    AevonAppOpenSource = [src copy];
+    AevonAppOpenAt = CFAbsoluteTimeGetCurrent();
+    if (AevonAppOpenWrite() == 0) {
         if (AevonAppOpenNotes < 20) {
             AevonAppOpenNotes += 1;
             AevonLogRaw([[NSString stringWithFormat:
                           @"notify: appurl no write b=%@", bundleID] UTF8String]);
         }
+        AevonAppOpenDrop();
         return 0;
     }
     AevonAppOpenPending = 1;
     AevonAppOpenTries = 0;
-    [AevonAppOpenBundle release];
-    AevonAppOpenBundle = [bundleID copy];
-    AevonAppOpenAt = CFAbsoluteTimeGetCurrent();
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-        (__bridge CFStringRef)[NSString stringWithFormat:@"com.aevon.openurl.%@", bundleID],
-        NULL, NULL, true);
     if (AevonAppOpenNotes < 20) {
         AevonAppOpenNotes += 1;
         AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: appurl send b=%@ opt=%d/%d u=%.48s",
-                      bundleID, kept, dropped, [url UTF8String]] UTF8String]);
+                      @"notify: appurl send b=%@ opt=%d/%d src=%@ u=%.48s",
+                      bundleID, kept, dropped,
+                      src != nil ? src : @"-", [url UTF8String]] UTF8String]);
     }
     AevonAppOpenNext(0.20);
     return 1;
@@ -6315,11 +6416,36 @@ static void AevonAppOpenCheck(void) {
             AevonForwardDrop("appurl ok");
             return;
         }
-        AevonAppOpenGiveUp("app refused");
+        // `ok=0` 是「这一拍不认」，不是「永远不认」：Aevon(186) 是在卡片起来后
+        // 第 207ms 问的，QQ 的 window scene 还没连上，当然回 NO；我们立刻退回
+        // 转发，于是又全屏又黑屏。改成再投几次，三次都在同一个窗口里问同一个
+        // 还没长大的进程，答案没有意义。
+        AevonAppOpenTries += 1;
+        if (AevonAppOpenTries < AevonAppOpenMaxTries) {
+            if (AevonAppOpenWrite() == 0) {
+                AevonAppOpenGiveUp("write");
+                return;
+            }
+            if (AevonAppOpenNotes < 20) {
+                AevonAppOpenNotes += 1;
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"notify: appurl retry n=%d via=%@",
+                              AevonAppOpenTries, via] UTF8String]);
+            }
+            AevonAppOpenNext(0.35);
+            return;
+        }
+        AevonAppOpenGiveUp("refused");
         return;
     }
     AevonAppOpenTries += 1;
-    if (AevonAppOpenTries <= 3) {
+    if (AevonAppOpenTries < AevonAppOpenMaxTries) {
+        // 连回执都没有：可能 App 里我们的 dylib 还没装载完（0.0.x 的装载重试
+        // 是 2 秒 × 3），也可能这一拍正好被系统回收。重投比猜快。
+        if (AevonAppOpenWrite() == 0) {
+            AevonAppOpenGiveUp("write");
+            return;
+        }
         AevonAppOpenNext(0.35);
         return;
     }
@@ -6360,7 +6486,13 @@ void AevonForwardDeliver(const char *why) {
         AevonForwardFlushNow(why != NULL ? why : "appurl no url");
         return;
     }
-    if (AevonAppOpenSend(bundle, url, AevonFwdHoldOptions) == 1) return;
+    // 来源 App。系统那次真正的 openURL 会带 `UIApplicationOpenURLOptionsSourceApplicationKey`
+    // （分享扩展那条是 `com.tencent.mqq.ShareExtension`），我们的 options 里没有这一项
+    // —— Aevon(186) 里 QQ 第 207ms 回 NO，最可能就是缺它（也可能是它还没准备好，
+    // 两个原因这一版一起治）。值只在宿主这一侧拿得到，所以随投递文件一起送过去。
+    id raw = AevonOpenSourceApp(AevonFwdHoldRequest, AevonFwdHoldOptions);
+    NSString *src = [raw isKindOfClass:[NSString class]] ? (NSString *)raw : nil;
+    if (AevonAppOpenSend(bundle, url, AevonFwdHoldOptions, src) == 1) return;
     AevonForwardFlushNow("appurl no file");
 }
 

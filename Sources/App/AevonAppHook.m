@@ -4700,10 +4700,12 @@ static void AevonMiniObserve(void) {
 // 通知，跨进程不需要沙盒权限，与 `aevon-mini` 同一条路的反向），回执写在
 // `tmp/aevon-open-ack`（`ok=1 via=app`）。宿主 1.25 秒收不到回执就退回老路。
 //
-// 交给谁：① 先自己实现 `application:openURL:options:` —— options 字典原样转交，
-// 里面那枚 `__PasteSharingToken` 是 App 能读粘贴板的前提（丢了分享就只剩空壳）；
-// ② 不认再走 scene 的 `scene:openURLContexts:`（`UIOpenURLContext` 只能 KVC
-// 现造，options 只能为空，所以排在后面）。两条都不认就回 `ok=0`，宿主回落。
+// 交给谁（0.2.16 把顺序翻过来了）：① 先走 scene 的 `scene:openURLContexts:`
+// —— QQ / 微信 / 抖音都是 scene 化的 App，系统对它们根本不调
+// `application:openURL:options:`；② scene 不认才退到 AppDelegate。
+// `UIOpenURLContext` 没有公开初始化器，`_URL` / `_options` 只能 KVC 现造；
+// `_options` 摸不到就让它是空的，URL 这条不跟着废。两条都不认就回 `ok=0`，
+// 宿主在 3 秒内重投 8 次（App 刚起来时 window scene 还没连上，这一拍问不出答案）。
 
 static NSString *AevonOpenURLPath(NSString *leaf) {
     NSString *tmp = NSTemporaryDirectory();
@@ -4735,8 +4737,10 @@ static void AevonOpenURLApply(void) {
                                                          error:&error];
     NSString *raw = [box isKindOfClass:[NSDictionary class]]
         ? [box objectForKey:@"url"] : nil;
-    NSDictionary *options = [box isKindOfClass:[NSDictionary class]]
+    NSDictionary *given = [box isKindOfClass:[NSDictionary class]]
         ? [box objectForKey:@"options"] : nil;
+    NSString *source = [box isKindOfClass:[NSDictionary class]]
+        ? [box objectForKey:@"src"] : nil;
     NSURL *url = raw.length > 0 ? [NSURL URLWithString:raw] : nil;
     if (![url isKindOfClass:[NSURL class]]) {
         AevonAppLogWrite("app: openurl bad plist\n");
@@ -4744,55 +4748,69 @@ static void AevonOpenURLApply(void) {
         return;
     }
 
+    // 系统那次真正的 openURL 交给 App 的 options 里一定有两项公共键：
+    // `UIApplicationOpenURLOptionsSourceApplicationKey`（发起方）和
+    // `UIApplicationOpenURLOptionsOpenInPlaceKey`。分享链路上前者是
+    // `com.tencent.mqq.ShareExtension` —— Aevon(186) 里 QQ 直接回了 NO，
+    // 缺这一项是最像的嫌疑；宿主已经把来源送过来了，这里补齐。
+    NSMutableDictionary *options = [NSMutableDictionary dictionary];
+    if ([given isKindOfClass:[NSDictionary class]]) [options addEntriesFromDictionary:given];
+    NSString *sourceKey = @"UIApplicationOpenURLOptionsSourceApplicationKey";
+    NSString *inPlaceKey = @"UIApplicationOpenURLOptionsOpenInPlaceKey";
+    if ([options objectForKey:sourceKey] == nil && source.length > 0) {
+        [options setObject:source forKey:sourceKey];
+    }
+    if ([options objectForKey:inPlaceKey] == nil) {
+        [options setObject:[NSNumber numberWithBool:NO] forKey:inPlaceKey];
+    }
+
     UIApplication *app = [UIApplication sharedApplication];
     const char *via = "none";
     BOOL ok = NO;
 
-    // ① 自己那个 delegate。options 原样给：粘贴板 token 就在里面。
-    id delegate = app.delegate;
-    SEL appSel = sel_registerName("application:openURL:options:");
-    if (delegate != nil && [delegate respondsToSelector:appSel]) {
-        @try {
-            BOOL (*call)(id, SEL, UIApplication *, NSURL *, NSDictionary *) =
-                (BOOL (*)(id, SEL, UIApplication *, NSURL *, NSDictionary *))objc_msgSend;
-            ok = call(delegate, appSel, app, url,
-                      options != nil ? options : [NSDictionary dictionary]);
-            via = "app";
-        } @catch (NSException *exception) {
-            ok = NO;
-            via = "app throw";
+    // ① 先用 scene 的正门。QQ / 微信 / 抖音都是 scene 化的 App，系统对它们
+    //    **根本不会**调 `application:openURL:options:`，只调这条 —— 顺序反过来
+    //    就等于拿一条系统从不走的路去问它认不认。`UIOpenURLContext` 没有公开
+    //    初始化器：KVC 摸它的 `_URL` / `_options`，摸不到就退到 ②。
+    UIScene *target = nil;
+    id targetDelegate = nil;
+    SEL sceneSel = sel_registerName("scene:openURLContexts:");
+    for (UIScene *scene in app.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        id d = ((id (*)(id, SEL))objc_msgSend)(scene, sel_registerName("delegate"));
+        if (d == nil || ![d respondsToSelector:sceneSel]) continue;
+        if (target == nil) { target = scene; targetDelegate = d; }
+        if (scene.activationState == UISceneActivationStateForegroundActive) {
+            target = scene;
+            targetDelegate = d;
+            break;
         }
     }
-
-    // ② scene 的正门。挑一个前台活着的窗口场景；没有就挑第一个认这条选择子的。
-    if (!ok) {
-        Class ctxCls = NSClassFromString(@"UIOpenURLContext");
-        SEL sceneSel = sel_registerName("scene:openURLContexts:");
-        UIScene *target = nil;
-        id targetDelegate = nil;
-        for (UIScene *scene in app.connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            id d = ((id (*)(id, SEL))objc_msgSend)(scene, sel_registerName("delegate"));
-            if (d == nil || ![d respondsToSelector:sceneSel]) continue;
-            if (target == nil) { target = scene; targetDelegate = d; }
-            if (scene.activationState == UISceneActivationStateForegroundActive) {
-                target = scene;
-                targetDelegate = d;
-                break;
-            }
-        }
-        if (ctxCls != Nil && targetDelegate != nil) {
-            id context = nil;
+    Class ctxCls = NSClassFromString(@"UIOpenURLContext");
+    if (targetDelegate != nil) {
+        id context = nil;
+        if (ctxCls == Nil) {
+            via = "noctx";
+        } else {
             @try {
                 context = [[ctxCls alloc] init];
-                // `UIOpenURLContext` 没有公开初始化器：KVC 直接摸它的 `_URL`。
-                // 摸不到会抛 `NSUndefinedKeyException`，下面接住 ⇒ 退回 ok=0。
+                // 私有 ivar 是 `_URL` / `_options`；KVC 的 key 用 `URL` 才找得到 `_URL`。
                 [context setValue:url forKey:@"URL"];
             } @catch (NSException *exception) {
                 [context release];
                 context = nil;
             }
             if (context != nil) {
+                // options 单独接：摸不到就让它空着，URL 这条不能跟着一起废。
+                @try {
+                    [context setValue:options forKey:@"options"];
+                } @catch (NSException *exception) {
+                    AevonAppLogWrite("app: openurl ctx opt miss\n");
+                }
+            }
+            if (context == nil) {
+                via = "nokvc";
+            } else {
                 @try {
                     NSSet *set = [NSSet setWithObject:context];
                     void (*call)(id, SEL, UIScene *, NSSet *) =
@@ -4802,16 +4820,38 @@ static void AevonOpenURLApply(void) {
                     via = "scene";
                 } @catch (NSException *exception) {
                     ok = NO;
-                    via = "scene throw";
+                    via = "scene-throw";
                 }
                 [context release];
+            }
+        }
+    } else {
+        via = "noscene";
+    }
+
+    // ② 老式 App（没有 scene 或者 scene delegate 不认）才走 AppDelegate。
+    if (!ok) {
+        id delegate = app.delegate;
+        SEL appSel = sel_registerName("application:openURL:options:");
+        if (delegate != nil && [delegate respondsToSelector:appSel]) {
+            @try {
+                BOOL (*call)(id, SEL, UIApplication *, NSURL *, NSDictionary *) =
+                    (BOOL (*)(id, SEL, UIApplication *, NSURL *, NSDictionary *))objc_msgSend;
+                ok = call(delegate, appSel, app, url, options);
+                // 成功才改 via；失败时保留更具体的那个（`noscene` / `nokvc` / `noctx`
+                // 比笼统的 `app` 有用得多）。
+                if (ok) via = "app";
+            } @catch (NSException *exception) {
+                ok = NO;
+                via = "app-throw";
             }
         }
     }
 
     char line[192];
-    snprintf(line, sizeof(line), "app: openurl ok=%d via=%s u=%d opt=%d\n",
-             ok ? 1 : 0, via, (int)raw.length, (int)[options count]);
+    snprintf(line, sizeof(line), "app: openurl ok=%d via=%s u=%d opt=%d src=%d\n",
+             ok ? 1 : 0, via, (int)raw.length, (int)[options count],
+             source.length > 0 ? 1 : 0);
     AevonAppLogWrite(line);
     AevonOpenURLAck(ok, via);
 }
