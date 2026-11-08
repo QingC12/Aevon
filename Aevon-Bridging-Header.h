@@ -331,6 +331,38 @@ NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL v
 ///   0  no such method on UIApplication or LSApplicationWorkspace
 NSInteger AevonLaunchSuspended(id _Nullable application, NSString *_Nullable bundleID);
 
+// MARK: - 0.2.13 自建 scene
+
+// 这一组是整条链上第一次「scene 不是系统给的」。路线来自开源母本
+// FrontBoardAppLauncher，每一样东西都先问再说（`AevonOwnGate`），整条包在
+// ObjC 的 `@try` 里。四个入口的分工：
+//   AevonOwnGate  只问不调，返回缺多少样（0 = 这条路接得上）
+//   AevonOwnStart 起进程 + 建 scene（异步），返回 0/1/2
+//   AevonOwnState / AevonOwnFetch  轮询那一格：0 没在跑 / 1 在建 / 2 建好了 / 3 失败
+//   AevonOwnDestroy / AevonOwnIsOwned  关卡时走哪一半
+
+/// 缺失项条数，0 表示整条自建路都接得上。只问不调。
+NSInteger AevonOwnGate(void);
+
+/// 起进程（launchIntent=4，不进前台）并建 scene。
+/// 返回 0 = 闸不过（调用方必须回落老路）、1 = 已开始、2 = 已有一次在跑。
+NSInteger AevonOwnStart(NSString *_Nullable bundleID, CGRect frame, const char *_Nullable from);
+
+/// 0 = 没在跑 / 1 = 在建 / 2 = 建好了（等取） / 3 = 失败。不消费状态。
+NSInteger AevonOwnState(void);
+
+/// 取走建好的 scene（状态回到 idle）。没有就返回 nil。
+id _Nullable AevonOwnFetch(void);
+
+/// 这一次卡片没有用自建的 scene（复用系统那个 / 走了老路）—— 关卡时不许销毁。
+void AevonOwnClear(void);
+
+/// 1 = 这张卡上的 scene 是自建的（关卡要销毁，不是推回后台）。
+NSInteger AevonOwnIsOwned(NSString *_Nullable bundleID);
+
+/// 销毁自建 scene。返回 1 表示这一句发出去了。
+NSInteger AevonOwnDestroy(NSString *_Nullable bundleID);
+
 // 0.0.65 的 `AevonColdStartReady` 已随该功能一起删除（0.0.66）：它靠「名片文件
 // 写上 pid」判断进程新旧，而名片写不进去时（沙箱、目录权限、装包顺序）判据就永远
 // 不成立 —— 于是每次开窗都先结束那个 App 再拉起来。一次写失败换来「App 打不开」，

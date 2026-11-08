@@ -298,6 +298,569 @@ NSInteger AevonLaunchSuspended(id application, NSString *bundleID) {
     return 0;
 }
 
+// MARK: - 0.2.13 自建 scene（不再「先全屏、再抢」）
+
+// 这一段回答的是整条链上最后一个「不是我们的东西」：**scene 从哪来**。
+//
+// 0.2.10 把「QQ 全屏后变黑」定成「那次转发」——转发把目标 App 摆成前台 App，
+// 而它的 scene 已经被我们贴进卡片，剩下的那半屏就是黑的。0.2.12 顺着这条线
+// 把挂起位写进了 `SBActivationSettings`（`pick=3 flag=1 read=1`，真机读回是 1），
+// QQ 仍然先全屏。这说明挂起位不是那一道闸：更外面的一步是
+// `launchApplicationWithIdentifier:suspended:YES` 本身——在 iOS 17 上它只负责
+// 把进程拉起来，SpringBoard 照样按「用户点了图标」把它摆成前台 App 演一遍
+// 全屏动画。我们从来都在同一个坑里：先让系统演完，再去抢。
+//
+// 开源母本 FrontBoardAppLauncher（TrollOpen 的致谢里点名的那个）走的是另一条：
+// 不经 open request、不给 SpringBoard 任何展示机会——
+//   RBSProcessIdentity -> FBApplicationProcessLaunchTransaction（launchIntent=4）
+//   -> registerProcessForAuditToken:
+//   -> FBSMutableSceneDefinition + FBSMutableSceneParameters
+//   -> FBSceneManager createSceneWithDefinition:initialParameters:
+//   -> scene.uiPresentationManager -> presenter -> presentationView
+// 屏幕从头到尾只有我们的卡片，没有第一帧全屏。
+//
+// 三条纪律落在这里：
+//   1. 每个类、每个选择子都先问（`AevonOwnGate`）。少一个就整条放弃，回落老路 ——
+//      0.0.15 拿逆向字符串直接调 `_createSceneWithDefinition:` 换来过一次安全模式，
+//      这一次不再有「可能存在的名字」。
+//   2. 整条包在 `@try/@catch` 里。Swift 接不住 ObjC 异常，这个文件接得住；
+//      任何 `unrecognized selector` 都变成一行日志加一次回落，不是一次重启。
+//   3. 结构体参数（`auditToken` 8×uint32、`CGRect`、`UIEdgeInsets`）一律走
+//      `NSInvocation` 或按声明类型传，绝不用 `performSelector` 碰。返回值超过
+//      16 字节的方法（`-auditToken`）也只有 `NSInvocation` 能安全取回。
+
+/// `{uint32_t[8]}`：`RBSProcessHandle -auditToken` 与
+/// `FBProcessManager -registerProcessForAuditToken:` 之间的那个结构体。
+typedef struct { uint32_t word[8]; } AevonAuditToken;
+
+/// 0 idle / 1 building / 2 ready（等取） / 3 failed
+static NSInteger AevonOwnPhase = 0;
+static id AevonOwnScene = nil;
+static NSString *AevonOwnBundle = nil;
+static NSString *AevonOwnIdentity = nil;
+static CGRect AevonOwnFrame = { {0, 0}, {0, 0} };
+/// 这一次开始建的时刻。超时兜底用它 —— 一个永不回调的启动事务会把 phase 冻在
+/// 「在建」，那之后自建这条路就永久不再被尝试，而这在日志里看起来只是「没走自建」。
+static CFAbsoluteTime AevonOwnAt = 0;
+static int AevonOwnNotes = 0;
+/// 1 = 屏幕上这张卡的 scene **确实是**我们自己建的那个。
+///
+/// 不能用「bundle 名对得上」来判断：自建 → 关卡（销毁）→ 用户从桌面全屏打开
+/// → 圆盘再开卡（这次复用系统那个 scene），名字还是同一个 bundle，而
+/// `destroyScene:` 要的 identity 也还是 `sceneID:<bundle>-default` —— 按名字判
+/// 会把系统那个正在显示的 scene 销毁掉，画面直接消失。所以「谁建的」必须由
+/// 建它的那一刻记下来，并且在每一次重新决定来源时清掉。
+static int AevonOwnHeld = 0;
+static int AevonOwnGateRan = 0;
+static NSInteger AevonOwnGateMiss = -1;
+static int AevonOwnStartNotes = 0;
+
+/// 一条现场行，带独立预算。这个工程里每一条现场行都得有自己的计数器：
+/// 跟别人共用一个，就会在几次操作之后静默，而静默和「没发生」长得一样。
+static void AevonOwnLog(NSString *format, ...) {
+    // 40 = 35 条 gate 明细 + 汇总 + 几次调用现场。预算比需要的多留几格：
+    // 这条路一次真机要回答的问题全在这几行里，被自己的预算吃掉是最贵的失败。
+    if (AevonOwnNotes >= 40) return;
+    AevonOwnNotes++;
+    va_list args;
+    va_start(args, format);
+    NSString *line = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    // 这个文件是 MRC（Makefile 里没有 `-fobjc-arc`），`alloc` 出来的东西要自己
+    // 交回去。`AevonLogRaw` 在 Swift 侧第一句就是 `String(cString:)`，取完即复制，
+    // 所以这里 release 之后没有人会再读那段 UTF-8。
+    AevonLogRaw([line UTF8String]);
+    [line release];
+}
+
+/// 自建 scene 需要的最小类面。`meta=1` 是类方法。
+///
+/// 名字全部来自真机普查（0.2.11 的 `surf: scn host` 已经把
+/// `createSceneWithDefinition:initialParameters:` 钉在 `FBSceneManager` 上，
+/// 形状 `i{@32@0:8@16@24}`），不是从字符串表里猜的。
+typedef struct {
+    const char *cls;
+    const char *sel;
+    int meta;
+} AevonOwnNeed;
+
+static const AevonOwnNeed AevonOwnNeeds[] = {
+    {"RBSProcessIdentity", "identityForEmbeddedApplicationIdentifier:", 1},
+    {"RBSProcessPredicate", "predicateMatchingIdentity:", 1},
+    {"RBSProcessHandle", "handleForPredicate:error:", 1},
+    {"RBSProcessHandle", "auditToken", 0},
+    {"FBProcessManager", "sharedInstance", 1},
+    {"FBProcessManager", "launchProcessWithContext:", 0},
+    {"FBProcessManager", "registerProcessForAuditToken:", 0},
+    {"FBMutableProcessExecutionContext", "setIdentity:", 0},
+    {"FBMutableProcessExecutionContext", "setEnvironment:", 0},
+    {"FBMutableProcessExecutionContext", "setLaunchIntent:", 0},
+    {"FBApplicationProcessLaunchTransaction",
+        "initWithProcessIdentity:executionContextProvider:", 0},
+    {"FBApplicationProcessLaunchTransaction", "setCompletionBlock:", 0},
+    {"FBApplicationProcessLaunchTransaction", "begin", 0},
+    {"FBSSceneIdentity", "identityForIdentifier:", 1},
+    {"FBSSceneClientIdentity", "identityForProcessIdentity:", 1},
+    {"FBSMutableSceneDefinition", "definition", 1},
+    {"FBSMutableSceneDefinition", "setIdentity:", 0},
+    {"FBSMutableSceneDefinition", "setClientIdentity:", 0},
+    {"FBSMutableSceneDefinition", "setSpecification:", 0},
+    {"UIApplicationSceneSpecification", "specification", 1},
+    {"FBSMutableSceneParameters", "parametersForSpecification:", 1},
+    {"FBSMutableSceneParameters", "setSettings:", 0},
+    {"FBSMutableSceneParameters", "setClientSettings:", 0},
+    {"UIMutableApplicationSceneSettings", "setDisplayConfiguration:", 0},
+    {"UIMutableApplicationSceneSettings", "setForeground:", 0},
+    {"UIMutableApplicationSceneSettings", "setFrame:", 0},
+    {"UIMutableApplicationSceneSettings", "setLevel:", 0},
+    {"UIMutableApplicationSceneSettings", "setInterfaceOrientation:", 0},
+    {"UIMutableApplicationSceneSettings", "setPersistenceIdentifier:", 0},
+    {"UIMutableApplicationSceneSettings", "setSafeAreaInsetsPortrait:", 0},
+    {"UIMutableApplicationSceneClientSettings", "setInterfaceOrientation:", 0},
+    {"FBSceneManager", "sharedInstance", 1},
+    {"FBSceneManager", "createSceneWithDefinition:initialParameters:", 0},
+    {"FBSceneManager", "destroyScene:withTransitionContext:", 0},
+    {"FBScene", "uiPresentationManager", 0},
+};
+
+/// 只问不调：返回缺失的条数，0 表示整条路都接得上。
+///
+/// 「问」是免费的：`respondsToSelector:` 与 `class_getInstanceMethod` 都不会
+/// 执行任何东西。这一条路真正的风险全在「调」上，所以先把问的那一半做满。
+NSInteger AevonOwnGate(void) {
+    if (AevonOwnGateRan) return AevonOwnGateMiss;
+    AevonOwnGateRan = 1;
+    NSInteger miss = 0;
+    int total = (int)(sizeof(AevonOwnNeeds) / sizeof(AevonOwnNeeds[0]));
+    for (int i = 0; i < total; i++) {
+        Class cls = NSClassFromString([NSString stringWithUTF8String:AevonOwnNeeds[i].cls]);
+        SEL sel = sel_registerName(AevonOwnNeeds[i].sel);
+        BOOL there = NO;
+        if (cls != Nil) {
+            there = AevonOwnNeeds[i].meta ? [cls respondsToSelector:sel]
+                                         : (class_getInstanceMethod(cls, sel) != NULL);
+        }
+        if (!there) {
+            miss++;
+            AevonOwnLog(@"win: own miss %s%s %s",
+                        cls == Nil ? "class " : "", AevonOwnNeeds[i].cls,
+                        AevonOwnNeeds[i].sel);
+        }
+    }
+    AevonOwnGateMiss = miss;
+    // 汇总行走 `AevonLogRaw`，不占预算：它是这条路最重要的一行（0 才敢往下调），
+    // 被自己的明细挤掉就等于这一版什么都没回答。（`AevonLogRaw` 收的是 C 字符串，
+    // 不是 NSString —— 这一句原本写成了直接传对象。）
+    NSString *summary = [[NSString alloc] initWithFormat:@"win: own gate need=%d miss=%ld",
+                         total, (long)miss];
+    AevonLogRaw([summary UTF8String]);
+    [summary release];
+    return miss;
+}
+
+/// 一个带签名调用的外壳：`-auditToken` 返回 32 字节结构体，arm64 上是间接
+/// 返回（stret）。`objc_msgSend` 用错 cast 会直接把返回值当成指针，正是 0.1.38
+/// 那五次安全模式的形状；`NSInvocation` 按 `NSMethodSignature` 处理，不存在
+/// 「猜 ABI」这一步。
+static NSMethodSignature *AevonOwnSignature(id target, SEL sel) {
+    if (target == nil) return nil;
+    @try {
+        return [target methodSignatureForSelector:sel];
+    } @catch (NSException *e) {
+        AevonOwnLog(@"win: own sig throw %s %s", sel_getName(sel),
+                    e.reason != nil ? [e.reason UTF8String] : "-");
+        return nil;
+    }
+}
+
+/// `-registerProcessForAuditToken:` —— 参数是那个 32 字节结构体，只能这么传。
+static NSInteger AevonOwnRegisterProcess(id manager, AevonAuditToken token) {
+    SEL sel = sel_registerName("registerProcessForAuditToken:");
+    NSMethodSignature *sig = AevonOwnSignature(manager, sel);
+    if (sig == nil || sig.numberOfArguments < 3) return 0;
+    @try {
+        NSInvocation *call = [NSInvocation invocationWithMethodSignature:sig];
+        [call setTarget:manager];
+        [call setSelector:sel];
+        // setArgument 自己会按签名拷贝这段内存，栈上的 token 活过这一句就够了。
+        [call setArgument:&token atIndex:2];
+        [call invoke];
+        return 1;
+    } @catch (NSException *e) {
+        AevonOwnLog(@"win: own reg throw %s",
+                    e.reason != nil ? [e.reason UTF8String] : "-");
+        return 0;
+    }
+}
+
+/// 取 `-auditToken`。返回 1 表示这一格填上了。
+static NSInteger AevonOwnAuditToken(id handle, AevonAuditToken *out) {
+    if (handle == nil || out == NULL) return 0;
+    SEL sel = sel_registerName("auditToken");
+    NSMethodSignature *sig = AevonOwnSignature(handle, sel);
+    if (sig == nil || sig.methodReturnLength != sizeof(AevonAuditToken)) {
+        if (sig != nil) {
+            AevonOwnLog(@"win: own token size=%lu want=%lu",
+                        (unsigned long)sig.methodReturnLength,
+                        (unsigned long)sizeof(AevonAuditToken));
+        }
+        return 0;
+    }
+    @try {
+        NSInvocation *call = [NSInvocation invocationWithMethodSignature:sig];
+        [call setTarget:handle];
+        [call setSelector:sel];
+        [call invoke];
+        memset(out, 0, sizeof(AevonAuditToken));
+        [call getReturnValue:out];
+        return 1;
+    } @catch (NSException *e) {
+        AevonOwnLog(@"win: own token throw %s",
+                    e.reason != nil ? [e.reason UTF8String] : "-");
+        return 0;
+    }
+}
+
+/// 建 scene 之前要的那份 settings。每一项都是「让这个 scene 自己就是一块
+/// 屏幕」，而不是「从整屏里裁一块」——这是 0.0.65 画布口径的延续：
+/// 给系统的是一块 430x717 的屏幕，卡片再把它等比缩小。
+static id AevonOwnSettings(CGRect frame) {
+    Class cls = NSClassFromString(@"UIMutableApplicationSceneSettings");
+    if (cls == Nil) return nil;
+    id settings = ((id (*)(id, SEL))objc_msgSend)(cls, sel_registerName("new"));
+    if (settings == nil) return nil;
+
+    // 显示配置：只读。屏幕本身一个字节都不改（App 进程里改 `UIScreen.bounds`
+    // 那条路 0.1.x 用四次黑屏否掉了，这里是 SpringBoard 的一次读）。
+    id screen = [UIScreen mainScreen];
+    if ([screen respondsToSelector:sel_registerName("displayConfiguration")]) {
+        id config = ((id (*)(id, SEL))objc_msgSend)(
+            screen, sel_registerName("displayConfiguration"));
+        if (config != nil) {
+            ((void (*)(id, SEL, id))objc_msgSend)(
+                settings, sel_registerName("setDisplayConfiguration:"), config);
+        }
+    }
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(
+        settings, sel_registerName("setForeground:"), YES);
+    ((void (*)(id, SEL, CGRect))objc_msgSend)(
+        settings, sel_registerName("setFrame:"), frame);
+    // level 1 = 普通 App 场景层级。0 是桌面自己的，不要。
+    ((void (*)(id, SEL, NSInteger))objc_msgSend)(
+        settings, sel_registerName("setLevel:"), (NSInteger)1);
+    // 1 = 竖屏。这个数是 `UIInterfaceOrientationPortrait` 的原始值，
+    // 与 `Root.plist` 里那个「强制竖屏」是同一个约定。
+    ((void (*)(id, SEL, NSInteger))objc_msgSend)(
+        settings, sel_registerName("setInterfaceOrientation:"), (NSInteger)1);
+    // 每个自建 scene 一个独立的持久化名：不带它，系统会把两次建的 scene
+    // 当成同一个（FrontBoardAppLauncher 在这条上也写了同样一行）。
+    NSString *token = [[NSUUID UUID] UUIDString];
+    ((void (*)(id, SEL, id))objc_msgSend)(
+        settings, sel_registerName("setPersistenceIdentifier:"), token);
+    // 安全区给 0：卡片是一整块屏幕，刘海那一条由 App 自己按 0 排。
+    // 给真机值（47/34）在 0.2.14 之后按日志里的实际留白再定，先不猜。
+    UIEdgeInsets none = UIEdgeInsetsZero;
+    ((void (*)(id, SEL, UIEdgeInsets))objc_msgSend)(
+        settings, sel_registerName("setSafeAreaInsetsPortrait:"), none);
+    return settings;
+}
+
+/// 真正建 scene 的那一段，在启动事务的 completion 里跑。
+/// 返回 scene 或 nil；任何一步不成立都返回 nil，绝不「带着半个对象继续走」。
+static id AevonOwnCompose(NSString *bundleID, id processIdentity, CGRect frame) {
+    Class defCls = NSClassFromString(@"FBSMutableSceneDefinition");
+    Class identCls = NSClassFromString(@"FBSSceneIdentity");
+    Class clientCls = NSClassFromString(@"FBSSceneClientIdentity");
+    Class specCls = NSClassFromString(@"UIApplicationSceneSpecification");
+    Class paramCls = NSClassFromString(@"FBSMutableSceneParameters");
+    Class mgrCls = NSClassFromString(@"FBSceneManager");
+    Class clientSetCls = NSClassFromString(@"UIMutableApplicationSceneClientSettings");
+    if (defCls == Nil || identCls == Nil || clientCls == Nil || specCls == Nil ||
+        paramCls == Nil || mgrCls == Nil) {
+        AevonOwnLog(@"win: own compose no class");
+        return nil;
+    }
+
+    // scene 标识：`sceneID:<bundle>-default`。这个拼法在真机上已经见过
+    // （`watch()` 里对 `sceneID:` 前缀的处理就是从系统自己的标识反推的），
+    // 也是 FrontBoardAppLauncher 用的同一个。
+    NSString *identity = [NSString stringWithFormat:@"sceneID:%@-default", bundleID];
+    id sceneIdentity = ((id (*)(id, SEL, id))objc_msgSend)(
+        identCls, sel_registerName("identityForIdentifier:"), identity);
+    id clientIdentity = ((id (*)(id, SEL, id))objc_msgSend)(
+        clientCls, sel_registerName("identityForProcessIdentity:"), processIdentity);
+    id spec = ((id (*)(id, SEL))objc_msgSend)(
+        specCls, sel_registerName("specification"));
+    if (sceneIdentity == nil || clientIdentity == nil || spec == nil) {
+        AevonOwnLog(@"win: own compose no identity spec=%d ident=%d client=%d",
+                    spec != nil, sceneIdentity != nil, clientIdentity != nil);
+        return nil;
+    }
+
+    id definition = ((id (*)(id, SEL))objc_msgSend)(
+        defCls, sel_registerName("definition"));
+    if (definition == nil) { AevonOwnLog(@"win: own compose no definition"); return nil; }
+    ((void (*)(id, SEL, id))objc_msgSend)(
+        definition, sel_registerName("setIdentity:"), sceneIdentity);
+    ((void (*)(id, SEL, id))objc_msgSend)(
+        definition, sel_registerName("setClientIdentity:"), clientIdentity);
+    ((void (*)(id, SEL, id))objc_msgSend)(
+        definition, sel_registerName("setSpecification:"), spec);
+
+    id parameters = ((id (*)(id, SEL, id))objc_msgSend)(
+        paramCls, sel_registerName("parametersForSpecification:"), spec);
+    if (parameters == nil) { AevonOwnLog(@"win: own compose no parameters"); return nil; }
+    id settings = AevonOwnSettings(frame);
+    if (settings == nil) { AevonOwnLog(@"win: own compose no settings"); return nil; }
+    ((void (*)(id, SEL, id))objc_msgSend)(
+        parameters, sel_registerName("setSettings:"), settings);
+
+    if (clientSetCls != Nil) {
+        id clientSettings = ((id (*)(id, SEL))objc_msgSend)(
+            clientSetCls, sel_registerName("new"));
+        if (clientSettings != nil) {
+            ((void (*)(id, SEL, NSInteger))objc_msgSend)(
+                clientSettings, sel_registerName("setInterfaceOrientation:"), (NSInteger)1);
+            ((void (*)(id, SEL, id))objc_msgSend)(
+                parameters, sel_registerName("setClientSettings:"), clientSettings);
+        }
+    }
+
+    id manager = ((id (*)(id, SEL))objc_msgSend)(
+        mgrCls, sel_registerName("sharedInstance"));
+    if (manager == nil) { AevonOwnLog(@"win: own compose no manager"); return nil; }
+
+    id scene = ((id (*)(id, SEL, id, id))objc_msgSend)(
+        manager, sel_registerName("createSceneWithDefinition:initialParameters:"),
+        definition, parameters);
+    if (scene == nil) {
+        AevonOwnLog(@"win: own compose nil scene");
+        return nil;
+    }
+    // 「建出来了」和「拿得到 presenter」是两件事。拿不到就不算成功 —— 一个没有
+    // uiPresentationManager 的 scene 贴不进卡片，只会留下一块永远不会有人看的
+    // 画面（0.0.20 的黑屏就是这个形状）。
+    id presentation = ((id (*)(id, SEL))objc_msgSend)(
+        scene, sel_registerName("uiPresentationManager"));
+    if (presentation == nil) {
+        AevonOwnLog(@"win: own compose scene without presenter manager");
+        return nil;
+    }
+    AevonOwnLog(@"win: own compose ok scene=%s id=%s", object_getClassName(scene),
+                [identity UTF8String]);
+    return scene;
+}
+
+/// 起进程 + 建 scene。异步，结果落在 `AevonOwnScene`。
+///
+/// 返回：0 = 参数/闸不过（立刻回落），1 = 已开始（等 `AevonOwnTake`），
+/// 2 = 已经有一次在跑（不重入）。
+NSInteger AevonOwnStart(NSString *bundleID, CGRect frame, const char *from) {
+    if (bundleID.length == 0) return 0;
+    // 1 = 在建、2 = 建好了还没被取走。两种都算「有一次在跑」：覆盖 2 会丢掉
+    // 上一张卡还没拿到手的那个 scene，而丢掉的 scene 没有人会去 destroy 它。
+    if (AevonOwnPhase == 1 || AevonOwnPhase == 2) return 2;
+    if (AevonOwnStartNotes >= 12) return 0;
+    AevonOwnStartNotes++;
+    if (AevonOwnGate() != 0) {
+        AevonOwnLog(@"win: own denied miss=%ld from=%s",
+                    (long)AevonOwnGateMiss, from != NULL ? from : "-");
+        return 0;
+    }
+    AevonOwnPhase = 1;
+    AevonOwnAt = CFAbsoluteTimeGetCurrent();
+    AevonOwnScene = nil;
+    // 重新开始建 = 上一张卡对「谁建的」这件事的结论作废。
+    AevonOwnHeld = 0;
+    // MRC：静态格换人的时候把上一位交回去，否则每开一张卡漏一条字符串。
+    if (AevonOwnBundle != nil) { [AevonOwnBundle release]; AevonOwnBundle = nil; }
+    if (AevonOwnIdentity != nil) { [AevonOwnIdentity release]; AevonOwnIdentity = nil; }
+    AevonOwnBundle = [bundleID copy];
+    AevonOwnIdentity = [[NSString stringWithFormat:@"sceneID:%@-default", bundleID] copy];
+    AevonOwnFrame = frame;
+    AevonOwnLog(@"win: own begin b=%@ from=%s frame=%.0fx%.0f", bundleID,
+                from != NULL ? from : "-", frame.size.width, frame.size.height);
+
+    @try {
+        Class idCls = NSClassFromString(@"RBSProcessIdentity");
+        id identity = ((id (*)(id, SEL, id))objc_msgSend)(
+            idCls, sel_registerName("identityForEmbeddedApplicationIdentifier:"), bundleID);
+        if (identity == nil) {
+            AevonOwnLog(@"win: own no process identity");
+            AevonOwnPhase = 3;
+            return 0;
+        }
+        Class predCls = NSClassFromString(@"RBSProcessPredicate");
+        id predicate = ((id (*)(id, SEL, id))objc_msgSend)(
+            predCls, sel_registerName("predicateMatchingIdentity:"), identity);
+
+        Class mgrCls = NSClassFromString(@"FBProcessManager");
+        id manager = ((id (*)(id, SEL))objc_msgSend)(
+            mgrCls, sel_registerName("sharedInstance"));
+        if (manager == nil) {
+            AevonOwnLog(@"win: own no process manager");
+            AevonOwnPhase = 3;
+            return 0;
+        }
+
+        // launchIntent = 4 —— 这一格是「不摆到前台」的全部。母本用它换掉了
+        // `launchApplicationWithIdentifier:suspended:` 那条在 iOS 17 上已经
+        // 不听 suspended 的老路。
+        Class ctxCls = NSClassFromString(@"FBMutableProcessExecutionContext");
+        Class txnCls = NSClassFromString(@"FBApplicationProcessLaunchTransaction");
+        id (^provider)(void) = ^id {
+            id context = ((id (*)(id, SEL))objc_msgSend)(ctxCls, sel_registerName("new"));
+            if (context == nil) return nil;
+            ((void (*)(id, SEL, id))objc_msgSend)(
+                context, sel_registerName("setIdentity:"), identity);
+            ((void (*)(id, SEL, id))objc_msgSend)(
+                context, sel_registerName("setEnvironment:"), @{});
+            ((void (*)(id, SEL, NSInteger))objc_msgSend)(
+                context, sel_registerName("setLaunchIntent:"), (NSInteger)4);
+            return ((id (*)(id, SEL, id))objc_msgSend)(
+                manager, sel_registerName("launchProcessWithContext:"), context);
+        };
+
+        // 母本传的是栈上的 block 字面量。MRC 下这一步不能照抄：那个 block 里
+        // 捕获着 `identity`/`manager`，如果 `init…` 只存指针不 copy，栈帧一退
+        // 它就是个野指针。显式 copy 到堆，并且**故意不 release** —— 每次开一张
+        // 卡漏几十字节，换「不会因为一个不知道有没有 retain 的初始化器而崩」。
+        id providerHeap = [provider copy];
+        id transaction = ((id (*)(id, SEL, id, id))objc_msgSend)(
+            txnCls, sel_registerName("initWithProcessIdentity:executionContextProvider:"),
+            identity, providerHeap);
+        if (transaction == nil) {
+            AevonOwnLog(@"win: own no transaction");
+            AevonOwnPhase = 3;
+            return 0;
+        }
+
+        // completion 里只碰全局和 block 自己，不碰 `AevonOwnStart` 的栈。
+        // 这个文件是 MRC：block 被 `setCompletionBlock:` 拷到堆上时，
+        // 捕获的 `bundleID` / `frame` 已各自复制一份，栈帧早就不在了。
+        NSString *doneBundle = [bundleID copy];
+        CGRect doneFrame = frame;
+        void (^done)(void) = ^{
+            // 这个 completion 跑在哪个队列由 FrontBoard 决定，不由我们选。所有
+            // 状态变更都搬到主线程：读它的 `pollForScene` 就在主线程上，于是
+            // 「phase 已经 2、scene 还是 nil」这种中间态不会被别人看见，
+            // 这一层也就不需要一个锁（这个工程里锁过的地方都出过事）。
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @try {
+                    Class handleCls = NSClassFromString(@"RBSProcessHandle");
+                    id handle = ((id (*)(id, SEL, id, void *))objc_msgSend)(
+                        handleCls, sel_registerName("handleForPredicate:error:"),
+                        predicate, NULL);
+                    if (handle != nil) {
+                        AevonAuditToken token;
+                        if (AevonOwnAuditToken(handle, &token)) {
+                            AevonOwnRegisterProcess(manager, token);
+                        }
+                    } else {
+                        AevonOwnLog(@"win: own no process handle");
+                    }
+                    id scene = AevonOwnCompose(doneBundle, identity, doneFrame);
+                    AevonOwnPhase = scene != nil ? 2 : 3;
+                    AevonOwnScene = scene;
+                    // `%s` 不是 `%@`：`object_getClassName()` 返回的是 C 字符串，交给
+                    // `%@` 会被当成对象去 retain，第一个字就是野指针。
+                    AevonOwnLog(@"win: own done phase=%ld scene=%s", (long)AevonOwnPhase,
+                                scene != nil ? object_getClassName(scene) : "nil");
+                } @catch (NSException *e) {
+                    AevonOwnPhase = 3;
+                    AevonOwnScene = nil;
+                    AevonOwnLog(@"win: own threw %s",
+                                e.reason != nil ? [e.reason UTF8String] : "-");
+                }
+            });
+        };
+        ((void (*)(id, SEL, id))objc_msgSend)(
+            transaction, sel_registerName("setCompletionBlock:"), done);
+        if (!AevonCallVoid(transaction, @"begin")) {
+            AevonOwnLog(@"win: own begin refused");
+            AevonOwnPhase = 3;
+            return 0;
+        }
+        return 1;
+    } @catch (NSException *e) {
+        AevonOwnPhase = 3;
+        AevonOwnLog(@"win: own threw at start %s",
+                    e.reason != nil ? [e.reason UTF8String] : "-");
+        return 0;
+    }
+}
+
+/// 0 = 没在跑 / 1 = 在建 / 2 = 建好了（等取） / 3 = 失败。**不消费状态。**
+///
+/// 拆成「问状态」和「取对象」两个而不是一个带出参的函数，是因为 `id *` 在 Swift
+/// 里会被导入成 `AutoreleasingUnsafeMutablePointer`，那是个每一版 SDK 都可能换
+/// 写法的形状。两个返回值都是标量/对象，没有指针可猜。
+NSInteger AevonOwnState(void) {
+    // 超时自阉。启动事务不回调时 phase 会冻在「在建」，而下一张卡会因此以为
+    // 「已经有一次在跑」直接落到老路 —— 那是个看不见的永久降级，必须自己结束。
+    if (AevonOwnPhase == 1 && AevonOwnAt > 0) {
+        double waited = CFAbsoluteTimeGetCurrent() - AevonOwnAt;
+        if (waited > 6.0) {
+            AevonOwnLog(@"win: own timeout after %.1fs, falling back", waited);
+            AevonOwnPhase = 3;
+        }
+    }
+    return AevonOwnPhase;
+}
+
+/// 取走建好的 scene（phase 回到 idle）。没有就返回 nil。
+id AevonOwnFetch(void) {
+    if (AevonOwnPhase != 2 || AevonOwnScene == nil) return nil;
+    id scene = AevonOwnScene;
+    // 一个 scene 只交给一张卡：第二次 `fetch` 拿到的是「没有」，不是上一次那张。
+    AevonOwnScene = nil;
+    AevonOwnPhase = 0;
+    // 从这一刻起，屏幕上那张卡的 scene 归我们管 —— 关卡要销毁它。
+    AevonOwnHeld = 1;
+    return scene;
+}
+
+/// 这一次卡片**没有**用自建的 scene（复用了系统那个，或者走了老路）。
+/// 由 `openCard` 在决定来源之后调一次，否则上一次的「持有」会留到下一次关卡。
+void AevonOwnClear(void) {
+    AevonOwnHeld = 0;
+}
+
+/// 这张卡上的 scene 是不是我们建的。关卡的动作完全不同：
+/// 借来的 scene 要「推回后台」，自建的要**销毁**（`destroyScene:`），
+/// 否则它会带着一个 presenter 一直挂在 SpringBoard 里，下一次打开同一个 App
+/// 就会跟系统自己那个撞名。
+NSInteger AevonOwnIsOwned(NSString *bundleID) {
+    if (!AevonOwnHeld) return 0;
+    if (bundleID.length == 0) return 0;
+    return [bundleID isEqualToString:AevonOwnBundle] ? 1 : 0;
+}
+
+/// 销毁自建 scene。返回 1 表示这一句发出去了。
+NSInteger AevonOwnDestroy(NSString *bundleID) {
+    if (bundleID.length == 0 || AevonOwnIdentity == nil) return 0;
+    if (![bundleID isEqualToString:AevonOwnBundle]) return 0;
+    Class mgrCls = NSClassFromString(@"FBSceneManager");
+    if (mgrCls == Nil) return 0;
+    @try {
+        id manager = ((id (*)(id, SEL))objc_msgSend)(
+            mgrCls, sel_registerName("sharedInstance"));
+        if (manager == nil) return 0;
+        ((void (*)(id, SEL, id, id))objc_msgSend)(
+            manager, sel_registerName("destroyScene:withTransitionContext:"),
+            AevonOwnIdentity, nil);
+        AevonOwnLog(@"win: own destroyed %@", AevonOwnIdentity);
+        AevonOwnPhase = 0;
+        AevonOwnScene = nil;
+        AevonOwnHeld = 0;
+        return 1;
+    } @catch (NSException *e) {
+        AevonOwnLog(@"win: own destroy threw %s",
+                    e.reason != nil ? [e.reason UTF8String] : "-");
+        return 0;
+    }
+}
+
 // MARK: - Reading the real method table (0.0.28)
 
 // 0.0.27 asked for three readings and got `absent` three times:

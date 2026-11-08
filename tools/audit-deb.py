@@ -811,6 +811,34 @@ def main():
                   b"surf: scn host none %s",
                   b"surf: scn host total=%d urln=%d",
                   b"surf: scn urln %s.%s{%s}",
+                  # 0.2.13 —— 真正开始用自建 scene（不再是「先全屏、再抢」）。
+                  #
+                  # 这一族是整条链上第一次「scene 不是系统给的」。每一条都是产物里
+                  # 必须能找到的证词，缺一条就等于那一格根本没编进去：
+                  #   own gate need=  miss=   那 35 样私有面问过几样、缺几样（0 才敢调）
+                  #   own miss       缺的是哪一类哪一个选择子（只问不调，问错也只是 0）
+                  #   own begin      起进程那一刻：谁的、从哪条路进来、画布多大
+                  #   own compose ok scene=… id=…   真建出来了，是什么类、什么 identity
+                  #   own done phase=…  scene=…     completion 落地时的终态
+                  #   own start      openCard 这一拍的判决（1 = 走自建，其余 = 退回老路）
+                  #   own scene up   自建 scene 交到卡片手里的时刻（毫秒）
+                  #   own gave up    自建失败，落回 0.2.12 那条挂起启动
+                  #   own destroyed  关卡：destroyScene，而不是 push background
+                  b"win: own gate need=%d miss=%ld",
+                  b"win: own miss %s%s %s",
+                  b"win: own begin b=%@ from=%s frame=%.0fx%.0f",
+                  b"win: own compose ok scene=%s id=%s",
+                  b"win: own done phase=%ld scene=%s",
+                  b"win: own start %@ door=%ld live=%d canvas=%.0fx%.0f t=%ldms wait=%ldms",
+                  b"win: own scene up after ",
+                  b"win: own gave up door=%ld b=%@ after %ldms",
+                  b"win: own destroyed %@",
+                  # 这一字典的字面量是「自建」这件事在产物里的锚：三个类名任何一个
+                  # 拼错，工程就编译成一条永远走不进去的路，而日志只会说 gate miss。
+                  b"FBSMutableSceneDefinition",
+                  b"FBApplicationProcessLaunchTransaction",
+                  b"registerProcessForAuditToken:",
+                  b"createSceneWithDefinition:initialParameters:",
                   b"notify: forward adopt b=%s op=%s",
                   b"win: ability app forceBg=%d ctrl forceBg=%d app dehost=%d ctrl dehost=%d",
                   b"win: ability scene deact=%d/%d overlay=%d txn=%d openurl=%d/%d",

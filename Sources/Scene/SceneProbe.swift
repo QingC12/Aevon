@@ -1023,6 +1023,48 @@ zStackParticipantDidChange:
         // 与 `ring: launch done` 同一个用途：把 3 秒卡顿锁到具体一跳到。`wait=` 是
         // 从 `openCard` 进门算起的全部开销（含钩子装配、AevonHookArm、降级），
         // `t=` 只是这一句本身。
+        // 0.2.13 — **换来源**。这是从 0.2.10 一路查下来最后剩下的那一格。
+        //
+        // 0.2.10 把「QQ 全屏后变黑」定成「那次转发」；0.2.12 把挂起位真的写进
+        // `SBActivationSettings`（真机读回 `read=1`）—— QQ 仍然先全屏。两次都
+        // 是对的读数、错的位置：**问题不在我们怎么改这次打开，而在我们压根不该
+        // 走「打开」这条路**。
+        //
+        // `launchApplicationWithIdentifier:suspended:` 在 iOS 17 上只负责把进程
+        // 拉起来，SpringBoard 照样按「用户点了图标」把 App 摆成前台演一遍全屏
+        // 动画；等我们把 scene 贴进卡片，屏幕上剩下的就是那半截黑。
+        //
+        // 自建 scene 不给它这个机会：自己起进程（launchIntent=4，不进前台）、
+        // 自己建 scene、自己在自己的窗口里挂 presenter。屏幕从头到尾只有卡片。
+        // 路线来自开源母本 FrontBoardAppLauncher（TrollOpen 致谢里点名的那个），
+        // 不是从字符串表里猜的；每一类每一选择子都先经过 `AevonOwnGate` 的问，
+        // 整条包在 ObjC 的 `@try` 里 —— 缺一样就退回 0.2.12 那条路，行为一字不改。
+        let ownAt = CFAbsoluteTimeGetCurrent()
+        // 「已经有一个活 scene」就不自建：那会跟系统自己那个 scene 撞同一个
+        // identity（`sceneID:<bundle>-default`）。第二次点同一个 App、刚退出
+        // 还没睡下去、图标路打开过 —— 全落在这一格里，走的还是 0.2.12 的链。
+        let alreadyLive = sceneFor(bundleID) != nil
+        if alreadyLive { AevonOwnClear() }
+        let canvas = FloatHost.fatRender(in: UIScreen.main.bounds.size)
+        let started = alreadyLive
+            ? -1
+            : AevonOwnStart(bundleID, CGRect(origin: .zero, size: canvas), "openCard")
+        Log.write(String(format: "win: own start %@ door=%ld live=%d canvas=%.0fx%.0f t=%ldms wait=%ldms",
+                         bundleID, started, alreadyLive ? 1 : 0, canvas.width, canvas.height,
+                         Int((CFAbsoluteTimeGetCurrent() - ownAt) * 1000),
+                         Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
+        if started == 1 {
+            mark("OWN-build")
+            markHosted(bundleID)
+            pollForScene(bundleID, ticks: 0, start: Date(), fallback: fallback)
+            return
+        }
+        // 走到这里就是老路（闸不过 / 限流 / 已经有一个活 scene）：这一张卡的
+        // scene 将来是系统的那个，关卡时**不能**销毁 —— 见 `AevonOwnHeld`。
+        AevonOwnClear()
+
+        // 老路一格没动。走到这里只有两种情形：`AevonOwnGate` 说这套私有面在
+        // 这台机器上不齐（于是我们连试都不试），或者已经有一次在跑（不重入）。
         let launchAt = CFAbsoluteTimeGetCurrent()
         let door = AevonLaunchSuspended(sharedApplication(), bundleID)
         Log.write(String(format: "win: icon launch %@ suspended door=%ld t=%ldms wait=%ldms",
@@ -1248,8 +1290,50 @@ zStackParticipantDidChange:
     /// pid=-1 = 进程没起；pid 有值但列表里没有它 = 起了没 scene；列表里有但
     /// 名字不含 bundle id = 我们的匹配口径错了。
     private static func pollForScene(_ bundleID: String, ticks: Int, start: Date,
-                                     probed: Int = 0, retried: Int = 0,
+                                     probed: Int = 0, retried: Int = 0, fell: Bool = false,
                                      fallback: @escaping (String) -> Void) {
+        // 0.2.13 — 自建 scene 是**第一个**来源，排在系统 scene 之前。
+        //
+        // 三种答案分别走：「2 建好了」接过来 —— 它就是这一版要的东西；
+        // 「1 还在建」继续等，不发任何请求；「3 失败」落回老路，而且只落一次
+        // （`fell` 兜住递归）。失败之后仍然靠下面 `sceneFor` 找系统那个 scene，
+        // 所以这一格最坏的后果只是「慢一点」，不是「没有卡」。
+        let ownState = AevonOwnState()
+        if ownState == 2, let built = AevonOwnFetch() as? NSObject {
+            unmark()
+            let ms = Int(Date().timeIntervalSince(start) * 1000)
+            Log.write("win: own scene up after " + String(ms) + "ms ticks=" + String(ticks))
+            emitNotes(AevonTakeNotes())
+            float(built, bundleID: bundleID)
+            guard FloatHost.mainBundle == bundleID else {
+                AevonHookDisarm(bundleID)
+                if AevonSystemCovered() {
+                    Log.write("win: own card closed by cover, no fallback")
+                    return
+                }
+                Log.write("win: own card did not come up, hold released")
+                fallback("own card did not come up")
+                return
+            }
+            return
+        }
+        var fellOver = fell
+        if ownState == 3, !fellOver {
+            fellOver = true
+            unmark()
+            let door = AevonLaunchSuspended(sharedApplication(), bundleID)
+            Log.write(String(format: "win: own gave up door=%ld b=%@ after %ldms", door,
+                             bundleID, Int(Date().timeIntervalSince(start) * 1000)))
+            if door != 1 {
+                AevonHookDisarm(bundleID)
+                if AevonSystemCovered() {
+                    Log.write("win: own gave up under cover, no fallback")
+                    return
+                }
+                fallback("own failed and suspended door=" + String(door))
+                return
+            }
+        }
         if let scene = sceneFor(bundleID) {
             unmark()
             let ms = Int(Date().timeIntervalSince(start) * 1000)
@@ -1328,7 +1412,7 @@ zStackParticipantDidChange:
         let gap: Double = ticks < 30 ? 0.04 : 0.25
         DispatchQueue.main.asyncAfter(deadline: .now() + gap) {
             pollForScene(bundleID, ticks: ticks + 1, start: start, probed: seen,
-                         retried: again, fallback: fallback)
+                         retried: again, fell: fellOver, fallback: fallback)
         }
     }
 
@@ -1575,12 +1659,20 @@ zStackParticipantDidChange:
             // `hosted mark cleared for com.apple.DocumentsApp` 出现在关别的窗那一拍）。
             // `bundleID` 是这个 scene 自己的，唯一正确。
             let closingBundle = bundleID ?? hostedBundle ?? ""
+            // 0.2.13 — **这张卡的 scene 是谁的**，决定了关卡要做的事完全相反。
+            //
+            // 借来的（系统的）要继续活在后台，所以要还画布、要 `AevonPushBackground`；
+            // 自建的必须销毁 —— 它没有「后台」这个状态，留着就是一个带着 presenter
+            // 挂在 SpringBoard 里的孤儿，下一次打开同一个 App 还会跟系统自己那个
+            // scene 撞同一个 identity。反过来对自建 scene 推后台也是错的：
+            // `AevonPushBackground` 会把一个「本不该存在」的 scene 交给系统去管理。
+            let owned = !closingBundle.isEmpty && AevonOwnIsOwned(closingBundle) == 1
             let screenSize = UIScreen.main.bounds.size
-            if !closingBundle.isEmpty {
+            if !closingBundle.isEmpty && !owned {
                 AevonSceneFrameSet(closingBundle, 0, 0,
                                    Double(screenSize.width), Double(screenSize.height))
             }
-            let restoreDoor = AevonPushSceneFrame(scene)
+            let restoreDoor = owned ? -1 : AevonPushSceneFrame(scene)
             if closingBundle.isEmpty {
                 AevonSceneFrameClear()
             } else {
@@ -1608,8 +1700,11 @@ zStackParticipantDidChange:
             // 第一次写不进去，是因为写的时候 presenter 还活着（`deactivate` 还没
             // 调），场景的归属权还在我们手里。拆完 presenter 再写，一次就够；
             // 下面那条 0.35 s 的补写留着，万一这一次也没落地。
-            let door = AevonPushBackground(scene)
-            Log.write("win: background after teardown door=" + String(door))
+            // 0.2.13 — 自建 scene 的关卡动作只有一个：销毁。`destroyScene:` 只解绑
+            // scene，进程留着（母本已知的这个行为对我们正好：下次打开省一次冷启动）。
+            let door = owned ? AevonOwnDestroy(closingBundle) : AevonPushBackground(scene)
+            Log.write("win: background after teardown door=" + String(door)
+                      + (owned ? " own=1" : ""))
             // 0.0.70 — 关卡这一拍把 App 写的读数取回来。必须在 `clearHosted()`
             // 之前：那个函数会把 `hostedBundle` 清空，之后就不知道去哪个容器里取了。
             drainAppLog("on close")
@@ -1634,6 +1729,8 @@ zStackParticipantDidChange:
             // 这一次只写 scene 的 frame（我们本来就拥有这个量），不碰任何视图，
             // 0.30 s 后执行，此时 presenter 已经 invalidate。
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) { [weak scene] in
+                // 0.2.13 — 自建的 scene 0.30 s 前已经销毁，这一段对它没有意义。
+                guard !owned else { return }
                 // 0.0.98 — 判据从「有没有卡」换成「这一个 App 有没有被重新登记」。
                 //
                 // 0.0.75 起这里写的是 `!cardUp`，当时「有卡」就等于「那个 App 又被
@@ -1684,7 +1781,8 @@ zStackParticipantDidChange:
             emitNotes(AevonHookSummary())
             let back = value(of: scene, "settings").map { AevonBoolOf($0, "isForeground") } ?? -1
             Log.write("win: card closed by " + reason + ", background door=" + String(door)
-                      + " fg=" + flag(back) + " live=" + (stillUp ? "yes" : "no"))
+                      + " fg=" + flag(back) + " live=" + (stillUp ? "yes" : "no")
+                      + (owned ? " own=1" : ""))
             // A hand-back that did not land is the same defect one layer down:
             // the app would spend the rest of the session believing it is in
             // front. One retry, a third of a second later, and then the log says so.
@@ -1693,7 +1791,7 @@ zStackParticipantDidChange:
             // 与「用户关掉卡片立刻点图标」撞在一起，补写把刚被系统拉起来的 App
             // 又按回后台。窗口越短越不会撞上；真撞上（新卡已经开出来）就不补了
             // —— 那时 scene 属于新的一张卡，再写后台就是错的。
-            if back != 0 {
+            if back != 0 && !owned {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                     // 0.0.98 — 判据按名字，不按「有没有卡」。多窗时 `cardUp` 大概
                     // 率还是 true（停靠小窗还在），用它判等于这条补写永远不执行；
