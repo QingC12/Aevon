@@ -601,13 +601,8 @@ def main():
                   # 0.1.34 — 解锁后重挂承载面：`canvas revived` 是动作本身，
                   # `revive after unlock` 是保活时钟接住那一次的信号。两条都
                   # 必须在内核里 —— 前两版黑屏就是「窗口回来了、画面没回来」。
-                  # 0.2.0 — 「整层隐藏」整段删除，换成的两条：
-                  #   盖着的时候建卡 ⇒ 当场收；卡片活着期间盖上来 ⇒ 每拍查、查到就收。
-                  #   0.1.31 的 `win: system cover hide/show` 从二进制里应该彻底消失
-                  #   （粘性标记就是 Aevon(168) 那台手机开不出浮窗的原因）。
-                  b"win: card closed at once (system cover up)",
-                  b"win: card closed by system cover",
-                  # 锁屏期间建卡被主动收掉时，**不许**再走全屏兜底。
+                  # 0.2.2 — 0.2.0 那两条「盖着就收卡」整段删除（见反向断言表）。
+                  # 剩下的两条遮挡闸都只做一件事：建卡失败时**不许**回落全屏。
                   b"win: icon card closed by cover, no fallback",
                   # 0.2.1 — 4 秒等不到场景、这一刻系统界面还盖着 ⇒ 一个字节都不开。
                   b"win: icon card gave up under cover, no fallback",
@@ -843,7 +838,13 @@ def main():
                  # 任何一条还能 grep 到，就说明那台发动机还在。
                  b"notify: divert replay b=%@",             # gone
                  b"notify: divert replay threw %@",         # gone
-                 b"notify: divert card up b=%@"):            # gone
+                 b"notify: divert card up b=%@",            # gone
+                 # 0.2.2 — 遮挡收卡的两条（建卡末步 + 保活时钟）。Aevon(171)：
+                 # 点通知那一刻 `isUILocked` 必然为真，这两条闸把每一次
+                 # 「通知 → 浮窗」都在建好之后自己拆了，用户看到「不全屏也不出窗」。
+                 # 任何一条还能 grep 到，就说明卡片又被遮挡判据杀了。
+                 b"win: card closed at once (system cover up)",   # gone
+                 b"win: card closed by system cover"):            # gone
         if gone in dylib_early:
             bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "
                 "back (hot zone 0.1.18 / summon bar 0.1.24 / cover lock gate 0.1.90)")

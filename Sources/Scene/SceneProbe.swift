@@ -1253,13 +1253,13 @@ zStackParticipantDidChange:
             // 那样一条失败会被记成一次成功，下次再去查就是「日志里没有异常」。
             guard FloatHost.mainBundle == bundleID else {
                 AevonHookDisarm(bundleID)
-                // 0.2.0 — 这一条不是失败，是**我们已经主动收掉了**。
+                // 0.2.2 — 建卡成功但主窗没落在这次请求的 App 上（被前一张卡抢了）。
                 //
-                // 「盖着的时候不留卡片」那条规则在建卡的最后一步就 `closeCard` 了，
-                // 于是这里看到的形状与「卡没起来」一模一样。若照原样走 `fallback`，
-                // 兜底会把 App **全屏**打开 —— 锁屏上点一条通知，结果解锁后蹦出一个
-                // 全屏 App，正是用户明确否掉的那种结果（他要的是「这次点击什么都不
-                // 发生」）。判据只能用遮挡本身：这一刻盖着，就不是失败。
+                // 这条闸只管一件事：**别回落全屏**。真正的失败照旧走 `fallback`；
+                // 但系统界面（锁屏 / 通知中心 / 控制中心）盖着的时候不走 —— 兜底
+                // 会把 App 全屏打开，锁屏上点一条通知变成解锁后蹦出一个全屏 App，
+                // 正是用户明确否掉的结果。遮挡从来不是「没关系」的理由（0.2.0 的
+                // 错就在这儿），它只是「宁可什么都不发生，也不要全屏」。
                 if AevonSystemCovered() {
                     Log.write("win: icon card closed by cover, no fallback")
                     return
@@ -1797,22 +1797,23 @@ zStackParticipantDidChange:
                 }
                 return
             }
-            // 0.2.0 — 卡片活着的时候系统界面盖上来（锁屏 / 通知中心 / 控制中心）：
-            // **收卡片**，不隐藏窗口。
+            // 0.2.2 — 这一拍照 0.2.0 是「盖着就收卡片」，整段删掉。
             //
-            // 0.1.31~0.1.99 这里是 `FloatHost.setSystemCovered(true)`，把所有宿主的
-            // 窗口一起藏起来。Aevon(168) 证明那条路的代价是整台手机再也开不出浮窗：
-            // 藏起来的卡片场景当场死掉、保活时钟跟着停，而「现在还盖着吗」只有这个
-            // 时钟会问 —— 标记从此永远摘不掉。收卡片没有这个尾巴：拆除是幂等的，
-            // 状态全在这里结束。
+            // 母版 Stheno 的二进制里 `isUILocked` 出现 0 次：它压根不管锁屏、
+            // 通知中心、控制中心盖不盖，卡片建了就活着。我们 0.1.31 加了「整层
+            // 隐藏」（Aevon(168) 证明它会自锁成永真，整台手机再也不出浮窗），
+            // 0.2.0 改成「盖着就收卡」，而 Aevon(171) 证明后者同样错：
             //
-            // 位置在 `gestureLive` 之后：手势期间整段让路（那条纪律见上面的注释），
-            // 一秒后照常问。
-            if AevonSystemCovered() {
-                Log.write("win: card closed by system cover")
-                closeCard("system cover")
-                return
-            }
+            //   12:25:34 点微信通知 → 挂起启动成功 → 598 ms 拿到 scene →
+            //   卡片完整建好（slot taken / band window up / window up level=101
+            //   / activate ran=yes）→ `win: card closed at once (system cover up)`
+            //   → 全拆。同一秒 `notify: cover … at=347ms` 说明面板其实早就收了。
+            //
+            // 判据里第一条 `SBLockScreenManager.isUILocked == 1` 在「点通知」
+            // 这一刻**必然为真**（那次点击自带 `unlock=1` 的解锁标志），所以这条闸
+            // 在通知路径上 100% 命中 —— 它和「点通知出浮窗」在逻辑上互斥，不是
+            // 数值调不好的问题。遮挡只能当「失败时不回落全屏」的兜底闸（见
+            // `pollForScene` 两个出口），不能当收卡条件。
             // 0.0.55 — 空闲熄屏的续命拍。放在节拍最前面：这一条与画面、与
             // settings 都没有关系，后面的任何一个 guard 都不该把它挡掉。
             if Date().timeIntervalSince(idleAt) >= 20 {
@@ -1910,8 +1911,10 @@ zStackParticipantDidChange:
                 }
             }
             // 0.2.0 — 这里原来每拍调一次 `FloatHost.setSystemCovered(AevonSystemCovered())`。
-            // 那套「整层隐藏」已经整段删除（见 FloatHost 里那段注释），遮挡判定搬到了
-            // 这一拍的开头：盖着就收卡片，不再藏窗口。
+            // 那套「整层隐藏」已经整段删除（见 FloatHost 里那段注释）。
+            // 0.2.2 — 搬到这一拍开头的那次「盖着就收卡片」也删了：点通知这一刻
+            // `isUILocked` 必然为真，它把每一次通知→浮窗都自己拆了（Aevon(171)）。
+            // 这一拍现在只读数，不因遮挡做任何拆除。
             // 0.0.50 — 画面本身的两个读数。`fg` 是我们自己写进去的，切换 App
             // 时它不变；`contentState` 才是「现在有没有画」，`level` 是母本那
             // 三件套里的第二件。Aevon(48) 的四份日志里 fg 一次没掉过，所以黑
@@ -2072,22 +2075,13 @@ zStackParticipantDidChange:
                 unmark()
             }
         }
-        // 0.2.0 — 锁屏 / 通知中心 / 控制中心盖着的时候**不留卡片**（用户 0.1.99 定档
-        // 「建了立刻收」）。
+        // 0.2.2 — 这里 0.2.0 是「建卡末步再问一次遮挡，盖着就 `closeCard`」，
+        // 整段删掉。理由与保活时钟那处相同（见那里）：点通知这一刻 `isUILocked`
+        // 必然为真，于是每一次「通知 → 浮窗」都在建好之后立刻被自己拆掉，
+        // 用户看到的就是「不全屏、也不出窗」。
         //
-        // 这是 0.1.31 那条「整层隐藏」的替代品。隐藏会留下一个「窗口在、画面不在、
-        // 宿主还活着」的半死状态，而它只能靠保活时钟刷新 —— Aevon(168) 里那次锁屏点
-        // 通知：标记翻成 true 之后卡片当场死了、时钟跟着停，于是整台手机的浮窗再也
-        // 开不出来。收卡片是干净拆除：presenter 停掉、槽位还回去、App 的标记撤掉，
-        // 下一次点击从零开始，没有任何状态能粘住。
-        //
-        // 放在整段建卡之后的最后一步（而不是建窗那一行）：`closeCard` 要拆 presenter、
-        // 要还 scene 尺寸、要释放空闲熄屏断言 —— 那些东西都在这一段里刚准备好。
-        if AevonSystemCovered() {
-            Log.write("win: card closed at once (system cover up)")
-            closeCard("system cover up")
-            return
-        }
+        // 母版没有这道闸。锁屏画面由 CoverSheet 窗口盖着（层级远高于卡片的 101），
+        // 卡片在那儿露不出来；解锁后自然显现 —— 不需要我们收。
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { keep() }
 
         // Nothing on this screen is hidden any more. 0.0.24 hid one view,
