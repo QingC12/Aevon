@@ -1713,7 +1713,11 @@ zStackParticipantDidChange:
             // 0.0.98 — 按名字拆自己那一块。多窗之后「拆唯一那个宿主」会让关掉
             // 主窗时连带干掉停靠小窗。
             FloatHost.hide(bundle: closingBundle)
-            // 0.2.22 — 全屏容器这一版没有动过，关闭时也就不需要还原。
+            // 0.2.24 — 借前台 scene 时藏掉的那一页要还回去。放在拆完 presenter
+            // 之后、交还后台之前：此刻 scene 还在我们手里，页面还空着，先还原
+            // 才不会让系统在中间那一瞬去画一张空页。
+            restoreHiddenPage()
+            // 0.2.24 — 那一页已经在上一条还回去了，这里没有别的还原动作。
             // 0.0.82 — 交还后台这一拍搬到拆完 presenter 之后。
             //
             // Aevon(73) 里每一张卡关掉都是同一个形状：`background door=1 fg=yes`
@@ -1943,23 +1947,34 @@ zStackParticipantDidChange:
         // 上面那段：写在 `activate` 之前的那一次不算「App 的窗口变了」。
         host.reassertCanvas()
 
-        // 0.2.23 — 借来的**前台** scene，卡起来之后要让系统切回桌面页。
+        // 0.2.24 — 借来的**前台** scene，卡起来之后要让系统切回桌面页。
         //
         // 0.2.22 的祖先链给出了答案：前台 App 的画面在
         // `SBDeviceApplicationSceneView > … > SBAppSwitcherPageView >
         // SBFluidSwitcherTouchPassThroughScrollView` 这一串里 —— 它就是 app
         // switcher 当前显示的那一页，桌面是同一把滚动视图的另一页。画面被我们的
         // presenter 接走之后那一页空了，空页留在原处就是「卡片外面整屏黑」。
-        // 藏内层 UIView（0.2.20）没用，藏 SBMainSwitcherWindow（0.2.21）也没用，
-        // 因为要动的不是可见性，是**当前页**。
         //
-        // 0.35 s 留给卡片先出画；失败只记一行，不做别的。
+        // 0.2.23 只试了三个 home 选择子，真机上只有一句 `unavailable` —— 三种
+        // 失败（对象没取到 / 名字不存在 / 带参数）长得一模一样，所以修不动。
+        // 这一版分两步，且**按读数**决定要不要兜底：
+        //   0.35 s 才叫 home（让卡片先出画）；
+        //   1.10 s 回读 `isSpringBoardActive` —— 桌面不在屏上就藏掉那张空页、
+        //            再试一次把桌面页滚出来。
         if let b = bundleID, AevonOwnIsOwned(b) == 0, liveFront {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                if closed { return }
                 if let used = AevonHomePress() {
                     Log.write("win: home pressed via " + used + " (borrowed fullscreen)")
                 } else {
                     Log.write("win: home press unavailable (borrowed fullscreen)")
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+                    if closed { return }
+                    let active = AevonSpringboardActive()
+                    Log.write("win: home check springboard=" + String(active))
+                    if active == 1 { return }
+                    hideEmptyPage(b)
                 }
             }
         }
@@ -2639,133 +2654,128 @@ zStackParticipantDidChange:
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { tick() }
     }
 
-    // MARK: - 0.2.22 全屏副本：只取证，不动手
+    // MARK: - 0.2.24 空的 app-switcher 页
 
-    /// SpringBoard 放在窗口和 scene 画面之间的类。口径与 0.0.24 一样窄：
-    /// 桌面、图标层、状态栏、壁纸都必须活下来，名字里提到它们的永远不是候选。
-    private static func isSceneCarrier(_ name: String) -> Bool {
-        if name.contains("HomeScreen") || name.contains("Icon")
-            || name.contains("StatusBar") || name.contains("Wallpaper")
-            || name.contains("Snapsh") || name.contains("Switcher") {
-            return false
-        }
-        return name.contains("SBDeviceApplicationSceneView")
-            || name.contains("SBAppContainerView")
-            || name.contains("SBSceneContainerView")
-            || name.contains("_UIScenePresentationView")
-    }
+    /// 被藏起来的那一页，以及它原来的 alpha / 交互开关。关卡时原样还回去 ——
+    /// 不还，用户关掉卡片之后那张页还是空的。
+    private static var hiddenPage: (view: UIView, alpha: CGFloat, touch: Bool)?
 
-    /// 视图对「我是哪个 scene」的几种说法。`_UIScenePresentationView` 自己
-    /// 不一定有，identity 在 presenter / sceneHandle / scene 上。
-    private static func sceneIdentifier(of view: UIView) -> String {
-        for key in ["sceneIdentifier", "_sceneIdentifier"] {
-            if let text = value(of: view, key) as? String, !text.isEmpty { return text }
-        }
-        if let handle = value(of: view, "sceneHandle") {
-            for key in ["sceneIdentifier", "identifier"] {
-                if let text = value(of: handle, key) as? String, !text.isEmpty { return text }
-            }
-        }
-        if let scene = value(of: view, "scene") {
-            for key in ["identifier", "sceneIdentifier"] {
-                if let text = value(of: scene, key) as? String, !text.isEmpty { return text }
-            }
-        }
-        return ""
-    }
-
-    /// `node` 在 `window` 这一层里的祖先：藏它而不是藏 node 自己，才会把
-    /// 「画面没了」和「画面没了、它身后那层黑还在」区分开。
-    private static func windowChild(containing node: UIView, in window: UIWindow) -> UIView? {
-        var current = node
-        var steps = 0
-        while let parent = current.superview, parent !== window {
-            current = parent
-            steps += 1
-            if steps > 64 { return nil }
-        }
-        return current.superview === window ? current : nil
-    }
-
-    /// 0.2.22 — 只取证，不动手。
+    /// 0.2.22 的祖先链给出了答案：前台 App 的画面在
+    /// `SBDeviceApplicationSceneView > … > SBAppSwitcherPageView` 这一串里 ——
+    /// 它就是 app switcher 当前显示的那一页，桌面是同一把滚动视图的另一页。
+    /// 画面被我们的 presenter 接走之后那一页空了，空页留在原处就是「卡外整屏黑」。
     ///
-    /// 0.2.20 把内层 UIView 的 alpha 置 0、0.2.21 把 `SBMainSwitcherWindow`
-    /// 整个置 0，两次都没能让黑色消失，说明「黑在哪一层」的判断连着错了两回。
-    /// 这一版不改任何 alpha，只把 scene 画面到窗口的祖先链、以及 SpringBoard
-    /// 的全部窗口原样写进日志；层级拿到之后再决定藏谁。
-    private static func demoteFullScreen(_ bundle: String) {
-        guard let application = sharedApplication() else {
-            Log.write("win: no application to look for the full screen")
-            return
-        }
-        var chosen: (node: UIView, top: UIView, name: String, ident: String)?
-        var windows = 0
+    /// 0.2.20 藏内层 UIView、0.2.21 藏 `SBMainSwitcherWindow` 都没能让黑色消失，
+    /// 因为要动的不是窗口可见性，是**当前页本身**。这一版两步都做，且都可观测：
+    ///   ① 藏掉屏幕上这一页（alpha 0 + 不吃触摸），关卡时原样还回；
+    ///   ② 把同一把滚动视图里的桌面页滚出来 —— 和手指上滑是同一个动作。
+    @discardableResult
+    private static func hideEmptyPage(_ bundle: String) -> String? {
+        guard let application = sharedApplication() else { return nil }
+        var page: UIView?
         for window in application.windows {
             if window is FloatWindow { continue }
-            windows += 1
             var queue: [UIView] = [window]
             var head = 0
             while head < queue.count && head < 4000 {
                 let node = queue[head]
                 head += 1
-                let name = NSStringFromClass(type(of: node))
-                if isSceneCarrier(name),
-                   let top = windowChild(containing: node, in: window) {
-                    let ident = sceneIdentifier(of: node)
-                    if !ident.isEmpty, ident.contains(bundle) {
-                        chosen = (node, top, name, ident)
-                        break
-                    }
+                if NSStringFromClass(type(of: node)).contains("AppSwitcherPageView"),
+                   covers(node, window) {
+                    page = node
+                    break
                 }
                 queue.append(contentsOf: node.subviews)
             }
-            if chosen != nil { break }
+            if page != nil { break }
         }
-
-        for (index, window) in application.windows.enumerated() {
-            Log.write("win: fs window " + String(index) + " "
-                      + NSStringFromClass(type(of: window))
-                      + " lvl=" + String(Int(window.windowLevel.rawValue))
-                      + " a=" + alphaText(window.alpha)
-                      + " hid=" + (window.isHidden ? "1" : "0")
-                      + " f=" + rectText(window.frame)
-                      + " subs=" + String(window.subviews.count))
+        guard let empty = page else {
+            Log.write("win: empty page not found for " + bundle)
+            return "notfound"
         }
-
-        guard let hit = chosen else {
-            Log.write("win: no fullscreen carrier for " + bundle
-                      + " (windows=" + String(windows) + ")")
-            return
-        }
-        Log.write("win: fs found " + hit.name + " ident=" + hit.ident
-                  + " top=" + NSStringFromClass(type(of: hit.top)))
-        var node: UIView? = hit.node
-        var depth = 0
-        while let view = node, depth < 12 {
-            Log.write("win: fs chain " + String(depth) + " "
-                      + NSStringFromClass(type(of: view))
-                      + " f=" + rectText(view.frame)
-                      + " a=" + alphaText(view.alpha)
-                      + " hid=" + (view.isHidden ? "1" : "0")
-                      + " subs=" + String(view.subviews.count))
-            if view is UIWindow { break }
-            node = view.superview
-            depth += 1
-        }
-        if let window = hit.node.window {
-            for (index, sibling) in window.subviews.enumerated() where sibling !== hit.top {
-                Log.write("win: fs sib " + String(index) + " "
-                          + NSStringFromClass(type(of: sibling))
-                          + " f=" + rectText(sibling.frame)
-                          + " a=" + alphaText(sibling.alpha)
-                          + " hid=" + (sibling.isHidden ? "1" : "0")
-                          + " subs=" + String(sibling.subviews.count))
-            }
-        }
+        hiddenPage = (empty, empty.alpha, empty.isUserInteractionEnabled)
+        empty.alpha = 0
+        empty.isUserInteractionEnabled = false
+        Log.write("win: empty page hid " + NSStringFromClass(type(of: empty))
+                  + " " + rectText(empty.convert(empty.bounds, to: nil)))
+        let scrolled = scrollToHomePage(from: empty)
+        Log.write("win: home page scroll " + (scrolled ? "sent" : "unavailable"))
+        return scrolled ? "hid+scroll" : "hid"
     }
 
-    private static func alphaText(_ value: CGFloat) -> String {
-        String(format: "%.2f", value)
+    /// 屏幕中心落在这一页里 = 这一页就是用户现在看到的那一页（也就是黑的那一页）。
+    private static func covers(_ view: UIView, _ window: UIWindow) -> Bool {
+        guard view.window === window else { return false }
+        let rect = view.convert(view.bounds, to: window)
+        return rect.contains(CGPoint(x: window.bounds.midX, y: window.bounds.midY))
+    }
+
+    /// 同一把滚动视图里带桌面内容的那一页，滚出来。这与手指上滑回桌面是同一个
+    /// 动作，只是不经过手势识别器 —— 手势那一半在 0.2.21 已经证明会打到 App 上。
+    private static func scrollToHomePage(from page: UIView) -> Bool {
+        var node: UIView? = page.superview
+        var steps = 0
+        var scroller: UIScrollView?
+        while let view = node, steps < 24 {
+            if let found = view as? UIScrollView { scroller = found; break }
+            node = view.superview
+            steps += 1
+        }
+        guard let scroll = scroller else { return false }
+        for candidate in pages(in: scroll) where candidate !== page {
+            if isHomePage(candidate) {
+                scroll.scrollRectToVisible(scroll.convert(candidate.bounds, from: candidate),
+                                           animated: true)
+                return true
+            }
+        }
+        return false
+    }
+
+    /// 页可能挂在滚动视图的容器里（0.2.20 的层级表里就有一层 `_SBFActualClippingView`），
+    /// 所以先看直接子视图，再往下一层找，最多两层。
+    private static func pages(in scroll: UIScrollView) -> [UIView] {
+        var out: [UIView] = []
+        for child in scroll.subviews {
+            if NSStringFromClass(type(of: child)).contains("PageView") {
+                out.append(child)
+                continue
+            }
+            for grand in child.subviews {
+                if NSStringFromClass(type(of: grand)).contains("PageView") {
+                    out.append(grand)
+                }
+            }
+        }
+        return out
+    }
+
+    /// 桌面页的判据：子树里还留着 HomeScreen / 图标列表 / 壁纸 —— 这三样只有
+    /// 桌面那一页才有。App 的页在画面被接走之后是空的，不能反过来用它判。
+    private static func isHomePage(_ page: UIView) -> Bool {
+        var queue: [UIView] = [page]
+        var head = 0
+        while head < queue.count && head < 600 {
+            let node = queue[head]
+            head += 1
+            let name = NSStringFromClass(type(of: node))
+            if name.contains("HomeScreen") || name.contains("IconListView")
+                || name.contains("DockView") || name.contains("Wallpaper") {
+                return true
+            }
+            queue.append(contentsOf: node.subviews)
+        }
+        return false
+    }
+
+    /// 关卡时把那一页还回去。没有藏过就什么都不做。
+    private static func restoreHiddenPage() {
+        guard let saved = hiddenPage else { return }
+        saved.view.alpha = saved.alpha
+        saved.view.isUserInteractionEnabled = saved.touch
+        hiddenPage = nil
+        Log.write("win: empty page restored "
+                  + NSStringFromClass(type(of: saved.view)))
     }
 
     private static func rectText(_ rect: CGRect) -> String {

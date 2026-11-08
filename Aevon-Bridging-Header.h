@@ -382,7 +382,12 @@ NSInteger AevonOwnIsOwned(NSString *_Nullable bundleID);
 NSInteger AevonOwnDestroy(NSString *_Nullable bundleID);
 
 /// 0.2.23 — 切回桌面页。返回实际用上的「类名 -选择器」，一个都没接上则为 nil。
+/// 0.2.24 — 取对象 → 普查选择子 → 再调用，每一层都进日志。
 NSString *_Nullable AevonHomePress(void);
+
+/// 0.2.24 — 回桌面的结果读数：1 = 桌面已经在屏上，0 = 还在 App 页里，-1 = 读不到。
+/// 调用方按「不是 1」决定要不要走藏空页的兜底 —— 不信返回值，信读数。
+int AevonSpringboardActive(void);
 
 // 0.0.65 的 `AevonColdStartReady` 已随该功能一起删除（0.0.66）：它靠「名片文件
 // 写上 pid」判断进程新旧，而名片写不进去时（沙箱、目录权限、装包顺序）判据就永远

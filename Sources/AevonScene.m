@@ -1028,41 +1028,114 @@ NSInteger AevonOwnIsOwned(NSString *bundleID) {
     return [bundleID isEqualToString:AevonOwnBundle] ? 1 : 0;
 }
 
-/// 0.2.23 — 让 SpringBoard 从「全屏 App 页」切回桌面页。
+/// 0.2.24 — 「回桌面」：先取对象、再普查、最后才试。
 ///
-/// 0.2.22 的祖先链证明：前台 App 的画面挂在
-/// `SBDeviceApplicationSceneView > … > SBAppSwitcherPageView >
-/// SBFluidSwitcherTouchPassThroughScrollView > …` 里 —— 现代 iOS 的前台 App
-/// 本来就是一页 app-switcher 页面，桌面是同一把滚动视图里的另一页。画面被我们
-/// 的 presenter 接进卡片之后，那一页就空了；空页留在当前位置，就是用户看到的
-/// 「卡片外面全黑，也不回桌面」。所以正确的收尾不是藏某一层，而是**切回桌面页**。
-///
-/// 依次试三个已知的无参入口，任何一个接上就返回它的类名与选择器（写进日志），
-/// 都没接上返回 nil —— 调用方只记一行，不做别的。
+/// 0.2.23 只试了三个名字，真机日志只有一句 `home press unavailable` ——
+/// 「对象没取到」「名字不存在」「名字存在但带参数」这三种失败长得一模一样。
+/// 这一版把三件事分开记：
+///   · `win: home targets n=…`  取到几个单例（以及每个入口为什么没取到）
+///   · `win: home sel …`        这些类里带 home 的选择子到底有哪些
+///   · 返回值                    实际调用了谁，或者最后走了哪条兜底
+static NSArray *AevonHomeClassNames(void) {
+    return @[@"SBUIController", @"SBMainWorkspace", @"SBWorkspace",
+             @"SBFluidSwitcherGestureManager", @"SBMainSwitcherControllerCoordinator",
+             @"SBSwitcherController", @"SBHomeScreenController",
+             @"SBHomeGestureInteraction", @"SBFluidSwitcherViewController"];
+}
+
+/// 取一个单例，并把「为什么没取到」写进 `states`（只进日志，不进返回值）。
+static id AevonHomeTake(NSString *className, NSString *entry, NSMutableArray *states) {
+    Class cls = NSClassFromString(className);
+    if (cls == Nil) { [states addObject:[className stringByAppendingString:@"=noclass"]]; return nil; }
+    SEL sel = NSSelectorFromString(entry);
+    if (![cls respondsToSelector:sel]) {
+        [states addObject:[className stringByAppendingString:@"=nosel"]];
+        return nil;
+    }
+    id got = nil;
+    @try {
+        got = ((id (*)(id, SEL))objc_msgSend)((id)cls, sel);
+    } @catch (__unused NSException *e) {
+        got = nil;
+    }
+    if (got == nil) { [states addObject:[className stringByAppendingString:@"=nil"]]; return nil; }
+    [states addObject:className];
+    return got;
+}
+
+/// 普查里哪些名字值得一试：带 home，且带 press/click/tap/single/dismiss；
+/// 排除 set 开头与 double/long/triple 这类会打开别的东西的名字。
+static BOOL AevonHomeNameWanted(NSString *name) {
+    NSString *low = [name lowercaseString];
+    if ([low rangeOfString:@"home"].location == NSNotFound) return NO;
+    if ([low hasPrefix:@"set"]) return NO;
+    static const char *bad[] = {"double", "long", "triple", "cancel", "begin", "update", "config"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        if ([low rangeOfString:[NSString stringWithUTF8String:bad[i]]].location != NSNotFound) return NO;
+    }
+    static const char *good[] = {"press", "click", "tap", "single", "dismiss"};
+    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+        if ([low rangeOfString:[NSString stringWithUTF8String:good[i]]].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
 NSString *AevonHomePress(void) {
     NSMutableArray *targets = [NSMutableArray array];
-    Class uiCls = NSClassFromString(@"SBUIController");
-    Class wsCls = NSClassFromString(@"SBMainWorkspace");
-    SEL shared = sel_registerName("sharedInstance");
-    if (uiCls != Nil && [uiCls respondsToSelector:shared]) {
-        id t = ((id (*)(id, SEL))objc_msgSend)(uiCls, shared);
-        if (t != nil) [targets addObject:t];
+    NSMutableArray *states = [NSMutableArray array];
+    NSArray *entries = @[@[@"SBUIController", @"sharedInstance"],
+                         @[@"SBMainWorkspace", @"sharedInstance"],
+                         @[@"SBWorkspace", @"mainWorkspace"],
+                         @[@"SBFluidSwitcherGestureManager", @"sharedInstance"],
+                         @[@"SBMainSwitcherControllerCoordinator", @"sharedInstance"],
+                         @[@"SBSwitcherController", @"sharedInstance"],
+                         @[@"SBHomeScreenController", @"sharedInstance"]];
+    for (NSArray *entry in entries) {
+        id got = AevonHomeTake(entry[0], entry[1], states);
+        if (got != nil) [targets addObject:got];
     }
-    if (wsCls != Nil && [wsCls respondsToSelector:shared]) {
-        id t = ((id (*)(id, SEL))objc_msgSend)(wsCls, shared);
-        if (t != nil) [targets addObject:t];
+    AevonLogRaw([[NSString stringWithFormat:@"win: home targets n=%lu %@",
+                  (unsigned long)targets.count,
+                  [states componentsJoinedByString:@","]] UTF8String]);
+
+    // 普查：只列名字，不调用。上限 120 行 —— 这是诊断行，不是常驻日志。
+    NSMutableArray *discovered = [NSMutableArray array];
+    int printed = 0;
+    for (NSString *cn in AevonHomeClassNames()) {
+        Class cls = NSClassFromString(cn);
+        if (cls == Nil) continue;
+        unsigned int count = 0;
+        Method *list = class_copyMethodList(cls, &count);
+        for (unsigned int i = 0; list != NULL && i < count && printed < 120; i++) {
+            NSString *name = NSStringFromSelector(method_getName(list[i]));
+            NSString *low = [name lowercaseString];
+            BOOL home = [low rangeOfString:@"home"].location != NSNotFound;
+            BOOL sw = [low rangeOfString:@"switcher"].location != NSNotFound &&
+                     ([low rangeOfString:@"dismiss"].location != NSNotFound ||
+                      home);
+            if (!home && !sw) continue;
+            printed += 1;
+            AevonLogRaw([[NSString stringWithFormat:@"win: home sel %@ %@ %s", cn, name,
+                          method_getTypeEncoding(list[i])] UTF8String]);
+            if (AevonHomeNameWanted(name)) [discovered addObject:@[cn, name]];
+        }
+        if (list != NULL) free(list);
     }
-    NSArray *names = @[@"_handleHomeButtonSinglePress",
-                       @"handleHomeButtonPress",
-                       @"_handleHomeButtonPress"];
+    AevonLogRaw([[NSString stringWithFormat:@"win: home census lines=%d found=%lu",
+                  printed, (unsigned long)discovered.count] UTF8String]);
+
+    NSArray *known = @[@"_handleHomeButtonSinglePress", @"handleHomeButtonSinglePress",
+                       @"handleHomeButtonPress", @"_handleHomeButtonPress",
+                       @"handleHomeGesture", @"_handleHomeGesture",
+                       @"homeButtonPressed", @"_homeButtonPressed",
+                       @"dismissToHomeScreen", @"_dismissToHomeScreen"];
     for (id target in targets) {
-        for (NSString *name in names) {
+        for (NSString *name in known) {
             SEL sel = NSSelectorFromString(name);
             if (![target respondsToSelector:sel]) continue;
             NSMethodSignature *sig = [target methodSignatureForSelector:sel];
-            // 只认「self + _cmd」的无参方法，参数数对不上就不碰，避免把
-            // SpringBoard 打进一条错误的调用约定里。
-            if (sig != nil && sig.numberOfArguments != 2) continue;
+            // 只认「self + _cmd」的无参方法，参数数对不上就不碰。
+            if (sig == nil || sig.numberOfArguments != 2) continue;
             @try {
                 ((void (*)(id, SEL))objc_msgSend)(target, sel);
             } @catch (__unused NSException *e) {
@@ -1072,7 +1145,79 @@ NSString *AevonHomePress(void) {
                     NSStringFromClass([target class]), name];
         }
     }
+
+    // 普查到的名字分两轮：先 press/click/tap，再其余。每一轮只调第一个接上的，
+    // 因为「按两次 home」在 iOS 上是打开多任务，而不是再回一次桌面。
+    for (int round = 0; round < 2; round++) {
+        for (NSArray *pair in discovered) {
+            Class cls = NSClassFromString(pair[0]);
+            if (cls == Nil) continue;
+            SEL sel = NSSelectorFromString(pair[1]);
+            NSMethodSignature *sig = [cls instanceMethodSignatureForSelector:sel];
+            if (sig == nil || sig.numberOfArguments != 2) continue;
+            NSString *low = [pair[1] lowercaseString];
+            BOOL press = [low rangeOfString:@"press"].location != NSNotFound ||
+                         [low rangeOfString:@"click"].location != NSNotFound ||
+                         [low rangeOfString:@"tap"].location != NSNotFound;
+            if (round == 0 && !press) continue;
+            if (round == 1 && press) continue;
+            for (id target in targets) {
+                if (![target isKindOfClass:cls]) continue;
+                @try {
+                    ((void (*)(id, SEL))objc_msgSend)(target, sel);
+                } @catch (__unused NSException *e) {
+                    continue;
+                }
+                return [NSString stringWithFormat:@"%@ -%@",
+                        NSStringFromClass([target class]), pair[1]];
+            }
+        }
+    }
+
+    // 最后一条：让 Workspace 发一次「没有 App 的切换请求」= 回桌面。
+    for (id target in targets) {
+        if (![target isKindOfClass:NSClassFromString(@"SBMainWorkspace")]) continue;
+        SEL create = NSSelectorFromString(@"createRequestForApplicationActivation:options:");
+        SEL exec = NSSelectorFromString(@"executeTransitionRequest:");
+        if (![target respondsToSelector:create] || ![target respondsToSelector:exec]) {
+            AevonLogRaw("win: home request unavailable");
+            continue;
+        }
+        @try {
+            id req = ((id (*)(id, SEL, id, unsigned long long))objc_msgSend)(
+                target, create, nil, (unsigned long long)0);
+            if (req == nil) { AevonLogRaw("win: home request nil"); continue; }
+            ((void (*)(id, SEL, id))objc_msgSend)(target, exec, req);
+            return @"SBMainWorkspace -home-request";
+        } @catch (NSException *e) {
+            AevonLogRaw([[NSString stringWithFormat:@"win: home request threw %@",
+                          e.reason != nil ? e.reason : @"-"] UTF8String]);
+        }
+    }
     return nil;
+}
+
+/// 0.2.24 — 回桌面的**结果读数**：1 = SpringBoard 已经在前台（桌面在屏上），
+/// 0 = 还在某个 App 页里，-1 = 读不到。调用方按 1/非 1 决定要不要走兜底。
+int AevonSpringboardActive(void) {
+    @try {
+        id ws = nil;
+        Class mainCls = NSClassFromString(@"SBMainWorkspace");
+        if (mainCls != Nil && [mainCls respondsToSelector:NSSelectorFromString(@"sharedInstance")]) {
+            ws = ((id (*)(id, SEL))objc_msgSend)((id)mainCls, NSSelectorFromString(@"sharedInstance"));
+        }
+        Class wsCls = NSClassFromString(@"SBWorkspace");
+        if (ws == nil && wsCls != Nil &&
+            [wsCls respondsToSelector:NSSelectorFromString(@"mainWorkspace")]) {
+            ws = ((id (*)(id, SEL))objc_msgSend)((id)wsCls, NSSelectorFromString(@"mainWorkspace"));
+        }
+        if (ws == nil) return -1;
+        SEL sel = NSSelectorFromString(@"isSpringBoardActive");
+        if (![ws respondsToSelector:sel]) return -1;
+        return ((BOOL (*)(id, SEL))objc_msgSend)(ws, sel) ? 1 : 0;
+    } @catch (__unused NSException *e) {
+        return -1;
+    }
 }
 
 /// 销毁自建 scene。返回 1 表示这一句发出去了。
