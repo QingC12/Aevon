@@ -529,7 +529,10 @@ static NSInteger AevonOwnAuditToken(id handle, AevonAuditToken *out) {
 /// 第一次打开那几拍要对得上。
 static int AevonOwnDisplayNotes = 0;
 static void AevonOwnDisplayLog(NSString *format, ...) {
-    if (AevonOwnDisplayNotes >= 12) return;
+    // 0.2.17 — 12 → 36。Aevon(188) 里抖音那一段**一行都没有**：前 3 个 App
+    // （设置 / Filza / 电池）每个 3 行就把 12 条用完了，于是最该看的那个 App
+    // 什么都没留下。这一族只在自建 scene 时写，36 条够 6~8 个 App。
+    if (AevonOwnDisplayNotes >= 36) return;
     AevonOwnDisplayNotes += 1;
     va_list args;
     va_start(args, format);
@@ -776,6 +779,28 @@ static id AevonOwnCompose(NSString *bundleID, id processIdentity, CGRect frame) 
     return scene;
 }
 
+/// 0.2.17 — 哪些 App 需要「先整屏建、再推到画布」。
+///
+/// 判据是**它按 `UIScreen` 排自己的内容**（抖音的 feed 容器、高德的地图容器），
+/// 而不是「它有多大牌」。名单里每加一个，都要在日志里看到那一版
+/// `app: geom early peers… UIView:0,0,430x932` 这种读数才加 —— 没有读数就加，
+/// 等于给一个本来排得对的 App 白塞一次尺寸变化。
+///
+/// 名单只影响**创建时的那一帧**：贴上卡片之后宿主照旧把 frame 推到画布，所以
+/// 「卡片多大、内容多大」这条口径一点没变，变的只是 App 收到了那次 resize。
+static BOOL AevonOwnStageFirst(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+    static const char *names[] = {
+        "com.ss.iphone.ugc.Aweme",   // 抖音：Aevon(188) peers6 UIView:0,0,430x932
+    };
+    const char *raw = [bundleID UTF8String];
+    if (raw == NULL) return NO;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (strcmp(raw, names[i]) == 0) return YES;
+    }
+    return NO;
+}
+
 /// 起进程 + 建 scene。异步，结果落在 `AevonOwnScene`。
 ///
 /// 返回：0 = 参数/闸不过（立刻回落），1 = 已开始（等 `AevonOwnTake`），
@@ -805,6 +830,36 @@ NSInteger AevonOwnStart(NSString *bundleID, CGRect frame, const char *from) {
     AevonOwnFrame = frame;
     AevonOwnLog(@"win: own begin b=%@ from=%s frame=%.0fx%.0f", bundleID,
                 from != NULL ? from : "-", frame.size.width, frame.size.height);
+
+    // 0.2.17 — 「先整屏建、再推到画布」。
+    //
+    // Aevon(188) 把抖音这一格拍清楚了：自建 scene 从**出生那刻**就是 430x717，
+    // 于是抖音的 feed 容器按 `UIScreen`(430x932) 排 ——
+    //   app: geom early peers6 n=1 UIView:0,0,430x932
+    //   app: geom early peers7 … UIView:0,0,430x932 | AWEFeedTopBarContainer:0,59,430x44
+    // 顶栏按安全区排对了，右侧那列工具栏锚在 932 的底部区，落在 717 之外 ⇒ 显示不全。
+    //
+    // 老路（0.2.12 系统建 scene）同一台机器上是 717 的：
+    //   app: geom late peers7 … UIView:430x717|AWEFeedTopBarContainer:430x44|UIImageView:430x717
+    // 差别不在「谁建 scene」，在**有没有经历过一次 932→717 的尺寸变化** ——
+    // 老路是先把 App 拉起来（整屏），再把窗口推到画布，App 收到那次 resize 才按
+    // 新尺寸重建自己的页面。自建 scene 把这两步压成一步，App 一辈子没收到过
+    // 那次 resize，就按出生时读到的 `UIScreen` 排了。
+    //
+    // 所以这里只补那一次「出生整屏」：scene 先按屏建，宿主贴上卡片后照旧把 frame
+    // 推到画布（`win: scene frame push door=…`），于是 App 经历一次 932→717，
+    // 和老路完全同一个事件序列。**不碰 UIScreen、不碰 App 的任何视图**。
+    CGRect composeFrame = frame;
+    if (AevonOwnStageFirst(bundleID)) {
+        CGRect full = [[UIScreen mainScreen] bounds];
+        if (full.size.height > frame.size.height + 8.0 &&
+            fabs(full.size.width - frame.size.width) < 8.0) {
+            composeFrame = full;
+            AevonOwnDisplayLog(@"win: own staged %.0fx%.0f -> %.0fx%.0f b=%@",
+                               composeFrame.size.width, composeFrame.size.height,
+                               frame.size.width, frame.size.height, bundleID);
+        }
+    }
 
     @try {
         Class idCls = NSClassFromString(@"RBSProcessIdentity");
@@ -876,7 +931,7 @@ NSInteger AevonOwnStart(NSString *bundleID, CGRect frame, const char *from) {
         // 这个文件是 MRC：block 被 `setCompletionBlock:` 拷到堆上时，
         // 捕获的 `bundleID` / `frame` 已各自复制一份，栈帧早就不在了。
         NSString *doneBundle = [bundleID copy];
-        CGRect doneFrame = frame;
+        CGRect doneFrame = composeFrame;
         void (^done)(void) = ^{
             // 这个 completion 跑在哪个队列由 FrontBoard 决定，不由我们选。所有
             // 状态变更都搬到主线程：读它的 `pollForScene` 就在主线程上，于是
@@ -6093,8 +6148,13 @@ static NSString *AevonFwdHoldBundle = nil;
 static SEL AevonFwdHoldCmd = NULL;
 static CFAbsoluteTime AevonFwdHoldAt = 0;
 static int AevonFwdHoldNotes = 0;
+/// 0.2.17 — 复检计数（定义在 `AevonForwardHoldWatch` 旁边，`AevonForwardHold`
+/// 里要把上一张卡的计数清零，所以在这里先声明一格）。
+static int AevonForwardWatchN;
 
 static void AevonForwardFlushNow(const char *why);
+/// 0.2.17 — 「App 内投递还挂着」。定义在下面 appurl 那一段；转发超时先问这一句。
+static int AevonAppOpenBusy(void);
 
 /// 只留一条。第二条分享进来时先把上一条发出去：丢掉一条 = 用户点的那次分享
 /// 什么都没发生，比晚一点严重得多。
@@ -6113,6 +6173,7 @@ static int AevonForwardHold(int slot, id self, SEL _cmd, id request, id options,
     AevonFwdHoldOrigin = [(id)origin retain];
     AevonFwdHoldBundle = [bundle copy];
     AevonFwdHoldAt = CFAbsoluteTimeGetCurrent();
+    AevonForwardWatchN = 0;
     if (AevonFwdHoldNotes < 12) {
         AevonFwdHoldNotes += 1;
         AevonLogRaw([[NSString stringWithFormat:@"notify: forward held slot=%d form=%c",
@@ -6195,6 +6256,33 @@ static void AevonForwardDrop(const char *why) {
     [origin release];
 }
 
+/// 0.2.17 — 转发超时从「1.6 s 一刀」改成「等 App 内投递的结论」。
+///
+/// Aevon(188) 把这一格拍死了：
+///
+///   21:32:16 notify: appurl send …                            ← 卡片刚起，App 的窗口还没连上
+///   21:32:17 notify: appurl ack ok=0 via=noscene at=207ms
+///   21:32:17 notify: appurl retry n=1..4                      ← 我们还在重投
+///   21:32:18 notify: forward flush why=timeout after=1675ms   ← 抢跑了
+///   21:32:18 notify: forward pass b=com.tencent.mqq …         ← SB 全屏、内容被抢、卡片黑
+///
+/// App 侧那条链要 3 秒才出结论，1.6 秒的定时器先把它交回 SpringBoard 了。从这一版
+/// 起：只要还有一次投递挂着，就每 0.5 s 复检一次，最长 6 s。结论出来之后（成功走
+/// `AevonForwardDrop`、失败也走 Drop）这个定时器天然变成空操作。
+static void AevonForwardHoldWatch(double waited) {
+    if (!AevonFwdHoldOn) return;
+    if (!AevonAppOpenBusy()) { AevonForwardFlush("timeout"); return; }
+    if (waited >= 6.0 || AevonForwardWatchN >= 10) {
+        AevonForwardFlush("timeout-hard");
+        return;
+    }
+    AevonForwardWatchN += 1;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonForwardHoldWatch(waited + 0.5);
+    });
+}
+
 /// 卡片把 scene 贴上（或等超时）时由主线程调用。任意线程调都安全。
 void AevonForwardFlush(const char *why) {
     if (!AevonFwdHoldOn) return;
@@ -6227,6 +6315,9 @@ void AevonForwardFlush(const char *why) {
 /// 1.25 秒没有回执才退回老路（交回 SpringBoard）—— 分享宁可全屏一次，也不许丢。
 static int AevonAppOpenNotes = 0;   // 这组行最多 20 条：分享是低频动作，20 条够一轮真机
 static int AevonAppOpenPending = 0;
+
+/// 0.2.17 — 给「转发超时」那一边看的只读位。见 `AevonForwardHoldWatch`。
+static int AevonAppOpenBusy(void) { return AevonAppOpenPending; }
 static int AevonAppOpenTries = 0;
 static NSString *AevonAppOpenBundle = nil;
 static NSString *AevonAppOpenURL = nil;
@@ -6237,7 +6328,7 @@ static CFAbsoluteTime AevonAppOpenAt = 0;
 /// window scene 还没连上、分享路由还没装好 —— Aevon(186) 就是在第 207ms 问的，
 /// QQ 的 `application:openURL:options:` 当场回 NO，我们立刻退回转发，
 /// 于是又一次全屏+黑屏。8 次 × 0.35s ≈ 3 秒，够它把界面搭起来。
-static const int AevonAppOpenMaxTries = 8;
+static const int AevonAppOpenMaxTries = 10;
 
 static NSString *AevonAppOpenLeaf(NSString *bundleID, NSString *leaf) {
     if (bundleID.length == 0 || leaf.length == 0) return nil;
@@ -6383,8 +6474,15 @@ static void AevonAppOpenGiveUp(const char *why) {
                   AevonAppOpenBundle != nil ? AevonAppOpenBundle : @"-",
                   why != NULL ? why : "-", ms] UTF8String]);
     AevonAppOpenDrop();
-    // 没回执 ⇒ 退回老路（交回 SpringBoard）。这一下会全屏，但分享不会丢。
-    AevonForwardFlushNow("appurl fallback");
+    // 0.2.17 — 这里原来是「退回老路，交回 SpringBoard」。那条路的代价 Aevon(188)
+    // 拍得很清楚：SB 把这 App 的 scene 抢去全屏（`app: page transition h=717
+    // last=932`），卡片随即黑屏，而用户要的是「背景停在文件分享发起页」。
+    // 所以没投进去就**就地销毁**：卡片留着（空的），不抢全屏、不黑屏。
+    // 内容这一拍确实没进去 —— 这一行是唯一的诚实记录，也是下一步的诊断入口。
+    AevonLogRaw([[NSString stringWithFormat:@"notify: share lost b=%@ why=%s",
+                  AevonFwdHoldBundle != nil ? AevonFwdHoldBundle : @"-",
+                  why != NULL ? why : "-"] UTF8String]);
+    AevonForwardDrop("appurl fail");
 }
 
 /// 回执的三种答案：`ok=1` 收工、`ok=0` 立刻退回老路、文件根本没有就再等一拍。
@@ -6405,10 +6503,23 @@ static void AevonAppOpenCheck(void) {
             if (parts.count > 0) via = [parts objectAtIndex:0];
         }
         double ms = (CFAbsoluteTimeGetCurrent() - AevonAppOpenAt) * 1000.0;
+        // 0.2.17 — `sc=` 是 App 侧报的「这个进程有几条 scene」。`sc=0` 加上
+        // `ok=0` 不是「它拒绝」，而是「它还没有界面可以接」：App 刚被拉起来的那
+        // 一两秒里 window scene 还没连上，问它等于问一个还没长出来的对象。
+        // 这种答案不计入「拒绝」，继续重投（Aevon(188) 八次全是这一种）。
+        int sc = -1;
+        NSRange scAt = [text rangeOfString:@"sc="];
+        if (scAt.location != NSNotFound) {
+            NSString *rest = [text substringFromIndex:scAt.location + scAt.length];
+            sc = rest.intValue;
+        }
+        NSString *trimmed = [text stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length > 96) trimmed = [trimmed substringToIndex:96];
         AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: appurl ack b=%@ ok=%d via=%@ at=%.0fms",
+                      @"notify: appurl ack b=%@ ok=%d via=%@ at=%.0fms [%@]",
                       AevonAppOpenBundle != nil ? AevonAppOpenBundle : @"-",
-                      ok ? 1 : 0, via, ms] UTF8String]);
+                      ok ? 1 : 0, via, ms, trimmed] UTF8String]);
         if (ok) {
             // 投递成功 ⇒ 这条请求就地销毁，**绝不**交给 SpringBoard：
             // 交给它就是把 App 的 scene 抢去全屏（这一版唯一要避开的事）。
@@ -6435,7 +6546,7 @@ static void AevonAppOpenCheck(void) {
             AevonAppOpenNext(0.35);
             return;
         }
-        AevonAppOpenGiveUp("refused");
+        AevonAppOpenGiveUp(sc == 0 ? "no-ui" : "refused");
         return;
     }
     AevonAppOpenTries += 1;
@@ -6656,11 +6767,7 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                     snprintf(line + at, sizeof(line) - at, " fwd=%d", forwarded);
                 }
                 if (forwarded == 1) {
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                                 (int64_t)(1.6 * NSEC_PER_SEC)),
-                                   dispatch_get_main_queue(), ^{
-                        AevonForwardFlush("timeout");
-                    });
+                    AevonForwardHoldWatch(1.6);
                 }
             }
             AevonOpenFromNotification(bundle);

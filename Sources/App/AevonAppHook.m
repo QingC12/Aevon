@@ -4704,8 +4704,10 @@ static void AevonMiniObserve(void) {
 // —— QQ / 微信 / 抖音都是 scene 化的 App，系统对它们根本不调
 // `application:openURL:options:`；② scene 不认才退到 AppDelegate。
 // `UIOpenURLContext` 没有公开初始化器，`_URL` / `_options` 只能 KVC 现造；
-// `_options` 摸不到就让它是空的，URL 这条不跟着废。两条都不认就回 `ok=0`，
-// 宿主在 3 秒内重投 8 次（App 刚起来时 window scene 还没连上，这一拍问不出答案）。
+// `_options` 摸不到就让它是空的，URL 这条不跟着废。scene 不认就退到 AppDelegate
+// 的三条老入口（0.2.17 补的），全都不认才回 `ok=0`；宿主在 3.5 秒内重投 10 次
+// （App 刚起来时 window scene 还没连上，这一拍问不出答案）。回执里带 pid / sc /
+// wsc / dlg / rsp，宿主原样打进主日志 —— Aevon(188) 缺的就是这几个数。
 
 static NSString *AevonOpenURLPath(NSString *leaf) {
     NSString *tmp = NSTemporaryDirectory();
@@ -4713,11 +4715,21 @@ static NSString *AevonOpenURLPath(NSString *leaf) {
     return [tmp stringByAppendingPathComponent:leaf];
 }
 
-static void AevonOpenURLAck(BOOL ok, const char *via) {
+/// 0.2.17 — 回执里带上现场：进程、scene 数、窗口场景数、delegate 类名、它认不认
+/// `scene:openURLContexts:`（`rsp`）。
+///
+/// Aevon(188) 八次全都是 `ok=0 via=noscene`，而这一行分不清三种完全不同的处境：
+/// ①这个进程一条 scene 都没有（App 还在连，或者它是老式工程）；②有 scene 但
+/// delegate 不实现这条选择子；③实现了我却拿不到它。三种的修法完全不同，所以
+/// 从这一版起把这四个数写进回执，宿主原样打进主日志。
+static void AevonOpenURLAck(BOOL ok, const char *via, int scenes, int windowScenes,
+                            const char *dlg, int rsp) {
     NSString *path = AevonOpenURLPath(@"aevon-open-ack");
     if (path == nil) return;
-    NSString *text = [NSString stringWithFormat:@"ok=%d via=%s\n",
-                      ok ? 1 : 0, via != NULL ? via : "-"];
+    NSString *text = [NSString stringWithFormat:
+                      @"ok=%d via=%s pid=%d sc=%d wsc=%d dlg=%s rsp=%d\n",
+                      ok ? 1 : 0, via != NULL ? via : "-", (int)getpid(),
+                      scenes, windowScenes, dlg != NULL ? dlg : "-", rsp];
     [text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
 }
 
@@ -4744,7 +4756,7 @@ static void AevonOpenURLApply(void) {
     NSURL *url = raw.length > 0 ? [NSURL URLWithString:raw] : nil;
     if (![url isKindOfClass:[NSURL class]]) {
         AevonAppLogWrite("app: openurl bad plist\n");
-        AevonOpenURLAck(NO, "parse");
+        AevonOpenURLAck(NO, "parse", 0, 0, "-", 0);
         return;
     }
 
@@ -4775,10 +4787,24 @@ static void AevonOpenURLApply(void) {
     UIScene *target = nil;
     id targetDelegate = nil;
     SEL sceneSel = sel_registerName("scene:openURLContexts:");
+    // 0.2.17 — 只读现场：有几个 scene、几个是 UIWindowScene、第一个窗口场景的
+    // delegate 类名、它认不认这条选择子。Aevon(188) 缺的就是这四个数。
+    int scenes = 0;
+    int windowScenes = 0;
+    int rsp = 0;
+    const char *dlg = "-";
     for (UIScene *scene in app.connectedScenes) {
+        scenes += 1;
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        windowScenes += 1;
         id d = ((id (*)(id, SEL))objc_msgSend)(scene, sel_registerName("delegate"));
-        if (d == nil || ![d respondsToSelector:sceneSel]) continue;
+        if (d == nil) continue;
+        if (windowScenes == 1) {
+            const char *name = object_getClassName(d);
+            dlg = name != NULL ? name : "-";
+            rsp = [d respondsToSelector:sceneSel] ? 1 : 0;
+        }
+        if (![d respondsToSelector:sceneSel]) continue;
         if (target == nil) { target = scene; targetDelegate = d; }
         if (scene.activationState == UISceneActivationStateForegroundActive) {
             target = scene;
@@ -4830,6 +4856,12 @@ static void AevonOpenURLApply(void) {
     }
 
     // ② 老式 App（没有 scene 或者 scene delegate 不认）才走 AppDelegate。
+    //
+    // 0.2.17 — 一条变三条。Aevon(188) 里 QQ 四次分享全是 `ok=0 via=noscene`：
+    // 这个数说明 scene 这条路没走通，而 ② 只有一条入口（`openURL:options:`），
+    // 它回 NO 我们就没牌了。可 QQ 这类老工程常见的实现是另外两条更老的选择子
+    // （iOS 9 之前是 `openURL:sourceApplication:annotation:`，再早是
+    // `handleOpenURL:`）。三条都问一遍，**第一个回 YES 的就停**，不会重复投递。
     if (!ok) {
         id delegate = app.delegate;
         SEL appSel = sel_registerName("application:openURL:options:");
@@ -4847,13 +4879,43 @@ static void AevonOpenURLApply(void) {
             }
         }
     }
+    if (!ok) {
+        id delegate = app.delegate;
+        SEL oldSel = sel_registerName("application:openURL:sourceApplication:annotation:");
+        if (delegate != nil && [delegate respondsToSelector:oldSel]) {
+            @try {
+                BOOL (*call)(id, SEL, UIApplication *, NSURL *, NSString *, id) =
+                    (BOOL (*)(id, SEL, UIApplication *, NSURL *, NSString *, id))objc_msgSend;
+                ok = call(delegate, oldSel, app, url, source, nil);
+                if (ok) via = "app-src";
+            } @catch (NSException *exception) {
+                ok = NO;
+                via = "app-src-throw";
+            }
+        }
+    }
+    if (!ok) {
+        id delegate = app.delegate;
+        SEL handleSel = sel_registerName("application:handleOpenURL:");
+        if (delegate != nil && [delegate respondsToSelector:handleSel]) {
+            @try {
+                BOOL (*call)(id, SEL, UIApplication *, NSURL *) =
+                    (BOOL (*)(id, SEL, UIApplication *, NSURL *))objc_msgSend;
+                ok = call(delegate, handleSel, app, url);
+                if (ok) via = "app-handle";
+            } @catch (NSException *exception) {
+                ok = NO;
+                via = "app-handle-throw";
+            }
+        }
+    }
 
     char line[192];
-    snprintf(line, sizeof(line), "app: openurl ok=%d via=%s u=%d opt=%d src=%d\n",
+    snprintf(line, sizeof(line), "app: openurl ok=%d via=%s u=%d opt=%d src=%d sc=%d wsc=%d rsp=%d dlg=%s\n",
              ok ? 1 : 0, via, (int)raw.length, (int)[options count],
-             source.length > 0 ? 1 : 0);
+             source.length > 0 ? 1 : 0, scenes, windowScenes, rsp, dlg);
     AevonAppLogWrite(line);
-    AevonOpenURLAck(ok, via);
+    AevonOpenURLAck(ok, via, scenes, windowScenes, dlg, rsp);
 }
 
 static void AevonOpenURLNote(CFNotificationCenterRef __unused center,

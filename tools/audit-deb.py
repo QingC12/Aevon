@@ -858,6 +858,15 @@ def main():
                   b"win: own safe skip top=%.0f bottom=%.0f enc=%s n=%u",
                   b"notify: appurl send b=%@ opt=%d/%d src=%@ u=%.48s",
                   b"notify: appurl retry n=%d via=%@",
+                  # 0.2.17 —— 抖音「出生整屏」那一次尺寸变化，以及分享不再抢跑。
+                  #   own staged        这个 App 的 scene 先按整屏建，贴上后再推到画布
+                  #                     （名单里现在只有抖音；串在产物里 = 名单真的编进去了）
+                  #   share lost        投递失败就地销毁（不再交回 SB）
+                  #   ack … [%@]        回执原文进主日志（pid / sc / wsc / dlg / rsp）
+                  b"win: own staged %.0fx%.0f -> %.0fx%.0f b=%@",
+                  b"com.ss.iphone.ugc.Aweme",
+                  b"notify: share lost b=%@ why=%s",
+                  b"notify: appurl ack b=%@ ok=%d via=%@ at=%.0fms [%@]",
                   b"notify: appurl ack b=%@ ok=%d via=%@ at=%.0fms",
                   b"notify: appurl give b=%@ why=%s at=%.0fms",
                   b"notify: appurl none b=%@ (no container)",
@@ -1535,7 +1544,13 @@ def main():
                       b"com.aevon.openurl.",
                       b"aevon-open.plist",
                       b"aevon-open-ack",
-                      b"app: openurl ok=%d via=%s u=%d opt=%d src=%d",
+                      b"app: openurl ok=%d via=%s u=%d opt=%d src=%d sc=%d wsc=%d rsp=%d dlg=%s",
+                      # 0.2.17 —— 回执里的现场（pid / scene 数 / delegate / 认不认）。
+                      b"ok=%d via=%s pid=%d sc=%d wsc=%d dlg=%s rsp=%d",
+                      # 0.2.17 —— AppDelegate 的两条老入口。QQ 这类老工程常常只实现
+                      # 这两条；名字写错一位就等于那条路从来没存在过。
+                      b"application:openURL:sourceApplication:annotation:",
+                      b"application:handleOpenURL:",
                       b"app: openurl ctx opt miss",
                       b"app: openurl no file",
                       b"app: openurl bad plist",
