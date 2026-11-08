@@ -1417,7 +1417,16 @@ final class RingHost: NSObject {
         guard workspace.responds(to: openSelector) else { return }
 
         Log.write("ring: launch \(bundleID)")
+        // 0.2.0 — 这一句是同步 XPC：`openApplicationWithBundleID:` 要等 FrontBoard
+        // 把这次打开处理完才回来。Aevon(168) 的 22:30:26 之后有 6 条连续的
+        // `win: main stall ~3000ms`，正好落在这一段窗口里 —— 但「正好落在」不等于
+        // 「就是它」：等 scene 那条轮询、建卡里的系统调用也都在同一段里。所以先
+        // 只量一段：调用进去到回来多久。三个数（本行 / `win: icon launch done` /
+        // `win: icon scene up after`）摆在一起，下一次日志就能指出是谁占了三秒。
+        let launchAt = CFAbsoluteTimeGetCurrent()
         _ = workspace.perform(openSelector, with: bundleID)
+        let launchMs = Int((CFAbsoluteTimeGetCurrent() - launchAt) * 1000)
+        Log.write(String(format: "ring: launch done t=%ldms", launchMs))
     }
 
     /// 圆心（四宫格）→ 应用选择面板（0.0.56）。

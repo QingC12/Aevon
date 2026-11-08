@@ -78,57 +78,36 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private static var mainIndex = 0
     static let slotCap = 11
 
-    // MARK: - 0.1.31 系统界面盖上来时让开
+    // MARK: - 0.2.0 「系统界面盖着」不再隐藏窗口
 
-    /// 上一次的判定。只在翻转时动窗口 —— 每 0.5 s 一次的 tick 不该反复写 `isHidden`。
-    private static var systemCovered = false
-
-    /// 锁屏 / 通知中心 / 控制中心在屏上时，把我们的窗口整层收起来。
-    ///
-    /// 用户原话：「主悬浮窗和停靠小窗会出现在控制中心，通知中心，锁屏解锁后没有
-    /// 上滑进入桌面的页面中（我记得之前修复过这个问题）」。
-    ///
-    /// 之前修的是右缘那条带（`RingHost.syncOverlayVisibility` 用同一组单例判断），
-    /// 卡片这一层没有跟着走 —— 它挂在自己的 UIWindow 上，系统那几层并不会把它
-    /// 盖住，于是锁屏/控制中心之上还能看见一张卡。
-    ///
-    /// 这里不猜层级数字：直接问 SBLockScreenManager / SBCoverSheetPresentationManager
-    /// / SBControlCenterController（与 RingHost 同一组判据），它们说「盖着」就整层
-    /// 让开。`isHidden` 而不是 alpha：窗口一旦隐藏就退出合成，也退出命中测试，
-    /// 那两件事都是「用户看不见它却还在吃触摸」的来源。
-    ///
-    /// 0.1.34 — 解锁后**重新接上画面**。
-    ///
-    /// 0.1.31 在这里只补了一次 `reassertCanvas()`（改 1 pt 再改回来）。V110 的
-    /// 日志证明那不够：`win: system cover show windows=11` 之后
-    /// `win: canvas re-asserted 430x717 after activate` 打了，而紧接着每一拍
-    /// 都是 `keepalive beat … cs=0`，一直到日志结束 —— 窗口在、承载视图在、
-    /// 里面没有画面。用户的原话是「必须重新打开悬浮窗才会显示内容」。
-    ///
-    /// 重开卡与「画面回来」之间差的是什么：一次 presenter 重新接管。所以这里
-    /// 把承载面摘下来再挂回去，让系统按新挂上的视图重新接一次远程层；真正的
-    /// 时机与重推前台由保活时钟做（见 `reviveTick`）。
-    static func setSystemCovered(_ covered: Bool) {
-        guard covered != systemCovered else { return }
-        systemCovered = covered
-        for host in slots {
-            host.window?.isHidden = covered
-            host.bandWindow?.isHidden = covered
-        }
-        Log.write("win: system cover " + (covered ? "hide" : "show")
-                  + " windows=" + String(slots.count))
-        guard !covered else { return }
-        for host in slots {
-            // 0.1.34 — 解锁后画面还是黑的（用户第三次报同一条）：`reassertCanvas`
-            // 只改承载视图的 bounds，救不回已经被系统拆掉的远程层。真正等价于
-            // 「手动关掉再打开悬浮窗」的动作是把承载面摘下来重新挂 —— 用户说
-            // 「必须重新打开悬浮窗才会显示内容」，那就替他把这一步做掉。
-            //
-            // 交给保活时钟而不是就地做：解锁这一拍系统还在往回恢复 scene，早
-            // 半步的重挂会被紧接着的那次写入抹掉。
-            host.reviveTick += 1
-        }
-    }
+    /* ⛔ 0.1.31~0.1.99 这里有一个 `systemCovered` 静态量 + `setSystemCovered()`：
+     * 锁屏 / 通知中心 / 控制中心在屏上时，把**所有宿主的卡片窗与手势窗**一起
+     * `isHidden = true`，让它们退出合成也退出命中测试。
+     *
+     * 它在 0.1.99 把整台手机的浮窗弄死了（用户 Aevon(168)：「通过圆盘打开悬浮窗时，
+     * 悬浮窗不会出现，同时系统的触摸会失效」），原因是**这个量只能被「卡片活着时」
+     * 的保活时钟刷新**：
+     *
+     *   22:30:25  锁屏上点了一条通知（`why=notify unlock=1`）⇒ 卡片建起来
+     *   22:30:47  保活时钟判「盖着」⇒ `win: system cover hide windows=11`
+     *   随后      卡片被自己藏住 ⇒ 场景 cs=0 死掉 ⇒ 时钟停 ⇒ **再也没有人来问第二次**
+     *   之后      6 次建卡全部在 `show` 的最后一行被判死：
+     *             `return window.isHidden ? nil : host` ⇒ `no window - presenter released`
+     *
+     * 自锁：没有卡片就没有时钟，没有时钟就永远摘不掉这个标记，标记摘不掉就永远
+     * 开不出卡片。日志里 1862 行只有 1 条 `system cover hide`、0 条 `show`。
+     *
+     * 另外两条连带伤害：失败时不回收槽位（槽号从 0 漏到 5，11 个漏满就彻底开不出），
+     * 被藏起来的幽灵宿主仍在 `touchOrder` 里认领热区（`touch in=30 eat=10`，
+     * 那时屏幕上根本没有卡片）⇒ 用户感到「系统触摸失效」。
+     *
+     * 母版不这么做：Stheno 的 strings 里 `isUILocked` 出现 0 次，它对锁屏 / 控制中心
+     * 没有任何特殊处理。所以这一层整段删除（用户 0.1.99 定档「按母版删掉整层隐藏」）。
+     *
+     * 现在的规则只有一条，且在 SceneProbe 里执行：**盖着的时候不留卡片**
+     * （建卡当场收、存活期间每拍查一次、盖着就收）。收卡片是干净的拆除，
+     * 不存在「藏起来的半死状态」，也就不可能再粘住。
+     */
 
     /// 0.1.34 — 重挂承载面。只碰我们自己的视图，不碰 App 的窗口。
     func reviveCanvas() {
@@ -197,22 +176,57 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     ///
     /// 顺序不为空的槽不参与 —— 它们的 `window` 是 nil，`rawTouch` 第一句就会
     /// 早退，排进来只是白跑一遍。
+    ///
+    /// 0.2.0 — **隐藏的窗也不算。**
+    ///
+    /// Aevon(168) 最后 11 秒里 `win: touch in=30 eat=10`：屏幕上没有任何卡片，
+    /// 我们却还在认领「底中上滑关」那些热区。原因是这条表只按 `window != nil`
+    /// 收宿主，而建卡失败的那几个宿主窗口**对象还在**（只是被藏起来）—— 用户
+    /// 点桌面图标、滑页面，落在那一块幽灵矩形里的手指就被吃掉，感受就是
+    /// 「系统触摸失效」。隐藏的窗口本来就不该参与任何命中。
     static var touchOrder: [FloatHost] {
         ensureSlots()
         let main = slots[mainIndex]
         var order: [FloatHost] = []
         // 主窗自己也可能停靠着（`mainIndex` 不随降级更新），所以判据是 `onMini`
         // 而不是「不等于 mainIndex」：真正的大卡片永远排在最后一个。
-        for slot in slots where slot.window != nil && slot.onMini {
+        for slot in slots where slot.showsTouch && slot.onMini {
             order.append(slot)
         }
-        if main.window != nil && !main.onMini {
+        if main.showsTouch, !main.onMini {
             order.append(main)
         }
-        for slot in slots where slot.window != nil && !slot.onMini && slot !== main {
+        for slot in slots where slot.showsTouch && !slot.onMini && slot !== main {
             order.append(slot)
         }
         return order
+    }
+
+    /// 0.2.0 — 「这一格现在真的在屏幕上」：窗口对象在，而且没有被藏起来。
+    ///
+    /// 两件事都要问。只有窗口对象在是不够的（Aevon(168) 那六个幽灵宿主就是
+    /// 窗口在、`isHidden == true`）；只有 `isHidden == false` 也不够（窗口 nil 时
+    /// 这个属性只能读到 false 的默认值）。触摸表与建卡失败后的回收都用它。
+    var showsTouch: Bool {
+        guard let window = window else { return false }
+        return !window.isHidden
+    }
+
+    /// 0.2.0 — 建卡走到一半失败时，把刚占的这一格还回去。
+    ///
+    /// `show` 在最后一行发现窗口没露出来就返回 nil，可那一格已经被
+    /// `takeMainSlot()` 占走了，`host.window` 也赋过值 —— 调用方拿不到宿主对象，
+    /// 谁也拆不掉它。Aevon(168) 的槽号就这么一路从 0 漏到 5；11 个槽漏满之后
+    /// 圆盘点任何图标都「没反应」。
+    ///
+    /// 拆的是 `mainIndex` 那一格：`takeMainSlot()` 刚刚把它挪到了这里，调用点
+    /// 与它之间没有任何别的建卡动作。
+    static func abandonTakenSlot() {
+        ensureSlots()
+        let host = slots[mainIndex]
+        host.teardown()
+        host.bundle = ""
+        host.onClose = nil
     }
 
     /// 当前主窗里演的 App；没有主窗时是空串。
@@ -756,10 +770,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     /// 0.1.34 — 「解锁了，给这张卡一次重来的机会」。
     ///
-    /// `setSystemCovered(false)` 每解锁一次加一，保活时钟看到数字变了就重置
-    /// 自己那套退避计数并调一次 `reviveCanvas()`。为什么不直接在
-    /// `setSystemCovered` 里做：那一刻系统刚撤掉锁屏，App 的 scene 还在往回
-    /// 恢复的路上，早半秒的重挂会被紧接着的一次系统写入抹掉。
+    /// 0.1.34 靠 `setSystemCovered(false)` 每解锁一次加一，保活时钟看到数字变了
+    /// 就重置自己那套退避计数并调一次 `reviveCanvas()`。
+    ///
+    /// **0.2.0 起这条计时器没人再拧了**：`setSystemCovered` 整段删除，而锁屏期间
+    /// 卡片会被直接收掉（见 SceneProbe 里「盖着就不留卡片」那两处），所以不存在
+    /// 「一张卡跨过锁屏活下来」的局面，也就没有需要重挂的承载面。字段与保活时钟
+    /// 里那段分支留着不删，是因为它同时管着「退避计数归零」—— 哪天要恢复解锁
+    /// 唤醒，拧一下这个数就够，不用再写一遍。
     var reviveTick = 0
     /// The transparent shield a docked card puts over its own picture. It exists
     /// for one reason: while the card is mini, a tap on the picture has to mean
@@ -1324,10 +1342,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         root.addSubview(card)
 
         host.window = window
-        // 0.1.31 — 如果这一刻系统界面正盖着（锁屏 / 通知中心 / 控制中心），
-        // 新窗口就别急着露：`setSystemCovered` 只在翻转那一拍动窗口，一个
-        // 在遮罩期间新建的宿主会被它漏掉，直到下一次翻转才跟上。
-        window.isHidden = FloatHost.systemCovered
+        // 0.2.0 — 这一行原来是 `window.isHidden = FloatHost.systemCovered`（0.1.31）。
+        // 那个粘性标记已经整段删除（见文件头部「系统界面盖着」那段）。窗口在这里
+        // 一律是露着的；「盖着的时候不留卡片」改由 SceneProbe 在建卡当场与保活
+        // 时钟里各查一次、查到了就收卡片 —— 收是干净拆除，藏是半死状态。
         // 0.0.47 — 手势环搬到 band 窗口（statusBar+1）。卡片留在这一层，所以
         // 里头的点击滑动照旧；伸手的那一圈在一个不会被任何 App 窗口盖住的层。
         host.installGrip(on: host.makeBand() ?? root)
@@ -1633,9 +1651,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let controller = UIViewController()
         controller.view = root
         window.rootViewController = controller
-        // 0.1.31 — 同上：遮罩在屏上时，这一层也不该露（它比卡片还高一级，
-        // 锁屏和控制中心照样压不住它）。
-        window.isHidden = FloatHost.systemCovered
+        // 0.2.0 — 同上：不再按粘性标记预设 `isHidden`（见卡片那一处的注释）。
         window.probe = { [weak self] point, hit in
             guard let self = self, self.ringProbe < 20 else { return }
             self.ringProbe += 1

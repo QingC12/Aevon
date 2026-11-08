@@ -601,7 +601,14 @@ def main():
                   # 0.1.34 — 解锁后重挂承载面：`canvas revived` 是动作本身，
                   # `revive after unlock` 是保活时钟接住那一次的信号。两条都
                   # 必须在内核里 —— 前两版黑屏就是「窗口回来了、画面没回来」。
-                  b"win: system cover ",
+                  # 0.2.0 — 「整层隐藏」整段删除，换成的两条：
+                  #   盖着的时候建卡 ⇒ 当场收；卡片活着期间盖上来 ⇒ 每拍查、查到就收。
+                  #   0.1.31 的 `win: system cover hide/show` 从二进制里应该彻底消失
+                  #   （粘性标记就是 Aevon(168) 那台手机开不出浮窗的原因）。
+                  b"win: card closed at once (system cover up)",
+                  b"win: card closed by system cover",
+                  # 锁屏期间建卡被主动收掉时，**不许**再走全屏兜底。
+                  b"win: icon card closed by cover, no fallback",
                   b"win: canvas revived ",
                   b"win: revive after unlock tick=",
                   # 0.1.61 — 键盘态的**进与出**都在。0.1.60 只留下了「进」：
@@ -818,7 +825,12 @@ def main():
                  # 0.1.90 — `cover=locked` 这条结论整个删了。它背后是
                  # `isUILocked`，而通知中心在屏时那一位本来就是 1：闸在唯一
                  # 该收的场景里恒真。留着这个字面量就等于留着那条死路。
-                 b"cover=locked"):                          # gone
+                 b"cover=locked",                           # gone
+                 # 0.2.0 — 「整层隐藏」整段删除（Aevon(168)：粘性标记让整台
+                 # 手机再也开不出浮窗）。这条前缀还能 grep 到，就说明那个
+                 # `systemCovered` 静态量又回来了 —— 它一旦回来，卡片就又会
+                 # 在锁屏后被自己藏住，而摘标记的只剩一个已经停摆的时钟。
+                 b"win: system cover "):                    # gone
         if gone in dylib_early:
             bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "
                 "back (hot zone 0.1.18 / summon bar 0.1.24 / cover lock gate 0.1.90)")
@@ -1672,7 +1684,11 @@ def main():
                   # （指针通道交接 / 划过汇总 / 圆心旋转），全是日志字面量。
                   b"AevonRingPointerHandoffV216",
                   b"AevonRingMultiRing",
-                  b"win: icon launch ",
+                  # 0.2.0 — 原来断言前缀 `win: icon launch `。这一版把这一行换成
+                  #   一条带计时的完整字面量（3 秒卡顿的分段取证要靠它），前缀本身
+                  #   不再是独立字面量，所以断言跟着换成整条。
+                  b"win: icon launch %@ suspended door=%ld t=%ldms wait=%ldms",
+                  b"ring: launch done t=%ldms",
                   b"win: icon scene up after ",
                   # 0.0.59 — 冷启动首帧。三条缺一不可：
                   # `launch state cs=` 是建卡那一刻的判据读数（contentState、

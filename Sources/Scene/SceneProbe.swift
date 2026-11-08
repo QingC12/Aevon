@@ -931,6 +931,11 @@ zStackParticipantDidChange:
     /// and a dead control on the home screen is worse than a full-screen app.
     static func openCard(_ bundleID: String, fallback: @escaping (String) -> Void) {
         guard !bundleID.isEmpty, !bundleID.hasPrefix("placeholder.") else { return }
+        // 0.2.0 — 这条链路的起点时刻。Aevon(168) 的 22:30:26~44 有 18 秒主线程
+        // 连续不通（6 条 `win: main stall ~3000ms`），而那一段里同时有三件事在跑：
+        // 全屏兜底的 `ring: launch`、等 scene 的 40 ms 轮询、以及建卡里的系统调用。
+        // 三个时间戳（本函数的 `wait=`、`t=`、`scene up after`）就是用来把它分开的。
+        let openedAt = CFAbsoluteTimeGetCurrent()
         // 0.1.91 — 「这张卡正在建」的登记。必须在**第一个** return 之前：
         // 收面板那条路要用它区分「卡在路上，可以先收」与「根本没有卡，不许收」。
         markPending(bundleID)
@@ -1014,8 +1019,16 @@ zStackParticipantDidChange:
         // 后果是**每次开窗先结束那个 App**。旧进程最大的坏处只是这一版的改动
         // 没生效，那是可以容忍的；把 App 弄成打不开是不可容忍的。
 
+        // 0.2.0 — 「挂起启动」这一句也是同步的（它要 FrontBoard 先承认这次打开）。
+        // 与 `ring: launch done` 同一个用途：把 3 秒卡顿锁到具体一跳到。`wait=` 是
+        // 从 `openCard` 进门算起的全部开销（含钩子装配、AevonHookArm、降级），
+        // `t=` 只是这一句本身。
+        let launchAt = CFAbsoluteTimeGetCurrent()
         let door = AevonLaunchSuspended(sharedApplication(), bundleID)
-        Log.write("win: icon launch " + bundleID + " suspended door=" + String(door))
+        Log.write(String(format: "win: icon launch %@ suspended door=%ld t=%ldms wait=%ldms",
+                         bundleID, door,
+                         Int((CFAbsoluteTimeGetCurrent() - launchAt) * 1000),
+                         Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
         guard door == 1 else {
             AevonHookDisarm(bundleID)
             fallback("suspended door=" + String(door))
@@ -1240,6 +1253,17 @@ zStackParticipantDidChange:
             // 那样一条失败会被记成一次成功，下次再去查就是「日志里没有异常」。
             guard FloatHost.mainBundle == bundleID else {
                 AevonHookDisarm(bundleID)
+                // 0.2.0 — 这一条不是失败，是**我们已经主动收掉了**。
+                //
+                // 「盖着的时候不留卡片」那条规则在建卡的最后一步就 `closeCard` 了，
+                // 于是这里看到的形状与「卡没起来」一模一样。若照原样走 `fallback`，
+                // 兜底会把 App **全屏**打开 —— 锁屏上点一条通知，结果解锁后蹦出一个
+                // 全屏 App，正是用户明确否掉的那种结果（他要的是「这次点击什么都不
+                // 发生」）。判据只能用遮挡本身：这一刻盖着，就不是失败。
+                if AevonSystemCovered() {
+                    Log.write("win: icon card closed by cover, no fallback")
+                    return
+                }
                 Log.write("win: icon card did not come up, hold released")
                 fallback("card did not come up")
                 return
@@ -1629,6 +1653,14 @@ zStackParticipantDidChange:
                 clearHosted(b)
             }
             Log.write("win: no window - presenter released")
+            // 0.2.0 — 这一格要还回去。
+            //
+            // `FloatHost.show` 在最后一行发现窗口没露出来就返回 nil，但那时
+            // `takeMainSlot()` 已经占走了一格、`host.window` 也赋过值 —— 调用方
+            // 手里没有宿主对象，谁也拆不掉它。Aevon(168) 的槽号就这么从 0 漏到 5，
+            // 11 个槽漏满之后圆盘点任何图标都「没反应」，而且那些幽灵宿主还会
+            // 继续认领热区吃手指。
+            FloatHost.abandonTakenSlot()
             return
         }
         cardUp = true
@@ -1757,6 +1789,22 @@ zStackParticipantDidChange:
                 }
                 return
             }
+            // 0.2.0 — 卡片活着的时候系统界面盖上来（锁屏 / 通知中心 / 控制中心）：
+            // **收卡片**，不隐藏窗口。
+            //
+            // 0.1.31~0.1.99 这里是 `FloatHost.setSystemCovered(true)`，把所有宿主的
+            // 窗口一起藏起来。Aevon(168) 证明那条路的代价是整台手机再也开不出浮窗：
+            // 藏起来的卡片场景当场死掉、保活时钟跟着停，而「现在还盖着吗」只有这个
+            // 时钟会问 —— 标记从此永远摘不掉。收卡片没有这个尾巴：拆除是幂等的，
+            // 状态全在这里结束。
+            //
+            // 位置在 `gestureLive` 之后：手势期间整段让路（那条纪律见上面的注释），
+            // 一秒后照常问。
+            if AevonSystemCovered() {
+                Log.write("win: card closed by system cover")
+                closeCard("system cover")
+                return
+            }
             // 0.0.55 — 空闲熄屏的续命拍。放在节拍最前面：这一条与画面、与
             // settings 都没有关系，后面的任何一个 guard 都不该把它挡掉。
             if Date().timeIntervalSince(idleAt) >= 20 {
@@ -1853,12 +1901,9 @@ zStackParticipantDidChange:
                     }
                 }
             }
-            // 0.1.31 — 系统界面（锁屏 / 通知中心 / 控制中心）盖上来时整层让开。
-            //
-            // 这一条每拍都问，判定本身是三个 `sharedInstanceIfExists` + KVC，
-            // 代价与上面那几个读数同级；真正动窗口只在翻转那一拍（`setSystemCovered`
-            // 自己判重），所以稳定期没有额外开销。
-            FloatHost.setSystemCovered(AevonSystemCovered())
+            // 0.2.0 — 这里原来每拍调一次 `FloatHost.setSystemCovered(AevonSystemCovered())`。
+            // 那套「整层隐藏」已经整段删除（见 FloatHost 里那段注释），遮挡判定搬到了
+            // 这一拍的开头：盖着就收卡片，不再藏窗口。
             // 0.0.50 — 画面本身的两个读数。`fg` 是我们自己写进去的，切换 App
             // 时它不变；`contentState` 才是「现在有没有画」，`level` 是母本那
             // 三件套里的第二件。Aevon(48) 的四份日志里 fg 一次没掉过，所以黑
@@ -2018,6 +2063,22 @@ zStackParticipantDidChange:
             } else if marked {
                 unmark()
             }
+        }
+        // 0.2.0 — 锁屏 / 通知中心 / 控制中心盖着的时候**不留卡片**（用户 0.1.99 定档
+        // 「建了立刻收」）。
+        //
+        // 这是 0.1.31 那条「整层隐藏」的替代品。隐藏会留下一个「窗口在、画面不在、
+        // 宿主还活着」的半死状态，而它只能靠保活时钟刷新 —— Aevon(168) 里那次锁屏点
+        // 通知：标记翻成 true 之后卡片当场死了、时钟跟着停，于是整台手机的浮窗再也
+        // 开不出来。收卡片是干净拆除：presenter 停掉、槽位还回去、App 的标记撤掉，
+        // 下一次点击从零开始，没有任何状态能粘住。
+        //
+        // 放在整段建卡之后的最后一步（而不是建窗那一行）：`closeCard` 要拆 presenter、
+        // 要还 scene 尺寸、要释放空闲熄屏断言 —— 那些东西都在这一段里刚准备好。
+        if AevonSystemCovered() {
+            Log.write("win: card closed at once (system cover up)")
+            closeCard("system cover up")
+            return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { keep() }
 
