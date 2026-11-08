@@ -364,6 +364,14 @@ id _Nullable AevonOwnFetch(void);
 // 请求时什么都不做；不调用也不会丢分享（1.6 秒超时会自己发）。
 void AevonForwardFlush(const char *_Nullable why);
 
+// 0.2.15 — 卡片的 scene 就位时调这个，**不要**直接调 `AevonForwardFlush`：
+// 它先试「把这次 open URL 直接投进目标 App」（宿主写 `tmp/aevon-open.plist` +
+// Darwin 通知，App 侧调自己的 `application:openURL:options:`），拿到 `ok=1`
+// 就整条销毁、一个字节都不交给 SpringBoard —— 交给它就等于把我们自建的 scene
+// 抢去全屏（Aevon(185)：`win: scene frame after=430x932` + 卡片黑屏）。
+// 1.25 秒没回执才退回 `AevonForwardFlush` 那条老路，分享不会丢。
+void AevonForwardDeliver(const char *_Nullable why);
+
 /// 这一次卡片没有用自建的 scene（复用系统那个 / 走了老路）—— 关卡时不许销毁。
 void AevonOwnClear(void);
 

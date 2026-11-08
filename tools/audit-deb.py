@@ -842,6 +842,27 @@ def main():
                   b"win: own live attach %@ t=%ldms wait=%ldms",
                   b"notify: forward held slot=%d form=%c",
                   b"notify: forward flush why=%s after=%.0fms",
+                  # 0.2.15 —— 尺寸 + 分享两件：
+                  #   own display       scene 的 displayConfiguration 被改成画布大小
+                  #                     （不改就是「UIScreen 932 / 窗口 717」，按屏幕
+                  #                      排版的 App 直接错位）
+                  #   appurl send       宿主把 URL + options 写进目标 App 容器
+                  #   appurl ack        App 侧回执（ok=1 via=app|scene）
+                  #   appurl give      没回执 ⇒ 退回老路转发
+                  #   forward drop      投递成功 ⇒ 就地销毁，一个字节都不交给 SB
+                  b"win: own display %.0fx%.0f -> %.0fx%.0f",
+                  b"win: own display keep %.0fx%.0f (no setBounds)",
+                  b"notify: appurl send b=%@ opt=%d/%d u=%.48s",
+                  b"notify: appurl ack b=%@ ok=%d via=%@ at=%.0fms",
+                  b"notify: appurl give b=%@ why=%s at=%.0fms",
+                  b"notify: appurl none b=%@ (no container)",
+                  b"notify: appurl no plist",
+                  b"notify: appurl no write b=%@",
+                  b"notify: forward drop why=%s after=%.0fms",
+                  b"com.aevon.openurl.%@",
+                  b"aevon-open.plist",
+                  b"aevon-open-ack",
+                  b"setDisplayConfiguration:",
                   # 这一字典的字面量是「自建」这件事在产物里的锚：三个类名任何一个
                   # 拼错，工程就编译成一条永远走不进去的路，而日志只会说 gate miss。
                   b"FBSMutableSceneDefinition",
@@ -1504,6 +1525,15 @@ def main():
                       b"app: band touch at %.0f,%.0f watch",
                       # 0.1.29 — 深浅色的应用侧观察者。
                       b"com.aevon.style.",
+                      # 0.2.15 — 分享 payload 的落点。这三行分别代表「交给自己了」
+                      # 与两种「没东西可交」；通道名与回执名也一起钉住 —— 宿主和
+                      # 应用两侧的拼写只要差一个字符，这条链就永久静默。
+                      b"com.aevon.openurl.",
+                      b"aevon-open.plist",
+                      b"aevon-open-ack",
+                      b"app: openurl ok=%d via=%s u=%d opt=%d",
+                      b"app: openurl no file",
+                      b"app: openurl bad plist",
                       b"setContentOffset:"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")

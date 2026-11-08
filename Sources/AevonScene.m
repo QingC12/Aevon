@@ -524,6 +524,62 @@ static NSInteger AevonOwnAuditToken(id handle, AevonAuditToken *out) {
 /// 建 scene 之前要的那份 settings。每一项都是「让这个 scene 自己就是一块
 /// 屏幕」，而不是「从整屏里裁一块」——这是 0.0.65 画布口径的延续：
 /// 给系统的是一块 430x717 的屏幕，卡片再把它等比缩小。
+/// 这一组行**不走** `AevonOwnLog` 的预算：40 条里 35 条被开机那一遍 gate 明细
+/// 占掉，用它写就等于「开机第一次打开 App 时这一行没有」。而尺寸这件事恰恰只有
+/// 第一次打开那几拍要对得上。
+static int AevonOwnDisplayNotes = 0;
+static void AevonOwnDisplayLog(NSString *format, ...) {
+    if (AevonOwnDisplayNotes >= 8) return;
+    AevonOwnDisplayNotes += 1;
+    va_list args;
+    va_start(args, format);
+    NSString *line = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    AevonLogRaw([line UTF8String]);
+    [line release];
+}
+
+/// 0.2.15 — 「这块屏幕」必须和 frame 一样大。
+///
+/// 0.2.13/0.2.14 把 scene 的 frame 设成画布 430x717，却把真机的
+/// `displayConfiguration`（430x932）原样塞了进去 ⇒ App 里 `UIScreen` 是 932、
+/// 窗口是 717。按 scene 排版的 App（QQ / 微信 / 抖音）看不出来，按 `UIScreen`
+/// 排版的那个就不行 —— Aevon(185) 高德：
+///   `app: geom early scene=430x717 win=430x932 root=430x932`
+/// 这就是用户说的「悬浮窗里的尺寸错乱」。
+///
+/// 做法：拷一份真机配置，把 `bounds` 改成画布大小，`scale` 等其余字段不动
+/// （像素尺寸由 scale 推，不另设 —— 名字拿不准的一律不调，宁可少设一项）。
+/// `setBounds:` 不存在就用回真机配置，也就是 0.2.14 的行为，不多赌一步。
+static id AevonOwnDisplay(CGRect frame) {
+    id screen = [UIScreen mainScreen];
+    SEL getter = sel_registerName("displayConfiguration");
+    if (screen == nil || ![screen respondsToSelector:getter]) return nil;
+    id base = ((id (*)(id, SEL))objc_msgSend)(screen, getter);
+    if (base == nil) return nil;
+    SEL boundsSel = sel_registerName("bounds");
+    if (![base respondsToSelector:boundsSel]) return base;
+    CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(base, boundsSel);
+    if (CGRectEqualToRect(now, frame)) return base;
+    SEL setBounds = sel_registerName("setBounds:");
+    id mutable = nil;
+    @try {
+        mutable = [[base mutableCopy] autorelease];
+    } @catch (NSException *exception) {
+        mutable = nil;
+    }
+    if (mutable == nil || ![mutable respondsToSelector:setBounds]) {
+        AevonOwnDisplayLog(@"win: own display keep %.0fx%.0f (no setBounds)",
+                           now.size.width, now.size.height);
+        return base;
+    }
+    ((void (*)(id, SEL, CGRect))objc_msgSend)(mutable, setBounds, frame);
+    AevonOwnDisplayLog(@"win: own display %.0fx%.0f -> %.0fx%.0f",
+                       now.size.width, now.size.height,
+                       frame.size.width, frame.size.height);
+    return mutable;
+}
+
 static id AevonOwnSettings(CGRect frame) {
     Class cls = NSClassFromString(@"UIMutableApplicationSceneSettings");
     if (cls == Nil) return nil;
@@ -531,15 +587,11 @@ static id AevonOwnSettings(CGRect frame) {
     if (settings == nil) return nil;
 
     // 显示配置：只读。屏幕本身一个字节都不改（App 进程里改 `UIScreen.bounds`
-    // 那条路 0.1.x 用四次黑屏否掉了，这里是 SpringBoard 的一次读）。
-    id screen = [UIScreen mainScreen];
-    if ([screen respondsToSelector:sel_registerName("displayConfiguration")]) {
-        id config = ((id (*)(id, SEL))objc_msgSend)(
-            screen, sel_registerName("displayConfiguration"));
-        if (config != nil) {
-            ((void (*)(id, SEL, id))objc_msgSend)(
-                settings, sel_registerName("setDisplayConfiguration:"), config);
-        }
+    // 那条路 0.1.x 用四次黑屏否掉了，这里是 SpringBoard 的一次读 + 一次拷贝）。
+    id config = AevonOwnDisplay(frame);
+    if (config != nil) {
+        ((void (*)(id, SEL, id))objc_msgSend)(
+            settings, sel_registerName("setDisplayConfiguration:"), config);
     }
     ((void (*)(id, SEL, BOOL))objc_msgSend)(
         settings, sel_registerName("setForeground:"), YES);
@@ -5933,6 +5985,8 @@ static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id o
 /// Swift 侧调用，原型在 bridging header 里；这里再写一行是给这个 `.m` 用的
 /// （bridging header 不进 `.m`，`-Wmissing-prototypes` 会把它记成告警，CI 是 `-Werror`）。
 void AevonForwardFlush(const char *why);
+/// 0.2.15 — 同上，原型也在这里各写一行（bridging header 不进 `.m`）。
+void AevonForwardDeliver(const char *why);
 
 /// 「先把请求交回系统，再建卡」这个顺序，是 0.1.95 定的，理由是「裸的挂起启动
 /// 会先把 App 拉起来、不带 launch options」。那条理由在**老路**上成立，但它有
@@ -5962,6 +6016,7 @@ static id AevonFwdHoldRequest = nil;
 static id AevonFwdHoldOptions = nil;
 static id AevonFwdHoldSettings = nil;
 static id AevonFwdHoldOrigin = nil;
+static NSString *AevonFwdHoldBundle = nil;
 static SEL AevonFwdHoldCmd = NULL;
 static CFAbsoluteTime AevonFwdHoldAt = 0;
 static int AevonFwdHoldNotes = 0;
@@ -5971,7 +6026,7 @@ static void AevonForwardFlushNow(const char *why);
 /// 只留一条。第二条分享进来时先把上一条发出去：丢掉一条 = 用户点的那次分享
 /// 什么都没发生，比晚一点严重得多。
 static int AevonForwardHold(int slot, id self, SEL _cmd, id request, id options,
-                            id settings, id origin, char form) {
+                            id settings, id origin, char form, NSString *bundle) {
     if (slot < 0 || _cmd == NULL || request == nil) return 0;
     if (AevonFwdHoldOn) AevonForwardFlushNow("replaced");
     AevonFwdHoldOn = 1;
@@ -5983,6 +6038,7 @@ static int AevonForwardHold(int slot, id self, SEL _cmd, id request, id options,
     AevonFwdHoldOptions = [(id)options retain];
     AevonFwdHoldSettings = [(id)settings retain];
     AevonFwdHoldOrigin = [(id)origin retain];
+    AevonFwdHoldBundle = [bundle copy];
     AevonFwdHoldAt = CFAbsoluteTimeGetCurrent();
     if (AevonFwdHoldNotes < 12) {
         AevonFwdHoldNotes += 1;
@@ -6012,6 +6068,8 @@ static void AevonForwardFlushNow(const char *why) {
     AevonFwdHoldOptions = nil;
     AevonFwdHoldSettings = nil;
     AevonFwdHoldOrigin = nil;
+    [AevonFwdHoldBundle release];
+    AevonFwdHoldBundle = nil;
     double waited = AevonFwdHoldAt > 0 ? (CFAbsoluteTimeGetCurrent() - AevonFwdHoldAt) : 0;
     AevonFwdHoldAt = 0;
     if (AevonFwdHoldNotes < 12) {
@@ -6033,6 +6091,37 @@ static void AevonForwardFlushNow(const char *why) {
     [origin release];
 }
 
+/// 0.2.15 — 这条请求我们自己在 App 里投递成功了 ⇒ 就地销毁，一个字节都不交给
+/// SpringBoard。与 `AevonForwardFlushNow` 的关键差别只有一条：不调原实现。
+static void AevonForwardDrop(const char *why) {
+    if (!AevonFwdHoldOn) return;
+    double waited = AevonFwdHoldAt > 0 ? (CFAbsoluteTimeGetCurrent() - AevonFwdHoldAt) : 0;
+    id heldSelf = AevonFwdHoldSelf;
+    id options = AevonFwdHoldOptions;
+    id settings = AevonFwdHoldSettings;
+    id origin = AevonFwdHoldOrigin;
+    AevonFwdHoldOn = 0;
+    AevonFwdHoldSlot = -1;
+    AevonFwdHoldCmd = NULL;
+    AevonFwdHoldSelf = nil;
+    AevonFwdHoldRequest = nil;
+    AevonFwdHoldOptions = nil;
+    AevonFwdHoldSettings = nil;
+    AevonFwdHoldOrigin = nil;
+    [AevonFwdHoldBundle release];
+    AevonFwdHoldBundle = nil;
+    AevonFwdHoldAt = 0;
+    if (AevonFwdHoldNotes < 12) {
+        AevonFwdHoldNotes += 1;
+        AevonLogRaw([[NSString stringWithFormat:@"notify: forward drop why=%s after=%.0fms",
+                      why != NULL ? why : "-", waited * 1000.0] UTF8String]);
+    }
+    [heldSelf release];
+    [options release];
+    [settings release];
+    [origin release];
+}
+
 /// 卡片把 scene 贴上（或等超时）时由主线程调用。任意线程调都安全。
 void AevonForwardFlush(const char *why) {
     if (!AevonFwdHoldOn) return;
@@ -6045,6 +6134,234 @@ void AevonForwardFlush(const char *why) {
         AevonForwardFlushNow(copy);
         if (copy != NULL) free(copy);
     });
+}
+
+// MARK: - 0.2.15 分享 payload 直投目标 App（不经 SpringBoard）
+
+/// Aevon(185) 把「转发」那一刻拍清楚了：`notify: forward pass b=com.tencent.mqq`
+/// 之后紧跟着这几行 ——
+///   win: scene frame after=430x932        ← 我们自己建的那个 scene 被改成全屏
+///   app: page transition h=932 last=717   ← App 那边同时被拉到 932
+///   win: after 1s hosted=-1 sublayers=0   ← 卡片这边什么都没有了
+/// 用户看到的就是「QQ 全屏 + 浮窗黑屏」。也就是说：只要这条请求进了 SpringBoard
+/// 的打开流程，它就会把**这个 App 的 scene** 摆到前台；我们自己建 scene、把 frame
+/// 设成多少都不作数 —— 0.2.13 换「怎么打开」解决不了这一层。
+///
+/// 所以分享这条不再经过它：宿主把 URL + 原始 options 写进目标 App 容器的
+/// `tmp/aevon-open.plist`，再发一声 `com.aevon.openurl.<bundle>`（通道方向与
+/// `aevon-mini` 相同，那条已在真机上双向验证过），由 App 进程里我们的 dylib
+/// 把这次 open URL 交给自己。回执写在 `tmp/aevon-open-ack`（`ok=1 via=app`）。
+/// 1.25 秒没有回执才退回老路（交回 SpringBoard）—— 分享宁可全屏一次，也不许丢。
+static int AevonAppOpenNotes = 0;   // 这组行最多 20 条：分享是低频动作，20 条够一轮真机
+static int AevonAppOpenPending = 0;
+static int AevonAppOpenTries = 0;
+static NSString *AevonAppOpenBundle = nil;
+static CFAbsoluteTime AevonAppOpenAt = 0;
+
+static NSString *AevonAppOpenLeaf(NSString *bundleID, NSString *leaf) {
+    if (bundleID.length == 0 || leaf.length == 0) return nil;
+    NSString *dir = AevonAppContainer(bundleID);
+    if (dir.length == 0) return nil;
+    return [dir stringByAppendingPathComponent:[@"tmp/" stringByAppendingString:leaf]];
+}
+
+/// plist 装得下的形状才留。`options` 里既有 `NSString` 也有私有对象
+/// （`__PasteSharingToken` 就不是公开类），装不进去的丢掉并记账 ——
+/// 「带了几项 / 丢了几项」是下一轮判「分享内容为什么没到」的唯一线索。
+static id AevonAppOpenSafe(id value, int depth, int *dropped) {
+    if (value == nil || depth > 3) return nil;
+    if ([value isKindOfClass:[NSString class]] || [value isKindOfClass:[NSNumber class]] ||
+        [value isKindOfClass:[NSData class]] || [value isKindOfClass:[NSDate class]]) {
+        return value;
+    }
+    // 老式 `NSURL` 在 plist 里不合法，转字符串保存。
+    if ([value isKindOfClass:[NSURL class]]) return [(NSURL *)value absoluteString];
+    if ([value isKindOfClass:[NSArray class]]) {
+        NSMutableArray *out = [NSMutableArray array];
+        for (id item in (NSArray *)value) {
+            id safe = AevonAppOpenSafe(item, depth + 1, dropped);
+            if (safe != nil) [out addObject:safe];
+        }
+        return out;
+    }
+    if ([value isKindOfClass:[NSDictionary class]]) {
+        NSMutableDictionary *out = [NSMutableDictionary dictionary];
+        for (id key in (NSDictionary *)value) {
+            if (![key isKindOfClass:[NSString class]]) { *dropped += 1; continue; }
+            id safe = AevonAppOpenSafe([(NSDictionary *)value objectForKey:key],
+                                       depth + 1, dropped);
+            if (safe != nil) [out setObject:safe forKey:key];
+            else *dropped += 1;
+        }
+        return out;
+    }
+    *dropped += 1;
+    return nil;
+}
+
+static void AevonAppOpenCheck(void);
+
+static void AevonAppOpenDrop(void) {
+    AevonAppOpenPending = 0;
+    AevonAppOpenTries = 0;
+    AevonAppOpenAt = 0;
+    [AevonAppOpenBundle release];
+    AevonAppOpenBundle = nil;
+}
+
+static void AevonAppOpenNext(double gap) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(gap * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonAppOpenCheck();
+    });
+}
+
+/// 1 = 已经发出去（正在等回执） / 0 = 发不出去（调用方立刻走老路）
+static int AevonAppOpenSend(NSString *bundleID, NSString *url, id options) {
+    if (bundleID.length == 0 || url.length == 0) return 0;
+    NSString *plist = AevonAppOpenLeaf(bundleID, @"aevon-open.plist");
+    NSString *ack = AevonAppOpenLeaf(bundleID, @"aevon-open-ack");
+    if (plist == nil || ack == nil) {
+        if (AevonAppOpenNotes < 20) {
+            AevonAppOpenNotes += 1;
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"notify: appurl none b=%@ (no container)", bundleID] UTF8String]);
+        }
+        return 0;
+    }
+    int dropped = 0;
+    id safe = AevonAppOpenSafe(options, 0, &dropped);
+    if (safe == nil) safe = [NSDictionary dictionary];
+    int kept = [safe isKindOfClass:[NSDictionary class]] ? (int)[(NSDictionary *)safe count] : 0;
+    NSDictionary *box = [NSDictionary dictionaryWithObjectsAndKeys:
+                         url, @"url", safe, @"options", nil];
+    NSError *error = nil;
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:box
+                                                              format:NSPropertyListXMLFormat_v1_0
+                                                             options:0
+                                                               error:&error];
+    if (data == nil) {
+        if (AevonAppOpenNotes < 20) {
+            AevonAppOpenNotes += 1;
+            AevonLogRaw("notify: appurl no plist");
+        }
+        return 0;
+    }
+    // 上一轮的回执照删：留着会让这一轮读到别人的答案。
+    [[NSFileManager defaultManager] removeItemAtPath:ack error:NULL];
+    if (![data writeToFile:plist atomically:YES]) {
+        if (AevonAppOpenNotes < 20) {
+            AevonAppOpenNotes += 1;
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"notify: appurl no write b=%@", bundleID] UTF8String]);
+        }
+        return 0;
+    }
+    AevonAppOpenPending = 1;
+    AevonAppOpenTries = 0;
+    [AevonAppOpenBundle release];
+    AevonAppOpenBundle = [bundleID copy];
+    AevonAppOpenAt = CFAbsoluteTimeGetCurrent();
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge CFStringRef)[NSString stringWithFormat:@"com.aevon.openurl.%@", bundleID],
+        NULL, NULL, true);
+    if (AevonAppOpenNotes < 20) {
+        AevonAppOpenNotes += 1;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: appurl send b=%@ opt=%d/%d u=%.48s",
+                      bundleID, kept, dropped, [url UTF8String]] UTF8String]);
+    }
+    AevonAppOpenNext(0.20);
+    return 1;
+}
+
+static void AevonAppOpenGiveUp(const char *why) {
+    if (!AevonAppOpenPending) return;
+    double ms = (CFAbsoluteTimeGetCurrent() - AevonAppOpenAt) * 1000.0;
+    AevonLogRaw([[NSString stringWithFormat:@"notify: appurl give b=%@ why=%s at=%.0fms",
+                  AevonAppOpenBundle != nil ? AevonAppOpenBundle : @"-",
+                  why != NULL ? why : "-", ms] UTF8String]);
+    AevonAppOpenDrop();
+    // 没回执 ⇒ 退回老路（交回 SpringBoard）。这一下会全屏，但分享不会丢。
+    AevonForwardFlushNow("appurl fallback");
+}
+
+/// 回执的三种答案：`ok=1` 收工、`ok=0` 立刻退回老路、文件根本没有就再等一拍。
+static void AevonAppOpenCheck(void) {
+    if (!AevonAppOpenPending) return;
+    NSString *ack = AevonAppOpenLeaf(AevonAppOpenBundle, @"aevon-open-ack");
+    NSString *text = ack != nil
+        ? [NSString stringWithContentsOfFile:ack encoding:NSUTF8StringEncoding error:NULL] : nil;
+    if (text != nil) {
+        [[NSFileManager defaultManager] removeItemAtPath:ack error:NULL];
+        BOOL ok = [text rangeOfString:@"ok=1"].location != NSNotFound;
+        NSString *via = @"?";
+        NSRange at = [text rangeOfString:@"via="];
+        if (at.location != NSNotFound) {
+            NSString *rest = [text substringFromIndex:at.location + at.length];
+            NSArray *parts = [rest componentsSeparatedByCharactersInSet:
+                              [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (parts.count > 0) via = [parts objectAtIndex:0];
+        }
+        double ms = (CFAbsoluteTimeGetCurrent() - AevonAppOpenAt) * 1000.0;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: appurl ack b=%@ ok=%d via=%@ at=%.0fms",
+                      AevonAppOpenBundle != nil ? AevonAppOpenBundle : @"-",
+                      ok ? 1 : 0, via, ms] UTF8String]);
+        if (ok) {
+            // 投递成功 ⇒ 这条请求就地销毁，**绝不**交给 SpringBoard：
+            // 交给它就是把 App 的 scene 抢去全屏（这一版唯一要避开的事）。
+            AevonAppOpenDrop();
+            AevonForwardDrop("appurl ok");
+            return;
+        }
+        AevonAppOpenGiveUp("app refused");
+        return;
+    }
+    AevonAppOpenTries += 1;
+    if (AevonAppOpenTries <= 3) {
+        AevonAppOpenNext(0.35);
+        return;
+    }
+    AevonAppOpenGiveUp("timeout");
+}
+
+/// 这条请求还挂在手里时能读到的 URL：顶层 `__PayloadURL` 优先，其次是
+/// `__PayloadOptions[UIApplicationLaunchOptionsURLKey]`（两条都在真机上见过）。
+static NSString *AevonForwardHeldURL(void) {
+    id value = AevonOpenAnyValue(AevonFwdHoldRequest, AevonFwdHoldOptions, @"__PayloadURL");
+    if (value == nil) {
+        id payload = AevonOpenPayload(AevonFwdHoldRequest, AevonFwdHoldOptions);
+        if (payload != nil) {
+            value = AevonActRead(payload, @"UIApplicationLaunchOptionsURLKey");
+        }
+    }
+    if ([value isKindOfClass:[NSURL class]]) return [(NSURL *)value absoluteString];
+    if ([value isKindOfClass:[NSString class]]) return (NSString *)value;
+    return nil;
+}
+
+/// 卡片把 scene 贴上时由 Swift 侧调用（主线程，或任意线程）。与
+/// `AevonForwardFlush` 的区别只有一条：**先试 App 内投递，失败才交回系统。**
+void AevonForwardDeliver(const char *why) {
+    if (!AevonFwdHoldOn) return;
+    if (![NSThread isMainThread]) {
+        char *copy = strdup(why != NULL ? why : "-");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonForwardDeliver(copy);
+            if (copy != NULL) free(copy);
+        });
+        return;
+    }
+    NSString *url = AevonForwardHeldURL();
+    NSString *bundle = AevonFwdHoldBundle;
+    if (url.length == 0 || bundle.length == 0) {
+        // 拿不到 URL（分享的是纯粘贴板内容、或者键名变了）⇒ 不额外等，直接走老路。
+        AevonForwardFlushNow(why != NULL ? why : "appurl no url");
+        return;
+    }
+    if (AevonAppOpenSend(bundle, url, AevonFwdHoldOptions) == 1) return;
+    AevonForwardFlushNow("appurl no file");
 }
 
 /// 替身。**顺序就是这里的全部安全设计**：
@@ -6200,7 +6517,8 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                 // 不在这里发。先让 `AevonOpenFromNotification` 把卡片的 process +
                 // scene 建起来，再把这个请求投回去。超时 1.6 秒兜底。
                 forwarded = AevonForwardHold(slot, self, _cmd, request, options,
-                                             settings, origin, form);
+                                             settings, origin, form,
+                                             [NSString stringWithUTF8String:bundle]);
                 size_t at = strlen(line);
                 if (at + 12 < sizeof(line)) {
                     snprintf(line + at, sizeof(line) - at, " fwd=%d", forwarded);

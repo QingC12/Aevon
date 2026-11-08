@@ -1321,7 +1321,11 @@ zStackParticipantDidChange:
             // 0.2.14 — 自建 scene 到位 ⇒ 现在才把分享那条请求投回系统。这一句
             // 之前它一直挂在 `AevonForwardHold` 里（最多 1.6 秒），就是为了不让
             // 系统先把 App 摆成前台。
-            AevonForwardFlush("own scene up")
+            //
+            // 0.2.15 — 不再直接交给系统：先由 `AevonForwardDeliver` 把这次 open URL
+            // 投进目标 App 自己的进程（Aevon(185) 证明「交回系统」那一瞬 SpringBoard
+            // 会把我们自建的 scene 改成 932 全屏，卡片随即黑屏）。投不进去才回落。
+            AevonForwardDeliver("own scene up")
             guard FloatHost.mainBundle == bundleID else {
                 AevonHookDisarm(bundleID)
                 if AevonSystemCovered() {
@@ -1358,7 +1362,8 @@ zStackParticipantDidChange:
             emitNotes(AevonTakeNotes())
             float(scene, bundleID: bundleID)
             // 0.2.14 — 系统那条路也一样：scene 已经在手里了再投 payload。
-            AevonForwardFlush("scene up")
+            // 0.2.15 — 同样先走「App 内投递」，失败才交回系统。
+            AevonForwardDeliver("scene up")
             // A hold with no card under it is a scene that never sleeps again.
             //
             // 0.0.98 — 判据从「有没有卡」换成「这个 App 是不是当前主窗」。旧主窗

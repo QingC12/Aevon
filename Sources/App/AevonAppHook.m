@@ -4689,6 +4689,157 @@ static void AevonMiniObserve(void) {
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
 }
 
+// MARK: - 0.2.15 分享 payload 直投（宿主写文件 + Darwin 通知，这里交给自己）
+//
+// 分享到 QQ 一直是「先全屏、再浮窗、浮窗黑屏」。Aevon(185) 拍到的是：宿主一旦
+// 把那条 open 请求交回 SpringBoard，SB 立刻把这个 App 的 scene 改成 932 全屏
+// （`win: scene frame after=430x932`），卡片那边随即 `sublayers=0`。所以宿主换
+// 成「自己把 URL 送到这个进程里」—— 这条路上 SB 不知道有这回事，也就没有全屏。
+//
+// 通道：`tmp/aevon-open.plist`（宿主写）+ `com.aevon.openurl.<bundle>`（Darwin
+// 通知，跨进程不需要沙盒权限，与 `aevon-mini` 同一条路的反向），回执写在
+// `tmp/aevon-open-ack`（`ok=1 via=app`）。宿主 1.25 秒收不到回执就退回老路。
+//
+// 交给谁：① 先自己实现 `application:openURL:options:` —— options 字典原样转交，
+// 里面那枚 `__PasteSharingToken` 是 App 能读粘贴板的前提（丢了分享就只剩空壳）；
+// ② 不认再走 scene 的 `scene:openURLContexts:`（`UIOpenURLContext` 只能 KVC
+// 现造，options 只能为空，所以排在后面）。两条都不认就回 `ok=0`，宿主回落。
+
+static NSString *AevonOpenURLPath(NSString *leaf) {
+    NSString *tmp = NSTemporaryDirectory();
+    if (tmp.length == 0 || leaf.length == 0) return nil;
+    return [tmp stringByAppendingPathComponent:leaf];
+}
+
+static void AevonOpenURLAck(BOOL ok, const char *via) {
+    NSString *path = AevonOpenURLPath(@"aevon-open-ack");
+    if (path == nil) return;
+    NSString *text = [NSString stringWithFormat:@"ok=%d via=%s\n",
+                      ok ? 1 : 0, via != NULL ? via : "-"];
+    [text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+}
+
+/// 主线程执行：读投递文件 → 调 App 自己的 open URL 入口 → 写回执。
+static void AevonOpenURLApply(void) {
+    NSString *file = AevonOpenURLPath(@"aevon-open.plist");
+    NSData *data = file.length > 0 ? [NSData dataWithContentsOfFile:file] : nil;
+    if (data == nil) {
+        AevonAppLogWrite("app: openurl no file\n");
+        return;
+    }
+    [[NSFileManager defaultManager] removeItemAtPath:file error:NULL];
+    NSError *error = nil;
+    id box = [NSPropertyListSerialization propertyListWithData:data
+                                                       options:NSPropertyListImmutable
+                                                        format:NULL
+                                                         error:&error];
+    NSString *raw = [box isKindOfClass:[NSDictionary class]]
+        ? [box objectForKey:@"url"] : nil;
+    NSDictionary *options = [box isKindOfClass:[NSDictionary class]]
+        ? [box objectForKey:@"options"] : nil;
+    NSURL *url = raw.length > 0 ? [NSURL URLWithString:raw] : nil;
+    if (![url isKindOfClass:[NSURL class]]) {
+        AevonAppLogWrite("app: openurl bad plist\n");
+        AevonOpenURLAck(NO, "parse");
+        return;
+    }
+
+    UIApplication *app = [UIApplication sharedApplication];
+    const char *via = "none";
+    BOOL ok = NO;
+
+    // ① 自己那个 delegate。options 原样给：粘贴板 token 就在里面。
+    id delegate = app.delegate;
+    SEL appSel = sel_registerName("application:openURL:options:");
+    if (delegate != nil && [delegate respondsToSelector:appSel]) {
+        @try {
+            BOOL (*call)(id, SEL, UIApplication *, NSURL *, NSDictionary *) =
+                (BOOL (*)(id, SEL, UIApplication *, NSURL *, NSDictionary *))objc_msgSend;
+            ok = call(delegate, appSel, app, url,
+                      options != nil ? options : [NSDictionary dictionary]);
+            via = "app";
+        } @catch (NSException *exception) {
+            ok = NO;
+            via = "app throw";
+        }
+    }
+
+    // ② scene 的正门。挑一个前台活着的窗口场景；没有就挑第一个认这条选择子的。
+    if (!ok) {
+        Class ctxCls = NSClassFromString(@"UIOpenURLContext");
+        SEL sceneSel = sel_registerName("scene:openURLContexts:");
+        UIScene *target = nil;
+        id targetDelegate = nil;
+        for (UIScene *scene in app.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            id d = ((id (*)(id, SEL))objc_msgSend)(scene, sel_registerName("delegate"));
+            if (d == nil || ![d respondsToSelector:sceneSel]) continue;
+            if (target == nil) { target = scene; targetDelegate = d; }
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                target = scene;
+                targetDelegate = d;
+                break;
+            }
+        }
+        if (ctxCls != Nil && targetDelegate != nil) {
+            id context = nil;
+            @try {
+                context = [[ctxCls alloc] init];
+                // `UIOpenURLContext` 没有公开初始化器：KVC 直接摸它的 `_URL`。
+                // 摸不到会抛 `NSUndefinedKeyException`，下面接住 ⇒ 退回 ok=0。
+                [context setValue:url forKey:@"URL"];
+            } @catch (NSException *exception) {
+                [context release];
+                context = nil;
+            }
+            if (context != nil) {
+                @try {
+                    NSSet *set = [NSSet setWithObject:context];
+                    void (*call)(id, SEL, UIScene *, NSSet *) =
+                        (void (*)(id, SEL, UIScene *, NSSet *))objc_msgSend;
+                    call(targetDelegate, sceneSel, target, set);
+                    ok = YES;
+                    via = "scene";
+                } @catch (NSException *exception) {
+                    ok = NO;
+                    via = "scene throw";
+                }
+                [context release];
+            }
+        }
+    }
+
+    char line[192];
+    snprintf(line, sizeof(line), "app: openurl ok=%d via=%s u=%d opt=%d\n",
+             ok ? 1 : 0, via, (int)raw.length, (int)[options count]);
+    AevonAppLogWrite(line);
+    AevonOpenURLAck(ok, via);
+}
+
+static void AevonOpenURLNote(CFNotificationCenterRef __unused center,
+                             void *__unused observer,
+                             CFStringRef __unused name,
+                             const void *__unused object,
+                             CFDictionaryRef __unused userInfo) {
+    // 通知回调可能落在任意线程，而 delegate 调用必须在主线程。
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            AevonOpenURLApply();
+        }
+    });
+}
+
+/// 构造函数里调一次。名字带自己的 bundle id，与宿主的拼接规则一致。
+static void AevonOpenURLObserve(void) {
+    NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
+    if (bundle.length == 0) return;
+    CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
+    NSString *name = [NSString stringWithFormat:@"com.aevon.openurl.%@", bundle];
+    CFNotificationCenterAddObserver(center, NULL, AevonOpenURLNote,
+                                    (__bridge CFStringRef)name, NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+}
+
 // MARK: - 0.1.29 深浅色（桌面发，应用收）
 
 /// 把自己所有窗口的样式重设一遍。
@@ -8067,6 +8218,9 @@ static void AevonAppBoot(void) {
     AevonBandObserve();
     // 0.1.29 — 深浅色。桌面上每切一次就发一条，这里把窗口样式重设一遍。
     AevonStyleObserve();
+    // 0.2.15 — 分享 payload 直投（见上面那一整段）。宿主在卡片 scene 就位之后
+    // 才发，所以这里注册得早不早无所谓，但必须早于第一次分享。
+    AevonOpenURLObserve();
     // 0.1.17 — 键盘在屏的那一声。软键盘属于应用这一侧，桌面要等这里报才知道
     // （见上面 `AevonKbObserve`）。
     AevonKbObserve();
