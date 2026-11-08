@@ -1046,19 +1046,17 @@ NSInteger AevonOwnIsOwned(NSString *bundleID) {
 ///      响应链上把那个 controller 找出来，让它自己处理。
 /// 谁生效由 Swift 侧回读 `isSpringBoardActive` 判定；三级都不行才动页面。
 
-/// SpringBoard 自己的 window scene：正常层级、有尺寸的第一个窗口。
-/// `handleHomeButtonSinglePressUpForWindowScene:` 要的就是它。
+/// SpringBoard 自己的 window scene。走 `connectedScenes`（`windows` 在
+/// iOS 15 起被标成 deprecated，而本工程的 ObjC 把 deprecated 当错误）。
 static id AevonSBWindowScene(void) {
     @try {
-        UIWindow *fallback = nil;
-        for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
-            if (win.windowScene == nil) continue;
-            if (fallback == nil) fallback = win;
-            if (win.windowLevel == UIWindowLevelNormal && win.bounds.size.height > 400) {
-                return win.windowScene;
-            }
+        id first = nil;
+        for (UIScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            if (first == nil) first = scene;
+            if (scene.activationState == UISceneActivationStateForegroundActive) return scene;
         }
-        return fallback.windowScene;
+        return first;
     } @catch (__unused NSException *e) {
         return nil;
     }
