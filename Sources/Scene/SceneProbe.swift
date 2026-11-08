@@ -1317,7 +1317,10 @@ zStackParticipantDidChange:
                 return
             }
             Log.write("win: icon " + bundleID + " produced no scene")
-            fallback("no scene in 12s")
+            // 字符串必须长过 15 字节：Swift 把 ≤15 字节的字面量编成立即数，
+            // 不进二进制常量区，audit 就断言不到（`no scene in 12s` 正好 15，
+            // 0.2.4 第一次构建就是栽在这条上）。
+            fallback("no scene after 12s and 3 retries")
             return
         }
         // 0.0.59 — 60 → 40 ms。枚举一次 scene manager 只有几个对象，成本远小于

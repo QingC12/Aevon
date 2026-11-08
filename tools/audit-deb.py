@@ -624,8 +624,9 @@ def main():
                   b"windowBlacklistText",
                   # 0.2.4 — 圆盘那条路的名单闸（它没有打开请求可判，单独问一次）。
                   b"ring: blacklisted, native open ",
-                  # 0.2.4 — 等满 12 秒的出口。
-                  b"no scene in 12s",
+                  # 0.2.4 — 等满 12 秒的出口。**不能写 `no scene in 12s`**：那句
+                  # 正好 15 字节，Swift 把它编成立即数，二进制里没有这个串。
+                  b"no scene after 12s and 3 retries",
                   b"win: canvas revived ",
                   b"win: revive after unlock tick=",
                   # 0.1.61 — 键盘态的**进与出**都在。0.1.60 只留下了「进」：
