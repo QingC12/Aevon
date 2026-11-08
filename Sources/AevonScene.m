@@ -3279,6 +3279,33 @@ static BOOL AevonWindowBlacklisted(const char *bundle) {
     return NO;
 }
 
+/// 0.2.10 — 分享黑名单（临时逃生门）。
+///
+/// 与上面那张 `windowBlacklistText` 的区别只有一条，但很关键：**这张只放分享**。
+/// 上面那张在 `AevonOpenDecide` 里站在判据之前，命中连通知一起放过；微信的通知
+/// → 浮窗一直好用，把微信写进那张表会把它一起关掉。所以这里另起一张，只在
+/// `kind == "share"` 时问。
+///
+/// 为什么要有这张表：Aevon(179) 里微信分享进卡片后**两次**崩在同一处
+/// （`-[MBPublicService provideFileSystem]: unrecognized selector`，`step=5`
+/// 落在我们 App 侧 sheet 钩子所在的函数），随后 `scene dead` → `revive` → 再崩
+/// （pid 9423 → 9428 → 9434）。成因未定，而在自建 scene 那条线落地之前，代价最小
+/// 的处置就是——让它走原生：分享能用、App 不崩，微信的通知与图标仍走浮窗。
+///
+/// 名单写死在源码里、不上面板：这是一次**作业**，自建 scene 完成后整块删掉；
+/// 放进面板要跟着改九份 plist 与 81 键口径，为一段临时逻辑不值。
+///
+/// 匹配用 `strstr`（同上面那张的理由）：`com.tencent.xin` 也该盖住
+/// `com.tencent.xin.sharetimeline` 这类扩展 bundle。
+static BOOL AevonShareNativeListed(const char *bundle) {
+    static const char *names[] = { "com.tencent.xin" };
+    if (bundle == NULL || bundle[0] == '\0') return NO;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (strstr(bundle, names[i]) != NULL) return YES;
+    }
+    return NO;
+}
+
 /// Swift 侧的同一张名单。圆盘点图标那条路不经过 `AevonOpenDecide`（它没有
 /// 「打开请求」可判），所以名单必须能单独问一次；否则名单里的 App 从圆盘点
 /// 仍然会被塞进卡片，而名单的语义是「这个 App 别碰我的路」。
@@ -3528,6 +3555,17 @@ static int AevonOpenDecide(id request, id options,
     } else if (!AevonShareSwitchOff() &&
                (AevonOpenIsShareSource(request, options) || (carrier && !sysFrom))) {
         kind = "share";
+    }
+
+    // 0.2.10 — 分享黑名单：只对「这次是分享」生效，命中就**整条放行**。
+    //
+    // 放在判据之后、`sameChain` 之前：`sameChain` 会把同一 App 的第二条吞成
+    // `chain`（返回 2，连原实现都不跑）。黑名单的语义是「这个 App 的分享别碰我的
+    // 路」，那一条也必须原样交给系统 —— 顺序反了，微信的第二条请求会被我们吞掉，
+    // 原生分享反而少一环。
+    if (kind != NULL && strcmp(kind, "share") == 0 && AevonShareNativeListed(bundle)) {
+        *why = "shareBlacklist";
+        return 0;
     }
 
     // 判据先于「同一次点击的第二条」：先确认这是要接管的那两种之一，再谈它是不是
@@ -5731,6 +5769,154 @@ static void AevonSurfGlobal(void) {
     if (hits == 0) AevonLogRaw("surf: g n=0 (no bundle/url activation selector anywhere)");
 }
 
+// MARK: - 0.2.10 自建 scene 的能力面（只读，一次）
+
+//
+// 为什么要有这一段：Aevon(179) 把两条路放进同一份日志，同机对照是硬的 ——
+// 通知那条路**不转发**，卡片 `keepalive fg=yes` 却不出全屏；分享那条路**转发**，
+// 同样 `fg=yes`，出全屏。所以全屏的来源是那次转发（它让主 workspace 把目标 App
+// 摆成前台 App，而 scene 正在我们卡里 ⇒ 全屏层是空的，看着就是黑屏），
+// **不是**「scene 被激活成前台」。用户据此定档：走 TrollOpen 那条「自建 scene」。
+//
+// 那一条的调用面极大（0.0.15 / 0.0.16 两次安全模式都出在这条线的裸调上），
+// 所以本版只做一件事：把**这个名字面在真机进程里到底存不存在**问清楚，
+// 一个对象都不建、一次 `objc_msgSend` 都不发。
+//
+// 三个问题分开答，因为它们导致三种不同的下一步：
+//   ① 类在不在（`scn exists`）—— 不在就是这条路在本进程不可用，得换宿主进程；
+//   ② 名字到底叫什么（`scn names`）—— 真 API 名靠 census 不靠 strings，
+//      0.2.8 的 `forceBg=0/0` 就是这么翻掉的；
+//   ③ 关键选择子落在哪个类、签名什么形状（`scn sel`）—— 下一步要换 IMP 的那一条
+//      必须由目标类自己实现，形状不对就是第三次安全模式。
+//
+// 全部 `class_copyMethodList` / `class_getInstanceMethod` / `method_getTypeEncoding`，
+// 没有 `method_setImplementation`、没有 `objc_msgSend`。跑在低优先级全局队列。
+
+/// 独立预算。不能和 `AevonSurfLines` 共用：那边 46 行早被通知那一半用完了，
+/// 共用就是「先跑完的静音另一个」—— 0.1.93 六条配额用尽那次就是这么来的。
+static int AevonScnLines = 0;
+
+static void AevonScnEmit(NSString *line) {
+    if (AevonScnLines >= 46) return;
+    AevonScnLines += 1;
+    AevonLogRaw(line.UTF8String);
+}
+
+/// 这条线上要点名的类。前一半是「自建一个 scene 需要的那套件」，
+/// 后一半是「SpringBoard 里现成的场景管理器」—— 两者缺一，路就走不成。
+static const char *AevonScnClassNames[] = {
+    "FBSMutableSceneDefinition", "FBSSceneDefinition", "FBSSceneIdentity",
+    "FBSceneManager", "FBScene", "FBSDisplayConfiguration", "FBSDisplayIdentity",
+    "FBProcessManager", "FBSSceneSpecification", "UIApplicationSceneSpecification",
+    "SBSceneManagerCoordinator", "SBSceneManager", "SBMainDisplaySceneManager",
+    "SBTransientOverlayPresentationManager", "SBTransientOverlayViewController",
+    "SBTransientOverlayWindow", "SBDeviceApplicationSceneHandle",
+    "SBApplicationSceneHandle", "UIApplicationSceneHandle", "_UIScenePresenter",
+    "SBMainWorkspace", "SBWorkspace", "UIWindowScene",
+};
+
+#define AEVON_SCN_CLASS_COUNT (sizeof(AevonScnClassNames) / sizeof(AevonScnClassNames[0]))
+
+/// ① 类在不在。拆两行是因为一行二十三个名字会到五百多字节，读的人要滚屏。
+static void AevonScnExists(void) {
+    NSMutableString *buf = [NSMutableString string];
+    for (size_t i = 0; i < AEVON_SCN_CLASS_COUNT; i++) {
+        if (i == 12) {
+            AevonScnEmit([NSString stringWithFormat:@"surf: scn exists a %@", buf]);
+            [buf setString:@""];
+        }
+        Class cls = objc_getClass(AevonScnClassNames[i]);
+        [buf appendFormat:@"%s=%d ", AevonScnClassNames[i], cls != Nil ? 1 : 0];
+    }
+    AevonScnEmit([NSString stringWithFormat:@"surf: scn exists b %@", buf]);
+}
+
+/// ② 名字到底叫什么。全类名扫一遍，命中关键词就列出来 —— 这是唯一不靠猜的
+/// 取名方式。关键词选的是「建场景 / 挂覆盖 / 管场景 / 配显示 / 拿凭证」五类。
+static void AevonScnNames(void) {
+    static const char *keys[] = {
+        "SceneDefinition", "SceneSpecification", "TransientOverlay",
+        "SceneManager", "DisplayConfiguration", "SceneHandle", "MutableScene",
+    };
+    int total = objc_getClassList(NULL, 0);
+    if (total <= 0) {
+        AevonScnEmit(@"surf: scn names unavailable");
+        return;
+    }
+    Class *list = (Class *)malloc(sizeof(Class) * (size_t)total);
+    if (list == NULL) return;
+    total = objc_getClassList(list, total);
+    NSMutableString *buf = [NSMutableString string];
+    int hits = 0;
+    for (int i = 0; i < total && hits < 30; i++) {
+        const char *name = class_getName(list[i]);
+        if (name == NULL) continue;
+        BOOL hit = NO;
+        for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]) && !hit; k++) {
+            if (strstr(name, keys[k]) != NULL) hit = YES;
+        }
+        if (!hit) continue;
+        [buf appendFormat:@"%s ", name];
+        hits += 1;
+        if (hits % 5 == 0) {
+            AevonScnEmit([NSString stringWithFormat:@"surf: scn names %d %@", hits, buf]);
+            [buf setString:@""];
+        }
+    }
+    if (buf.length > 0) {
+        AevonScnEmit([NSString stringWithFormat:@"surf: scn names %d %@", hits, buf]);
+    }
+    free(list);
+    AevonScnEmit([NSString stringWithFormat:@"surf: scn names total=%d", hits]);
+}
+
+/// ③ 关键选择子落在哪个类、什么形状。`i=` 是实例方法、`c=` 是类方法，
+/// 花括号里是 `method_getTypeEncoding` 的原文 —— 下一步要按它写函数指针。
+static void AevonScnSelectors(void) {
+    static const char *sels[] = {
+        "createSceneWithDefinition:initialParameters:",
+        "createRequestWithOptions:displayConfiguration:",
+        "sceneWithDefinition:",
+        "setSpecification:",
+        "setIdentifier:",
+        "specification",
+        "_openURLCore:display:animating:activationSettings:origin:withResult:",
+        "_handleOpenApplicationRequest:options:activationSettings:origin:withResult:",
+        "mainDisplaySceneManager",
+        "sceneManagerForDisplayIdentifier:",
+        "presentedTransientOverlayViewControllers",
+        "setFlag:forActivationSetting:",
+    };
+    int found = 0;
+    for (size_t s = 0; s < sizeof(sels) / sizeof(sels[0]); s++) {
+        SEL sel = sel_registerName(sels[s]);
+        NSMutableString *buf = [NSMutableString string];
+        int hits = 0;
+        for (size_t c = 0; c < AEVON_SCN_CLASS_COUNT && hits < 4; c++) {
+            Class cls = objc_getClass(AevonScnClassNames[c]);
+            if (cls == Nil) continue;
+            Method inst = class_getInstanceMethod(cls, sel);
+            if (inst != NULL) {
+                const char *enc = method_getTypeEncoding(inst);
+                [buf appendFormat:@"%s i{%s} ", AevonScnClassNames[c], enc != NULL ? enc : "?"];
+                hits += 1;
+                found += 1;
+                continue;
+            }
+            Method meta = class_getClassMethod(cls, sel);
+            if (meta != NULL) {
+                const char *enc = method_getTypeEncoding(meta);
+                [buf appendFormat:@"%s c{%s} ", AevonScnClassNames[c], enc != NULL ? enc : "?"];
+                hits += 1;
+                found += 1;
+            }
+        }
+        AevonScnEmit([NSString stringWithFormat:@"surf: scn sel %s n=%d %@",
+                      sels[s], hits, hits > 0 ? buf : @"(none)"]);
+    }
+    AevonScnEmit([NSString stringWithFormat:@"surf: scn sel total=%d", found]);
+}
+
 /// 入口。装配前调用一次；跑在低优先级全局队列上。
 void AevonActivateSurfaceCensus(void) {
     static int done = 0;
@@ -5765,6 +5951,11 @@ void AevonActivateSurfaceCensus(void) {
         AevonSurfClass("SBUserNotificationCenter", "request", 12, NO);
         AevonSurfClass("SBUserNotificationCenter", "action", 12, NO);
         AevonSurfGlobal();
+        // 0.2.10 — 自建 scene 的能力面。放在通知那一半之后、`surf: end` 之前：
+        // 两半各自有预算，谁先跑完都不会把另一半静音。
+        AevonScnExists();
+        AevonScnNames();
+        AevonScnSelectors();
         AevonLogRaw("surf: end");
     });
 }

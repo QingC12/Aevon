@@ -776,6 +776,21 @@ def main():
                   b"win: ability deact2 sbws=%d fbmgr=%d fluid=%d coord=%d",
                   # 因果读数：转发前/后目标 App 在系统眼里是不是前台。
                   b"win: pose b=%@ phase=%s front=%d bg=%d run=%d pid=%d",
+                  # 0.2.10 —— 两件事，各自的证词分开。
+                  #
+                  #   shareBlacklist  微信分享走原生（本版唯一的行为改动）。它是
+                  #                   `why` 的值，只出现在 `notify: pass … why=%s`
+                  #                   与分流行里 —— 产物里没有它，就说明那条闸根本没编进去。
+                  #   surf: scn …     自建 scene 的三问：类在不在 / 名字叫什么 /
+                  #                   关键选择子落在哪个类、什么形状。全部 class_copyMethodList
+                  #                   + method_getTypeEncoding，一个对象都不建、一次 msgSend
+                  #                   都不发 —— 这条线的历史是两次安全模式，所以本版只问。
+                  b"shareBlacklist",
+                  b"surf: scn exists a",
+                  b"surf: scn exists b",
+                  b"surf: scn names total=%d",
+                  b"surf: scn sel %s n=%d",
+                  b"surf: scn sel total=%d",
                   b"notify: forward adopt b=%s op=%s",
                   b"win: ability app forceBg=%d ctrl forceBg=%d app dehost=%d ctrl dehost=%d",
                   b"win: ability scene deact=%d/%d overlay=%d txn=%d openurl=%d",
