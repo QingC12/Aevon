@@ -1248,7 +1248,7 @@ zStackParticipantDidChange:
     /// pid=-1 = 进程没起；pid 有值但列表里没有它 = 起了没 scene；列表里有但
     /// 名字不含 bundle id = 我们的匹配口径错了。
     private static func pollForScene(_ bundleID: String, ticks: Int, start: Date,
-                                     probed: Int = 0,
+                                     probed: Int = 0, retried: Int = 0,
                                      fallback: @escaping (String) -> Void) {
         if let scene = sceneFor(bundleID) {
             unmark()
@@ -1287,7 +1287,25 @@ zStackParticipantDidChange:
             seen = elapsed
             probeScenes(bundleID, seconds: elapsed)
         }
-        guard Date().timeIntervalSince(start) < 6.0 else {
+        // 0.2.4 —— 挂起启动不是「叫一次就成」的。
+        //
+        // 母版取宿主是 `obtainHostViewForBundle:frame:maxAttempts:delay:with169:completion:`
+        // —— 名字里那两个参数就是「次数」和「间隔」，它默认会重试。我们到 0.2.3 为止
+        // 只叫一次，然后原地干等六秒。Aevon(173) 的高德到第九秒才出现 scene，单次
+        // 请求在那一刻早就过期了，等再久也不会自己补上。
+        //
+        // 这里每 2 秒补叫一次、最多三次（第 2 / 4 / 6 秒），连同总等待从 6 秒放到
+        // 12 秒，就是母版那对参数在本项目的落点。每次 1~17 ms（真机实测），不是
+        // `openApplicationWithBundleID:` 那种 10 秒 XPC，留在主线程上可以接受。
+        var again = retried
+        if again < 3, Date().timeIntervalSince(start) >= Double(again + 1) * 2.0 {
+            again += 1
+            let door = AevonLaunchSuspended(sharedApplication(), bundleID)
+            Log.write(String(format: "win: icon relaunch %@ try=%ld door=%ld t=%ldms",
+                             bundleID, again, door,
+                             Int(Date().timeIntervalSince(start) * 1000)))
+        }
+        guard Date().timeIntervalSince(start) < 12.0 else {
             unmark()
             AevonHookDisarm(bundleID)
             // 0.2.1 — 这一条出口原来不看遮挡，于是锁屏上点一条通知会走到全屏兜底。
@@ -1299,7 +1317,7 @@ zStackParticipantDidChange:
                 return
             }
             Log.write("win: icon " + bundleID + " produced no scene")
-            fallback("no scene in 6s")
+            fallback("no scene in 12s")
             return
         }
         // 0.0.59 — 60 → 40 ms。枚举一次 scene manager 只有几个对象，成本远小于
@@ -1307,7 +1325,7 @@ zStackParticipantDidChange:
         let gap: Double = ticks < 30 ? 0.04 : 0.25
         DispatchQueue.main.asyncAfter(deadline: .now() + gap) {
             pollForScene(bundleID, ticks: ticks + 1, start: start, probed: seen,
-                         fallback: fallback)
+                         retried: again, fallback: fallback)
         }
     }
 
@@ -1320,7 +1338,7 @@ zStackParticipantDidChange:
     ///   pid 有值但列表里没有这个 App ⇒ 进程在、scene 没建（挂起启动对这类
     ///   App 无效）。列表里有但名字不含 bundle id ⇒ `sceneFor` 的匹配口径错。
     ///
-    /// 每次等待最多 6 行（第 1~6 秒），一行十几个字节的读数，不打程序结构。
+    /// 每次等待最多 12 行（第 1~12 秒），一行十几个字节的读数，不打程序结构。
     private static func probeScenes(_ bundleID: String, seconds: Int) {
         let pid = AevonAppPid(bundleID)
         var names: [String] = []
@@ -1333,15 +1351,36 @@ zStackParticipantDidChange:
             }
         }
         let joined = names.prefix(6).joined(separator: "|")
-        Log.write(String(format: "win: wait scene %lds app=%d n=%ld %@",
-                         seconds, pid, names.count, joined))
+        Log.write(String(format: "win: wait scene %lds app=%d n=%ld hook=%d %@",
+                         seconds, pid, names.count, AevonSeenCountOf(), joined))
     }
 
     /// The scene that answers to this bundle id. Matched on the identifier
     /// rather than on the app object: `sceneID:com.x.y-default` is the one
     /// spelling every release has used, and the scene manager is the only door
     /// that lists scenes across processes.
+    ///
+    /// 0.2.4 — 两条口径。先问 manager（健康的那一类：已连上客户端），再问拦截点
+    /// 登记表（`sceneID:` 名字出现过、系统推过 settings，但 manager 列不出来）。
+    ///
+    /// Aevon(173) 把这两类分开了：高德六行现场里 manager 一个都不给，而 hook
+    /// trace 里同名 scene 被改了三次前台 —— 它存在，只是没连上客户端。用第一条
+    /// 口径能保证「正常 App 拿到的永远是健康 scene」，第二条只在第一条空手时兜底，
+    /// 并且把它的三项读数写进日志：`running=0 visible=0` 就是那种空壳，建出来
+    /// 大概率是一张黑卡，日志里要看得见这件事。
     private static func sceneFor(_ bundleID: String) -> NSObject? {
+        if let scene = listedScene(bundleID) { return scene }
+        guard let raw = AevonSeenSceneForBundle(bundleID) else { return nil }
+        guard let seen = raw as? NSObject else { return nil }
+        Log.write("win: scene from hook table " + bundleID
+                  + " seen=" + String(AevonSeenCountOf())
+                  + " running=" + flag(AevonBoolOf(seen, "accessibilitySceneIsRunningInForeground"))
+                  + " visible=" + flag(AevonBoolOf(seen, "accessibilitySceneIsForegroundVisible")))
+        return seen
+    }
+
+    /// 第一条口径：manager 枚举。所有正常建卡的 App 都走这条。
+    private static func listedScene(_ bundleID: String) -> NSObject? {
         guard let manager = AevonSceneManager() as? NSObject else { return nil }
         var found: NSObject?
         AevonEnumerateScenes(manager) { scene in

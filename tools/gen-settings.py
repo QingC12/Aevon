@@ -443,6 +443,20 @@ def build_root(panel_items, wired):
     items.append({"cell": "PSButtonCell", "label": "重载桌面（应用闸门变更）",
                   "action": "respring:", "defaults": DOMAIN})
 
+    # 0.2.4 — 浮窗黑名单。母版与四家同行都带这张名单（TrollOpen 的
+    # TOBJJumpSplitExcludedApplications、Mango 的 urlOpenInSplit、Myrtle 的
+    # URLJUMPBLACKLIST），它是「某个 App 在浮窗里用不了」时唯一的自救手段。
+    # 在这一版之前，Aevon 一个走不通的 App 只能表现为「点了没反应」。
+    items.append({"cell": "PSGroupCell", "label": "浮窗黑名单",
+                  "footerText": "填 bundle id，用逗号、空格或换行分隔（例：com.autonavi.amap）。"
+                                "名单里的 App 不进浮窗，也不拦它的打开请求——一切按系统原生走。"
+                                "改名后无需重载桌面，下一次点通知/分享就生效。"
+                                "写 com.autonavi 这样的前缀也会盖住它名下所有 App。"})
+    items.append({"cell": "PSTextFieldSpecifier", "label": "黑名单",
+                  "key": "windowBlacklistText", "default": "",
+                  "defaults": DOMAIN,
+                  "placeholder": "com.autonavi.amap, com.example.app"})
+
     items.append({"cell": "PSGroupCell", "label": "功能设置",
                   "footerText": f"下面 8 个面板共 {total} 项，母本键与母本一一对应"
                                 f"（母本 81 键中有 {len(DROPPED)} 项已明确放弃，"
@@ -473,17 +487,17 @@ def build_root(panel_items, wired):
                                 f"承载形状：旧版圆盘 1:1 移入——右缘左滑呼出，划过跳跃、"
                                 f"阻尼旋转、逐点展开全是本体；应用在编辑器里增删排序"
                                 f"（上限 36，含截图 / 录屏动作槽）。"
-                                f"0.2.3 起：修「有的应用能用悬浮窗、有的只能全屏，全屏还会闪退」。真机日志里"
-                                f"六次点击有五次正常（微信 591 毫秒、小红书 633、汽水音乐 962、Sileo 292、"
-                                f"QQ 459 拿到场景），只有高德两次都是「挂起启动 1 毫秒成功、四秒零场景」。"
-                                f"以前的处理是四秒等不到就全屏兜底 —— 而高德全屏打开时加载画面一出就崩回"
-                                f"桌面。现在两处一起改：全屏兜底整段删除（卡片没起来只留一行证词，宁可什么都"
-                                f"不发生也不要 App 闪退；母版也只在排除表命中时才回落全屏）；等场景从四秒延到"
-                                f"六秒，并且每秒写一行现场 win: wait scene（App 的 pid + 场景管理器里全部场景"
-                                f"标识）—— pid 是 -1 说明进程没起，pid 有值但列表里没有它说明进程在、场景没建，"
-                                f"列表里有但名字不含 bundle id 说明是我们的匹配口径错。判据：点高德通知应出现"
-                                f"wait scene 六行、最后一行 ring: card declined，不再出现任何全屏打开；其他"
-                                f"应用应照旧出小窗。停掉整个通知与分享接管：在"
+                                f"0.2.4 起：按母版补齐三件（Stheno / TrollOpen / Mango / Myrtle 共有的做法）。"
+                                f"① 查场景两条口径：管理器枚举之外，再从系统的场景设置拦截点顺手记一份——"
+                                f"「FrontBoard 已登记、客户端还没连上」的那类场景枚举列不出来，而系统正在给它"
+                                f"推设置（高德就是这么漏掉的）；② 挂起启动改为带重试：每 2 秒补叫一次、最多"
+                                f"三次，总等待 12 秒（对应母版 obtainHostView 的 maxAttempts / delay）；"
+                                f"③ 恢复「失败回落原生一次」，并加上面那张黑名单——名单里的 App 在分流层就"
+                                f"整条放行，连吞都不吞。另修一条判据：带内容的打开不再一律算分享。"
+                                f"说明：高德那次「全屏也打不开」是它自己在新版本上的问题（降级后正常），"
+                                f"与浮窗无关；这类 App 请直接写进上面的黑名单。判据：正常应用应看到 "
+                                f"win: icon scene up after；起不来的应看到 win: wait scene 共 12 行，随后 "
+                                f"ring: card declined，再跟一次 ring: launch。停掉整个通知与分享接管：在"
                                 f"/var/mobile/Library/Logs/Aevon/ 下建空文件 notify.off 再重启；只想停分享"
                                 f"（含带内容的打开）就建 share.off。"})
 

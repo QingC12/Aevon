@@ -22,6 +22,17 @@ void AevonEnumerateScenes(id _Nullable manager, void (^_Nullable block)(id _Null
 id _Nullable AevonSceneManager(void);
 /// 0.2.3 — 「等 scene」现场快照用：这个 bundle 的进程 pid。取不到一律 -1。
 int AevonAppPid(NSString *_Nullable bundleID);
+/// 0.2.4 — 第二条口径：拦截点记过的、名字含这个 bundle 的 scene。
+///
+/// `enumerateScenesWithBlock:` 列不出「FrontBoard 已登记、客户端还没连上」的空壳
+/// scene，而系统的 settings 推送就是发给那种 scene 的。Aevon(173) 的高德正是这样：
+/// 枚举里六秒零命中，hook trace 里同名 scene 被我们改了三次前台。
+id _Nullable AevonSeenSceneForBundle(NSString *_Nullable bundle);
+/// 拦截点记住了几个 scene（诊断用，不参与判断）。
+int AevonSeenCountOf(void);
+/// 0.2.4 — 浮窗黑名单。圆盘那条路没有「打开请求」可判，所以名单要能单独问。
+/// 键：`windowBlacklistText`（逗号/空格分隔）与 `windowBlacklist`（数组）。
+BOOL AevonBlacklistedBundle(NSString *_Nullable bundle);
 NSString *_Nullable AevonTakeNotes(void);
 
 /// 0.0.16 / 0.0.22 — the mother ship's route: a scene's `uiPresentationManager`

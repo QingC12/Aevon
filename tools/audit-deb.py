@@ -606,11 +606,26 @@ def main():
                   b"win: icon card closed by cover, no fallback",
                   # 0.2.1 — 4 秒等不到场景、这一刻系统界面还盖着 ⇒ 一个字节都不开。
                   b"win: icon card gave up under cover, no fallback",
-                  # 0.2.3 — 卡片没起来时只留一行证词，**不再全屏兜底**
-                  # （Aevon(172)：高德全屏打开加载画面一出就崩）。
+                  # 0.2.3 — 卡片没起来时留一行证词。0.2.4 — 这一行后面跟回落，
+                  # 所以措辞从 `no fallback` 改成 `falling back`（见文件末尾）。
                   b"ring: card declined (",
+                  # 0.2.4 — 母版那条「失败回落原生一次」又接回来了，带滑动窗口限流。
+                  b"ring: launch done t=%ldms",
+                  b"ring: launch skip ",
+                  # 0.2.4 — 第二条口径：拦截点记过的 scene（manager 枚举列不出的那种）。
+                  b"win: scene from hook table ",
+                  # 0.2.4 — 挂起启动带重试（对应母版 maxAttempts/delay）。
+                  b"win: icon relaunch %@ try=%ld door=%ld t=%ldms",
                   # 0.2.3 — 等 scene 那几秒的现场快照（pid + 全部 scene 标识）。
-                  b"win: wait scene %lds app=%d n=%ld %@",
+                  # 0.2.4 — 多一个 hook 计数：枚举里有几个、拦截点记了几个。
+                  b"win: wait scene %lds app=%d n=%ld hook=%d %@",
+                  # 0.2.4 — 黑名单。断言用长键名而不是 `blacklist`（9 字节会被
+                  # 编成立即数，`why=blacklist` 又是拼出来的，都不在二进制里）。
+                  b"windowBlacklistText",
+                  # 0.2.4 — 圆盘那条路的名单闸（它没有打开请求可判，单独问一次）。
+                  b"ring: blacklisted, native open ",
+                  # 0.2.4 — 等满 12 秒的出口。
+                  b"no scene in 12s",
                   b"win: canvas revived ",
                   b"win: revive after unlock tick=",
                   # 0.1.61 — 键盘态的**进与出**都在。0.1.60 只留下了「进」：
@@ -848,13 +863,10 @@ def main():
                  # 任何一条还能 grep 到，就说明卡片又被遮挡判据杀了。
                  b"win: card closed at once (system cover up)",   # gone
                  b"win: card closed by system cover",             # gone
-                 # 0.2.3 — 整套「全屏兜底」删除（Aevon(172)：高德两次都是
-                 # 「4 秒无 scene → 全屏 → 加载画面一出就崩回桌面」）。兜底把
-                 # 「什么都没发生」换成了「App 闪退」，而且那 10 秒同步 XPC 正是
-                 # Aevon(169) 整机卡死的发动机。任何一条还能 grep 到，就说明那条
-                 # 腿又接回去了。
-                 b"ring: launch done t=%ldms",                    # gone
-                 b"ring: launch skip ",                           # gone
+                 # 0.2.3 删掉的那条「2.5 秒重放」仍然不许回来（Aevon(169) 的
+                 # 自循环 + 10 秒同步 XPC 就是它）。0.2.4 恢复了「回落原生一次」，
+                 # 但那是 `ring: launch` 这一条腿，与 `card route declined` 不是
+                 # 一回事：后者是旧文件里那个会自己喂自己的闭包。
                  b"ring: card route declined ("):                 # gone
         if gone in dylib_early:
             bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "

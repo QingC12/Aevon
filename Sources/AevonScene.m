@@ -363,6 +363,84 @@ static BOOL AevonSceneIsMine(id scene) {
     return AevonSlotOfScene(scene) >= 0;
 }
 
+// MARK: - 第二条口径：拦截点登记（0.2.4）
+
+/// 名字表。`AEVON_SEEN_MAX` 个槽，够放下「同时开着的一批 App」；满了就不再收，
+/// 因为这张表只是 `enumerateScenesWithBlock:` 的补集，不是全量清单。
+#define AEVON_SEEN_MAX 16
+static char AevonSeenName[AEVON_SEEN_MAX][96];
+/// 与名字同槽的**弱**引用。裸指针在这里是错的：scene 由系统持有并销毁，而我们
+/// 每一拍都要读它的 `identifier` —— 存裸指针的那一版会在 App 退出后变成悬空指针，
+/// 下一次读名字就是一次跨进程的野指针访问。弱引用在销毁时自动置 nil，正好。
+static id AevonSeenWeak[AEVON_SEEN_MAX];
+static int AevonSeenCount = 0;
+
+/// 从拦截点顺手记下这个 scene。
+///
+/// 0.2.4 — 为什么需要第二条口径。Aevon(173) 里高德那六行现场是这样的：
+///
+///     win: wait scene 1s app=-1 n=5 com.apple.UIKit.remote-keyboard|com.apple.springboard|…
+///
+/// 六行里从头到尾没有 autonavi，看起来像「scene 压根没建」。但同一时段的 hook
+/// trace 里有 `sceneID:com.autonavi.amap-default`，`mine=1 fg=0 amend=1` ——
+/// 系统已经在给它推 settings，而且被我们改了三次前台。两件事只能同时成立在一个
+/// 前提下：**scene 已经建了，只是 `enumerateScenesWithBlock:` 列不出它**。
+/// 那一类 scene 是「FrontBoard 侧已登记、客户端还没连上」的空壳，而拦截方法的
+/// 入参正是它 —— 系统把 settings 交给它，就说明它存在。
+///
+/// 所以这里不判断归不归我们管：只要名字是 `sceneID:` 开头、不是 SpringBoard 自己
+/// 的，就记下来。归谁管由 `AevonSlotOfScene` 在真正的建卡路径上决定。
+static void AevonSeenNote(id scene) {
+    if (scene == nil) return;
+    const char *name = AevonSceneName(scene);
+    if (name == NULL || name[0] == '\0' || strcmp(name, "?") == 0) return;
+    if (strncmp(name, "sceneID:", 8) != 0) return;
+    if (strstr(name, "com.apple.springboard") != NULL) return;
+
+    int slot = -1;
+    for (int i = 0; i < AevonSeenCount; i++) {
+        if (strcmp(AevonSeenName[i], name) == 0) { slot = i; break; }
+    }
+    if (slot < 0) {
+        if (AevonSeenCount < AEVON_SEEN_MAX) {
+            slot = AevonSeenCount++;
+            strlcpy(AevonSeenName[slot], name, sizeof(AevonSeenName[slot]));
+        } else {
+            // 满了先回收：弱引用为 nil 说明那个 scene 已经销毁，名字留着只会
+            // 永久占坑。16 个槽用完就再也收不进新的 = 又一次「一次开机 N 次」
+            // 那种配额错误（0.1.93 的教训），所以必须是可回收的。
+            for (int i = 0; i < AEVON_SEEN_MAX; i++) {
+                if (objc_loadWeak(&AevonSeenWeak[i]) != nil) continue;
+                slot = i;
+                strlcpy(AevonSeenName[slot], name, sizeof(AevonSeenName[slot]));
+                break;
+            }
+            if (slot < 0) return;
+        }
+    }
+    objc_storeWeak(&AevonSeenWeak[slot], scene);
+}
+
+/// 拦截点记过的、名字含这个 bundle 的 scene。没有就返回 nil。
+///
+/// `objc_loadWeak` 而不是 `objc_loadWeakRetained`：调用点在主线程、拿到就立刻用，
+/// 中间没有别的释放机会；而 `+1` 的那一版在 MRC 下要么漏 release（每次开窗漏一个
+/// scene 引用），要么依赖 autorelease pool 的深度 —— 两条都比这里多一个失败面。
+id AevonSeenSceneForBundle(NSString *bundle) {
+    if (bundle == nil || [bundle length] == 0) return nil;
+    const char *text = [bundle UTF8String];
+    if (text == NULL || text[0] == '\0') return nil;
+    for (int i = 0; i < AevonSeenCount; i++) {
+        if (strstr(AevonSeenName[i], text) == NULL) continue;
+        id scene = objc_loadWeak(&AevonSeenWeak[i]);
+        if (scene != nil) return scene;
+    }
+    return nil;
+}
+
+/// 表里现在记了几个 —— 日志用，不参与任何判断。
+int AevonSeenCountOf(void) { return AevonSeenCount; }
+
 /// 追加一个名字。已经在表里的不重复登记（同一个 App 被再选一次会走到这里）。
 void AevonHookArm(NSString *bundle) {
     if (bundle == nil) return;
@@ -1287,6 +1365,10 @@ NSString *AevonHookInstall(void) {
         __block AevonHookSlot *mine = slot;
         id block = ^(id manager, id scene, id settings) {
             long seen = __sync_fetch_and_add(&AevonInterceptCalls, 1);
+            // 0.2.4 — 第二条口径：系统每推一次 settings，就说明这个 scene 真的在。
+            // 这一行必须在 `AevonSlotOfScene` 之前 —— 记的是「存在」，判断归谁管
+            // 是后面的事，两件事分开才不会因为没 arm 就漏掉一个真实存在的 scene。
+            AevonSeenNote(scene);
             int mineSlot = AevonSlotOfScene(scene);
             BOOL ours = mineSlot >= 0;
             int wasFront = AevonFlagOf(settings, "isForeground");
@@ -3047,6 +3129,74 @@ static BOOL AevonDivertExhausted(void) {
 /// 两个预算合用一个计数器，先跑完的那个会把另一个静音。
 static int AevonDivertNotes = 0;
 
+// MARK: - 浮窗黑名单（0.2.4）
+
+/// 名单里的 App **不进浮窗，也不拦它的打开请求** —— 一切按系统原生走。
+///
+/// 这是母版与四家同行唯一一致的产品化逃生门：TrollOpen 的
+/// `TOBJJumpSplitExcludedApplications`、Mango 的 `urlOpenInSplit`、Myrtle 的
+/// `URLJUMPBLACKLIST`，都带一张名单，出问题的 App 进名单就回原生。
+/// Aevon 到 0.2.3 为止一张都没有 —— 于是任何一个在我们这条路上走不通的 App
+/// （Aevon(173) 的高德）都只能「什么都不发生」，用户没有任何自救手段。
+///
+/// 读两个键，字符串优先（面板的文本框写 `windowBlacklistText`，手改 plist 的
+/// 写 `windowBlacklist` 数组）：
+///
+///   `windowBlacklistText` — 逗号 / 空格 / 换行分隔的 bundle id
+///   `windowBlacklist`     — 字符串数组
+///
+/// **只在一次打开请求上读一次**，不进逐帧路径：`CFPreferencesCopyAppValue` 是一次
+/// IPC 往返，Aevon(90) 那条「每次点击都卡」的教训就是把它放进了触摸路径。
+/// 判据按 `strstr` 做包含匹配，不是逐字相等 —— 名单里写 `com.autonavi` 就该把
+/// `com.autonavi.amap` 一起盖住，那是使用者写字时的自然预期。
+static BOOL AevonWindowBlacklisted(const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return NO;
+    CFStringRef domain = CFSTR("com.aevon");
+
+    CFPropertyListRef list = CFPreferencesCopyAppValue(CFSTR("windowBlacklist"), domain);
+    if (list != NULL) {
+        BOOL hit = NO;
+        CFTypeID kind = CFGetTypeID(list);
+        if (kind == CFArrayGetTypeID()) {
+            CFArrayRef array = (CFArrayRef)list;
+            CFIndex count = CFArrayGetCount(array);
+            for (CFIndex i = 0; i < count && !hit; i++) {
+                CFTypeRef item = CFArrayGetValueAtIndex(array, i);
+                if (item == NULL || CFGetTypeID(item) != CFStringGetTypeID()) continue;
+                const char *text = [(__bridge NSString *)item UTF8String];
+                if (text != NULL && text[0] != '\0' && strstr(bundle, text) != NULL) hit = YES;
+            }
+        } else if (kind == CFStringGetTypeID()) {
+            const char *text = [(__bridge NSString *)list UTF8String];
+            if (text != NULL && strstr(text, bundle) != NULL) hit = YES;
+        }
+        CFRelease(list);
+        if (hit) return YES;
+    }
+
+    CFPropertyListRef text = CFPreferencesCopyAppValue(CFSTR("windowBlacklistText"), domain);
+    if (text != NULL) {
+        BOOL hit = NO;
+        if (CFGetTypeID(text) == CFStringGetTypeID()) {
+            const char *raw = [(__bridge NSString *)text UTF8String];
+            if (raw != NULL && strstr(raw, bundle) != NULL) hit = YES;
+        }
+        CFRelease(text);
+        if (hit) return YES;
+    }
+    return NO;
+}
+
+/// Swift 侧的同一张名单。圆盘点图标那条路不经过 `AevonOpenDecide`（它没有
+/// 「打开请求」可判），所以名单必须能单独问一次；否则名单里的 App 从圆盘点
+/// 仍然会被塞进卡片，而名单的语义是「这个 App 别碰我的路」。
+BOOL AevonBlacklistedBundle(NSString *bundle) {
+    if (bundle == nil || [bundle length] == 0) return NO;
+    const char *text = [bundle UTF8String];
+    if (text == NULL) return NO;
+    return AevonWindowBlacklisted(text);
+}
+
 /// 0.1.99 — **放行也要说原因**，而且用独立的预算。
 ///
 /// Aevon(167) 里 QQ 那一次分享有一条 `notify: hit op=user … src=…ShareExtension`，
@@ -3235,6 +3385,14 @@ static int AevonOpenDecide(id request, id options,
 
     // SpringBoard 自己也有开请求（解锁后回到主屏之类）。吞掉它就是吞掉主屏。
     if (strncmp(bundle, "com.apple.springboard", 21) == 0) { *why = "springboard"; return 0; }
+
+    // 0.2.4 — 黑名单：命中就**整条放行**，既不进浮窗也不吞请求。
+    //
+    // 这条闸必须在判据之前。黑名单的语义是「这个 App 别碰我的路」，它跟「这次是
+    // 通知还是分享」无关 —— 放到判据后面，命中的 App 仍会被当成通知吞一次。
+    // 放行的写法与 `springboard` / `plain` 相同（返回 0，原实现照常跑），所以
+    // 系统怎么打开它，现在就怎么打开，一个字节都没被动过。
+    if (AevonWindowBlacklisted(bundle)) { *why = "blacklist"; return 0; }
 
     // 0.2.1 — 三条证据先取好，再判路。
     //

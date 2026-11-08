@@ -128,6 +128,28 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
+			<string>填 bundle id，用逗号、空格或换行分隔（例：com.autonavi.amap）。名单里的 App 不进浮窗，也不拦它的打开请求——一切按系统原生走。改名后无需重载桌面，下一次点通知/分享就生效。写 com.autonavi 这样的前缀也会盖住它名下所有 App。</string>
+			<key>label</key>
+			<string>浮窗黑名单</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSTextFieldSpecifier</string>
+			<key>default</key>
+			<string></string>
+			<key>defaults</key>
+			<string>com.aevon</string>
+			<key>key</key>
+			<string>windowBlacklistText</string>
+			<key>label</key>
+			<string>黑名单</string>
+			<key>placeholder</key>
+			<string>com.autonavi.amap, com.example.app</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
 			<string>下面 8 个面板共 55 项，母本键与母本一一对应（母本 81 键中有 9 项已明确放弃，名单见交付说明）。点任一项进入该面板；承载形状已整体换成旧版实现，其余面板的开关会写入 com.aevon 域，等对应功能落地后即生效。</string>
 			<key>label</key>
 			<string>功能设置</string>
@@ -244,7 +266,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>Aevon 0.2.3 · Swift · arm64e · 8 个面板全部可进入。承载形状：旧版圆盘 1:1 移入——右缘左滑呼出，划过跳跃、阻尼旋转、逐点展开全是本体；应用在编辑器里增删排序（上限 36，含截图 / 录屏动作槽）。0.2.3 起：修「有的应用能用悬浮窗、有的只能全屏，全屏还会闪退」。真机日志里六次点击有五次正常（微信 591 毫秒、小红书 633、汽水音乐 962、Sileo 292、QQ 459 拿到场景），只有高德两次都是「挂起启动 1 毫秒成功、四秒零场景」。以前的处理是四秒等不到就全屏兜底 —— 而高德全屏打开时加载画面一出就崩回桌面。现在两处一起改：全屏兜底整段删除（卡片没起来只留一行证词，宁可什么都不发生也不要 App 闪退；母版也只在排除表命中时才回落全屏）；等场景从四秒延到六秒，并且每秒写一行现场 win: wait scene（App 的 pid + 场景管理器里全部场景标识）—— pid 是 -1 说明进程没起，pid 有值但列表里没有它说明进程在、场景没建，列表里有但名字不含 bundle id 说明是我们的匹配口径错。判据：点高德通知应出现wait scene 六行、最后一行 ring: card declined，不再出现任何全屏打开；其他应用应照旧出小窗。停掉整个通知与分享接管：在/var/mobile/Library/Logs/Aevon/ 下建空文件 notify.off 再重启；只想停分享（含带内容的打开）就建 share.off。</string>
+			<string>Aevon 0.2.4 · Swift · arm64e · 8 个面板全部可进入。承载形状：旧版圆盘 1:1 移入——右缘左滑呼出，划过跳跃、阻尼旋转、逐点展开全是本体；应用在编辑器里增删排序（上限 36，含截图 / 录屏动作槽）。0.2.4 起：按母版补齐三件（Stheno / TrollOpen / Mango / Myrtle 共有的做法）。① 查场景两条口径：管理器枚举之外，再从系统的场景设置拦截点顺手记一份——「FrontBoard 已登记、客户端还没连上」的那类场景枚举列不出来，而系统正在给它推设置（高德就是这么漏掉的）；② 挂起启动改为带重试：每 2 秒补叫一次、最多三次，总等待 12 秒（对应母版 obtainHostView 的 maxAttempts / delay）；③ 恢复「失败回落原生一次」，并加上面那张黑名单——名单里的 App 在分流层就整条放行，连吞都不吞。另修一条判据：带内容的打开不再一律算分享。说明：高德那次「全屏也打不开」是它自己在新版本上的问题（降级后正常），与浮窗无关；这类 App 请直接写进上面的黑名单。判据：正常应用应看到 win: icon scene up after；起不来的应看到 win: wait scene 共 12 行，随后 ring: card declined，再跟一次 ring: launch。停掉整个通知与分享接管：在/var/mobile/Library/Logs/Aevon/ 下建空文件 notify.off 再重启；只想停分享（含带内容的打开）就建 share.off。</string>
 			<key>label</key>
 			<string>关于</string>
 		</dict>
