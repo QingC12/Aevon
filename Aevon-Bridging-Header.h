@@ -362,6 +362,13 @@ void AevonLogRaw(const char *_Nullable line);
 /// SpringBoard 侧：挂 `SBMainWorkspace -executeTransitionRequest:`，认通知回应。
 void AevonNotificationOpenInstall(void);
 
+/// 0.2.5 — 清通知的「截对象」入口：挂 `NCNotificationDispatcher` 的
+/// `-destination:executeAction:forNotificationRequest:requestAuthentication:withParameters:completion:`，
+/// 把被点击的那条 `NCNotificationRequest` 连同它所在的 destination 登记下来，
+/// 供 0.60 秒后的 `AevonClearNotification` 直接 withdraw。
+/// 通知栈是懒加载的，取不到类会自己 3 秒后再试（上限 20 次），调用方只叫一次。
+void AevonNotificationCaptureInstall(void);
+
 /// 0.1.93 — 主线程看门狗。后台队列每秒问主线程一次;主线程被卡住时它从后台
 /// 直接往日志里写一行 `win: main stall …ms`（不走 `Log.write`,那条路的
 /// `DateFormatter` 不是线程安全的）。`version` 只用于日志前缀。

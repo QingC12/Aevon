@@ -3355,6 +3355,28 @@ static BOOL AevonOpenCarriesPayload(id request, id options) {
     return strcmp(AevonOpenPayloadKind(request, options), "none") != 0;
 }
 
+/// 0.2.5 — 「这是一次通知点击」的第二个判据：`options[@"__LaunchOrigin"]`。
+///
+/// 老判据只看 `__Actions.firstObject` 的类名。它在**横幅**与**长按/下滑通知**这两条
+/// 路上成立，但「通知中心里直接点一条」那一次 `__Actions` 是空的（Aevon(167)/(169)
+/// 的 `act=- n=0` 里混着这种），于是被当成 `plain` 原样转发 —— 用户看到的就是
+/// 「在通知中心点，全屏打开，没有浮窗」。
+///
+/// TrollOpen 1.5.2 的实证（三家逆向报告 2026-11-08）：它认的就是这个键，取值是
+///   · `SBSLaunchOriginBulletinDestinationBanner`     —— 横幅
+///   · `SBSLaunchOriginBulletinDestinationCoverSheet` —— 通知中心 / 锁屏
+/// 两个入口同一族，共同片段是 `Bulletin`；只认 `__Actions` 会漏掉后一个。
+///
+/// 是「或」不是「与」：老判据命中过的那些路一个字节都没改，新增的这一条只把
+/// 漏掉的那条补进来。取不到就返回 NO（回到老行为，不猜）。
+static BOOL AevonOpenIsNotificationOrigin(id request, id options) {
+    id origin = AevonOpenAnyValue(request, options, @"__LaunchOrigin");
+    if (![origin isKindOfClass:[NSString class]]) return NO;
+    const char *raw = [(NSString *)origin UTF8String];
+    if (raw == NULL) return NO;
+    return strstr(raw, "Bulletin") != NULL;
+}
+
 /// `options` 里有没有某个键。
 static BOOL AevonOpenHasKey(id options, NSString *key) {
     id dict = AevonOpenDict(options);
@@ -3400,13 +3422,17 @@ static int AevonOpenDecide(id request, id options,
     // 请求也当成分享（Aevon(169) 里 14 次 `src=com.apple.springboard pay=payload`），
     // 于是通知那条路整段跑不到（清通知没做），还每次白交一次原实现。所以这里给
     // 它加一个前提：来源不是 SpringBoard。
-    int notifyKind = AevonOpenIsNotificationAction(AevonOpenFirstAction(request, options)) ? 1 : 0;
+    int notifyAct = AevonOpenIsNotificationAction(AevonOpenFirstAction(request, options)) ? 1 : 0;
+    int notifyOrg = notifyAct ? 0 : (AevonOpenIsNotificationOrigin(request, options) ? 1 : 0);
+    int notifyKind = (notifyAct || notifyOrg) ? 1 : 0;
     int carrier = AevonOpenCarriesPayload(request, options) ? 1 : 0;
     int sysFrom = AevonOpenSourceIsSpringBoard(request, options) ? 1 : 0;
 
     const char *kind = NULL;
     if (notifyKind) {
-        kind = "notify";
+        // 两个判据分开写进 `why`，否则「通知中心那条补上了没有」在日志里看不出来：
+        // `notify` = 老判据（`__Actions` 类名），`notifyOrigin` = 新判据（`__LaunchOrigin`）。
+        kind = notifyAct ? "notify" : "notifyOrigin";
     } else if (!AevonShareSwitchOff() &&
                (AevonOpenIsShareSource(request, options) || (carrier && !sysFrom))) {
         kind = "share";
@@ -4001,6 +4027,154 @@ static id AevonCleanDispatcher(void) {
     return found;
 }
 
+// MARK: - 0.2.5 清通知的第一条路：截对象
+//
+// 老路的死结（Aevon(161)/(167)：6/6 `clear=noid`）不是 getter 试得不够，而是
+// 「从动作对象反推标识、再拿标识去各宿主里比对」这个思路本身不成立：中间任何一跳
+// 改名，整条路就静默落空，而落空与「没有这条通知」在日志里长得一样。
+//
+// 正解是**截对象**（三家逆向 2026-11-08 实证）：
+//   `NCNotificationDispatcher -destination:executeAction:forNotificationRequest:
+//    requestAuthentication:withParameters:completion:` 的第三个参数就是
+//   `NCNotificationRequest` 本体。TrollOpen 1.5.2 的 `__objc_selrefs` 里既有这个
+//   选择子，也有随后要用的 `withdrawNotificationRequest:`（同一次解引用里出现）。
+// 于是：钩子顺手登记「这一次被点的请求 + 它所在的 destination」，0.60 秒后直接拿
+// 对象去 withdraw —— 不猜标识、不扫列表、不比对。
+//
+// 三条纪律：
+//   · 钩子里**只登记并原样转发**：通知的正常处理（弹 App、回锁屏、收起横幅）完全
+//     交给原实现。这一层吞掉一次，用户看到的就是「点了通知没反应」。
+//   · 登记用强引用但**带寿命**（4 秒窗，覆盖时先 release）：SpringBoard 常驻，
+//     永久持有一个通知请求对象就是一条常驻泄漏。
+//   · 动手仍在 0.60 秒后的主队列上（`AevonClearLater`），不在钩子那一拍做任何
+//     跨对象操作 —— 那一拍系统正在处理用户的手指。
+static id AevonCapRequest = nil;
+static id AevonCapDestination = nil;
+static double AevonCapAt = 0;
+static long AevonCapCalls = 0;
+
+/// 丢掉登记的那一对对象。调用方自己保证在锁外不持有它们。
+static void AevonCapDrop(void) {
+    @synchronized ([AevonHookProbe class]) {
+        [AevonCapRequest release];
+        AevonCapRequest = nil;
+        [AevonCapDestination release];
+        AevonCapDestination = nil;
+        AevonCapAt = 0;
+    }
+}
+
+/// 登记的这一条还新鲜吗。只有「刚被点过」的那一条才允许被拿去清 —— 清的时机是
+/// 点击后 0.60 秒，窗给到 4 秒是为了容纳卡片那条路的抖动。
+static BOOL AevonCaptureFresh(void) {
+    BOOL fresh = NO;
+    @synchronized ([AevonHookProbe class]) {
+        fresh = (AevonCapRequest != nil &&
+                 AevonCapAt > 0 &&
+                 CFAbsoluteTimeGetCurrent() - AevonCapAt <= 4.0);
+    }
+    return fresh;
+}
+
+void AevonNotificationCaptureInstall(void);
+
+/// 挂 `NCNotificationDispatcher` 那个入口。通知栈是懒加载的（0.1.94 的真机读数：
+/// 3 秒时这个类还不存在、10 秒才出现），所以取不到类就 3 秒后再来一次、最多 20 次
+/// —— 与 `AevonCleanDispatcher` 一样的滑动策略，绝不做「一次开机只试一次」。
+///
+/// 两个类名都试，**子类优先**：0.1.42 的普查把 SpringBoard 里 70 个含 Notification
+/// 的类列了一遍，`SBNCNotificationDispatcher` 在、`NCNotificationDispatcher` 当时
+/// 报 0；而真正跑起来的是前者（它是后者的子类，0.1.45 的父类链取证）。
+/// 先装子类还有一层：`AevonAttach` 对「继承来的方法」走 `class_addMethod`，
+/// 于是钩子只落在子类的方法表上，父类那份原样不动 —— 只响一次，不会双调。
+void AevonNotificationCaptureInstall(void) {
+    static int tries = 0;
+    Class cls = Nil;
+    static const char *candidates[2] = { "SBNCNotificationDispatcher", "NCNotificationDispatcher" };
+    for (int i = 0; i < 2 && cls == Nil; i++) {
+        Class c = NSClassFromString([NSString stringWithUTF8String:candidates[i]]);
+        if (c == Nil) continue;
+        if (class_getInstanceMethod(c, NSSelectorFromString(
+                @"destination:executeAction:forNotificationRequest:requestAuthentication:withParameters:completion:")) == NULL) {
+            continue;
+        }
+        cls = c;
+    }
+    if (cls == Nil) {
+        if (tries < 20) {
+            tries += 1;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                AevonNotificationCaptureInstall();
+            });
+        } else {
+            AevonLogRaw("notify: capture class missing after 20 tries");
+        }
+        return;
+    }
+
+    NSMutableString *out = [NSMutableString string];
+    AevonHookSlot *slot = AevonReserve("nc-cap");
+    if (slot == NULL) {
+        AevonLogRaw("notify: capture no slot left");
+        return;
+    }
+    __block AevonHookSlot *mine = slot;
+    id block = ^(id dispatcher, id destination, id action, id request,
+                 id authentication, id parameters, id completion) {
+        long n = __sync_fetch_and_add(&AevonCapCalls, 1);
+        // 顺序是按选择子名读的（destination / executeAction / forNotificationRequest /
+        // requestAuthentication / withParameters / completion），但「读对了名字」不等于
+        // 「参数确实在那一格」—— 所以登记前先看类名。不是 `…NotificationRequest` 的
+        // 东西一律不登记：宁可这条清不掉，也不能拿别的对象去 withdraw。
+        const char *rc = request != nil ? object_getClassName(request) : NULL;
+        BOOL isRequest = (rc != NULL && strstr(rc, "NotificationRequest") != NULL);
+        if (isRequest && request != nil) {
+            @synchronized ([AevonHookProbe class]) {
+                if (AevonCapRequest != request) {
+                    [AevonCapRequest release];
+                    AevonCapRequest = [request retain];
+                    [AevonCapDestination release];
+                    AevonCapDestination = [destination retain];
+                    AevonCapAt = CFAbsoluteTimeGetCurrent();
+                }
+            }
+        }
+        // 只打第一次。`AevonRawTrace` 走的是 32 条的环形表（开机那几十条 tick 就填满），
+        // 而这个钩子要等到用户点通知才会响 —— 用 trace 等于永远看不到。写一行直写日志
+        // 在点击这一拍是可接受的成本（整条通知路径本来就在写日志），而它决定了下一份
+        // 真机日志能不能回答「参数顺序猜对了没有」。
+        if (n == 0) {
+            char capLine[220];
+            snprintf(capLine, sizeof(capLine),
+                     "notify: capture req=%s dest=%s act=%s ok=%d",
+                     rc != NULL ? rc : "-",
+                     destination != nil ? object_getClassName(destination) : "-",
+                     action != nil ? object_getClassName(action) : "-",
+                     isRequest ? 1 : 0);
+            AevonLogRaw(capLine);
+        }
+        void (*original)(id, SEL, id, id, id, id, id, id) =
+            (void (*)(id, SEL, id, id, id, id, id, id))mine->original;
+        // 深度只在「这一次调用期间」抬着，让守护别在这段里写盘（同 intercept 那条路）。
+        __sync_fetch_and_add(&AevonHookDepth, 1);
+        if (original != NULL) {
+            original(dispatcher, mine->sel, destination, action,
+                     request, authentication, parameters, completion);
+        }
+        __sync_fetch_and_sub(&AevonHookDepth, 1);
+    };
+    BOOL live = AevonAttachShaped(out, slot, cls,
+        @"destination:executeAction:forNotificationRequest:requestAuthentication:withParameters:completion:",
+        6, block);
+    if (live) {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: capture live cls=%@", NSStringFromClass(cls)]
+                     UTF8String]);
+    } else {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: capture failed %@", out] UTF8String]);
+    }
+}
+
 /// 收尾频率上限。用满之后一律回到 0.1.88 的行为（面板与横幅都不动）。
 ///
 /// 0.1.93 — 同样是「一次开机 6 次」改成滑动窗口。Aevon(161) 里这条上限在
@@ -4220,6 +4394,88 @@ static BOOL AevonClearWithdraw(id host, id requestObject, char *how, size_t size
     return NO;
 }
 
+/// 0.2.5 — 用截到的对象清一条。返回 YES 表示这条路真的动了（或确认没有必要再走老路）。
+///
+/// 三步，缺一不做：
+///   ① **归属校验**：`request.sectionIdentifier` 必须就是这次分流的目标 bundle。
+///      钩子是全局的（任何 destination 的任何动作都会经过），只靠「4 秒窗」不够
+///      —— 用户点通知的同时来了别的动作，没有这一条就会清错 App 的通知。
+///   ② **宿主**：先在登记的那个 destination 上调 `withdrawNotificationRequest:`。
+///      TrollOpen 的实证是 destination 上就有这个方法（`SBNotificationBannerDestination`
+///      一次成功，母版 log71 同样落在它上面）；本体取不到就退回 dispatcher 四格。
+///   ③ **只清这一条**：传进去的是截到的那个请求对象本身，不是标识、不是列表。
+static BOOL AevonClearFromCapture(const char *bundle, char *how, size_t size) {
+    if (bundle == NULL) return NO;
+    id request = nil;
+    id destination = nil;
+    double at = 0;
+    @synchronized ([AevonHookProbe class]) {
+        request = [AevonCapRequest retain];
+        destination = [AevonCapDestination retain];
+        at = AevonCapAt;
+    }
+    if (request == nil) {
+        [destination release];
+        return NO;
+    }
+
+    BOOL cleared = NO;
+    BOOL expired = NO;
+    @try {
+        if (at <= 0 || CFAbsoluteTimeGetCurrent() - at > 4.0) {
+            // 过期：不清，也不在这里释放（下一拍 `AevonCapDrop` 会做）。
+            expired = YES;
+        } else {
+            NSString *section = AevonCleanRead(request, "sectionIdentifier");
+            if (section == nil) section = AevonCleanRead(request, "sectionID");
+            const char *sectionRaw =
+                [section isKindOfClass:[NSString class]] ? [(NSString *)section UTF8String] : NULL;
+            if (sectionRaw != NULL && strcmp(sectionRaw, bundle) == 0) {
+                NSString *ident = AevonCleanRead(request, "identifier");
+                const char *identRaw =
+                    [ident isKindOfClass:[NSString class]] ? [(NSString *)ident UTF8String] : "-";
+
+                char sel[64];
+                sel[0] = '\0';
+                if (destination != nil &&
+                    AevonClearWithdraw(destination, request, sel, sizeof(sel))) {
+                    snprintf(how, size, "capture:%s", sel);
+                    cleared = YES;
+                } else {
+                    id dispatcher = AevonCleanDispatcher();
+                    static const char *roles[4] = {
+                        "bannerDestination", "dashBoardDestination",
+                        "notificationCenterDestination", "lockScreenDestination",
+                    };
+                    for (int i = 0; i < 4 && !cleared; i++) {
+                        id host = AevonCleanRead(dispatcher, roles[i]);
+                        if (host == nil) continue;
+                        if (AevonClearWithdraw(host, request, sel, sizeof(sel))) {
+                            snprintf(how, size, "capture:%s@%s", sel, roles[i]);
+                            cleared = YES;
+                        }
+                    }
+                    if (!cleared) {
+                        snprintf(how, size, "capture:nowithdraw");
+                    }
+                }
+                size_t used = strlen(how);
+                if (used + 8 < size) {
+                    snprintf(how + used, size - used, " id=%s", identRaw);
+                }
+            } else {
+                snprintf(how, size, "capture:section");
+            }
+        }
+    } @finally {
+        [request release];
+        [destination release];
+    }
+
+    if (cleared || expired) AevonCapDrop();
+    return cleared;
+}
+
 /// 能力地图。一次开机一行：哪几个宿主上真的有那两个入口。
 ///
 /// 这一行的作用是「下一版不用再装一次机」—— 0.1.89 那次六个候选全没进闸、日志里
@@ -4263,20 +4519,39 @@ static void AevonClearMap(id dispatcher) {
 }
 
 /// 真正去做那件事。`bundle` / `identifier` 都是 C 串（跨帧传，自己复制的一份）。
+///
+/// 0.2.5 — `identifier` 可以是 NULL。老路要靠它去比对，截对象那条路不需要；
+/// 而「老路取不到标识」正是 6/6 `clear=noid` 的全部内容 —— 现在那种情况也能清。
 static void AevonClearNotification(const char *bundle, const char *identifier) {
-    if (bundle == NULL || identifier == NULL) return;
+    if (bundle == NULL) return;
     if (AevonActivateSwitchOff()) return;
     if (AevonClearExhausted()) return;
     AevonClearRuns += 1;
+
+    char how[96], line[360];
+    how[0] = '\0';
+
+    // ① 截对象先走：不猜标识、不扫列表，是唯一「一定指得到那一条」的做法。
+    if (AevonClearFromCapture(bundle, how, sizeof(how))) {
+        snprintf(line, sizeof(line), "notify: clear b=%s via=%s", bundle, how);
+        AevonLogRaw(line);
+        return;
+    }
+
+    if (identifier == NULL) {
+        // 截对象没命中、老路又没有标识 —— 这一条本拍清不掉。记一行说明是哪一半缺的，
+        // 下一份日志就不用再靠 `clear=noid` 去猜。
+        snprintf(line, sizeof(line), "notify: clear b=%s capture=%s id=absent",
+                 bundle, how[0] != '\0' ? how : "none");
+        AevonLogRaw(line);
+        return;
+    }
 
     NSString *want = [NSString stringWithUTF8String:identifier];
     if (want.length < 4) return;
 
     id dispatcher = AevonCleanDispatcher();
     AevonClearMap(dispatcher);
-
-    char how[64], line[300];
-    how[0] = '\0';
 
     // 先 dispatcher 自己（有的系统版本把请求留在它身上），再四个 destination。
     static const char *roles[4] = {
@@ -4302,13 +4577,21 @@ static void AevonClearNotification(const char *bundle, const char *identifier) {
 }
 
 /// 排到 0.60 秒之后。字符串自己复制一份带进块里：这个工程按 MRC 编译。
+///
+/// 0.2.5 — `identifier` 允许为 nil（截对象那条路不需要标识）。这也修掉了一个更隐蔽
+/// 的问题：0.1.9x 的调用点是「取到标识才排队」，而真机 6/6 取不到标识 ⇒ 清通知
+/// 那整段代码**一次都没被排上**，日志里只有 `clear=noid` 一行，看起来像「清失败」，
+/// 其实是「根本没试」。
 static void AevonClearLater(const char *bundle, NSString *identifier) {
     if (bundle == NULL) return;
-    const char *raw = [identifier UTF8String];
-    if (raw == NULL || strlen(raw) < 4) return;
+    const char *raw = identifier != nil ? [identifier UTF8String] : NULL;
+    char *b2 = NULL;
+    if (raw != NULL && strlen(raw) >= 4) {
+        b2 = strdup(raw);
+        if (b2 == NULL) return;
+    }
     char *b1 = strdup(bundle);
-    char *b2 = strdup(raw);
-    if (b1 == NULL || b2 == NULL) { free(b1); free(b2); return; }
+    if (b1 == NULL) { free(b2); return; }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         AevonClearNotification(b1, b2);
@@ -4654,9 +4937,20 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                 AevonClearProbe(request, options);
                 // 0.1.92：清掉这一条 —— 「点开 = 已读」。标识在这一拍就取好（只读几个
                 // getter），真正动手排到 0.60 秒之后，见 `AevonClearNotification`。
+                //
+                // 0.2.5 — 排队条件从「取到标识」改成「取到标识 **或** 截到了对象」。
+                // 真机 6/6 是 `clear=noid`，而排队只在取到标识时才发生 ⇒ 清通知那整段
+                // 一次都没跑过。截对象那条路不需要标识，所以它必须能单独把这一拍排上。
                 NSString *clear = AevonClearIdentifier(request, options);
-                if (clear.length > 3) {
-                    AevonClearLater(bundle, clear);
+                BOOL haveId = clear.length > 3;
+                BOOL canCapture = AevonCaptureFresh();
+                if (haveId || canCapture) {
+                    AevonClearLater(bundle, haveId ? clear : nil);
+                    if (!haveId && AevonDivertNotes < 6) {
+                        AevonDivertNotes += 1;
+                        AevonLogRaw([[NSString stringWithFormat:
+                                      @"notify: clear b=%@ via=capture only", target] UTF8String]);
+                    }
                 } else if (AevonDivertNotes < 6) {
                     AevonDivertNotes += 1;
                     AevonLogRaw([[NSString stringWithFormat:@"notify: clear b=%@ clear=noid",

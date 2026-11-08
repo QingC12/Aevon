@@ -106,6 +106,13 @@ public func AevonStart() {
     // 全在键盘进程（`AevonAppHook.m` 的 `AevonKbNativeInstall`），这里不该有活。
     AevonNotificationOpenInstall()
 
+    // 0.2.5 — 清通知改「截对象」。老路是从动作对象反推标识再去各宿主里比对，
+    // 真机 6/6 `clear=noid`（猜标识这件事本身走不通，不是 getter 没试全）。
+    // 这一条挂的是系统的通知动作入口，第三个参数就是 `NCNotificationRequest` 本体，
+    // 直接拿对象去 withdraw。钩子只登记、原样转发，不改变通知的任何行为；
+    // 类不存在时它自己 3 秒后重试（通知栈懒加载）。
+    AevonNotificationCaptureInstall()
+
     // 0.1.85 — 通知点击观察器。**只取证，不接管**：挂的是 SpringBoard 的
     // App 激活总入口，替身只读一遍参数、原样转发、写一行日志。
     // 装配的三道前置闸在这里，钩子自己的两道在 AevonScene.m 里；六道闸的

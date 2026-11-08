@@ -266,7 +266,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>Aevon 0.2.4 · Swift · arm64e · 8 个面板全部可进入。承载形状：旧版圆盘 1:1 移入——右缘左滑呼出，划过跳跃、阻尼旋转、逐点展开全是本体；应用在编辑器里增删排序（上限 36，含截图 / 录屏动作槽）。0.2.4 起：按母版补齐三件（Stheno / TrollOpen / Mango / Myrtle 共有的做法）。① 查场景两条口径：管理器枚举之外，再从系统的场景设置拦截点顺手记一份——「FrontBoard 已登记、客户端还没连上」的那类场景枚举列不出来，而系统正在给它推设置（高德就是这么漏掉的）；② 挂起启动改为带重试：每 2 秒补叫一次、最多三次，总等待 12 秒（对应母版 obtainHostView 的 maxAttempts / delay）；③ 恢复「失败回落原生一次」，并加上面那张黑名单——名单里的 App 在分流层就整条放行，连吞都不吞。另修一条判据：带内容的打开不再一律算分享。说明：高德那次「全屏也打不开」是它自己在新版本上的问题（降级后正常），与浮窗无关；这类 App 请直接写进上面的黑名单。判据：正常应用应看到 win: icon scene up after；起不来的应看到 win: wait scene 共 12 行，随后 ring: card declined，再跟一次 ring: launch。停掉整个通知与分享接管：在/var/mobile/Library/Logs/Aevon/ 下建空文件 notify.off 再重启；只想停分享（含带内容的打开）就建 share.off。</string>
+			<string>Aevon 0.2.5 · Swift · arm64e · 8 个面板全部可进入。承载形状：旧版圆盘 1:1 移入——右缘左滑呼出，划过跳跃、阻尼旋转、逐点展开全是本体；应用在编辑器里增删排序（上限 36，含截图 / 录屏动作槽）。0.2.5 起：清通知改「截对象」，判据补第二个入口。① 清通知不再从动作对象反推标识——真机 6/6 取不到（猜标识这件事本身走不通，不是名字没试全）；改为挂系统通知动作入口，第三个参数就是那条通知请求本体，0.6 秒后直接 withdraw 它，并校验 sectionIdentifier 必须就是目标 App，绝不清错别人的。顺带修掉一个更隐蔽的问题：原来「取到标识才排队」，所以清通知那整段在真机上一次都没跑过。② 判据补 __LaunchOrigin——「通知中心里直接点一条」那次 __Actions 是空的，旧判据会漏掉它（表现是全屏打开、没有浮窗）；取值含 Bulletin 即认（横幅 / 通知中心 /锁屏三个入口同族）。判据：点通知后日志应有 notify: capture live 与 notify: clear b=… via=capture:…；若只见 via=capture:section，说明截到的请求不属于这次打开的 App（按纪律不清）。停掉整个通知与分享接管：在/var/mobile/Library/Logs/Aevon/ 下建空文件 notify.off 再重启；只想停分享（含带内容的打开）就建 share.off。</string>
 			<key>label</key>
 			<string>关于</string>
 		</dict>

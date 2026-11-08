@@ -727,6 +727,33 @@ def main():
                   b"notify: clear b=%s id=%s clear=noreq",
                   b"notify: clear b=%@ clear=noid",
                   b"notify: clear map",
+                  # 0.2.5 — 清通知改「截对象」。老路（上面五条 getter + 各宿主比对）在
+                  # 真机 6/6 是 `clear=noid`：猜标识这件事本身走不通，不是名字没试全。
+                  # 新路的证词是这七条，缺一条就等于「那条分支没跑过」：
+                  #
+                  #   capture live / failed   钩子装上没有（装上才有对象可截）
+                  #   capture class missing   通知栈 20 次都没起来（懒加载的真实现）
+                  #   capture req=… ok=…      钩子**第一次**被调用时四个参数的真实类名；
+                  #                           `ok=1` 是「第三格确实是 NotificationRequest」，
+                  #                           参数顺序猜错的唯一现场证据就是这里
+                  #   clear b=… via=…         真正动手那一次：哪个宿主、哪个方法、哪条标识
+                  #   clear b=… capture=…     截对象没成（section 不符 / 无 withdraw），
+                  #                           写清是哪一半缺的
+                  #   clear b=… via=capture only  老路取不到标识，但截到了对象 —— 这一拍
+                  #                           仍然排队（0.1.9x 的死结就是「没标识就不排」）
+                  b"notify: capture live cls=%@",
+                  b"notify: capture failed %@",
+                  b"notify: capture class missing after 20 tries",
+                  b"notify: capture req=%s dest=%s act=%s ok=%d",
+                  b"notify: clear b=%s via=%s",
+                  b"notify: clear b=%s capture=%s id=absent",
+                  b"notify: clear b=%@ via=capture only",
+                  # 这一对是三家逆向（2026-11-08）里同时出现在 `__objc_selrefs` 的选择子：
+                  # TrollOpen 1.5.2 就是拿它们做「点通知 → 清掉那一条」的。选择子本身
+                  # 必须在产物里 —— 名字写错一位，钩子装不上，而日志只会说 failed。
+                  b"destination:executeAction:forNotificationRequest:requestAuthentication:withParameters:completion:",
+                  # 归属校验：截到的请求必须属于这次分流的目标 App，否则不清。
+                  b"sectionIdentifier",
                   # 取标识的五条无参 getter。`identifier` 故意不在里面（BSAction 自己也有），
                   # 这几条同时是「这一版到底问过哪些名字」的证词。
                   b"notificationRequestIdentifier",
