@@ -224,7 +224,24 @@ id AevonCreatePresenter(id manager, NSString *identifier, NSInteger priority) {
         return nil;
     }
     id (*call)(id, SEL, id, NSInteger) = (id (*)(id, SEL, id, NSInteger))objc_msgSend;
-    id presenter = call(manager, sel, identifier, priority);
+    // 0.2.29 — 这一段必须包 @try。
+    //
+    // 0.2.27 真机（iPhone16,2 / 17.3.1）在「点外部链接以浮窗打开」时把 SpringBoard
+    // 带进了安全模式，崩溃栈是：
+    //     -[UIScenePresentationManager createPresenterWithIdentifier:priority:]
+    //     AevonCreatePresenter + 100
+    //     libdispatch _dispatch_client_callout（主线程）
+    // 这个调用会抛 NSException（同一 scene 上已有同标识 presenter 等），而 Swift 侧
+    // 接不住 ObjC 异常 —— 唯一能兜住的地方就是这里。catch 到就返回 nil，调用方本来
+    // 就有 `guard let ... else { "win: no presenter"; return }`，卡片不建，进程还在。
+    id presenter = nil;
+    @try {
+        presenter = call(manager, sel, identifier, priority);
+    } @catch (NSException *exception) {
+        AevonLogRaw([[NSString stringWithFormat:@"win: presenter threw %@ on %@",
+                      exception.reason ?: @"(no reason)", identifier] UTF8String]);
+        presenter = nil;
+    }
     AevonNote(@"presenter %@ -> %@", identifier,
               presenter ? NSStringFromClass([presenter class]) : @"nil");
     return presenter;
