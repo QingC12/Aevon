@@ -1028,171 +1028,96 @@ NSInteger AevonOwnIsOwned(NSString *bundleID) {
     return [bundleID isEqualToString:AevonOwnBundle] ? 1 : 0;
 }
 
-/// 0.2.24 — 「回桌面」：先取对象、再普查、最后才试。
+/// 0.2.25 — 「回桌面」的三级阶梯。
 ///
-/// 0.2.23 只试了三个名字，真机日志只有一句 `home press unavailable` ——
-/// 「对象没取到」「名字不存在」「名字存在但带参数」这三种失败长得一模一样。
-/// 这一版把三件事分开记：
-///   · `win: home targets n=…`  取到几个单例（以及每个入口为什么没取到）
-///   · `win: home sel …`        这些类里带 home 的选择子到底有哪些
-///   · 返回值                    实际调用了谁，或者最后走了哪条兜底
-static NSArray *AevonHomeClassNames(void) {
-    return @[@"SBUIController", @"SBMainWorkspace", @"SBWorkspace",
-             @"SBFluidSwitcherGestureManager", @"SBMainSwitcherControllerCoordinator",
-             @"SBSwitcherController", @"SBHomeScreenController",
-             @"SBHomeGestureInteraction", @"SBFluidSwitcherViewController"];
-}
+/// 0.2.24 的普查已经回答了「有什么可调」：这台机器上
+/// `SBHomeScreenController` 不存在（noclass），`SBSwitcherController` 与
+/// `SBFluidSwitcherGestureManager` 没有 sharedInstance（nosel），而
+/// `SBMainSwitcherControllerCoordinator -handleHomeButtonPress` 调得到却没有
+/// 效果（回读 `isSpringBoardActive=0`）。「名字在」不等于「这一级能用」。
+///
+/// 于是这一版不再普查，改成三级**按读数推进**的阶梯，一次只差一种做法：
+///   1. `SBUIController -handleHomeButtonSinglePressUpForWindowScene:` —— 真机上
+///      硬件 home 键走的就是这一条（B24@0:8@16，一个对象参数）；
+///   2. `SBMainSwitcherControllerCoordinator
+///      -dismissMainSwitcherNoninteractivelyAnimated:` —— 含义是「不经过手势，
+///      把主切换器收起」，也就是回到桌面；
+///   3. `SBFluidSwitcherViewController -handleHomeButtonPress` —— 从当前页的
+///      响应链上把那个 controller 找出来，让它自己处理。
+/// 谁生效由 Swift 侧回读 `isSpringBoardActive` 判定；三级都不行才动页面。
 
-/// 取一个单例，并把「为什么没取到」写进 `states`（只进日志，不进返回值）。
-static id AevonHomeTake(NSString *className, NSString *entry, NSMutableArray *states) {
-    Class cls = NSClassFromString(className);
-    if (cls == Nil) { [states addObject:[className stringByAppendingString:@"=noclass"]]; return nil; }
-    SEL sel = NSSelectorFromString(entry);
-    if (![cls respondsToSelector:sel]) {
-        [states addObject:[className stringByAppendingString:@"=nosel"]];
+/// SpringBoard 自己的 window scene：正常层级、有尺寸的第一个窗口。
+/// `handleHomeButtonSinglePressUpForWindowScene:` 要的就是它。
+static id AevonSBWindowScene(void) {
+    @try {
+        UIWindow *fallback = nil;
+        for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
+            if (win.windowScene == nil) continue;
+            if (fallback == nil) fallback = win;
+            if (win.windowLevel == UIWindowLevelNormal && win.bounds.size.height > 400) {
+                return win.windowScene;
+            }
+        }
+        return fallback.windowScene;
+    } @catch (__unused NSException *e) {
         return nil;
     }
-    id got = nil;
+}
+
+/// 只取 `sharedInstance` 这一种单例；取不到返回 nil（调用方记 nosel）。
+static id AevonHomeShared(NSString *className) {
+    Class cls = NSClassFromString(className);
+    if (cls == Nil) return nil;
+    SEL sel = NSSelectorFromString(@"sharedInstance");
+    if (![cls respondsToSelector:sel]) return nil;
     @try {
-        got = ((id (*)(id, SEL))objc_msgSend)((id)cls, sel);
+        return ((id (*)(id, SEL))objc_msgSend)((id)cls, sel);
     } @catch (__unused NSException *e) {
-        got = nil;
+        return nil;
     }
-    if (got == nil) { [states addObject:[className stringByAppendingString:@"=nil"]]; return nil; }
-    [states addObject:className];
-    return got;
 }
 
-/// 普查里哪些名字值得一试：带 home，且带 press/click/tap/single/dismiss；
-/// 排除 set 开头与 double/long/triple 这类会打开别的东西的名字。
-static BOOL AevonHomeNameWanted(NSString *name) {
-    NSString *low = [name lowercaseString];
-    if ([low rangeOfString:@"home"].location == NSNotFound) return NO;
-    if ([low hasPrefix:@"set"]) return NO;
-    static const char *bad[] = {"double", "long", "triple", "cancel", "begin", "update", "config"};
-    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
-        if ([low rangeOfString:[NSString stringWithUTF8String:bad[i]]].location != NSNotFound) return NO;
-    }
-    static const char *good[] = {"press", "click", "tap", "single", "dismiss"};
-    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
-        if ([low rangeOfString:[NSString stringWithUTF8String:good[i]]].location != NSNotFound) return YES;
-    }
-    return NO;
-}
-
-NSString *AevonHomePress(void) {
-    NSMutableArray *targets = [NSMutableArray array];
-    NSMutableArray *states = [NSMutableArray array];
-    NSArray *entries = @[@[@"SBUIController", @"sharedInstance"],
-                         @[@"SBMainWorkspace", @"sharedInstance"],
-                         @[@"SBWorkspace", @"mainWorkspace"],
-                         @[@"SBFluidSwitcherGestureManager", @"sharedInstance"],
-                         @[@"SBMainSwitcherControllerCoordinator", @"sharedInstance"],
-                         @[@"SBSwitcherController", @"sharedInstance"],
-                         @[@"SBHomeScreenController", @"sharedInstance"]];
-    for (NSArray *entry in entries) {
-        id got = AevonHomeTake(entry[0], entry[1], states);
-        if (got != nil) [targets addObject:got];
-    }
-    AevonLogRaw([[NSString stringWithFormat:@"win: home targets n=%lu %@",
-                  (unsigned long)targets.count,
-                  [states componentsJoinedByString:@","]] UTF8String]);
-
-    // 普查：只列名字，不调用。上限 120 行 —— 这是诊断行，不是常驻日志。
-    NSMutableArray *discovered = [NSMutableArray array];
-    int printed = 0;
-    for (NSString *cn in AevonHomeClassNames()) {
-        Class cls = NSClassFromString(cn);
-        if (cls == Nil) continue;
-        unsigned int count = 0;
-        Method *list = class_copyMethodList(cls, &count);
-        for (unsigned int i = 0; list != NULL && i < count && printed < 120; i++) {
-            NSString *name = NSStringFromSelector(method_getName(list[i]));
-            NSString *low = [name lowercaseString];
-            BOOL home = [low rangeOfString:@"home"].location != NSNotFound;
-            BOOL sw = [low rangeOfString:@"switcher"].location != NSNotFound &&
-                     ([low rangeOfString:@"dismiss"].location != NSNotFound ||
-                      home);
-            if (!home && !sw) continue;
-            printed += 1;
-            AevonLogRaw([[NSString stringWithFormat:@"win: home sel %@ %@ %s", cn, name,
-                          method_getTypeEncoding(list[i])] UTF8String]);
-            if (AevonHomeNameWanted(name)) [discovered addObject:@[cn, name]];
+/// 0.2.25 — 第 `step` 级回桌面。`page` 只有第 3 级用到（往上走响应链）。
+/// 返回一句日志；`nil` = step 不认识。没接上的那一级返回原因，不算失败。
+NSString *AevonHomeStep(int step, id page) {
+    @try {
+        if (step == 1) {
+            id ctl = AevonHomeShared(@"SBUIController");
+            SEL sel = NSSelectorFromString(@"handleHomeButtonSinglePressUpForWindowScene:");
+            if (ctl == nil || ![ctl respondsToSelector:sel]) return @"step1 SBUIController nosel";
+            id scene = AevonSBWindowScene();
+            if (scene == nil) return @"step1 scene nil";
+            ((void (*)(id, SEL, id))objc_msgSend)(ctl, sel, scene);
+            return [NSString stringWithFormat:@"step1 SBUIController single-press-up scene=%@",
+                    NSStringFromClass([scene class])];
         }
-        if (list != NULL) free(list);
-    }
-    AevonLogRaw([[NSString stringWithFormat:@"win: home census lines=%d found=%lu",
-                  printed, (unsigned long)discovered.count] UTF8String]);
-
-    NSArray *known = @[@"_handleHomeButtonSinglePress", @"handleHomeButtonSinglePress",
-                       @"handleHomeButtonPress", @"_handleHomeButtonPress",
-                       @"handleHomeGesture", @"_handleHomeGesture",
-                       @"homeButtonPressed", @"_homeButtonPressed",
-                       @"dismissToHomeScreen", @"_dismissToHomeScreen"];
-    for (id target in targets) {
-        for (NSString *name in known) {
-            SEL sel = NSSelectorFromString(name);
-            if (![target respondsToSelector:sel]) continue;
-            NSMethodSignature *sig = [target methodSignatureForSelector:sel];
-            // 只认「self + _cmd」的无参方法，参数数对不上就不碰。
-            if (sig == nil || sig.numberOfArguments != 2) continue;
-            @try {
-                ((void (*)(id, SEL))objc_msgSend)(target, sel);
-            } @catch (__unused NSException *e) {
-                continue;
+        if (step == 2) {
+            id coordinator = AevonHomeShared(@"SBMainSwitcherControllerCoordinator");
+            SEL sel = NSSelectorFromString(@"dismissMainSwitcherNoninteractivelyAnimated:");
+            if (coordinator == nil || ![coordinator respondsToSelector:sel]) {
+                return @"step2 coordinator nosel";
             }
-            return [NSString stringWithFormat:@"%@ -%@",
-                    NSStringFromClass([target class]), name];
+            ((BOOL (*)(id, SEL, BOOL))objc_msgSend)(coordinator, sel, YES);
+            return @"step2 coordinator dismiss-main-switcher YES";
         }
-    }
-
-    // 普查到的名字分两轮：先 press/click/tap，再其余。每一轮只调第一个接上的，
-    // 因为「按两次 home」在 iOS 上是打开多任务，而不是再回一次桌面。
-    for (int round = 0; round < 2; round++) {
-        for (NSArray *pair in discovered) {
-            Class cls = NSClassFromString(pair[0]);
-            if (cls == Nil) continue;
-            SEL sel = NSSelectorFromString(pair[1]);
-            NSMethodSignature *sig = [cls instanceMethodSignatureForSelector:sel];
-            if (sig == nil || sig.numberOfArguments != 2) continue;
-            NSString *low = [pair[1] lowercaseString];
-            BOOL press = [low rangeOfString:@"press"].location != NSNotFound ||
-                         [low rangeOfString:@"click"].location != NSNotFound ||
-                         [low rangeOfString:@"tap"].location != NSNotFound;
-            if (round == 0 && !press) continue;
-            if (round == 1 && press) continue;
-            for (id target in targets) {
-                if (![target isKindOfClass:cls]) continue;
-                @try {
-                    ((void (*)(id, SEL))objc_msgSend)(target, sel);
-                } @catch (__unused NSException *e) {
-                    continue;
-                }
-                return [NSString stringWithFormat:@"%@ -%@",
-                        NSStringFromClass([target class]), pair[1]];
+        if (step == 3) {
+            id node = page;
+            int steps = 0;
+            while (node != nil && steps < 40) {
+                if ([NSStringFromClass([node class]) containsString:@"SBFluidSwitcherViewController"]) break;
+                node = [node nextResponder];
+                steps += 1;
             }
+            SEL sel = NSSelectorFromString(@"handleHomeButtonPress");
+            if (node == nil || ![node respondsToSelector:sel]) {
+                return @"step3 switcher controller not found";
+            }
+            ((BOOL (*)(id, SEL))objc_msgSend)(node, sel);
+            return @"step3 switcher-controller handleHomeButtonPress";
         }
-    }
-
-    // 最后一条：让 Workspace 发一次「没有 App 的切换请求」= 回桌面。
-    for (id target in targets) {
-        if (![target isKindOfClass:NSClassFromString(@"SBMainWorkspace")]) continue;
-        SEL create = NSSelectorFromString(@"createRequestForApplicationActivation:options:");
-        SEL exec = NSSelectorFromString(@"executeTransitionRequest:");
-        if (![target respondsToSelector:create] || ![target respondsToSelector:exec]) {
-            AevonLogRaw("win: home request unavailable");
-            continue;
-        }
-        @try {
-            id req = ((id (*)(id, SEL, id, unsigned long long))objc_msgSend)(
-                target, create, nil, (unsigned long long)0);
-            if (req == nil) { AevonLogRaw("win: home request nil"); continue; }
-            ((void (*)(id, SEL, id))objc_msgSend)(target, exec, req);
-            return @"SBMainWorkspace -home-request";
-        } @catch (NSException *e) {
-            AevonLogRaw([[NSString stringWithFormat:@"win: home request threw %@",
-                          e.reason != nil ? e.reason : @"-"] UTF8String]);
-        }
+    } @catch (NSException *e) {
+        return [NSString stringWithFormat:@"step%d threw %@", step,
+                e.reason != nil ? e.reason : @"-"];
     }
     return nil;
 }

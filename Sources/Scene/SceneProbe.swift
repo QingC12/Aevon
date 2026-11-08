@@ -1947,34 +1947,28 @@ zStackParticipantDidChange:
         // 上面那段：写在 `activate` 之前的那一次不算「App 的窗口变了」。
         host.reassertCanvas()
 
-        // 0.2.24 — 借来的**前台** scene，卡起来之后要让系统切回桌面页。
+        // 0.2.25 — 借来的**前台** scene，卡起来之后按三级阶梯回桌面。
         //
-        // 0.2.22 的祖先链给出了答案：前台 App 的画面在
-        // `SBDeviceApplicationSceneView > … > SBAppSwitcherPageView >
-        // SBFluidSwitcherTouchPassThroughScrollView` 这一串里 —— 它就是 app
-        // switcher 当前显示的那一页，桌面是同一把滚动视图的另一页。画面被我们的
-        // presenter 接走之后那一页空了，空页留在原处就是「卡片外面整屏黑」。
-        //
-        // 0.2.23 只试了三个 home 选择子，真机上只有一句 `unavailable` —— 三种
-        // 失败（对象没取到 / 名字不存在 / 带参数）长得一模一样，所以修不动。
-        // 这一版分两步，且**按读数**决定要不要兜底：
-        //   0.35 s 才叫 home（让卡片先出画）；
-        //   1.10 s 回读 `isSpringBoardActive` —— 桌面不在屏上就藏掉那张空页、
-        //            再试一次把桌面页滚出来。
+        // 0.2.24 的普查证明了「名字在」不等于「这一级能用」：协调器的
+        // `handleHomeButtonPress` 调得到，回读却是 `isSpringBoardActive=0`。
+        // 所以每一级都隔 0.6 s 回读一次读数，到 1 就收手；三级都不行才动页面。
         if let b = bundleID, AevonOwnIsOwned(b) == 0, liveFront {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                if closed { return }
-                if let used = AevonHomePress() {
-                    Log.write("win: home pressed via " + used + " (borrowed fullscreen)")
-                } else {
-                    Log.write("win: home press unavailable (borrowed fullscreen)")
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+            let page = centeredSwitcherPage()
+            for step in 1...3 {
+                let delay = 0.30 + 0.60 * Double(step - 1)
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                     if closed { return }
-                    let active = AevonSpringboardActive()
-                    Log.write("win: home check springboard=" + String(active))
-                    if active == 1 { return }
-                    hideEmptyPage(b)
+                    if AevonSpringboardActive() == 1 {
+                        Log.write("win: home already in front, skip step " + String(step))
+                        return
+                    }
+                    Log.write("win: home " + (AevonHomeStep(Int32(step), page) ?? "step nil"))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.60) {
+                        if closed { return }
+                        let active = AevonSpringboardActive()
+                        Log.write("win: home check " + String(step) + " springboard=" + String(active))
+                        if step == 3, active != 1 { hideEmptyPage(b) }
+                    }
                 }
             }
         }
@@ -2654,25 +2648,16 @@ zStackParticipantDidChange:
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { tick() }
     }
 
-    // MARK: - 0.2.24 空的 app-switcher 页
+    // MARK: - 0.2.25 空的 app-switcher 页
 
     /// 被藏起来的那一页，以及它原来的 alpha / 交互开关。关卡时原样还回去 ——
     /// 不还，用户关掉卡片之后那张页还是空的。
     private static var hiddenPage: (view: UIView, alpha: CGFloat, touch: Bool)?
 
-    /// 0.2.22 的祖先链给出了答案：前台 App 的画面在
-    /// `SBDeviceApplicationSceneView > … > SBAppSwitcherPageView` 这一串里 ——
-    /// 它就是 app switcher 当前显示的那一页，桌面是同一把滚动视图的另一页。
-    /// 画面被我们的 presenter 接走之后那一页空了，空页留在原处就是「卡外整屏黑」。
-    ///
-    /// 0.2.20 藏内层 UIView、0.2.21 藏 `SBMainSwitcherWindow` 都没能让黑色消失，
-    /// 因为要动的不是窗口可见性，是**当前页本身**。这一版两步都做，且都可观测：
-    ///   ① 藏掉屏幕上这一页（alpha 0 + 不吃触摸），关卡时原样还回；
-    ///   ② 把同一把滚动视图里的桌面页滚出来 —— 和手指上滑是同一个动作。
-    @discardableResult
-    private static func hideEmptyPage(_ bundle: String) -> String? {
+    /// 屏幕正中央那一页 app-switcher 页 —— 也就是用户看到的那一页。
+    /// 0.2.25 — 只找一次，三级 home 阶梯与兜底共用同一个对象。
+    private static func centeredSwitcherPage() -> UIView? {
         guard let application = sharedApplication() else { return nil }
-        var page: UIView?
         for window in application.windows {
             if window is FloatWindow { continue }
             var queue: [UIView] = [window]
@@ -2682,29 +2667,36 @@ zStackParticipantDidChange:
                 head += 1
                 if NSStringFromClass(type(of: node)).contains("AppSwitcherPageView"),
                    covers(node, window) {
-                    page = node
-                    break
+                    return node
                 }
                 queue.append(contentsOf: node.subviews)
             }
-            if page != nil { break }
         }
-        guard let empty = page else {
+        return nil
+    }
+
+    /// 三级 home 都没能把桌面叫回屏上时，最后一步：藏掉那张空页，并试着把桌面页
+    /// 滚出来。0.2.24 在这里误判过 —— 判据里带了 `Wallpaper`，而 app-switcher
+    /// 的每一页都带壁纸背景板，于是空页被当成桌面放过了。
+    @discardableResult
+    private static func hideEmptyPage(_ bundle: String) -> String? {
+        guard let empty = centeredSwitcherPage() else {
             Log.write("win: empty page not found for " + bundle)
             return "notfound"
         }
-        // 藏之前先认一眼：如果屏幕中间这一页**已经是桌面**，说明 home 那一步其实
-        // 成了、只是读数没读到（`isSpringBoardActive` 在有些版本上不存在）。这时
-        // 再藏一次就是把桌面藏掉 —— 宁可什么都不做。
-        if isHomePage(empty) {
+        let mark = homeMark(empty)
+        Log.write("win: empty page " + NSStringFromClass(type(of: empty))
+                  + " " + rectText(empty.convert(empty.bounds, to: nil))
+                  + " home=" + (mark ?? "none"))
+        // 真的已经是桌面就一行都不动 —— 这时藏它就是把桌面藏掉。
+        if mark != nil {
             Log.write("win: empty page is home, left alone")
             return "home"
         }
         hiddenPage = (empty, empty.alpha, empty.isUserInteractionEnabled)
         empty.alpha = 0
         empty.isUserInteractionEnabled = false
-        Log.write("win: empty page hid " + NSStringFromClass(type(of: empty))
-                  + " " + rectText(empty.convert(empty.bounds, to: nil)))
+        Log.write("win: empty page hid " + NSStringFromClass(type(of: empty)))
         let scrolled = scrollToHomePage(from: empty)
         Log.write("win: home page scroll " + (scrolled ? "sent" : "unavailable"))
         return scrolled ? "hid+scroll" : "hid"
@@ -2729,13 +2721,16 @@ zStackParticipantDidChange:
             steps += 1
         }
         guard let scroll = scroller else { return false }
-        for candidate in pages(in: scroll) where candidate !== page {
-            if isHomePage(candidate) {
+        let all = pages(in: scroll)
+        for candidate in all where candidate !== page {
+            if let mark = homeMark(candidate) {
+                Log.write("win: home page found " + mark + " " + rectText(candidate.frame))
                 scroll.scrollRectToVisible(scroll.convert(candidate.bounds, from: candidate),
                                            animated: true)
                 return true
             }
         }
+        Log.write("win: home page none in " + String(all.count) + " pages")
         return false
     }
 
@@ -2757,22 +2752,23 @@ zStackParticipantDidChange:
         return out
     }
 
-    /// 桌面页的判据：子树里还留着 HomeScreen / 图标列表 / 壁纸 —— 这三样只有
-    /// 桌面那一页才有。App 的页在画面被接走之后是空的，不能反过来用它判。
-    private static func isHomePage(_ page: UIView) -> Bool {
+    /// 桌面页的判据：子树里要有真正的桌面内容类（桌面视图 / 图标列表 / 底座 /
+    /// 图标内容）。0.2.24 把 `Wallpaper` 也算进去是错的：app-switcher 每一页
+    /// 都带壁纸背景板。命中时返回那个类名，为了下一轮日志能直接看出判给了谁。
+    private static func homeMark(_ page: UIView) -> String? {
         var queue: [UIView] = [page]
         var head = 0
-        while head < queue.count && head < 600 {
+        while head < queue.count && head < 900 {
             let node = queue[head]
             head += 1
             let name = NSStringFromClass(type(of: node))
-            if name.contains("HomeScreen") || name.contains("IconListView")
-                || name.contains("DockView") || name.contains("Wallpaper") {
-                return true
+            if name.contains("SBHomeScreen") || name.contains("SBIconListView")
+                || name.contains("SBDockView") || name.contains("SBIconContentView") {
+                return name
             }
             queue.append(contentsOf: node.subviews)
         }
-        return false
+        return nil
     }
 
     /// 关卡时把那一页还回去。没有藏过就什么都不做。

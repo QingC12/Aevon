@@ -381,9 +381,10 @@ NSInteger AevonOwnIsOwned(NSString *_Nullable bundleID);
 /// 销毁自建 scene。返回 1 表示这一句发出去了。
 NSInteger AevonOwnDestroy(NSString *_Nullable bundleID);
 
-/// 0.2.23 — 切回桌面页。返回实际用上的「类名 -选择器」，一个都没接上则为 nil。
-/// 0.2.24 — 取对象 → 普查选择子 → 再调用，每一层都进日志。
-NSString *_Nullable AevonHomePress(void);
+/// 0.2.25 — 回桌面的三级阶梯，一次只调用一级（1 = 硬件 home 键那条、
+/// 2 = 收起主切换器、3 = 切换器 controller 的 home 处理）。`page` 只有第 3 级
+/// 用到（沿响应链找 controller）。返回实际调用了谁，或没接上的原因。
+NSString *_Nullable AevonHomeStep(int step, id _Nullable page);
 
 /// 0.2.24 — 回桌面的结果读数：1 = 桌面已经在屏上，0 = 还在 App 页里，-1 = 读不到。
 /// 调用方按「不是 1」决定要不要走藏空页的兜底 —— 不信返回值，信读数。
