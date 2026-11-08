@@ -1028,6 +1028,53 @@ NSInteger AevonOwnIsOwned(NSString *bundleID) {
     return [bundleID isEqualToString:AevonOwnBundle] ? 1 : 0;
 }
 
+/// 0.2.23 — 让 SpringBoard 从「全屏 App 页」切回桌面页。
+///
+/// 0.2.22 的祖先链证明：前台 App 的画面挂在
+/// `SBDeviceApplicationSceneView > … > SBAppSwitcherPageView >
+/// SBFluidSwitcherTouchPassThroughScrollView > …` 里 —— 现代 iOS 的前台 App
+/// 本来就是一页 app-switcher 页面，桌面是同一把滚动视图里的另一页。画面被我们
+/// 的 presenter 接进卡片之后，那一页就空了；空页留在当前位置，就是用户看到的
+/// 「卡片外面全黑，也不回桌面」。所以正确的收尾不是藏某一层，而是**切回桌面页**。
+///
+/// 依次试三个已知的无参入口，任何一个接上就返回它的类名与选择器（写进日志），
+/// 都没接上返回 nil —— 调用方只记一行，不做别的。
+NSString *AevonHomePress(void) {
+    NSMutableArray *targets = [NSMutableArray array];
+    Class uiCls = NSClassFromString(@"SBUIController");
+    Class wsCls = NSClassFromString(@"SBMainWorkspace");
+    SEL shared = sel_registerName("sharedInstance");
+    if (uiCls != Nil && [uiCls respondsToSelector:shared]) {
+        id t = ((id (*)(id, SEL))objc_msgSend)(uiCls, shared);
+        if (t != nil) [targets addObject:t];
+    }
+    if (wsCls != Nil && [wsCls respondsToSelector:shared]) {
+        id t = ((id (*)(id, SEL))objc_msgSend)(wsCls, shared);
+        if (t != nil) [targets addObject:t];
+    }
+    NSArray *names = @[@"_handleHomeButtonSinglePress",
+                       @"handleHomeButtonPress",
+                       @"_handleHomeButtonPress"];
+    for (id target in targets) {
+        for (NSString *name in names) {
+            SEL sel = NSSelectorFromString(name);
+            if (![target respondsToSelector:sel]) continue;
+            NSMethodSignature *sig = [target methodSignatureForSelector:sel];
+            // 只认「self + _cmd」的无参方法，参数数对不上就不碰，避免把
+            // SpringBoard 打进一条错误的调用约定里。
+            if (sig != nil && sig.numberOfArguments != 2) continue;
+            @try {
+                ((void (*)(id, SEL))objc_msgSend)(target, sel);
+            } @catch (__unused NSException *e) {
+                continue;
+            }
+            return [NSString stringWithFormat:@"%@ -%@",
+                    NSStringFromClass([target class]), name];
+        }
+    }
+    return nil;
+}
+
 /// 销毁自建 scene。返回 1 表示这一句发出去了。
 NSInteger AevonOwnDestroy(NSString *bundleID) {
     if (bundleID.length == 0 || AevonOwnIdentity == nil) return 0;

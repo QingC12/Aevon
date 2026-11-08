@@ -1848,11 +1848,16 @@ zStackParticipantDidChange:
         // `seen` 只是读数，不参与判断：热启动回来的 App 同样 seen=0（它在后台），
         // 若拿它当条件，快速通道永远不会被走到，热启动也要白等 100 ms。
         var awaiting = false
+        // 0.2.23 — 这颗 App 在接手之前是不是**已经摆在屏幕上**（seen=1）。
+        // 只有这一种情况会留下「空的 app-switcher 页」，也就是用户看到的黑屏；
+        // 后台 App 被拉进卡片时 seen=0，不需要任何收尾。
+        var liveFront = false
         if bundleID != nil {
             let state = AevonContentStateOf(scene)
             let layers = count(of: value(of: scene, "layerManager"), "layers")
             let seen = AevonBoolOf(scene, "accessibilitySceneIsForegroundVisible")
             awaiting = (state != 2) || (layers == 0)
+            liveFront = (seen == 1)
             Log.write(String(format: "win: launch state cs=%ld layers=%ld seen=%ld held=%ld",
                              state, layers, seen, awaiting ? 1 : 0))
         }
@@ -1938,17 +1943,24 @@ zStackParticipantDidChange:
         // 上面那段：写在 `activate` 之前的那一次不算「App 的窗口变了」。
         host.reassertCanvas()
 
-        // 0.2.22 — 这一张卡接的是**系统已经摆在眼前的全屏 App**（`own live
-        // attach`）。它的画面被新 presenter 接走之后，系统原来那个全屏容器
-        // 就空了，用户看到「卡片里有 QQ，卡片外面整屏黑，也不回桌面」。
+        // 0.2.23 — 借来的**前台** scene，卡起来之后要让系统切回桌面页。
         //
-        // 0.2.20 藏内层 UIView、0.2.21 藏 SBMainSwitcherWindow，黑色都没消失，
-        // 说明前两次对「黑在哪一层」的判断都是错的（后者还把桌面一起藏了）。
-        // 这一版不再盲改：只把 scene → 祖先链 → 窗口的实际层级写进日志，
-        // 拿到现场再决定动哪一层。
-        if let b = bundleID, AevonOwnIsOwned(b) == 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                demoteFullScreen(b)
+        // 0.2.22 的祖先链给出了答案：前台 App 的画面在
+        // `SBDeviceApplicationSceneView > … > SBAppSwitcherPageView >
+        // SBFluidSwitcherTouchPassThroughScrollView` 这一串里 —— 它就是 app
+        // switcher 当前显示的那一页，桌面是同一把滚动视图的另一页。画面被我们的
+        // presenter 接走之后那一页空了，空页留在原处就是「卡片外面整屏黑」。
+        // 藏内层 UIView（0.2.20）没用，藏 SBMainSwitcherWindow（0.2.21）也没用，
+        // 因为要动的不是可见性，是**当前页**。
+        //
+        // 0.35 s 留给卡片先出画；失败只记一行，不做别的。
+        if let b = bundleID, AevonOwnIsOwned(b) == 0, liveFront {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                if let used = AevonHomePress() {
+                    Log.write("win: home pressed via " + used + " (borrowed fullscreen)")
+                } else {
+                    Log.write("win: home press unavailable (borrowed fullscreen)")
+                }
             }
         }
 

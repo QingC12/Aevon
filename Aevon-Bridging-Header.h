@@ -381,6 +381,9 @@ NSInteger AevonOwnIsOwned(NSString *_Nullable bundleID);
 /// 销毁自建 scene。返回 1 表示这一句发出去了。
 NSInteger AevonOwnDestroy(NSString *_Nullable bundleID);
 
+/// 0.2.23 — 切回桌面页。返回实际用上的「类名 -选择器」，一个都没接上则为 nil。
+NSString *_Nullable AevonHomePress(void);
+
 // 0.0.65 的 `AevonColdStartReady` 已随该功能一起删除（0.0.66）：它靠「名片文件
 // 写上 pid」判断进程新旧，而名片写不进去时（沙箱、目录权限、装包顺序）判据就永远
 // 不成立 —— 于是每次开窗都先结束那个 App 再拉起来。一次写失败换来「App 打不开」，
