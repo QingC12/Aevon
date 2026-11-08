@@ -1401,6 +1401,20 @@ final class RingHost: NSObject {
         openFromRing(bundleID)
     }
 
+    /// 全屏兜底的专用串行队列。
+    ///
+    /// 0.2.1 — `openApplicationWithBundleID:` 是同步 XPC，必须离开主线程。
+    /// Aevon(169) 里这条路返回了 10 次，10 次**全是 10 秒整**（10 004~10 008 ms），
+    /// 也就是每次都撞 XPC 超时；它跑在主线程上，于是 2 分 07 秒里主线程累计停了
+    /// 100 秒 —— 用户看到的就是「整机卡死，只能等它自己恢复」。串行是必要的：
+    /// 同一时刻只允许一路调用者进 LaunchServices。
+    private static let launchQueue = DispatchQueue(label: "com.aevon.ring.launch",
+                                                   qos: .userInitiated)
+
+    /// 每个 App 最近的回落时刻。滑动窗口，60 秒内最多 2 次 —— 不用「一次开机 N 次」
+    /// 那种配额：用完就永久失效，0.1.93 已经在别处吃过这个亏。
+    private static var launchRecent: [String: [Date]] = [:]
+
     /// The old behaviour, kept as the fallback and unchanged: the same private
     /// entry point SpringBoard itself uses. Guarded at every step.
     private func launch(_ bundleID: String) {
@@ -1416,17 +1430,31 @@ final class RingHost: NSObject {
         let openSelector = NSSelectorFromString("openApplicationWithBundleID:")
         guard workspace.responds(to: openSelector) else { return }
 
+        // 0.2.1 — 同一个 App 60 秒内最多回落 2 次。卡片连续开不出来时，这一条是
+        // 唯一的减速带：没有它，反复点同一个图标就是反复 10 秒的 XPC。
+        let now = Date()
+        var recent = (RingHost.launchRecent[bundleID] ?? [])
+            .filter { now.timeIntervalSince($0) < 60 }
+        guard recent.count < 2 else {
+            Log.write("ring: launch skip " + bundleID + " (recent " + String(recent.count) + ")")
+            return
+        }
+        recent.append(now)
+        RingHost.launchRecent[bundleID] = recent
+
         Log.write("ring: launch \(bundleID)")
         // 0.2.0 — 这一句是同步 XPC：`openApplicationWithBundleID:` 要等 FrontBoard
         // 把这次打开处理完才回来。Aevon(168) 的 22:30:26 之后有 6 条连续的
-        // `win: main stall ~3000ms`，正好落在这一段窗口里 —— 但「正好落在」不等于
-        // 「就是它」：等 scene 那条轮询、建卡里的系统调用也都在同一段里。所以先
-        // 只量一段：调用进去到回来多久。三个数（本行 / `win: icon launch done` /
-        // `win: icon scene up after`）摆在一起，下一次日志就能指出是谁占了三秒。
+        // `win: main stall ~3000ms`，正好落在这一段窗口里。
+        //
+        // 0.2.1 — 那一段现在有答案了：Aevon(169) 的 10 次调用**每次都是 10 秒整**，
+        // 所以卡的就是它本身，不是旁边的轮询。既然它动不动就超时，就不能留在主线程。
         let launchAt = CFAbsoluteTimeGetCurrent()
-        _ = workspace.perform(openSelector, with: bundleID)
-        let launchMs = Int((CFAbsoluteTimeGetCurrent() - launchAt) * 1000)
-        Log.write(String(format: "ring: launch done t=%ldms", launchMs))
+        RingHost.launchQueue.async {
+            _ = workspace.perform(openSelector, with: bundleID)
+            let launchMs = Int((CFAbsoluteTimeGetCurrent() - launchAt) * 1000)
+            Log.write(String(format: "ring: launch done t=%ldms", launchMs))
+        }
     }
 
     /// 圆心（四宫格）→ 应用选择面板（0.0.56）。

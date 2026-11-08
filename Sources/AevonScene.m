@@ -2974,17 +2974,15 @@ static int AevonOpenKeyNotes = 0;
 //   闸一 · 开关      `notify.off` 在 ⇒ 一个字节都不改，和 0.1.87 完全一样；
 //   闸二 · 判据      `__Actions.firstObject` 的类名必须含 `NotificationResponseAction`。
 //                    分享面板、URL、点图标都不含，一律照旧全屏；
-//   闸三 · 目标      bundle 必须是从 `request` 直接取到的非空串，且不是 SpringBoard 自己；
-//   闸四 · 兜底      吞掉之后 2.5 秒查一次 `AevonCardIsUpFor()`；卡片没起来就把原实现
-//                    **补调一次**（这是「点了没反应」这个最坏结果唯一的出口）。
+//   闸三 · 目标      bundle 必须是从 `request` 直接取到的非空串，且不是 SpringBoard 自己。
 //
-// 为什么敢吞：`openCard` 自己已经有一条全屏兜底（`ring: card route declined` →
-// `LSApplicationWorkspace openApplicationWithBundleID:`）。闸四补的是它兜不住的那
-// 一段 —— 挂起启动成功但卡片没建成，那时既没有卡片也没有全屏。
+// 0.2.1 — 原来的「闸四 · 兜底」整段删掉了：吞掉之后 2.5 秒查一次卡片、没起来就把原
+// 实现补调一次。Aevon(169) 证明它会**自己喂自己** —— 补调会让原实现再走一遍同样被
+// 接管的入口，于是又分流、又建卡、又失败、又补调，每轮还带一次 10 秒整的同步 XPC。
+// 母版 Stheno 没有这一条：它只在「失败/排除表命中」时回落一次全屏，不回灌原实现。
 //
-// 为什么必须查而不是等：真机上场景是异步出现的，`openCard` 的轮询最长会走满
-// 若干拍。用一个固定延时判「成了没成」正是 0.1.84 键盘那一版的错法（拿时间当
-// 证据），所以这里判的是**卡片在不在**，不是「过了多久」。
+// 现在最坏的结果是「卡片没建起来，这一下没有反应」，而不是「整机卡住等它自己恢复」。
+// 全屏兜底只剩 `openCard` 那条 `ring: card route declined`，一次点击最多一次。
 
 /// 上一次分流的时刻与目标。同一次点击会连着走 open → trusted 两条，第一条被吞掉
 /// 之后第二条通常不会再来（链条在替身里就断了）；真来了也不能再开一次卡片。
@@ -3123,6 +3121,24 @@ static BOOL AevonOpenIsShareSource(id request, id options) {
     return NO;
 }
 
+/// 这次打开是 SpringBoard 自己发起的（`src=com.apple.springboard`）。
+///
+/// 0.2.1 — 「带 payload 就算分享」那条判据必须把这一种来源排掉。Aevon(169) 里
+/// 14 条 `notify: share … src=com.apple.springboard pay=payload` 全不是分享：通知
+/// 这条链派生出来的后续请求也带着 `__PayloadOptions`，于是被当成分享 —— 既不去
+/// 清通知（走的是 share 分支，那一整段都跳过），又每次都白交一次原实现
+/// （日志里的 `notify: forward done err`）。
+///
+/// 真分享的三种来源（`sharingd` / `…ShareExtension` / `…sharetimeline`）在
+/// Aevon(162)(163)(165)(167) 四份日志里没有一次是 springboard。
+static BOOL AevonOpenSourceIsSpringBoard(id request, id options) {
+    id from = AevonOpenSourceApp(request, options);
+    if (from == nil) return NO;
+    const char *raw = [(NSString *)from UTF8String];
+    if (raw == NULL) return NO;
+    return strstr(raw, "com.apple.springboard") != NULL;
+}
+
 /// 顶层 payload 的三种痕迹任取其一。键都在 `options` 上，`request` 兜一次。
 ///
 /// Aevon(163) 的真机形状（`keys=` 那一格就是 options 的全部键）：
@@ -3189,27 +3205,22 @@ static int AevonOpenDecide(id request, id options,
     // SpringBoard 自己也有开请求（解锁后回到主屏之类）。吞掉它就是吞掉主屏。
     if (strncmp(bundle, "com.apple.springboard", 21) == 0) { *why = "springboard"; return 0; }
 
-    // 两条路，判据都在这一个 if 里定死；其余一律原样转发。
+    // 0.2.1 — 三条证据先取好，再判路。
     //
-    // 0.1.92 起多了第二条：分享面板。它的判据不是 action（分享是 `act=- n=0`，
-    // 与点图标一样），而是**来源进程** —— 真机日志里那一条对照行是
-    // `src=com.apple.sharingd`。取不到来源就不接管。
-    //
-    // 0.1.97：来源进程这一条只盖住了 sharingd。Aevon(163) 里分享给 QQ / 微信走的是
-    // 各自的分享扩展（`…ShareExtension` / `…sharetimeline`），旧判据一条没接住 ⇒
-    // 全屏打开。所以再加一条**更硬的证据：这次打开带没带东西**（顶层 `__PayloadURL` /
-    // `__PasteSharingToken` / `__PayloadOptions`）。带东西的打开就是交接文件的那种打开，
-    // 不管它是谁发起的 —— 「系统 URL 打开 App」也走这条，正是下一步要的。
+    // 0.1.97 那条「带 payload 就算分享」太宽：它把 SpringBoard 自己派生出来的后续
+    // 请求也当成分享（Aevon(169) 里 14 次 `src=com.apple.springboard pay=payload`），
+    // 于是通知那条路整段跑不到（清通知没做），还每次白交一次原实现。所以这里给
+    // 它加一个前提：来源不是 SpringBoard。
+    int notifyKind = AevonOpenIsNotificationAction(AevonOpenFirstAction(request, options)) ? 1 : 0;
+    int carrier = AevonOpenCarriesPayload(request, options) ? 1 : 0;
+    int sysFrom = AevonOpenSourceIsSpringBoard(request, options) ? 1 : 0;
+
     const char *kind = NULL;
-    if (AevonOpenIsNotificationAction(AevonOpenFirstAction(request, options))) {
+    if (notifyKind) {
         kind = "notify";
     } else if (!AevonShareSwitchOff() &&
-               (AevonOpenIsShareSource(request, options) ||
-                AevonOpenCarriesPayload(request, options))) {
+               (AevonOpenIsShareSource(request, options) || (carrier && !sysFrom))) {
         kind = "share";
-    } else {
-        *why = "plain";
-        return 0;
     }
 
     // 判据先于「同一次点击的第二条」：先确认这是要接管的那两种之一，再谈它是不是
@@ -3219,8 +3230,23 @@ static int AevonOpenDecide(id request, id options,
     // 同一次点击的第二条（open → trusted 之间只隔几毫秒）。第一条被吞掉之后
     // 链条通常就断了；真来了也不能再开一次卡片，否则屏幕上一大一小的两个。
     double now = CFAbsoluteTimeGetCurrent();
-    if (AevonDivertAt > 0 && now - AevonDivertAt < 1.5 &&
-        strcmp(bundle, AevonDivertBundle) == 0) {
+    int sameChain = (AevonDivertAt > 0 && now - AevonDivertAt < 1.5 &&
+                     strcmp(bundle, AevonDivertBundle) == 0);
+
+    if (kind == NULL) {
+        // 0.2.1 — 系统自己接着那条链发来的、带东西的请求：不建卡，但也不许放它
+        // 过去。放过去就是「全屏把 App 拉起来」，而那正是用户 0.1.98 报的那一幕。
+        // 只在紧跟在我们自己那次分流（1.5 秒）之内才这么判，免得把解锁回主屏之类
+        // 的正常请求一起吞掉。
+        if (sameChain && carrier && sysFrom) {
+            *why = "syschain";
+            return 2;
+        }
+        *why = "plain";
+        return 0;
+    }
+
+    if (sameChain) {
         *why = "chain";
         return 2;
     }
@@ -3429,21 +3455,6 @@ static char AevonOpenResultShape(id result) {
     return 0;
 }
 
-/// 三个空块，形状各一种。补调原实现时用它们顶替**已经收过尾**的结果块：原实现
-/// 照旧会调一次，而这一次什么都不做。
-static void (^AevonNoopBool)(BOOL) = ^(BOOL ok) { (void)ok; };
-static void (^AevonNoopObj)(id) = ^(id value) { (void)value; };
-static void (^AevonNoopVoid)(void) = ^{ };
-
-static id AevonOpenNoopFor(char form) {
-    switch (form) {
-        case 'B': return (id)AevonNoopBool;
-        case '@': return (id)AevonNoopObj;
-        case 'v': return (id)AevonNoopVoid;
-        default: return nil;
-    }
-}
-
 /// 上一个收过尾的结果块。同一次点击的 open → trusted 两条有可能拿的是**同一个块**，
 /// 收两次比悬着更难查（`[transaction invalidate]` 跑第二遍、`resume` 跑两遍）。
 static void *AevonLastResult = NULL;
@@ -3465,41 +3476,6 @@ static void AevonOpenFinishResult(id result, const char **shape) {
     } @catch (NSException *exception) {
         *shape = "threw";
     }
-}
-
-/// 吞掉之后的兜底看门狗。
-/// 吞掉 SpringBoard 的开请求，最坏的结果是「点了通知什么也没发生」。`openCard`
-/// 自己有一条全屏兜底，但它兜不住「挂起启动成功、卡片没建成」那一段 —— 那时既
-/// 没有卡片也没有全屏。所以 2.5 秒后查一次**卡片在不在**：不在就把原实现补调
-/// 一次，让这一下退化成 0.1.87 的行为。补调只发生一次，且只在没有卡片时。
-///
-/// 2.5 秒是给的余量，不是判据：`openCard` 里 `pollForScene` 要等场景出现，真机
-/// 上通常 0.3~1 秒；判据是 `AevonCardIsUpFor()` 的返回值。拿时间当判据正是
-/// 0.1.84 键盘那一版的错法。
-static void AevonOpenWatch(id self, SEL cmd, id request, id options,
-                           id settings, id origin, id replayResult,
-                           IMP original, NSString *bundle) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        const char *want = [bundle UTF8String];
-        if (want == NULL) return;
-        if (AevonCardIsUpFor(want)) {
-            AevonLogRaw([[NSString stringWithFormat:@"notify: divert card up b=%@", bundle]
-                         UTF8String]);
-            return;
-        }
-        AevonLogRaw([[NSString stringWithFormat:@"notify: divert replay b=%@", bundle]
-                     UTF8String]);
-        @try {
-            if (original != NULL) {
-                ((void (*)(id, SEL, id, id, id, id, id))original)
-                    (self, cmd, request, options, settings, origin, replayResult);
-            }
-        } @catch (NSException *exception) {
-            AevonLogRaw([[NSString stringWithFormat:@"notify: divert replay threw %@",
-                          exception.name != nil ? exception.name : @"?"] UTF8String]);
-        }
-    });
 }
 
 // MARK: - 0.1.89 分流之后的收尾：关通知中心 / 撤横幅
@@ -4418,10 +4394,14 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                  AevonDivertCount);
     } else if (verdict == 2) {
         // 吞掉，也不再开卡片。结果块照样要收尾，否则这一次调用会悬着。
+        //
+        // 0.2.1 — `why` 也打出来：`chain` 是同一次点击的第二条，`syschain` 是
+        // SpringBoard 接着我们那条链派生出来、还带着 payload 的那一条（它不再被
+        // 当成分享，也不再被放过去全屏打开）。
         const char *chainShape = "none";
         AevonOpenFinishResult(result, &chainShape);
-        snprintf(line, sizeof(line), "notify: divert chain b=%s op=%s result=%s", bundle,
-                 slot >= 0 ? AevonOpenTargets[slot].tag : "?", chainShape);
+        snprintf(line, sizeof(line), "notify: divert chain b=%s op=%s why=%s result=%s", bundle,
+                 slot >= 0 ? AevonOpenTargets[slot].tag : "?", why, chainShape);
     } else if (slot >= 0) {
         AevonOpenSnapshot(slot, request, options, settings, origin, line, sizeof(line));
     }
@@ -4432,15 +4412,14 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
         NSString *target = [NSString stringWithUTF8String:bundle];
         if (target.length > 2) {
             // 结果块：认得出形状就当场收尾 —— 悬着的事务会让 SpringBoard 以为
-            // 还在开 App。收尾之后补调原实现时必须换一个同形状的空块，
-            // 否则同一个块会被收两次。
+            // 还在开 App。
+            //
+            // 0.2.1 — 这里原来还要留一个 `replay`（同形状空块）给 2.5 秒重放用。
+            // 重放整段删掉之后它没有消费者了：收尾只用原始块一次。
             char form = AevonOpenResultShape(result);
             const char *shape = "none";
-            id replay = result;
             if (form != 0) {
                 AevonOpenFinishResult(result, &shape);
-                id noop = AevonOpenNoopFor(form);
-                if (noop != nil) replay = noop;
             }
             size_t used = strlen(line);
             if (used + 16 < sizeof(line)) {
@@ -4505,8 +4484,15 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                     });
                 }
             }
-            AevonOpenWatch(self, _cmd, request, options, settings, origin, replay,
-                           AevonOpenOrig[slot], target);
+            // 0.2.1 — 这里原来是 `AevonOpenWatch(...)`：吞掉 2.5 秒后查一次卡片在不在，
+            // 不在就把原实现补调一次。
+            //
+            // Aevon(169) 证明那条路会**自己喂自己**：补调一次原实现 ⇒ 原实现再走一遍
+            // `_handleOpenApplicationRequest:` ⇒ 那条也在接管里 ⇒ 又分流、又建卡、
+            // 又失败 ⇒ 又补调。13 次 op=trusted、23 次 replay、10 次全屏兜底，每次兜底
+            // 都是 10 秒整的同步 XPC，主线程在 2 分 07 秒里累计停了 100 秒 —— 就是用户
+            // 说的「整机卡死，只能等它自己恢复」。母版 Stheno 没有这条：它只在
+            // 「失败/排除表命中」时回落一次全屏，不回灌原实现。整段删除。
         }
     } else if (verdict == 0) {
         // 0.1.99 — 放行之前先把「哪一条、为什么、带没带东西」落下来。

@@ -1273,6 +1273,14 @@ zStackParticipantDidChange:
         guard Date().timeIntervalSince(start) < 4.0 else {
             unmark()
             AevonHookDisarm(bundleID)
+            // 0.2.1 — 这一条出口原来不看遮挡，于是锁屏上点一条通知会走到全屏兜底。
+            // Aevon(169) 里 10 次 `ring: launch` 全是这么来的：每次都是 10 秒整的
+            // 同步 XPC，主线程在 2 分 07 秒里停了 100 秒。另一个出口
+            // （`card did not come up`）早就有这道闸，这里补上同一道。
+            if AevonSystemCovered() {
+                Log.write("win: icon card gave up under cover, no fallback")
+                return
+            }
             Log.write("win: icon " + bundleID + " produced no scene")
             fallback("no scene in 4s")
             return

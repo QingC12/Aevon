@@ -609,6 +609,10 @@ def main():
                   b"win: card closed by system cover",
                   # 锁屏期间建卡被主动收掉时，**不许**再走全屏兜底。
                   b"win: icon card closed by cover, no fallback",
+                  # 0.2.1 — 4 秒等不到场景、这一刻系统界面还盖着 ⇒ 一个字节都不开。
+                  b"win: icon card gave up under cover, no fallback",
+                  # 0.2.1 — 全屏兜底的滑动窗口（同一个 App 60 秒最多 2 次）。
+                  b"ring: launch skip ",
                   b"win: canvas revived ",
                   b"win: revive after unlock tick=",
                   # 0.1.61 — 键盘态的**进与出**都在。0.1.60 只留下了「进」：
@@ -648,14 +652,16 @@ def main():
                   #   divert b=… op=… why=… unlock=…  吞掉了，去开卡片
                   #   divert chain b=…                同一次点击的第二条，吞掉但不再开
                   #   divert pass b=… why=…           认出来了但没吞（开关/上限/取不到）
-                  #   divert card up b=…              2.5 秒后查到卡片在 —— 成功判据
-                  #   divert replay b=…               卡片没起来，已补调原实现退回全屏
+                  # 0.2.1 — `divert card up` / `divert replay` / `replay threw` 三条删掉：
+                  #   2.5 秒重放整段拔掉（它是自循环的发动机，Aevon(169)）。它们现在在
+                  #   反向断言表里，见下面的 `# gone`。
                   b"notify: divert b=%s op=%s why=%s unlock=%d n=%d",
-                  b"notify: divert chain b=%s op=%s result=%s",
+                  b"notify: divert chain b=%s op=%s why=%s result=%s",
                   b"notify: divert pass b=%s why=%s",
-                  b"notify: divert card up b=%@",
-                  b"notify: divert replay b=%@",
-                  b"notify: divert replay threw %@",
+                  # 0.2.1 — 判据收紧以后的新结局：带 payload、但来源是 SpringBoard 的
+                  # 那种打开，只在紧跟我们自己那次分流时才被吞（`why=syschain` 会出现在
+                  # 上面那行 chain 日志里 —— 短串会被编成立即数，所以断言只认这条长的）。
+                  b"com.apple.springboard",
                   # 判据要能在二进制里找到，否则「为什么没吞」全靠猜。
                   b"NotificationResponseAction",
                   # 0.1.89 — 分流之后的收尾。收面板 / 收横幅这两件事本来挂在
@@ -830,7 +836,14 @@ def main():
                  # 手机再也开不出浮窗）。这条前缀还能 grep 到，就说明那个
                  # `systemCovered` 静态量又回来了 —— 它一旦回来，卡片就又会
                  # 在锁屏后被自己藏住，而摘标记的只剩一个已经停摆的时钟。
-                 b"win: system cover "):                    # gone
+                 b"win: system cover ",                     # gone
+                 # 0.2.1 — 2.5 秒重放与它的成功判据。Aevon(169) 证明这条路会自己喂
+                 # 自己：补调原实现 ⇒ 原实现再走一遍被接管的入口 ⇒ 又分流又建卡又
+                 # 失败，每轮附一次 10 秒整的同步 XPC（主线程 2 分 07 秒停 100 秒）。
+                 # 任何一条还能 grep 到，就说明那台发动机还在。
+                 b"notify: divert replay b=%@",             # gone
+                 b"notify: divert replay threw %@",         # gone
+                 b"notify: divert card up b=%@"):            # gone
         if gone in dylib_early:
             bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "
                 "back (hot zone 0.1.18 / summon bar 0.1.24 / cover lock gate 0.1.90)")
