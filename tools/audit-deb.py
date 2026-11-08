@@ -984,9 +984,10 @@ def main():
                   b"ncDispatcher",
                   b"_notificationDispatcher",
                   b"delegate",
-                  # 闸四（Swift 侧）：闩的三态。三条缺一条，「上次死在这条钩子
-                  # 上」这个结论就落不下来 —— 而这正是这一版唯一的安全网。
-                  b"notify: activate latch held, previous boot died while armed",
+                  # 闸四（Swift 侧）：闩的两振。0.2.26 起第一次只跳过本次装配，
+                  # 第二次才落 notify.off —— 普通重载桌面不再永久关掉通知/分享。
+                  b"notify: activate latch held 1/2, this boot stays native",
+                  b"notify: activate latch held twice, notify.off written",
                   b"notify: activate latch cleared uptime=",
                   b"notify: activate off switch=notify.off",
                   b"notify: activate arm scheduled in ",

@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.2.25"
+    public static let version = "0.2.26"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -120,6 +120,9 @@ public enum Aevon {
     /// 而这个判断必须在任何进程里都读到同一份。
     public static let activateArmedPath = "/var/mobile/Library/Logs/Aevon/notify.armed"
     public static let activateOffPath   = "/var/mobile/Library/Logs/Aevon/notify.off"
+    /// 0.2.26 — 连续几次启动看见旧闩。`1` 只跳过一次装配，`2` 才落 `notify.off`；
+    /// 普通重载桌面也会留下旧闩，一振就关会把这个功能永久误伤（0.2.25 的真机日志）。
+    public static let activateStrikesPath = "/var/mobile/Library/Logs/Aevon/notify.strikes"
 
     /// 0.1.92 — 分享面板那条路自己的开关。与 `notify.off` 分开是因为两者风险不同：
     /// 「分享文件给别的 App」带交接，出问题时往往只是「打开是空的」，而通知那条是

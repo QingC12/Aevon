@@ -15,7 +15,7 @@
 #
 set +e
 
-VERSION="0.2.25"
+VERSION="0.2.26"
 
 # roothide 的维护脚本跑在 libvroot 里："/" 是 jbroot，真实根在 /rootfs。
 # 两个都试一次；失败也无所谓，插件加载时会自己再建。
@@ -38,6 +38,18 @@ for ROOT in /var/mobile /rootfs/var/mobile; do
     # on a device with no terminal. The log holds no secrets.
     chmod 666 "$LOG" 2>/dev/null
     echo "$(date '+%Y-%m-%d %H:%M:%S') [$VERSION] installed (roothide / arm64e / swift)" >> "$LOG" 2>/dev/null
+
+    # 0.2.26 — 旧版把「上次启动没活到 180 秒」直接判成致命，落了 notify.off；
+    # 而升级后点「重载桌面」必然制造这种闩，于是通知/分享永久退回全屏。
+    # 这里只清掉那个空文件（插件自己写的），有内容的一律当成用户的手动开关保留；
+    # 闩与振数都是瞬时状态，升级后从零开始。
+    OFF="$ROOT/Library/Logs/Aevon/notify.off"
+    if [ -f "$OFF" ] && [ ! -s "$OFF" ]; then
+        rm -f "$OFF" 2>/dev/null
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [$VERSION] install: cleared auto notify.off" >> "$LOG" 2>/dev/null
+    fi
+    rm -f "$ROOT/Library/Logs/Aevon/notify.armed" \
+          "$ROOT/Library/Logs/Aevon/notify.strikes" 2>/dev/null
 done
 
 # Settings caches its PreferenceLoader list in memory. Dropping the process

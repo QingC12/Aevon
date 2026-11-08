@@ -1947,30 +1947,45 @@ zStackParticipantDidChange:
         // 上面那段：写在 `activate` 之前的那一次不算「App 的窗口变了」。
         host.reassertCanvas()
 
-        // 0.2.25 — 借来的**前台** scene，卡起来之后按三级阶梯回桌面。
+        // 0.2.26 — 借来的**前台** scene：先让「空页」不再占屏，再回桌面。
         //
-        // 0.2.24 的普查证明了「名字在」不等于「这一级能用」：协调器的
-        // `handleHomeButtonPress` 调得到，回读却是 `isSpringBoardActive=0`。
-        // 所以每一级都隔 0.6 s 回读一次读数，到 1 就收手；三级都不行才动页面。
+        // 0.2.25 的两处真机读数决定了这一版的两处改动：
+        //   · 空页要等三级都失败才藏（`hideEmptyPage`），所以那之前整段过渡
+        //     都是黑的 → 现在 0.05 s 就藏，并同步滚到桌面页；
+        //   · 第一级 home 在 0.30 s 才发，回读又等 0.60 s → 现在 0.12 s 发，
+        //     每级 0.42 s 回读，失败立刻进下一级。
         if let b = bundleID, AevonOwnIsOwned(b) == 0, liveFront {
             let page = centeredSwitcherPage()
-            for step in 1...3 {
-                let delay = 0.30 + 0.60 * Double(step - 1)
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                    if closed { return }
-                    if AevonSpringboardActive() == 1 {
-                        Log.write("win: home already in front, skip step " + String(step))
-                        return
-                    }
-                    Log.write("win: home " + (AevonHomeStep(Int32(step), page) ?? "step nil"))
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.60) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                if closed { return }
+                if AevonSpringboardActive() != 1 { _ = hideEmptyPage(b, animated: false) }
+            }
+            // 回桌面的过渡会把借来的 scene 判成后台，画面随即掉一帧黑。
+            // 下面那串连写专门覆盖这半秒（0.2.25：掉画后 63 ms 才回来，
+            // 那正好是 200 ms 节拍剩下的余量）。
+            AevonHomeWakeReset()
+            func climb(_ step: Int) {
+                if closed { return }
+                if AevonSpringboardActive() == 1 {
+                    Log.write("win: home already in front, skip step " + String(step))
+                    return
+                }
+                Log.write("win: home " + (AevonHomeStep(Int32(step), page) ?? "step nil"))
+                for offset in [0.0, 0.06, 0.14, 0.24, 0.36] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + offset) {
                         if closed { return }
-                        let active = AevonSpringboardActive()
-                        Log.write("win: home check " + String(step) + " springboard=" + String(active))
-                        if step == 3, active != 1 { hideEmptyPage(b) }
+                        _ = AevonHomeWake(scene)
                     }
                 }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+                    if closed { return }
+                    let active = AevonSpringboardActive()
+                    Log.write("win: home check " + String(step) + " springboard=" + String(active))
+                    if active == 1 { return }
+                    if step < 3 { climb(step + 1) } else { hideEmptyPage(b) }
+                }
             }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { climb(1) }
         }
 
         // 0.0.59 — 首帧交给自己的观察器，不再等保活时钟。
@@ -2679,7 +2694,7 @@ zStackParticipantDidChange:
     /// 滚出来。0.2.24 在这里误判过 —— 判据里带了 `Wallpaper`，而 app-switcher
     /// 的每一页都带壁纸背景板，于是空页被当成桌面放过了。
     @discardableResult
-    private static func hideEmptyPage(_ bundle: String) -> String? {
+    private static func hideEmptyPage(_ bundle: String, animated: Bool = true) -> String? {
         guard let empty = centeredSwitcherPage() else {
             Log.write("win: empty page not found for " + bundle)
             return "notfound"
@@ -2697,7 +2712,7 @@ zStackParticipantDidChange:
         empty.alpha = 0
         empty.isUserInteractionEnabled = false
         Log.write("win: empty page hid " + NSStringFromClass(type(of: empty)))
-        let scrolled = scrollToHomePage(from: empty)
+        let scrolled = scrollToHomePage(from: empty, animated: animated)
         Log.write("win: home page scroll " + (scrolled ? "sent" : "unavailable"))
         return scrolled ? "hid+scroll" : "hid"
     }
@@ -2711,7 +2726,7 @@ zStackParticipantDidChange:
 
     /// 同一把滚动视图里带桌面内容的那一页，滚出来。这与手指上滑回桌面是同一个
     /// 动作，只是不经过手势识别器 —— 手势那一半在 0.2.21 已经证明会打到 App 上。
-    private static func scrollToHomePage(from page: UIView) -> Bool {
+    private static func scrollToHomePage(from page: UIView, animated: Bool) -> Bool {
         var node: UIView? = page.superview
         var steps = 0
         var scroller: UIScrollView?
@@ -2726,7 +2741,7 @@ zStackParticipantDidChange:
             if let mark = homeMark(candidate) {
                 Log.write("win: home page found " + mark + " " + rectText(candidate.frame))
                 scroll.scrollRectToVisible(scroll.convert(candidate.bounds, from: candidate),
-                                           animated: true)
+                                           animated: animated)
                 return true
             }
         }

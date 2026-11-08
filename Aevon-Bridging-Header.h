@@ -295,6 +295,10 @@ long AevonInterceptWrites(void);
 /// 正是守护四版一次都没动的原因。只由 `contentState != 2` 触发，上限 8 次、
 /// 间隔 200 ms。返回 1/2/3 表示走了哪条门，0 表示没门可走或被节流。
 NSInteger AevonWakeScene(id _Nullable scene);
+/// 0.2.26 — 回桌面那一秒的连写：同一段写入体，不走 200 ms 节流。额度由
+/// `AevonHomeWakeReset` 在每次回桌面前重置。
+NSInteger AevonHomeWake(id _Nullable scene);
+void AevonHomeWakeReset(void);
 long AevonWakeCount(void);
 
 /// 0.0.51 — 画面回来的那一刻把这一段的额度还回去，下一段黑重新从满格起。

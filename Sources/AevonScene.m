@@ -2515,19 +2515,22 @@ void AevonWakeReset(void) {
 /// 留着它只会在真出问题时把一次黑屏变成一段密集改写 —— 8 次（约 1.6 秒）足够
 /// 撑过一次真正的掉画，又不会在错误的方向上硬撑整场。
 static const long AevonWakeBudget = 8;
-NSInteger AevonWakeScene(id scene) {
-    if (scene == nil || !AevonIsArmed()) return 0;
-    if (AevonPushBanned) return 0;
-    if (![NSThread isMainThread]) return 0;
-    if (AevonHookDepth > 0) return 0;
-    if (AevonInPush) return 0;
-    // 0.0.51 — 计数的位置挪到节流之后。原来它排在节流前面，掉画期间每 60 ms
-    // 一拍都会自增：一次真正的写入要吃掉四拍，60 次的额度三秒就烧完，此后这
-    // 一次会话里再也不会唤醒 —— 修好的东西自己会过期，这比不修更糟。
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - AevonLastWake < 0.2) return 0;
-    if (__sync_fetch_and_add(&AevonWakeTried, 1) > AevonWakeBudget) return 0;
-    AevonLastWake = now;
+
+/// 0.2.26 — 回桌面那一刻的连写。写入体与 `AevonWakeScene` 完全相同，只是不走
+/// 200 ms 节流：系统在「回桌面」的过渡里会把借来的 scene 判成后台，卡片随之
+/// 掉一帧黑。0.2.25 真机的读数 `picture dropped cs=0 ... picture back after
+/// 63ms` 里那 63 ms 就是下一拍节流的等待，不是恢复需要的时间。这里按
+/// 80 ms 一拍连写几次，把那段空白压到一帧以内。
+static long AevonHomeWakeTried = 0;
+static const long AevonHomeWakeBudget = 12;
+
+void AevonHomeWakeReset(void) {
+    __sync_lock_test_and_set(&AevonHomeWakeTried, 0);
+    AevonLastWake = 0;
+}
+
+/// 真正的写入体。调用方负责全部闸门 —— 两个入口的闸门只差「节流 / 额度」。
+static NSInteger AevonWakeWrite(id scene) {
     AevonInPush = 1;
 
     SEL settingsSel = sel_registerName("settings");
@@ -2555,6 +2558,34 @@ NSInteger AevonWakeScene(id scene) {
     if (path != 0) __sync_fetch_and_add(&AevonWakeWrote, 1);
     AevonInPush = 0;
     return path;
+}
+
+NSInteger AevonWakeScene(id scene) {
+    if (scene == nil || !AevonIsArmed()) return 0;
+    if (AevonPushBanned) return 0;
+    if (![NSThread isMainThread]) return 0;
+    if (AevonHookDepth > 0) return 0;
+    if (AevonInPush) return 0;
+    // 0.0.51 — 计数的位置挪到节流之后。原来它排在节流前面，掉画期间每 60 ms
+    // 一拍都会自增：一次真正的写入要吃掉四拍，60 次的额度三秒就烧完，此后这
+    // 一次会话里再也不会唤醒 —— 修好的东西自己会过期，这比不修更糟。
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - AevonLastWake < 0.2) return 0;
+    if (__sync_fetch_and_add(&AevonWakeTried, 1) > AevonWakeBudget) return 0;
+    AevonLastWake = now;
+    return AevonWakeWrite(scene);
+}
+
+/// 0.2.26 — 只给「回桌面」用的连写入口：没有 200 ms 节流，额度按一次回桌面
+/// 重置（`AevonHomeWakeReset`）。其余闸门与 `AevonWakeScene` 一致。
+NSInteger AevonHomeWake(id scene) {
+    if (scene == nil || !AevonIsArmed()) return 0;
+    if (AevonPushBanned) return 0;
+    if (![NSThread isMainThread]) return 0;
+    if (AevonHookDepth > 0) return 0;
+    if (AevonInPush) return 0;
+    if (__sync_fetch_and_add(&AevonHomeWakeTried, 1) > AevonHomeWakeBudget) return 0;
+    return AevonWakeWrite(scene);
 }
 
 

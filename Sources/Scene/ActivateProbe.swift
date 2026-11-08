@@ -138,15 +138,31 @@ enum ActivateProbe {
 
         // 闸四（后半）· 上一次的闩还在。
         //
-        // 闩在装配前写、活到 180 秒才摘，所以「下次启动还看得见它」只有一种
-        // 解释：上一次装上去之后没活到摘闩。这时候最该做的不是再装一遍，
-        // 而是把结论落下来并停手 —— 一份日志的价值远低于一台能开机的手机。
+        // 0.2.26 — 这里原来一见闩就写 `notify.off`，把「通知/分享改走浮窗」
+        // 永久关掉。真机上这不是罕见路径，是必然路径：装完插件要点「重载桌面」，
+        // 而重载桌面就是一次新的 SpringBoard 启动；只要它发生在上一次启动后的
+        // 180 秒内，新进程就会看见旧闩，于是通知和分享从此全部退回全屏 ——
+        // 0.2.25 的日志里那一行 `notify: activate off switch=notify.off` 就是
+        // 这么来的，用户从来没手动关过。
+        //
+        // 现在改成两振出局：第一次看见闩只记一笔并跳过本次装配（给一次干净
+        // 启动），第二次启动仍然看见闩才认定「装上去就死」并落开关。一次真正
+        // 致命的替换体最多带走两次启动，而一次普通重载再也不会误伤。
         if manager.fileExists(atPath: Aevon.activateArmedPath) {
-            Log.write("notify: activate latch held, previous boot died while armed")
             try? manager.removeItem(atPath: Aevon.activateArmedPath)
             try? manager.createDirectory(atPath: Aevon.stateDir,
                                          withIntermediateDirectories: true)
-            manager.createFile(atPath: Aevon.activateOffPath, contents: Data())
+            let strikes = (Int((try? String(contentsOfFile: Aevon.activateStrikesPath,
+                                             encoding: .utf8)) ?? "") ?? 0) + 1
+            try? String(strikes).write(toFile: Aevon.activateStrikesPath,
+                                       atomically: true, encoding: .utf8)
+            if strikes >= 2 {
+                manager.createFile(atPath: Aevon.activateOffPath, contents: Data())
+                try? manager.removeItem(atPath: Aevon.activateStrikesPath)
+                Log.write("notify: activate latch held twice, notify.off written")
+            } else {
+                Log.write("notify: activate latch held 1/2, this boot stays native")
+            }
             return
         }
 
@@ -162,9 +178,11 @@ enum ActivateProbe {
         }
 
         // 闸四（收尾）· 松闩。到点还活着，说明装配与这个 IMP 都不致命。
+        // 0.2.26 — 同时把「振数」清零：这是唯一能证明正常启动的证据。
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + latchSeconds) {
             guard manager.fileExists(atPath: Aevon.activateArmedPath) else { return }
             try? manager.removeItem(atPath: Aevon.activateArmedPath)
+            try? manager.removeItem(atPath: Aevon.activateStrikesPath)
             Log.write("notify: activate latch cleared uptime=\(Int(latchSeconds))s")
         }
     }
