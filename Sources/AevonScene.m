@@ -19,6 +19,7 @@
 #import <objc/runtime.h>
 #import <dispatch/dispatch.h>
 #import <math.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -5788,6 +5789,60 @@ static BOOL AevonClearWithdraw(id host, id requestObject, char *how, size_t size
     return NO;
 }
 
+/// 0.2.27 — 系统自己的删除口。
+///
+/// 0.2.26 真机读数：`withdrawNotificationRequest:` 在 `CSNotificationDispatcher`
+/// 上**不抛异常**（日志 `via=capture:withdrawNotificationRequest: id=-`），
+/// 但通知中心那一条还在 —— 说明内部宿主只撤了横幅/锁屏那一面，没有删投递记录。
+/// `UNUserNotificationCenter -removeDeliveredNotificationsWithIdentifiers:`
+/// 是同一个投递的公开删除口，通知中心会跟着消失。类不存在就现 dlopen 一次
+/// （SpringBoard 不一定加载过 UserNotifications）。
+static BOOL AevonClearViaUN(id request, const char *bundle) {
+    if (request == nil) return NO;
+    NSString *ident = nil;
+    static const char *keys[4] = {
+        "notificationIdentifier", "requestIdentifier", "uuid", "identifier",
+    };
+    for (int i = 0; i < 4 && ident == nil; i++) {
+        id got = AevonCleanRead(request, keys[i]);
+        if (got == nil) continue;
+        if ([got isKindOfClass:[NSString class]]) {
+            if ([(NSString *)got length] > 0) ident = (NSString *)got;
+            continue;
+        }
+        // 有的版本这一格是 UNNotificationRequest 之类，标识在它里面。
+        id inner = AevonCleanRead(got, "identifier");
+        if ([inner isKindOfClass:[NSString class]] && [(NSString *)inner length] > 0) {
+            ident = (NSString *)inner;
+        }
+    }
+    if (ident == nil) return NO;
+
+    Class cls = NSClassFromString(@"UNUserNotificationCenter");
+    if (cls == Nil) {
+        void *handle = dlopen("/System/Library/Frameworks/UserNotifications.framework/UserNotifications",
+                              RTLD_LAZY);
+        if (handle != NULL) cls = NSClassFromString(@"UNUserNotificationCenter");
+    }
+    if (cls == Nil) return NO;
+    SEL cur = sel_registerName("currentNotificationCenter");
+    if (![cls respondsToSelector:cur]) return NO;
+    id center = ((id (*)(id, SEL))objc_msgSend)((id)cls, cur);
+    if (center == nil) return NO;
+    SEL remove = sel_registerName("removeDeliveredNotificationsWithIdentifiers:");
+    if (![center respondsToSelector:remove]) return NO;
+    @try {
+        ((void (*)(id, SEL, id))objc_msgSend)(center, remove, @[ident]);
+    } @catch (__unused NSException *e) {
+        return NO;
+    }
+    if (bundle != NULL) {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: clear b=%s via=un id=%@",
+                      bundle, ident] UTF8String]);
+    }
+    return YES;
+}
+
 /// 0.2.5 — 用截到的对象清一条。返回 YES 表示这条路真的动了（或确认没有必要再走老路）。
 ///
 /// 三步，缺一不做：
@@ -5853,9 +5908,17 @@ static BOOL AevonClearFromCapture(const char *bundle, char *how, size_t size) {
                         snprintf(how, size, "capture:nowithdraw");
                     }
                 }
+                // 0.2.27 — 内部 withdraw 之后再补一刀公开删除口。真机上前者
+                // 不抛、但通知中心那条还在，所以这里不再拿它的返回值当结论。
+                BOOL viaUN = AevonClearViaUN(request, bundle);
+                if (viaUN) cleared = YES;
                 size_t used = strlen(how);
                 if (used + 8 < size) {
                     snprintf(how + used, size - used, " id=%s", identRaw);
+                }
+                used = strlen(how);
+                if (used + 8 < size) {
+                    snprintf(how + used, size - used, " un=%d", viaUN ? 1 : 0);
                 }
             } else {
                 snprintf(how, size, "capture:section");

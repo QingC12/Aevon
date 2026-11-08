@@ -1970,6 +1970,7 @@ zStackParticipantDidChange:
                     Log.write("win: home already in front, skip step " + String(step))
                     return
                 }
+                if step == 1 { holdPicture(view, seconds: 0.90) }
                 Log.write("win: home " + (AevonHomeStep(Int32(step), page) ?? "step nil"))
                 for offset in [0.0, 0.06, 0.14, 0.24, 0.36] {
                     DispatchQueue.main.asyncAfter(deadline: .now() + offset) {
@@ -2794,6 +2795,38 @@ zStackParticipantDidChange:
         hiddenPage = nil
         Log.write("win: empty page restored "
                   + NSStringFromClass(type(of: saved.view)))
+    }
+
+    /// 0.2.27 — 回桌面过渡里，把卡片最后一帧贴在卡片上。
+    ///
+    /// 0.2.25/0.2.26 两次真机都是同一个形状：回桌面那一刻借来的 scene 被系统判成
+    /// 后台，`picture dropped` 先落一行，连写 settings 只能让它早点回来 ——
+    /// 那几十到两百毫秒里合成的仍是空画面，操作者看到「浮窗黑一下」。
+    /// `snapshotView(afterScreenUpdates: false)` 不重绘、只取当前渲染树，
+    /// 贴在卡片顶部就能把这段空白盖住；0.60 秒后自己摘掉。
+    private static var homeSnapshot: UIView?
+
+    private static func holdPicture(_ view: UIView, seconds: Double) {
+        if homeSnapshot != nil { return }
+        let bounds = view.bounds
+        guard bounds.width > 1, bounds.height > 1 else {
+            Log.write("win: home snapshot skipped empty")
+            return
+        }
+        guard let snap = view.snapshotView(afterScreenUpdates: false) else {
+            Log.write("win: home snapshot none")
+            return
+        }
+        snap.frame = bounds
+        snap.isUserInteractionEnabled = false
+        view.addSubview(snap)
+        homeSnapshot = snap
+        Log.write("win: home snapshot held " + rectText(bounds))
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+            snap.removeFromSuperview()
+            if homeSnapshot === snap { homeSnapshot = nil }
+            Log.write("win: home snapshot released")
+        }
     }
 
     private static func rectText(_ rect: CGRect) -> String {
