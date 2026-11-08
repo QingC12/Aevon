@@ -5917,6 +5917,109 @@ static void AevonScnSelectors(void) {
     AevonScnEmit([NSString stringWithFormat:@"surf: scn sel total=%d", found]);
 }
 
+// MARK: - 0.2.11 五个「问不到」的名字，到底在谁身上
+
+//
+// 0.2.10 的 `surf: scn sel` 只问了 23 个点名的类，Aevon(180) 里五个名字全答
+// `n=0 (none)`：`_openURLCore:display:…`、`sceneWithDefinition:`、`setIdentifier:`、
+// `sceneManagerForDisplayIdentifier:`、`presentedTransientOverlayViewControllers`。
+//
+// 那不是「不存在」，是**问的范围太小**。母版能在同版本系统上跑，它的每条调用点在
+// 真机上就必然存在；我们问不到，就是探针的口径漏了 —— 这条纪律已经被同一形状证过
+// 两次（零参选择子在 `__TEXT,__const` 里、`clientIdentity` 被大小写过滤掉），
+// 这是第三次，所以这次不问「那 23 个类」，问**每一个类**。
+//
+// 两个问题一起答，因为它们导致两种完全不同的下一步：
+//   ① 名字对、宿主不是我们点名的那几个 ⇒ 下一版只换宿主对象，调用面照抄；
+//   ② 名字也变了（TrollOpen 那条链在 17.3.1 上可能已经改名）⇒ 按关键词重新取名：
+//      同时含 `openurl` 与 `display`/`scene` 的方法名，一个不漏地列出来。
+//
+// 全部只读：`class_copyMethodList` + `method_getTypeEncoding`，不建对象、不发消息。
+// 实例方法与类方法都扫：TrollOpen 的自建链是「建定义 → 建请求 → 建场景」，
+// 中间几跳很可能是类方法。
+
+/// 独立预算，理由同 `AevonScnLines`：占别人的行数就是让先跑完的那一半静音另一半。
+static int AevonScnHostLines = 0;
+
+static void AevonScnHostEmit(NSString *line) {
+    if (AevonScnHostLines >= 44) return;
+    AevonScnHostLines += 1;
+    AevonLogRaw(line.UTF8String);
+}
+
+/// 第三问：**每个类**都有没有这六个名字。每个名字只记前三个宿主 —— 第四个之后
+/// 都是子类继承带来的噪声，改 IMP 也永远不该改在继承来的那一条上。
+static void AevonScnHosts(void) {
+    static const char *sels[] = {
+        "_openURLCore:display:animating:activationSettings:origin:withResult:",
+        "sceneWithDefinition:",
+        "setIdentifier:",
+        "sceneManagerForDisplayIdentifier:",
+        "presentedTransientOverlayViewControllers",
+        "createSceneWithDefinition:initialParameters:",
+    };
+    const size_t selCount = sizeof(sels) / sizeof(sels[0]);
+    SEL targets[8];
+    int hitsPer[8] = {0};
+    for (size_t s = 0; s < selCount; s++) targets[s] = sel_registerName(sels[s]);
+
+    int total = objc_getClassList(NULL, 0);
+    if (total <= 0) {
+        AevonScnHostEmit(@"surf: scn host unavailable");
+        return;
+    }
+    Class *list = (Class *)malloc(sizeof(Class) * (size_t)total);
+    if (list == NULL) return;
+    total = objc_getClassList(list, total);
+    int totalHits = 0;
+    int urlHits = 0;
+    for (int i = 0; i < total; i++) {
+        Class cls = list[i];
+        const char *cname = class_getName(cls);
+        if (cname == NULL) continue;
+        // pass 0 = 本类实现的实例方法；pass 1 = 元类上的类方法。
+        for (int pass = 0; pass < 2; pass++) {
+            Class holder = pass == 0 ? cls : object_getClass((id)cls);
+            if (holder == Nil) continue;
+            unsigned int count = 0;
+            Method *methods = class_copyMethodList(holder, &count);
+            if (methods == NULL) continue;
+            for (unsigned int j = 0; j < count; j++) {
+                SEL sel = method_getName(methods[j]);
+                const char *sname = sel_getName(sel);
+                if (sname == NULL) continue;
+                for (size_t s = 0; s < selCount; s++) {
+                    if (!sel_isEqual(sel, targets[s])) continue;
+                    if (hitsPer[s] >= 3) continue;
+                    const char *enc = method_getTypeEncoding(methods[j]);
+                    AevonScnHostEmit([NSString stringWithFormat:@"surf: scn host %s %s %c{%s}",
+                                      sels[s], cname, pass == 0 ? 'i' : 'c',
+                                      enc != NULL ? enc : "?"]);
+                    hitsPer[s] += 1;
+                    totalHits += 1;
+                }
+                // 第二问：改名了的话，名字里仍会留着这两个词。
+                if (urlHits < 14 && strcasestr(sname, "openurl") != NULL &&
+                    (strcasestr(sname, "display") != NULL || strcasestr(sname, "scene") != NULL)) {
+                    const char *enc = method_getTypeEncoding(methods[j]);
+                    AevonScnHostEmit([NSString stringWithFormat:@"surf: scn urln %s.%s{%s}",
+                                      cname, sname, enc != NULL ? enc : "?"]);
+                    urlHits += 1;
+                }
+            }
+            free(methods);
+        }
+    }
+    free(list);
+    for (size_t s = 0; s < selCount; s++) {
+        if (hitsPer[s] == 0) {
+            AevonScnHostEmit([NSString stringWithFormat:@"surf: scn host none %s", sels[s]]);
+        }
+    }
+    AevonScnHostEmit([NSString stringWithFormat:@"surf: scn host total=%d urln=%d",
+                      totalHits, urlHits]);
+}
+
 /// 入口。装配前调用一次；跑在低优先级全局队列上。
 void AevonActivateSurfaceCensus(void) {
     static int done = 0;
@@ -5956,6 +6059,8 @@ void AevonActivateSurfaceCensus(void) {
         AevonScnExists();
         AevonScnNames();
         AevonScnSelectors();
+        // 0.2.11 — 0.2.10 那五个问答 none 的名字，改成「全类扫」再问一次。
+        AevonScnHosts();
         AevonLogRaw("surf: end");
     });
 }

@@ -791,6 +791,15 @@ def main():
                   b"surf: scn names total=%d",
                   b"surf: scn sel %s n=%d",
                   b"surf: scn sel total=%d",
+                  # 0.2.11 —— 0.2.10 那五个答 none 的名字改成「全类扫」。三条证词：
+                  #   host <sel> <cls> i|c{enc}   名字在、宿主是谁、形状（改 IMP 前必须知道）
+                  #   host none <sel>             全类都没有 —— 那就是真不在，得换宿主进程
+                  #   urln <cls>.<sel>{enc}       按 openurl + display|scene 重新取名（防改名）
+                  # 仍然只读。产物里缺这三条，等于这一版什么都没问。
+                  b"surf: scn host %s %s %c{%s}",
+                  b"surf: scn host none %s",
+                  b"surf: scn host total=%d urln=%d",
+                  b"surf: scn urln %s.%s{%s}",
                   b"notify: forward adopt b=%s op=%s",
                   b"win: ability app forceBg=%d ctrl forceBg=%d app dehost=%d ctrl dehost=%d",
                   b"win: ability scene deact=%d/%d overlay=%d txn=%d openurl=%d",
