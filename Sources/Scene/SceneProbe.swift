@@ -1228,7 +1228,7 @@ zStackParticipantDidChange:
         clearHosted()
     }
 
-    /// 4 秒内找 scene。
+    /// 6 秒内找 scene。
     ///
     /// 0.0.58 — 前 30 拍从 250 ms 压到 60 ms。原来那 250 ms 是「一秒看四次」，
     /// 而场景从挂起启动到出现通常只要 120~300 ms —— 也就是**第一次看见它，
@@ -1237,8 +1237,18 @@ zStackParticipantDidChange:
     /// 成了整条链上最贵的一段延迟。
     ///
     /// 1.8 秒之后退回 250 ms：那时候还没 scene，就是真没起来，没必要每秒查
-    /// 十七次到第四秒。
+    /// 十七次到第六秒。
+    ///
+    /// 0.2.3 — 4 秒 → 6 秒，并且**每秒写一行现场**（`win: wait scene`）。
+    /// Aevon(172) 里高德两次都是「挂起启动 1 ms 成功、4 秒零 scene」，而微信
+    /// 591 ms、小红书 633 ms、汽水音乐 962 ms 都正常 —— 说明这不是「慢」，是
+    /// 高德这一类根本不按挂起启动建 scene。4 秒这个数字从来没有依据，只是当年
+    /// 拍的；而缺少现场让「进程没起」和「进程起了没 scene」分不开。诊断行同时
+    /// 报 App 的 pid 与 manager 里全部 scene 标识，一次就能分清三种情况：
+    /// pid=-1 = 进程没起；pid 有值但列表里没有它 = 起了没 scene；列表里有但
+    /// 名字不含 bundle id = 我们的匹配口径错了。
     private static func pollForScene(_ bundleID: String, ticks: Int, start: Date,
+                                     probed: Int = 0,
                                      fallback: @escaping (String) -> Void) {
         if let scene = sceneFor(bundleID) {
             unmark()
@@ -1270,7 +1280,14 @@ zStackParticipantDidChange:
             }
             return
         }
-        guard Date().timeIntervalSince(start) < 4.0 else {
+        // 0.2.3 — 每秒一行现场（第 0 秒不打，那一拍必然还没有）。
+        let elapsed = Int(Date().timeIntervalSince(start))
+        var seen = probed
+        if elapsed > seen {
+            seen = elapsed
+            probeScenes(bundleID, seconds: elapsed)
+        }
+        guard Date().timeIntervalSince(start) < 6.0 else {
             unmark()
             AevonHookDisarm(bundleID)
             // 0.2.1 — 这一条出口原来不看遮挡，于是锁屏上点一条通知会走到全屏兜底。
@@ -1282,15 +1299,42 @@ zStackParticipantDidChange:
                 return
             }
             Log.write("win: icon " + bundleID + " produced no scene")
-            fallback("no scene in 4s")
+            fallback("no scene in 6s")
             return
         }
         // 0.0.59 — 60 → 40 ms。枚举一次 scene manager 只有几个对象，成本远小于
         // 这一拍白等的时间；前 30 拍（1.2 s）覆盖了「scene 该出现」的全部窗口。
         let gap: Double = ticks < 30 ? 0.04 : 0.25
         DispatchQueue.main.asyncAfter(deadline: .now() + gap) {
-            pollForScene(bundleID, ticks: ticks + 1, start: start, fallback: fallback)
+            pollForScene(bundleID, ticks: ticks + 1, start: start, probed: seen,
+                         fallback: fallback)
         }
+    }
+
+    /// 0.2.3 — 「等 scene」这条路上的一次现场快照。**只读，只写日志。**
+    ///
+    /// 三个读数回答三个不同的问题，缺一个就分不开失败：
+    /// - `app=`  该 bundle 的进程 pid；`-1` = 进程根本没起（挂起启动被吞掉了）。
+    /// - `n=`    manager 里 scene 的总数。0 说明连桌面都不在（不该发生）。
+    /// - 列表    每条 scene 的标识（去掉 `sceneID:` 前缀，只留前 56 字节）。
+    ///   pid 有值但列表里没有这个 App ⇒ 进程在、scene 没建（挂起启动对这类
+    ///   App 无效）。列表里有但名字不含 bundle id ⇒ `sceneFor` 的匹配口径错。
+    ///
+    /// 每次等待最多 6 行（第 1~6 秒），一行十几个字节的读数，不打程序结构。
+    private static func probeScenes(_ bundleID: String, seconds: Int) {
+        let pid = AevonAppPid(bundleID)
+        var names: [String] = []
+        if let manager = AevonSceneManager() as? NSObject {
+            AevonEnumerateScenes(manager) { scene in
+                guard let scene = scene as? NSObject else { return }
+                let ident = value(of: scene, "identifier").map { String(describing: $0) } ?? "?"
+                let short = ident.replacingOccurrences(of: "sceneID:", with: "")
+                names.append(String(short.prefix(56)))
+            }
+        }
+        let joined = names.prefix(6).joined(separator: "|")
+        Log.write(String(format: "win: wait scene %lds app=%d n=%ld %@",
+                         seconds, pid, names.count, joined))
     }
 
     /// The scene that answers to this bundle id. Matched on the identifier

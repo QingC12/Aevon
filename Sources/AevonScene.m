@@ -75,6 +75,37 @@ void AevonEnumerateScenes(id manager, void (^block)(id scene)) {
     call(manager, sel, block);
 }
 
+/// 0.2.3 — 「等 scene」那几秒里，这个 App 的进程到底起没起。
+///
+/// 只回答一个问题：`pid` 有值 = 进程在；`-1` = 进程不在（挂起启动对它没生效）。
+/// 它与 scene 列表拼在一起才能把三种失败分开（见 `SceneProbe.probeScenes`）。
+///
+/// 全部经 `respondsToSelector:` 问过才调用，整段 `@try` —— 这是诊断路上的一个
+/// 读数，它不许把进程带走。取不到的每一种情况都折成 `-1`，与「进程不在」同值：
+/// 诊断行里少一个区分，好过为了区分去猜一个可能不存在的 selector。
+int AevonAppPid(NSString *bundleID) {
+    if (bundleID.length == 0) return -1;
+    @try {
+        Class cls = NSClassFromString(@"SBApplicationController");
+        if (cls == Nil) return -1;
+        SEL sharedSel = NSSelectorFromString(@"sharedInstance");
+        if (![cls respondsToSelector:sharedSel]) return -1;
+        id shared = ((id (*)(id, SEL))objc_msgSend)((id)cls, sharedSel);
+        if (shared == nil) return -1;
+        SEL appSel = NSSelectorFromString(@"applicationWithBundleIdentifier:");
+        if (![shared respondsToSelector:appSel]) return -1;
+        id app = ((id (*)(id, SEL, id))objc_msgSend)(shared, appSel, bundleID);
+        if (app == nil) return -1;
+        SEL pidSel = NSSelectorFromString(@"pid");
+        if (![app respondsToSelector:pidSel]) return -1;
+        // 标量返回值只走强转过的函数指针读 x0，不用 `perform`（它会把一个
+        // `int` 当成对象指针 retain —— 0.1.38 那五次安全模式就是这么来的）。
+        return ((int (*)(id, SEL))objc_msgSend)(app, pidSel);
+    } @catch (__unused NSException *exception) {
+        return -1;
+    }
+}
+
 // MARK: - Notes
 
 /// Notes are collected here and drained by Swift in one go, so the log gets

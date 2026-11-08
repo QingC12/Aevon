@@ -20,6 +20,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// "this system will not do it" and logs it.
 void AevonEnumerateScenes(id _Nullable manager, void (^_Nullable block)(id _Nullable scene));
 id _Nullable AevonSceneManager(void);
+/// 0.2.3 — 「等 scene」现场快照用：这个 bundle 的进程 pid。取不到一律 -1。
+int AevonAppPid(NSString *_Nullable bundleID);
 NSString *_Nullable AevonTakeNotes(void);
 
 /// 0.0.16 / 0.0.22 — the mother ship's route: a scene's `uiPresentationManager`

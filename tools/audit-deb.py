@@ -606,8 +606,11 @@ def main():
                   b"win: icon card closed by cover, no fallback",
                   # 0.2.1 — 4 秒等不到场景、这一刻系统界面还盖着 ⇒ 一个字节都不开。
                   b"win: icon card gave up under cover, no fallback",
-                  # 0.2.1 — 全屏兜底的滑动窗口（同一个 App 60 秒最多 2 次）。
-                  b"ring: launch skip ",
+                  # 0.2.3 — 卡片没起来时只留一行证词，**不再全屏兜底**
+                  # （Aevon(172)：高德全屏打开加载画面一出就崩）。
+                  b"ring: card declined (",
+                  # 0.2.3 — 等 scene 那几秒的现场快照（pid + 全部 scene 标识）。
+                  b"win: wait scene %lds app=%d n=%ld %@",
                   b"win: canvas revived ",
                   b"win: revive after unlock tick=",
                   # 0.1.61 — 键盘态的**进与出**都在。0.1.60 只留下了「进」：
@@ -844,7 +847,15 @@ def main():
                  # 「通知 → 浮窗」都在建好之后自己拆了，用户看到「不全屏也不出窗」。
                  # 任何一条还能 grep 到，就说明卡片又被遮挡判据杀了。
                  b"win: card closed at once (system cover up)",   # gone
-                 b"win: card closed by system cover"):            # gone
+                 b"win: card closed by system cover",             # gone
+                 # 0.2.3 — 整套「全屏兜底」删除（Aevon(172)：高德两次都是
+                 # 「4 秒无 scene → 全屏 → 加载画面一出就崩回桌面」）。兜底把
+                 # 「什么都没发生」换成了「App 闪退」，而且那 10 秒同步 XPC 正是
+                 # Aevon(169) 整机卡死的发动机。任何一条还能 grep 到，就说明那条
+                 # 腿又接回去了。
+                 b"ring: launch done t=%ldms",                    # gone
+                 b"ring: launch skip ",                           # gone
+                 b"ring: card route declined ("):                 # gone
         if gone in dylib_early:
             bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "
                 "back (hot zone 0.1.18 / summon bar 0.1.24 / cover lock gate 0.1.90)")
@@ -1702,7 +1713,6 @@ def main():
                   #   一条带计时的完整字面量（3 秒卡顿的分段取证要靠它），前缀本身
                   #   不再是独立字面量，所以断言跟着换成整条。
                   b"win: icon launch %@ suspended door=%ld t=%ldms wait=%ldms",
-                  b"ring: launch done t=%ldms",
                   b"win: icon scene up after ",
                   # 0.0.59 — 冷启动首帧。三条缺一不可：
                   # `launch state cs=` 是建卡那一刻的判据读数（contentState、

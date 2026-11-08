@@ -1380,20 +1380,25 @@ final class RingHost: NSObject {
 
     /// The disc's activate path. `AevonWindowManager.launchAndOpen` is the old
     /// name; the hook routes it here. Same contract as 0.0.38's ring tap: the
-    /// card route first, a plain full-screen launch as the fallback — a tap
-    /// must never be a dead end.
+    /// card route first.
+    ///
+    /// 0.2.3 — 这里原来有一句 `self?.launch(bundleID)`：卡片没起来就全屏打开。
+    /// Aevon(172) 证明那句话现在是**净损害**：高德两次都是「4 秒等不到 scene →
+    /// 全屏兜底 → 加载画面一出就崩回桌面」。也就是说兜底把「什么都没发生」换成了
+    /// 「App 闪退」。母版只在「排除表命中」时才回落全屏 —— 它不会为了一次失败的
+    /// 承载把 App 硬拉到前台。等我们知道这篇 App 为什么不出 scene 之前，
+    /// 一个字节都不开，只把原因写在日志里。
     private func openFromRing(_ bundleID: String) {
         guard !bundleID.hasPrefix("placeholder.") else { return }
-        SceneProbe.openCard(bundleID) { [weak self] reason in
-            Log.write("ring: card route declined (" + reason + "), opening " + bundleID)
-            self?.launch(bundleID)
+        SceneProbe.openCard(bundleID) { reason in
+            Log.write("ring: card declined (" + reason + "), no fallback " + bundleID)
         }
     }
 
     /// 0.1.40 — 通知点击那条路。
     ///
     /// 和圆盘图标同一个终点（`openFromRing`），只是多一行来路证词：日志里
-    /// `notify: open <bundle>` 之后紧跟 `ring: card route declined …` 时，
+    /// `notify: open <bundle>` 之后紧跟 `ring: card declined …` 时，
     /// 才能分清「通知这条路没通」和「通了但卡片没起来」。
     func openFromNotification(_ bundleID: String) {
         guard !bundleID.isEmpty, !bundleID.hasPrefix("placeholder.") else { return }
@@ -1401,61 +1406,14 @@ final class RingHost: NSObject {
         openFromRing(bundleID)
     }
 
-    /// 全屏兜底的专用串行队列。
-    ///
-    /// 0.2.1 — `openApplicationWithBundleID:` 是同步 XPC，必须离开主线程。
-    /// Aevon(169) 里这条路返回了 10 次，10 次**全是 10 秒整**（10 004~10 008 ms），
-    /// 也就是每次都撞 XPC 超时；它跑在主线程上，于是 2 分 07 秒里主线程累计停了
-    /// 100 秒 —— 用户看到的就是「整机卡死，只能等它自己恢复」。串行是必要的：
-    /// 同一时刻只允许一路调用者进 LaunchServices。
-    private static let launchQueue = DispatchQueue(label: "com.aevon.ring.launch",
-                                                   qos: .userInitiated)
-
-    /// 每个 App 最近的回落时刻。滑动窗口，60 秒内最多 2 次 —— 不用「一次开机 N 次」
-    /// 那种配额：用完就永久失效，0.1.93 已经在别处吃过这个亏。
-    private static var launchRecent: [String: [Date]] = [:]
-
-    /// The old behaviour, kept as the fallback and unchanged: the same private
-    /// entry point SpringBoard itself uses. Guarded at every step.
-    private func launch(_ bundleID: String) {
-        guard let meta = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type else {
-            Log.write("ring: LSApplicationWorkspace unavailable, cannot open \(bundleID)")
-            return
-        }
-        let defaultSelector = NSSelectorFromString("defaultWorkspace")
-        guard meta.responds(to: defaultSelector),
-              let workspace = meta.perform(defaultSelector)?
-                  .takeUnretainedValue() as? NSObject else { return }
-
-        let openSelector = NSSelectorFromString("openApplicationWithBundleID:")
-        guard workspace.responds(to: openSelector) else { return }
-
-        // 0.2.1 — 同一个 App 60 秒内最多回落 2 次。卡片连续开不出来时，这一条是
-        // 唯一的减速带：没有它，反复点同一个图标就是反复 10 秒的 XPC。
-        let now = Date()
-        var recent = (RingHost.launchRecent[bundleID] ?? [])
-            .filter { now.timeIntervalSince($0) < 60 }
-        guard recent.count < 2 else {
-            Log.write("ring: launch skip " + bundleID + " (recent " + String(recent.count) + ")")
-            return
-        }
-        recent.append(now)
-        RingHost.launchRecent[bundleID] = recent
-
-        Log.write("ring: launch \(bundleID)")
-        // 0.2.0 — 这一句是同步 XPC：`openApplicationWithBundleID:` 要等 FrontBoard
-        // 把这次打开处理完才回来。Aevon(168) 的 22:30:26 之后有 6 条连续的
-        // `win: main stall ~3000ms`，正好落在这一段窗口里。
-        //
-        // 0.2.1 — 那一段现在有答案了：Aevon(169) 的 10 次调用**每次都是 10 秒整**，
-        // 所以卡的就是它本身，不是旁边的轮询。既然它动不动就超时，就不能留在主线程。
-        let launchAt = CFAbsoluteTimeGetCurrent()
-        RingHost.launchQueue.async {
-            _ = workspace.perform(openSelector, with: bundleID)
-            let launchMs = Int((CFAbsoluteTimeGetCurrent() - launchAt) * 1000)
-            Log.write(String(format: "ring: launch done t=%ldms", launchMs))
-        }
-    }
+    // 0.2.3 — 这里原来有整套「全屏兜底」：`launchQueue` 串行队列、`launchRecent`
+    // 60 秒 2 次的滑动窗口，以及 `launch(_:)` 里那句同步 XPC
+    // `openApplicationWithBundleID:`（Aevon(169) 里 10 次全是 10 秒整，主线程
+    // 2 分 07 秒停了 100 秒）。整段删除，调用的那一头也删了 —— 保留一个没人调用
+    // 的全屏入口，下一版又会有人把它接回去（Aevon(172)：高德一接就闪退）。
+    //
+    // 将来若要做母版那种「排除表命中 ⇒ 直接全屏」，那是一条**新**路径：进来之前
+    // 就该知道这个 App 不能承载，而不是承载失败之后再把 App 硬拉到前台。
 
     /// 圆心（四宫格）→ 应用选择面板（0.0.56）。
     ///
