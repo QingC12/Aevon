@@ -1375,10 +1375,26 @@ zStackParticipantDidChange:
         if let scene = listedScene(bundleID) { return scene }
         guard let raw = AevonSeenSceneForBundle(bundleID) else { return nil }
         guard let seen = raw as? NSObject else { return nil }
+        // 0.2.7 — Mango 的 `pollSceneContentThenFade:remaining:`：判**内容**就绪，
+        // 不判「对象存在」。
+        //
+        // 0.2.4 起第二条口径能拿到「FrontBoard 已登记、客户端还没连上」的空壳，
+        // 拿到就直接建卡 —— 建出来的是一张黑卡（用户看到的就是「小窗是黑的」）。
+        // 空壳的两个读数都是 0：`accessibilitySceneIsRunningInForeground` 与
+        // `accessibilitySceneIsForegroundVisible`。两个都 0 就**不返回**，让
+        // `pollForScene` 继续等（重试与 12 秒上限都不动）；只要有一个是 1 就照旧。
+        //
+        // 这条只影响「manager 列不出来、只有 hook 表认识」的那一类 scene ——
+        // 正常 App 全走第一条口径，一个字节都没变。
+        let running = AevonBoolOf(seen, "accessibilitySceneIsRunningInForeground")
+        let visible = AevonBoolOf(seen, "accessibilitySceneIsForegroundVisible")
+        let shell = (running == 0 && visible == 0)
         Log.write("win: scene from hook table " + bundleID
                   + " seen=" + String(AevonSeenCountOf())
-                  + " running=" + flag(AevonBoolOf(seen, "accessibilitySceneIsRunningInForeground"))
-                  + " visible=" + flag(AevonBoolOf(seen, "accessibilitySceneIsForegroundVisible")))
+                  + " running=" + flag(running)
+                  + " visible=" + flag(visible)
+                  + (shell ? " shell=1 (deferred, no black card)" : ""))
+        if shell { return nil }
         return seen
     }
 

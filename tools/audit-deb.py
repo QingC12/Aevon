@@ -748,6 +748,30 @@ def main():
                   b"notify: clear b=%s via=%s",
                   b"notify: clear b=%s capture=%s id=absent",
                   b"notify: clear b=%@ via=capture only",
+                  # 0.2.7 —— 三家综合（TrollOpen / Myrtle / Mango）这一版的四条证词。
+                  #
+                  #   shareprobe   分享那一拍的全部现场：来源、payload 类型、结果块形状、
+                  #                挂起键读回值、settings 四个能力、options 全部键名。
+                  #                它存在的理由就是「分享这条路从来没有真机现场」——
+                  #                快照有 32 拍预算，分享常排在第 11 拍之后。
+                  #   forward adopt 第二道认领（同一 App 2 秒内）。Aevon(173) 里 op=trusted
+                  #                转发出去之后，op=untrusted 那条又被转发一次，多出来
+                  #                的那次原实现调用就是把 App 拉上全屏的那一次。
+                  #   win: ability 三家各自的核心能力在 iOS 17.3.1 上还在不在
+                  #                （forceBackgrounded / _setDeactivationReasons /
+                  #                 SBTransientOverlayWindow / 进程事务 / _openURLCore）。
+                  #                只问不调，问错也只是 0。
+                  b"notify: shareprobe b=%s src=%s pay=%s form=%c fwd=%d origin=%s ac=%s",
+                  b"notify: forward adopt b=%s op=%s",
+                  b"win: ability app forceBg=%d ctrl forceBg=%d app dehost=%d ctrl dehost=%d",
+                  b"win: ability scene deact=%d/%d overlay=%d txn=%d openurl=%d",
+                  # settings 能力行补了两个读数（getFlag / n）。0.2.6 之前它是「一次开机
+                  # 只记一次」，分享换一条路进来时日志里什么都没有。
+                  b"notify: fwd settings c=%s setSusp=%d setFlag=%d getSusp=%d getFlag=%d n=%d",
+                  # 放行侧独立预算（原来与通知共用 6 条，第三次点击之后永久静默）。
+                  b"notify: divert pass b=%s why=%s n=%d",
+                  # Mango 的「判内容就绪」：空壳不建卡，继续等。
+                  b" shell=1 (deferred, no black card)",
                   # 这一对是三家逆向（2026-11-08）里同时出现在 `__objc_selrefs` 的选择子：
                   # TrollOpen 1.5.2 就是拿它们做「点通知 → 清掉那一条」的。选择子本身
                   # 必须在产物里 —— 名字写错一位，钩子装不上，而日志只会说 failed。

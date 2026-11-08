@@ -3149,6 +3149,13 @@ static BOOL AevonDivertExhausted(void) {
 /// 两个预算合用一个计数器，先跑完的那个会把另一个静音。
 static int AevonDivertNotes = 0;
 
+/// 0.2.7 — 放行侧（`notify: divert pass`）自己的预算。
+///
+/// 与 `AevonDivertNotes` 分开是必须的：通知路径每点一次都会写一到两行
+/// （`capture only` / `clear=noid`），共用 6 条预算的话，第三次点击之后
+/// 放行侧就永久静默 —— 分享那条路在 Aevon(175) 里就是这么消失的。
+static int AevonPassDivertNotes = 0;
+
 // MARK: - 浮窗黑名单（0.2.4）
 
 /// 名单里的 App **不进浮窗，也不拦它的打开请求** —— 一切按系统原生走。
@@ -3550,6 +3557,93 @@ static int AevonOpenSlot(SEL cmd) {
     return -1;
 }
 
+/// 0.2.7 — `options` 的键名列表，抽成独立函数。
+///
+/// 原来是写在 `AevonOpenSnapshot` 里的内联循环，且被 `AevonOpenKeyNotes < 3`
+/// 卡着只打三拍。分享那条路在真机上通常排在通知之后，等它到的时候那三拍
+/// 早被用掉了 —— 于是「分享时 options 里到底有什么键」这件事，在日志里
+/// 一次都看不到。Aevon(173) 那次 `keys=` 是空的，不是因为真的没键。
+///
+/// 抽出来之后有两处调用：快照（配额照旧 3 次）与分享现场行（独立配额）。
+static void AevonOpenKeysOf(id options, char *out, size_t size) {
+    if (out == NULL || size == 0) return;
+    out[0] = '\0';
+    @try {
+        id dump = [options isKindOfClass:[NSDictionary class]]
+                ? options
+                : AevonActRead(options, @"dictionary");
+        if (![dump isKindOfClass:[NSDictionary class]]) return;
+        size_t used = 0;
+        for (id key in (NSDictionary *)dump) {
+            if (![key isKindOfClass:[NSString class]]) continue;
+            const char *raw = [(NSString *)key UTF8String];
+            if (raw == NULL) continue;
+            size_t need = strlen(raw);
+            if (used + need + 2 >= size) break;
+            if (used > 0) out[used++] = ',';
+            memcpy(out + used, raw, need);
+            used += need;
+            out[used] = '\0';
+        }
+    } @catch (NSException *exception) {
+        out[0] = '\0';
+    }
+}
+
+/// 0.2.7 — 分享现场行。**只读，只写日志。**
+///
+/// 为什么单独一行、而不是往 `notify: hit` 里加字段：hit 有 32 拍 / 每槽 10 拍
+/// 的总预算，分享常常排在第 11 拍之后，根本轮不到。而分享这条路是三家综合
+/// （Myrtle 的 rehost + 参数化重试、Mango 的判内容就绪、TrollOpen 的自建 scene）
+/// 里唯一还没拿到真机现场的一段 —— 没有这行，下一版还是只能猜。
+///
+/// 记录：bundle / 来源进程 / payload 类型 / 动作类名 / LaunchOrigin /
+///      结果块形状 / 挂起键读回值 / settings 四个能力 / options 全部键。
+static int AevonShareNotes = 0;
+static void AevonOpenShareNote(id request, id options, id settings,
+                               char form, int forwarded) {
+    if (AevonShareNotes >= 12) return;
+    AevonShareNotes += 1;
+    char bundleText[56], sourceText[56], actionText[56], originText[56];
+    char keys[200], clsText[48];
+    bundleText[0] = sourceText[0] = actionText[0] = originText[0] = clsText[0] = '\0';
+    keys[0] = '\0';
+    @try {
+        AevonActName(AevonOpenBundleOf(request), bundleText, sizeof(bundleText));
+        AevonActName(AevonOpenSourceApp(request, options), sourceText, sizeof(sourceText));
+        AevonActName(AevonOpenFirstAction(request, options), actionText, sizeof(actionText));
+        AevonActName(AevonOpenAnyValue(request, options, @"__LaunchOrigin"),
+                     originText, sizeof(originText));
+        AevonOpenKeysOf(options, keys, sizeof(keys));
+        const char *cls = settings != nil ? object_getClassName(settings) : NULL;
+        snprintf(clsText, sizeof(clsText), "%s", cls != NULL ? cls : "-");
+        int setSusp = 0, setFlag = 0, getSusp = 0, getFlag = 0;
+        if (settings != nil) {
+            setSusp = [settings respondsToSelector:sel_registerName("setActivateSuspended:")] ? 1 : 0;
+            setFlag = [settings respondsToSelector:
+                       sel_registerName("setFlag:forActivationSetting:")] ? 1 : 0;
+            getSusp = [settings respondsToSelector:sel_registerName("activateSuspended")] ? 1 : 0;
+            getFlag = [settings respondsToSelector:
+                       sel_registerName("flagForActivationSetting:")] ? 1 : 0;
+        }
+        id susp = [options isKindOfClass:[NSDictionary class]]
+                ? [(NSDictionary *)options objectForKey:@"__ActivateSuspended"] : nil;
+        int suspVal = [susp isKindOfClass:[NSNumber class]] ? [(NSNumber *)susp intValue] : -1;
+        char line[620];
+        snprintf(line, sizeof(line),
+                 "notify: shareprobe b=%s src=%s pay=%s form=%c fwd=%d origin=%s ac=%s"
+                 " susp=%d set=%s setSusp=%d setFlag=%d getSusp=%d getFlag=%d keys=%s",
+                 bundleText, sourceText, AevonOpenPayloadKind(request, options),
+                 form != 0 ? form : '-', forwarded, originText,
+                 actionText[0] != '\0' ? actionText : "-",
+                 suspVal, clsText, setSusp, setFlag, getSusp, getFlag,
+                 keys[0] != '\0' ? keys : "-");
+        AevonLogRaw(line);
+    } @catch (NSException *exception) {
+        AevonLogRaw("notify: shareprobe threw");
+    }
+}
+
 /// 把这一拍看见的东西拼成一行。**只读**：没有一次 retain、没有一次写盘。
 ///
 /// 字段（下一份日志按这个读）：
@@ -3600,24 +3694,9 @@ static void AevonOpenSnapshot(int slot, id request, id options,
         if (url != nil) AevonActName(url, urlText, sizeof(urlText));
 
         if (AevonOpenKeyNotes < 3) {
-            id dump = [options isKindOfClass:[NSDictionary class]]
-                    ? options
-                    : AevonActRead(options, @"dictionary");
-            if ([dump isKindOfClass:[NSDictionary class]]) {
-                AevonOpenKeyNotes += 1;
-                size_t used = 0;
-                for (id key in (NSDictionary *)dump) {
-                    if (![key isKindOfClass:[NSString class]]) continue;
-                    const char *raw = [(NSString *)key UTF8String];
-                    if (raw == NULL) continue;
-                    size_t need = strlen(raw);
-                    if (used + need + 2 >= sizeof(keys)) break;
-                    if (used > 0) keys[used++] = ',';
-                    memcpy(keys + used, raw, need);
-                    used += need;
-                    keys[used] = '\0';
-                }
-            }
+            // 0.2.7 — 循环搬进 `AevonOpenKeysOf`（分享现场行要用同一个口径）。
+            AevonOpenKeyNotes += 1;
+            AevonOpenKeysOf(options, keys, sizeof(keys));
         }
 
         snprintf(out, size,
@@ -4799,19 +4878,26 @@ static CFAbsoluteTime AevonOpenForwardAt = 0;
 /// 选择子。**问是不花钱的**：这里只 `respondsToSelector:`，一个都不调 ——
 /// 有结果才在下一版接上去，没结果就把这条排除掉。
 static void AevonForwardProbeSettings(id settings) {
-    static int done = 0;
-    if (done) return;
-    done = 1;
+    // 0.2.7 — 从「一次开机只记一次」改成「前 12 次都记」。
+    //
+    // 原来那个 `done` 让这行在开机第一次转发之后永久消失。Aevon(173) 里它确实
+    // 出现过一次（`setSusp=0 setFlag=1`），但下一次换一条路进来时，settings 的
+    // 类名与能力可能不一样，日志里却什么都没有 —— 而「分享走哪个宿主、宿主上
+    // 有没有挂起口」正是本版要回答的问题。
+    static int notes = 0;
+    if (notes >= 12) return;
+    notes += 1;
     const char *cls = settings != nil ? class_getName([settings class]) : NULL;
-    int suspSet = 0, flagSet = 0, suspGet = 0;
+    int suspSet = 0, flagSet = 0, suspGet = 0, flagGet = 0;
     if (settings != nil) {
         suspSet = [settings respondsToSelector:sel_registerName("setActivateSuspended:")] ? 1 : 0;
         flagSet = [settings respondsToSelector:sel_registerName("setFlag:forActivationSetting:")] ? 1 : 0;
         suspGet = [settings respondsToSelector:sel_registerName("activateSuspended")] ? 1 : 0;
+        flagGet = [settings respondsToSelector:sel_registerName("flagForActivationSetting:")] ? 1 : 0;
     }
     AevonLogRaw([[NSString stringWithFormat:
-                  @"notify: fwd settings c=%s setSusp=%d setFlag=%d getSusp=%d",
-                  cls != NULL ? cls : "-", suspSet, flagSet, suspGet] UTF8String]);
+                  @"notify: fwd settings c=%s setSusp=%d setFlag=%d getSusp=%d getFlag=%d n=%d",
+                  cls != NULL ? cls : "-", suspSet, flagSet, suspGet, flagGet, notes] UTF8String]);
 }
 
 static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id options,
@@ -4872,11 +4958,53 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
     int passThrough = (request != nil && request == AevonOpenForwardMark &&
                        AevonOpenForwardAt > 0 &&
                        CFAbsoluteTimeGetCurrent() - AevonOpenForwardAt < 2.0);
+    // 0.2.7 — 第二道认领：**同一个 App 的第二次请求**也当我们自己人。
+    //
+    // Aevon(173) 的真机现场（分享给 QQ，一行一行都在）：
+    //   notify: forward susp=1 keys=4                      ← op=trusted 那条转发出去
+    //   notify: forward pass b=com.tencent.mqq op=user      ← 指针认领成功
+    //   notify: divert b=com.tencent.mqq op=untrusted why=share … fwd=1
+    //
+    // 第三条说明 **op=untrusted 这条又被分流、又转发了一次**。它不是同一个对象
+    // ——系统在 trusted → untrusted 之间重建了 request —— 所以指针那条认领拦不住
+    // 它。多转发一次就是多调一次原实现，也就是**多一次前台激活**：卡片里一个、
+    // 屏幕上又一个，用户看到的就是「小窗 + 全屏」。
+    //
+    // 三家的共同意识是「这次打开是我自己发起的」（Myrtle 甚至把「打开理由」做成
+    // 贯穿到完成回调的参数）。这里用最便宜的形状：**2 秒内 + 同一个 bundle**
+    // 就算自己人，认领后立刻把窗口关掉（一次有效），不 retain 任何对象。
+    //
+    // 只比 bundle 字符串，不碰 payload 类型：分享那条链上后续请求的 payload 会被
+    // 系统改写，拿它当条件会刚好把要认的那一条漏掉。
+    int adopted = 0;
+    if (!passThrough && request != nil && AevonOpenForwardMark != nil &&
+        AevonOpenForwardAt > 0 &&
+        CFAbsoluteTimeGetCurrent() - AevonOpenForwardAt < 2.0) {
+        id mineBundle = AevonOpenBundleOf(AevonOpenForwardMark);
+        id nowBundle = AevonOpenBundleOf(request);
+        if ([mineBundle isKindOfClass:[NSString class]] &&
+            [nowBundle isKindOfClass:[NSString class]] &&
+            [(NSString *)mineBundle isEqualToString:(NSString *)nowBundle]) {
+            adopted = 1;
+        }
+    }
     if (passThrough) {
         verdict = 0;
         why = "fwd";
         id pb = AevonOpenBundleOf(request);
         snprintf(line, sizeof(line), "notify: forward pass b=%s op=%s",
+                 [pb isKindOfClass:[NSString class]] ? [pb UTF8String] : "-",
+                 slot >= 0 ? AevonOpenTargets[slot].tag : "?");
+        AevonLogRaw(line);
+        line[0] = '\0';
+    } else if (adopted) {
+        // 认领一次就失效：2 秒窗口留给「打开请求的后续几条」，不留到下一次点击。
+        AevonOpenForwardAt = 0;
+        AevonOpenForwardMark = nil;
+        verdict = 0;
+        why = "adopt";
+        id pb = AevonOpenBundleOf(request);
+        snprintf(line, sizeof(line), "notify: forward adopt b=%s op=%s",
                  [pb isKindOfClass:[NSString class]] ? [pb UTF8String] : "-",
                  slot >= 0 ? AevonOpenTargets[slot].tag : "?");
         AevonLogRaw(line);
@@ -4967,6 +5095,8 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                               AevonOpenPayloadKind(request, options), forwarded,
                               AevonDivertCount]
                              UTF8String]);
+                // 0.2.7 — 分享现场行（独立配额 12，不受快照那 32 拍影响）。
+                AevonOpenShareNote(request, options, settings, form, forwarded);
             } else {
                 // 0.1.99 — 先取证结构（哪一跳断），再按老路取标识。两件事都只读。
                 AevonClearProbe(request, options);
@@ -5044,10 +5174,17 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
         }
         // 「认出来了但没分流」才是需要解释的：开关、上限、取不到目标。
         // `plain`/`nobundle` 是常态（点图标、分享面板），一行都不写。
+        //
+        // 0.2.7 — 这里原来与通知那两行共用 `AevonDivertNotes < 6`。通知路径每次
+        // 点击都会写一到两行，六条预算在第三次点击之后就用光了 —— 之后任何一次
+        // 「认出来了却没分流」在日志里都是静默的。分享这条路正是这么丢掉现场的：
+        // Aevon(175) 整份日志一条 `notify: pass` 都没有，不是因为没发生，
+        // 是因为配额早被通知吃了。两条各自独立计数。
         if (strcmp(why, "plain") != 0 && strcmp(why, "nobundle") != 0 &&
-            AevonDivertNotes < 6 && line[0] == '\0') {
-            AevonDivertNotes += 1;
-            snprintf(line, sizeof(line), "notify: divert pass b=%s why=%s", bundle, why);
+            AevonPassDivertNotes < 20 && line[0] == '\0') {
+            AevonPassDivertNotes += 1;
+            snprintf(line, sizeof(line), "notify: divert pass b=%s why=%s n=%d",
+                     bundle, why, AevonPassDivertNotes);
         }
     }
 
@@ -5068,6 +5205,58 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
 /// 四道闸按「最便宜且最能提前止损」的顺序排：方法在不在 → 编码是否逐字节等于
 /// 真机普查到的那个 → 是不是 SBMainWorkspace 自己实现的 → 拿不拿得到原实现。
 /// 任何一道不过都只写一行日志，一次 `method_setImplementation` 都不做。
+/// 0.2.7 — 三家综合要用到的能力面，一次开机问一遍。**只问，一个都不调。**
+///
+/// 这一版不靠猜：`respondsToSelector:` 与 `objc_getClass` 是免费的，问错也不会有
+/// 副作用；而「有这个能力」是下一版能不能接线的唯一前提。四项分别对应三家：
+///
+///   · Myrtle 1.5.0 —— 它和我们的路线最像（`launchApplicationWithIdentifier:suspended:`
+///     + 自建窗口 + rehost）。它比我们多的那一件是 `forceBackgrounded:forApp:`：
+///     目标 App 已经在后台跑着的时候，**把它的前台身份按回去**，这样原实现被调
+///     也不会让屏幕上多出一个全屏。Aevon(173) 里 QQ 分享正是「卡片建了、另一个
+///     宿主也在前台」的形态。系统侧承这个动作的通常是 `SBApplicationController`
+///     或 `SBApplication` 自己，两个都问。
+///   · 母版 Stheno —— `_setDeactivationReasons:onScene:withSettings:reason:`
+///     是它改 scene 前后台的第二道门（我们只装了 `_scene:interceptUpdateWithNewSettings:`）。
+///   · TrollOpen 1.5.2 —— `SBTransientOverlayWindow` 类与
+///     `createSceneWithDefinition:initialParameters:`：那是「App 不自己出 scene」的
+///     唯一根治手段（本版不碰，先确认这两样在 iOS 17.3.1 上还在不在）。
+///   · Mango Beta8 —— `retryMountBacking:bundleID:retries:` 是它自己的方法名，
+///     系统侧没有，所以这里不列；它的思想（判内容、带 retries）已经落到代码里。
+static int AevonClassHasMethod(Class cls, const char *name) {
+    if (cls == Nil || name == NULL) return -1;   // -1 = 类都不在
+    return [cls instancesRespondToSelector:sel_registerName(name)] ? 1 : 0;
+}
+
+static void AevonAbilityProbe(void) {
+    @try {
+        Class appCls = objc_getClass("SBApplication");
+        Class ctrlCls = objc_getClass("SBApplicationController");
+        Class mgrCls = objc_getClass("SBSceneManager");
+        Class mainMgr = objc_getClass("SBMainDisplaySceneManager");
+        Class hostCls = objc_getClass("SBTransientOverlayWindow");
+        Class txnCls = objc_getClass("FBApplicationProcessLaunchTransaction");
+        Class wsCls = objc_getClass("SBMainWorkspace");
+
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"win: ability app forceBg=%d ctrl forceBg=%d app dehost=%d ctrl dehost=%d",
+                      AevonClassHasMethod(appCls, "forceBackgrounded:forApp:"),
+                      AevonClassHasMethod(ctrlCls, "forceBackgrounded:forApp:"),
+                      AevonClassHasMethod(appCls, "dehost"),
+                      AevonClassHasMethod(ctrlCls, "dehost")] UTF8String]);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"win: ability scene deact=%d/%d overlay=%d txn=%d openurl=%d",
+                      AevonClassHasMethod(mgrCls, "_setDeactivationReasons:onScene:withSettings:reason:"),
+                      AevonClassHasMethod(mainMgr, "_setDeactivationReasons:onScene:withSettings:reason:"),
+                      hostCls != Nil ? 1 : 0,
+                      txnCls != Nil ? 1 : 0,
+                      AevonClassHasMethod(wsCls,
+                          "_openURLCore:display:animating:activationSettings:origin:withResult:")] UTF8String]);
+    } @catch (NSException *exception) {
+        AevonLogRaw("win: ability probe threw");
+    }
+}
+
 void AevonActivateProbeInstall(void) {
     static int done = 0;
     if (done) return;
@@ -5119,6 +5308,8 @@ void AevonActivateProbeInstall(void) {
     AevonLogRaw([[NSString stringWithFormat:@"notify: open armed n=%d/%d shape=%s skip=%@",
                   armed, AevonOpenMax, AEVON_OPEN_SHAPE,
                   skip.length > 0 ? skip : @"-"] UTF8String]);
+    // 0.2.7 — 能力面（三家综合的前提）。只问不调，见函数上方那段。
+    AevonAbilityProbe();
 }
 
 // MARK: - 0.1.86 激活面普查（只读，一次装机能答完）
