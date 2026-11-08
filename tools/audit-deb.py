@@ -761,7 +761,14 @@ def main():
                   #                （forceBackgrounded / _setDeactivationReasons /
                   #                 SBTransientOverlayWindow / 进程事务 / _openURLCore）。
                   #                只问不调，问错也只是 0。
-                  b"notify: shareprobe b=%s src=%s pay=%s form=%c fwd=%d origin=%s ac=%s",
+                  b"notify: shareprobe b=%s src=%s pay=%s form=%c fwd=%d origin=%s ac=%s"
+                  b" susp=%d fsusp=%d set=%s setSusp=%d setFlag=%d getSusp=%d getFlag=%d"
+                  b" pid=%d seen=%d purl=%s keys=%s",
+                  # 0.2.8 —— 激活标志表。挂起语义挂在 settings 的标志位上（`setSusp=0`
+                  # 说明没有 `setActivateSuspended:`），而 options 里的 `__ActivateSuspended`
+                  # 只对冷启动成立。这一行把 24 位全读一遍，靠「转发并挂起 / 普通打开」两组
+                  # 现场对比定位真正的挂起位 —— 只读，不猜，也不置位。
+                  b"win: act flags tag=%s bits=%s set=%s n=%d",
                   b"notify: forward adopt b=%s op=%s",
                   b"win: ability app forceBg=%d ctrl forceBg=%d app dehost=%d ctrl dehost=%d",
                   b"win: ability scene deact=%d/%d overlay=%d txn=%d openurl=%d",

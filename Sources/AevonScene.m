@@ -3600,14 +3600,89 @@ static void AevonOpenKeysOf(id options, char *out, size_t size) {
 /// 记录：bundle / 来源进程 / payload 类型 / 动作类名 / LaunchOrigin /
 ///      结果块形状 / 挂起键读回值 / settings 四个能力 / options 全部键。
 static int AevonShareNotes = 0;
+/// 0.2.8 — 激活标志表的行数预算。每一条打开请求一行，80 行足够覆盖
+/// 「冷启动分享 / 热启动分享 / 通知 / 点图标」四种现场各若干次。
+static int AevonFlagsNotes = 0;
+/// 0.2.8 — 上一次转发真正写进去的 `__ActivateSuspended` 值。
+/// 分享现场行原来读的是**原始** options（我们写的是副本），所以恒为 -1；
+/// 这个变量记的是写后回读到的真值，`fsusp=` 就是它。
+static int AevonForwardSuspLast = -1;
+
+/// 把一个可能是 NSString 也可能是 NSURL 的值变成可读文本。**只读**。
+static void AevonOpenValueText(id value, char *out, size_t size) {
+    if (out == NULL || size == 0) return;
+    out[0] = '\0';
+    if (value == nil) return;
+    @try {
+        if ([value isKindOfClass:[NSString class]]) {
+            const char *raw = [(NSString *)value UTF8String];
+            snprintf(out, size, "%s", raw != NULL ? raw : "-");
+            return;
+        }
+        SEL absSel = sel_registerName("absoluteString");
+        if ([value respondsToSelector:absSel]) {
+            id text = ((id (*)(id, SEL))objc_msgSend)(value, absSel);
+            if ([text isKindOfClass:[NSString class]]) {
+                const char *raw = [(NSString *)text UTF8String];
+                snprintf(out, size, "%s", raw != NULL ? raw : "-");
+                return;
+            }
+        }
+        snprintf(out, size, "<%s>", object_getClassName(value));
+    } @catch (NSException *exception) {
+        snprintf(out, size, "<threw>");
+    }
+}
+
+/// 0.2.8 — 激活标志表。**只读**：只问「这一位是不是 1」，一个 setter 都不碰。
+///
+/// Aevon(176) 定下两件事：
+///   · `SBActivationSettings` 上有 `setFlag:forActivationSetting:` 与
+///     `flagForActivationSetting:`，**没有** `setActivateSuspended:`；
+///   · options 里的 `__ActivateSuspended` 只对**冷启动**成立 —— 目标 App 已经在跑时
+///     系统照常前台激活，于是「全屏先出来 → scene 被卡片搬走 → 那一层变黑」。
+///
+/// 真正的挂起位如果存在，只可能在这一排标志里。这一版**不猜它是第几位**：把 0..23
+/// 全部读一遍打成一行。判读方法只有一条 —— 拿「转发并挂起」与「普通打开」两组现场
+/// 对比，哪一位只在挂起那一组是 1，它就是挂起位；下一版才在转发前按那一位置位。
+///
+/// 读 BOOL 是免费的，24 次 objc_msgSend 在打开请求那一拍可以忽略。整段 @try 包着：
+/// 下标越界若抛异常，只丢这一行，不影响分流。
+static void AevonOpenActFlags(id settings, const char *tag) {
+    if (AevonFlagsNotes >= 80) return;
+    if (settings == nil) return;
+    SEL getSel = sel_registerName("flagForActivationSetting:");
+    if (![settings respondsToSelector:getSel]) return;
+    AevonFlagsNotes += 1;
+    enum { AEVON_FLAG_SLOTS = 24 };
+    char bits[AEVON_FLAG_SLOTS + 1];
+    bits[AEVON_FLAG_SLOTS] = '\0';
+    for (int i = 0; i < AEVON_FLAG_SLOTS; i++) bits[i] = '0';
+    @try {
+        for (int i = 0; i < AEVON_FLAG_SLOTS; i++) {
+            BOOL on = ((BOOL (*)(id, SEL, unsigned long))objc_msgSend)
+                (settings, getSel, (unsigned long)i);
+            if (on) bits[i] = '1';
+        }
+        const char *cls = object_getClassName(settings);
+        char line[220];
+        snprintf(line, sizeof(line), "win: act flags tag=%s bits=%s set=%s n=%d",
+                 tag != NULL ? tag : "-", bits, cls != NULL ? cls : "-", AevonFlagsNotes);
+        AevonLogRaw(line);
+    } @catch (NSException *exception) {
+        AevonLogRaw("win: act flags threw");
+    }
+}
+
 static void AevonOpenShareNote(id request, id options, id settings,
                                char form, int forwarded) {
     if (AevonShareNotes >= 12) return;
     AevonShareNotes += 1;
     char bundleText[56], sourceText[56], actionText[56], originText[56];
-    char keys[200], clsText[48];
+    char keys[200], clsText[48], urlText[100];
     bundleText[0] = sourceText[0] = actionText[0] = originText[0] = clsText[0] = '\0';
     keys[0] = '\0';
+    urlText[0] = '\0';
     @try {
         AevonActName(AevonOpenBundleOf(request), bundleText, sizeof(bundleText));
         AevonActName(AevonOpenSourceApp(request, options), sourceText, sizeof(sourceText));
@@ -3629,14 +3704,32 @@ static void AevonOpenShareNote(id request, id options, id settings,
         id susp = [options isKindOfClass:[NSDictionary class]]
                 ? [(NSDictionary *)options objectForKey:@"__ActivateSuspended"] : nil;
         int suspVal = [susp isKindOfClass:[NSNumber class]] ? [(NSNumber *)susp intValue] : -1;
-        char line[620];
+
+        // 0.2.8 — 三个新字段，全部只读：
+        //   purl = `__PayloadURL` 的真值。原来只知道「有 payload、类型是 url」，
+        //          不知道它是 file://（系统拷进 Inbox 的那种）还是 https://
+        //          （UniversalLink），而这两条在「怎么自己送达」上是两条完全不同的路。
+        //   pid  = 目标 App 此刻的 pid（-1 = 没在跑 / 取不到）。这一位是本次全屏的
+        //          关键变量：`__ActivateSuspended` 只对冷启动成立，App 已经在跑时
+        //          它被无视，系统照常前台激活。pid > 0 与 pid < 0 两组现场必须分开读。
+        //   seen = 系统的场景登记表里有没有这个 App（1 = 上一拍就能拿到 scene）。
+        //          与 pid 并列，回答「是进程没起，还是进程起了但没有 scene」。
+        AevonOpenValueText(AevonOpenAnyValue(request, options, @"__PayloadURL"),
+                           urlText, sizeof(urlText));
+        NSString *bundleName = [NSString stringWithUTF8String:bundleText];
+        int pid = AevonAppPid(bundleName);
+        int seen = AevonSeenSceneForBundle(bundleName) != nil ? 1 : 0;
+
+        char line[760];
         snprintf(line, sizeof(line),
                  "notify: shareprobe b=%s src=%s pay=%s form=%c fwd=%d origin=%s ac=%s"
-                 " susp=%d set=%s setSusp=%d setFlag=%d getSusp=%d getFlag=%d keys=%s",
+                 " susp=%d fsusp=%d set=%s setSusp=%d setFlag=%d getSusp=%d getFlag=%d"
+                 " pid=%d seen=%d purl=%s keys=%s",
                  bundleText, sourceText, AevonOpenPayloadKind(request, options),
                  form != 0 ? form : '-', forwarded, originText,
                  actionText[0] != '\0' ? actionText : "-",
-                 suspVal, clsText, setSusp, setFlag, getSusp, getFlag,
+                 suspVal, AevonForwardSuspLast, clsText, setSusp, setFlag, getSusp, getFlag,
+                 pid, seen, urlText[0] != '\0' ? urlText : "-",
                  keys[0] != '\0' ? keys : "-");
         AevonLogRaw(line);
     } @catch (NSException *exception) {
@@ -4916,6 +5009,9 @@ static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id o
     // 上面这一句本身就是覆盖（setObject 不做合并）。这里再读回来落一行日志 ——
     // 「写了」和「写进去了」不是一件事，0.1.95 就是写了、但写的是错的键。
     id susp = [forward objectForKey:@"__ActivateSuspended"];
+    // 0.2.8 — 写后回读的真值单独存一份：分享现场行读的是**原始** options（我们改的是
+    // 副本），所以那边永远是 -1；这个变量是唯一能证明「挂起键真的进了这一次请求」的东西。
+    AevonForwardSuspLast = susp != nil ? [(NSNumber *)susp intValue] : -1;
     AevonLogRaw([[NSString stringWithFormat:@"notify: forward susp=%d keys=%lu",
                   susp != nil ? [(NSNumber *)susp intValue] : -1,
                   (unsigned long)[forward count]] UTF8String]);
@@ -4944,6 +5040,9 @@ static int AevonOpenForwardPayload(int slot, id self, SEL _cmd, id request, id o
 static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                          id settings, id origin, id result) {
     int slot = AevonOpenSlot(_cmd);
+    // 0.2.8 — 每一拍先清掉「上一次转发写进去的挂起值」，免得分享现场行把上一条的读数
+    // 当成这一条的（这是一次全局量，只在这一拍里有意义）。
+    AevonForwardSuspLast = -1;
     char line[640];
     line[0] = '\0';
     char bundle[64];
@@ -5040,6 +5139,10 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
     } else if (slot >= 0) {
         AevonOpenSnapshot(slot, request, options, settings, origin, line, sizeof(line));
     }
+
+    // 0.2.8 — 激活标志表：四条入口的每一拍都记一行，**行为零改动**。
+    // 判读只靠两组对比（见 `AevonOpenActFlags`）：哪一位只在「转发并挂起」那一组是 1。
+    AevonOpenActFlags(settings, slot >= 0 ? AevonOpenTargets[slot].tag : "?");
 
     if (verdict == 1) {
         // 不转发。SpringBoard 那一段（建 app layout、全屏推前台）整段跳过，改由
