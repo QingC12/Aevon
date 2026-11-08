@@ -431,6 +431,14 @@ def build_root(panel_items, wired):
         items.append({"cell": "PSTitleValueCell", "label": label,
                       "key": key, "default": default, "defaults": DOMAIN})
 
+    # 0.2.19 — 手机端反馈现场的唯一入口。不是面板：没有 plist、没有开关，
+    # 只是把 /var/mobile/Aevon.log 的尾巴渲染出来，可截图、可一键复制。
+    items.append({"cell": "PSGroupCell", "label": "诊断",
+                  "footerText": "日志页只读不写：显示 /var/mobile/Aevon.log 最近 600 行。"
+                                "右上角「复制」可整段粘贴到反馈里，不需要导出文件。"})
+    items.append({"cell": "PSButtonCell", "label": "查看日志（最近 600 行）",
+                  "action": "openLog:", "defaults": DOMAIN})
+
     items.append({"cell": "PSGroupCell", "label": "安全闸门",
                   "footerText": "这两个开关是应急用的。任一开启后，桌面重载时 Aevon 不安装任何 hook。"
                                 "关闭 G0/G1 不会自动恢复，需要重载桌面。"})
@@ -491,7 +499,8 @@ def build_root(panel_items, wired):
                                 "① 0.2.17 的「等投递结论」一秒都没等过：`AevonForwardHoldWatch(1.6)` 是同步调用的，而它第一句就是「投递不忙 ⇒ 立刻 flush」；卡片要 100 毫秒之后才把 scene 贴上、才调 `AevonForwardDeliver`，所以这一拍永远读到「不忙」。Aevon(189) 现场：`notify: forward held slot=1 form=@` 紧跟 `notify: forward flush why=timeout after=0ms`，接着 `notify: forward pass b=com.tencent.mqq op=user` —— 交回系统那一下 SpringBoard 把 QQ 的 scene 抢去整屏；卡片自己是好的（`win: scene frame after=430x717`），黑的是它背后。这一版首拍排到 1.0 秒之后，之后每 0.5 秒续拍。"
                                 "② 两种「等」分开算：投递**已经发起** ⇒ 等它的结论（6 秒硬上限）；**一次都没发起** ⇒ 3 秒宽限，还是不发就地销毁（`notify: share lost b=… why=no deliver`）。**任何一条路都不再交回 SpringBoard**，所以背景永远停在分享发起页，不会再有全屏黑底。"
                                 "③ 回执加了 `wins`（App 有几个窗口）与 `state`（应用状态），宿主原样打进主日志 —— Aevon(188) 那条 `ok=0 via=noscene` 是「没有 scene」还是「有窗口没 scene」，这一版才分得清。抖音那条已按 Aevon(189) 验收（`win: own staged 430x932 -> 430x717` + `app: geom early peers6 n=1 UIView:0,0,430x717`），本版不再动它。"
-                                "停掉整个通知与分享接管：在 /var/mobile/Library/Logs/Aevon/ 下建空文件 notify.off 再重启；只想停分享就建 share.off。"})
+                                "停掉整个通知与分享接管：在 /var/mobile/Library/Logs/Aevon/ 下建空文件 notify.off 再重启；只想停分享就建 share.off。"
+                                "0.2.19 起：设置 → 诊断 → 查看日志（最近 600 行），可截图或一键复制，手机端不再需要导出文件。"})
 
 
     return {"title": "Aevon", "items": items}

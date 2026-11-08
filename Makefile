@@ -97,6 +97,7 @@ AevonPrefs_FILES := $(AE_CORE) $(AE_RING) \
                     Sources/Prefs/AppListController.swift \
                     Sources/Prefs/AppPickerController.swift \
                     Sources/Prefs/PanelController.swift \
+                    Sources/Prefs/LogController.swift \
                     Sources/Prefs/RootListController.swift
 AevonPrefs_INSTALL_PATH := /Library/PreferenceBundles
 AevonPrefs_FRAMEWORKS := Foundation UIKit ReplayKit Photos AVFoundation AudioToolbox

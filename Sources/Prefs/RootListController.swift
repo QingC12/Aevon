@@ -159,6 +159,19 @@ final class RootListController: PSListController {
         Log.write("prefs: open panel \(panel)")
     }
 
+    /// 0.2.19 — the log page. Not a panel: it has no plist and no switches,
+    /// it just renders the tail of Aevon.log so a phone-only report can carry
+    /// evidence (screenshot or 复制 → paste). Kept out of the eight-panel
+    /// count on purpose — those are settings, this is a witness.
+    @objc func openLog(_ specifier: PSSpecifier) {
+        let controller = AevonLogController()
+        if let navigation = navigationController {
+            navigation.pushViewController(controller, animated: true)
+            return
+        }
+        present(UINavigationController(rootViewController: controller), animated: true)
+    }
+
     @objc func clearAttempts(_ specifier: PSSpecifier) {
         Gate.resetAttempts()
         Gate.request(Aevon.commandReset)   // SpringBoard clears its own copy too
