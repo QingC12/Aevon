@@ -5254,7 +5254,7 @@ static void AevonCleanBanner(id dispatcher, char *out, size_t size) {
 ///     （Aevon(158)）里四处 `wait=0/1` 说明冷却期内卡片其实早就占了槽，慢的是那个
 ///     0.45 秒的起始延迟与 0.15 秒的节拍。这一版把起始延迟压到 0.10 秒、节拍压到
 ///     0.04 秒，并给「卡在路上」单开一个出口 —— 见 `AevonCleanCoverAfterCard`。
-static void AevonCleanCover(char *out, size_t size) {
+static void AevonCleanCover(char *out, size_t size, int dismissFirst) {
     if (out == NULL || size == 0) return;
     out[0] = '\0';
     id cover = AevonShared(@"SBCoverSheetPresentationManager");
@@ -5306,7 +5306,21 @@ static void AevonCleanCover(char *out, size_t size) {
         AevonLogRaw(line);
     }
 
-    for (int i = 0; i < ladderCount; i++) {
+    // 0.2.28 — 候选顺序可翻转。第一次收用默认顺序（标准入口优先）；0.6 秒后
+    // 复核发现面板还在时，用 `dismissFirst` 换成 dismiss 专用候选再试一次 ——
+    // `setCoverSheetPresented:NO` 在某些现场会被系统吞掉（不抛、不生效），
+    // 这正是「点了通知，通知中心没关」的那一类。
+    int order[ladderCount];
+    int orderCount = 0;
+    if (dismissFirst) {
+        order[orderCount++] = 3; order[orderCount++] = 4; order[orderCount++] = 5;
+        order[orderCount++] = 1; order[orderCount++] = 0; order[orderCount++] = 2;
+    } else {
+        for (int i = 0; i < ladderCount; i++) order[orderCount++] = i;
+    }
+
+    for (int k = 0; k < orderCount; k++) {
+        int i = order[k];
         SEL sel = sel_registerName(ladder[i].sel);
         Method method = class_getInstanceMethod([cover class], sel);
         if (method == NULL) continue;
@@ -5357,6 +5371,32 @@ static void AevonCleanCover(char *out, size_t size) {
 
     if (miss[0] != '\0') snprintf(out, size, "cover=shape%s", miss);
     else snprintf(out, size, "cover=none");
+}
+
+/// 0.2.28 — 收面板之后的复核。
+///
+/// 0.2.27 及以前 `cover=ok:…` 只是「调用没抛异常」，不是「面板真的走了」。
+/// `setCoverSheetPresented:NO` 在某些现场会被系统吞掉，用户看到的就是「点了通知，
+/// 通知中心没关」。这里 0.6 秒后复读那两个布尔量，仍在屏就换成 dismiss 专用候选
+/// 再试一次 —— 两次结论写进同一行，下一份日志不用再猜是哪一半。
+static void AevonCleanCoverFollowUp(void) {
+    if (AevonActivateSwitchOff()) return;
+    id cover = AevonShared(@"SBCoverSheetPresentationManager");
+    if (cover == nil) return;
+    NSInteger presented = AevonBoolOf(cover, @"isPresented");
+    NSInteger visible = AevonBoolOf(cover, @"isVisible");
+    char again[128], line[260];
+    again[0] = '\0';
+    if (presented != 1 && visible != 1) {
+        snprintf(line, sizeof(line), "notify: cover follow p=%ld v=%ld gone",
+                 (long)presented, (long)visible);
+        AevonLogRaw(line);
+        return;
+    }
+    AevonCleanCover(again, sizeof(again), 1);
+    snprintf(line, sizeof(line), "notify: cover follow p=%ld v=%ld %s",
+             (long)presented, (long)visible, again);
+    AevonLogRaw(line);
 }
 
 /// SpringBoard 的通知 dispatcher。只解析一次，解析结果留一份强引用。
@@ -5618,9 +5658,14 @@ static BOOL AevonCleanExhausted(void) {
 
 /// 清通知的频率上限。0.1.93 — 与另外两处一样，从「一次开机 6 次」改成滑动窗口；
 /// 理由见 `AevonCleanExhausted`：一次开机型的配额会让功能在某个时刻悄悄永久失效。
+///
+/// 0.2.28 — 6 → 24。收尾（收面板/收横幅）与清通知各记一次，也就是说一口点
+/// 一次通知要吃掉两格：原来的 6 格只够点三次，第四次开始面板不收、通知不清
+/// —— 这正是「有的会清、有的不会」里最规律的那一半。24 格 = 每两分钟 12 次点击，
+/// 仍然挡得住失控循环，也不会在正常使用里悄悄关掉功能。
 static int AevonClearRuns = 0;
 static double AevonClearWindow = 0;
-#define AEVON_CLEAR_MAX 6
+#define AEVON_CLEAR_MAX 24
 #define AEVON_CLEAR_WINDOW 120.0
 
 static BOOL AevonClearExhausted(void) {
@@ -5632,6 +5677,26 @@ static BOOL AevonClearExhausted(void) {
     return AevonClearRuns >= AEVON_CLEAR_MAX;
 }
 
+/// 0.2.28 — 标识归一化。
+///
+/// 同一个通知在不同投递上把标识放在不同类型里：公开的 `UNNotificationRequest.
+/// identifier` 是 NSString，而内部 `identifier` / `uuid` 常是 NSUUID。0.2.27 只接受
+/// NSString，读到 NSUUID 时整格被跳过 —— 这就是「有的会清、有的不会」：同一台机器
+/// 上不同 App / 不同投递的标识类型不同。这里把两种都折成可比较的字符串
+/// （NSUUID → `UUIDString`），其他类型一律不认。
+static NSString *AevonClearStringOf(id value) {
+    if (value == nil) return nil;
+    if ([value isKindOfClass:[NSString class]]) {
+        NSString *text = (NSString *)value;
+        return text.length > 3 ? text : nil;
+    }
+    if ([value isKindOfClass:[NSUUID class]]) {
+        NSString *text = [(NSUUID *)value UUIDString];
+        return text.length > 3 ? text : nil;
+    }
+    return nil;
+}
+
 /// 一个对象上的「通知标识」候选读数。无参、只读，每一步都过 `respondsToSelector` + `@try`。
 static NSString *AevonClearIdentifierOf(id object) {
     if (object == nil) return nil;
@@ -5640,10 +5705,8 @@ static NSString *AevonClearIdentifierOf(id object) {
         "notificationIdentifier", "notificationUUID", "uuid",
     };
     for (int i = 0; i < 5; i++) {
-        id value = AevonCleanRead(object, names[i]);
-        if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 3) {
-            return (NSString *)value;
-        }
+        NSString *value = AevonClearStringOf(AevonCleanRead(object, names[i]));
+        if (value != nil) return value;
     }
     return nil;
 }
@@ -5660,8 +5723,7 @@ static NSString *AevonClearIdentifier(id request, id options) {
     id notification = response != nil ? AevonCleanRead(response, "notification") : nil;
     id note = notification != nil ? AevonCleanRead(notification, "request") : nil;
     id raw = note != nil ? AevonCleanRead(note, "identifier") : nil;
-    if ([raw isKindOfClass:[NSString class]] && [(NSString *)raw length] > 3) return (NSString *)raw;
-    return nil;
+    return AevonClearStringOf(raw);
 }
 
 /// 0.1.99 — 点通知时的**结构取证**：这条公开链到底断在哪一跳。
@@ -5799,24 +5861,23 @@ static BOOL AevonClearWithdraw(id host, id requestObject, char *how, size_t size
 /// （SpringBoard 不一定加载过 UserNotifications）。
 static BOOL AevonClearViaUN(id request, const char *bundle) {
     if (request == nil) return NO;
-    NSString *ident = nil;
+    // 0.2.28 — 不再「取第一个字符串就走」。四个键分别折成字符串（NSUUID 也认），
+    // 一起去问系统：哪个键是真标识由系统答，猜错的那个只是 no-op。
+    NSMutableArray<NSString *> *idents = [NSMutableArray array];
     static const char *keys[4] = {
         "notificationIdentifier", "requestIdentifier", "uuid", "identifier",
     };
-    for (int i = 0; i < 4 && ident == nil; i++) {
+    for (int i = 0; i < 4; i++) {
         id got = AevonCleanRead(request, keys[i]);
         if (got == nil) continue;
-        if ([got isKindOfClass:[NSString class]]) {
-            if ([(NSString *)got length] > 0) ident = (NSString *)got;
-            continue;
+        NSString *text = AevonClearStringOf(got);
+        if (text == nil) {
+            // 有的版本这一格是 UNNotificationRequest 之类，标识在它里面。
+            text = AevonClearStringOf(AevonCleanRead(got, "identifier"));
         }
-        // 有的版本这一格是 UNNotificationRequest 之类，标识在它里面。
-        id inner = AevonCleanRead(got, "identifier");
-        if ([inner isKindOfClass:[NSString class]] && [(NSString *)inner length] > 0) {
-            ident = (NSString *)inner;
-        }
+        if (text != nil && ![idents containsObject:text]) [idents addObject:text];
     }
-    if (ident == nil) return NO;
+    if (idents.count == 0) return NO;
 
     Class cls = NSClassFromString(@"UNUserNotificationCenter");
     if (cls == Nil) {
@@ -5830,17 +5891,30 @@ static BOOL AevonClearViaUN(id request, const char *bundle) {
     id center = ((id (*)(id, SEL))objc_msgSend)((id)cls, cur);
     if (center == nil) return NO;
     SEL remove = sel_registerName("removeDeliveredNotificationsWithIdentifiers:");
-    if (![center respondsToSelector:remove]) return NO;
-    @try {
-        ((void (*)(id, SEL, id))objc_msgSend)(center, remove, @[ident]);
-    } @catch (__unused NSException *e) {
-        return NO;
+    BOOL removed = NO;
+    if ([center respondsToSelector:remove]) {
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(center, remove, idents);
+            removed = YES;
+        } @catch (__unused NSException *e) {
+            removed = NO;
+        }
     }
-    if (bundle != NULL) {
+    // 0.2.28 — 未决表里也删一遍。不拿它当成功判据：方法不在、或这条已经投递完，
+    // 都只是跳过；但「投递了却没进已投递表」的那些正是通知中心里赖着不走的一类。
+    SEL pending = sel_registerName("removePendingNotificationRequestsWithIdentifiers:");
+    if ([center respondsToSelector:pending]) {
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(center, pending, idents);
+        } @catch (__unused NSException *e) {
+            // 同上：这条是补刀，不是判据。
+        }
+    }
+    if (bundle != NULL && removed) {
         AevonLogRaw([[NSString stringWithFormat:@"notify: clear b=%s via=un id=%@",
-                      bundle, ident] UTF8String]);
+                      bundle, [idents componentsJoinedByString:@","]] UTF8String]);
     }
-    return YES;
+    return removed;
 }
 
 /// 0.2.5 — 用截到的对象清一条。返回 YES 表示这条路真的动了（或确认没有必要再走老路）。
@@ -6088,7 +6162,7 @@ static int AevonCleanElapsed(void) {
 ///   100   第一次问：卡片在 ⇒ 当场收（热启动常见，`at≈100`）
 ///   100+ 每 40 毫秒再问一次
 ///   300   还只是「在路上」⇒ 收（`f=1`，冷启动常见）
-///   3600  连「在路上」都没有 ⇒ `cover=skip:nocard`，不动手
+///   3600  连「在路上」都没有 ⇒ `cover=skip:nocard` 并强制收一次（0.2.28 起）
 #define AEVON_CLEAN_DELAY 0.10       // 从手指到第一次问卡片（0.1.90 是 0.45）
 #define AEVON_CLEAN_POLL 0.04
 #define AEVON_CLEAN_TRIES 90        // 0.04 × 90 = 3.6 秒，与 0.1.90 同一个上限
@@ -6103,18 +6177,33 @@ static void AevonCleanCoverAfterCard(const char *bundle, int tick) {
 
     if (up || (coming && tick >= AEVON_CLEAN_FORCE)) {
         char cover[128], line[320];
-        AevonCleanCover(cover, sizeof(cover));
+        AevonCleanCover(cover, sizeof(cover), 0);
         // `f=1` 表示这一下是「卡在路上就收了」，不是「卡片已经在」。两者都要留痕：
         // 若用户觉得快是快了但闪了一下，日志里这两格就是分辨它的唯一办法。
         snprintf(line, sizeof(line), "notify: cover b=%s %s wait=%d at=%dms f=%d",
                  bundle, cover, tick, AevonCleanElapsed(), up ? 0 : 1);
         AevonLogRaw(line);
+        // 0.2.28 — 0.6 秒后复核。`cover=ok:` 只代表调用没抛，不代表面板走了。
+        // 复核只在「这一拍确实调了收面板」后排队，一次点击只有一次。
+        if (strncmp(cover, "cover=ok:", 9) == 0) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                AevonCleanCoverFollowUp();
+            });
+        }
         return;
     }
     if (tick >= AEVON_CLEAN_TRIES) {
-        char line[240];
-        snprintf(line, sizeof(line), "notify: cover b=%s cover=skip:nocard wait=%d at=%dms",
-                 bundle, tick, AevonCleanElapsed());
+        // 0.2.28 — 等不到卡片也要收面板。
+        //
+        // 0.1.90 的判据是「卡片在才收」，那时收早会露出空白桌面；但代价是开卡失败
+        // 或卡片被别的东西顶掉时，面板会一直留在屏上 —— 用户说的「点了通知，
+        // 通知中心根本不收起」就有这一格。3.6 秒足够卡片起来，起不来时用户已经
+        // 等了很久，留一张空桌面好过留一个关不掉的遮罩（真锁屏仍由 passcode 闸拦住）。
+        char cover[128], line[320];
+        AevonCleanCover(cover, sizeof(cover), 1);
+        snprintf(line, sizeof(line), "notify: cover b=%s cover=skip:nocard wait=%d at=%dms %s",
+                 bundle, tick, AevonCleanElapsed(), cover);
         AevonLogRaw(line);
         return;
     }

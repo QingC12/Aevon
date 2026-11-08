@@ -1947,22 +1947,13 @@ zStackParticipantDidChange:
         // 上面那段：写在 `activate` 之前的那一次不算「App 的窗口变了」。
         host.reassertCanvas()
 
-        // 0.2.26 — 借来的**前台** scene：先让「空页」不再占屏，再回桌面。
+        // 0.2.28 — 回桌面指令先发，卡片在过渡里出现。
         //
-        // 0.2.25 的两处真机读数决定了这一版的两处改动：
-        //   · 空页要等三级都失败才藏（`hideEmptyPage`），所以那之前整段过渡
-        //     都是黑的 → 现在 0.05 s 就藏，并同步滚到桌面页；
-        //   · 第一级 home 在 0.30 s 才发，回读又等 0.60 s → 现在 0.12 s 发，
-        //     每级 0.42 s 回读，失败立刻进下一级。
+        // 0.2.27 的顺序是「卡片先亮、0.12 s 后才回桌面」，于是有几拍操作者看到的是
+        // 卡片已经在屏上、背后的全屏页还是黑的（借来的 scene 已归卡片，那一页空了）。
+        // 现在一到这一行就先藏空页、先发第一级 home，卡片首帧落在过渡中间。
         if let b = bundleID, AevonOwnIsOwned(b) == 0, liveFront {
             let page = centeredSwitcherPage()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                if closed { return }
-                if AevonSpringboardActive() != 1 { _ = hideEmptyPage(b, animated: false) }
-            }
-            // 回桌面的过渡会把借来的 scene 判成后台，画面随即掉一帧黑。
-            // 下面那串连写专门覆盖这半秒（0.2.25：掉画后 63 ms 才回来，
-            // 那正好是 200 ms 节拍剩下的余量）。
             AevonHomeWakeReset()
             func climb(_ step: Int) {
                 if closed { return }
@@ -1970,7 +1961,6 @@ zStackParticipantDidChange:
                     Log.write("win: home already in front, skip step " + String(step))
                     return
                 }
-                if step == 1 { holdPicture(view, seconds: 0.90) }
                 Log.write("win: home " + (AevonHomeStep(Int32(step), page) ?? "step nil"))
                 for offset in [0.0, 0.06, 0.14, 0.24, 0.36] {
                     DispatchQueue.main.asyncAfter(deadline: .now() + offset) {
@@ -1986,7 +1976,9 @@ zStackParticipantDidChange:
                     if step < 3 { climb(step + 1) } else { hideEmptyPage(b) }
                 }
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { climb(1) }
+            if AevonSpringboardActive() != 1 { _ = hideEmptyPage(b, animated: false) }
+            holdPicture(view, seconds: 0.90)
+            climb(1)
         }
 
         // 0.0.59 — 首帧交给自己的观察器，不再等保活时钟。
