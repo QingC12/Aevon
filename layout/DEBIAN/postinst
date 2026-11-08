@@ -15,7 +15,7 @@
 #
 set +e
 
-VERSION="0.2.20"
+VERSION="0.2.21"
 
 # roothide 的维护脚本跑在 libvroot 里："/" 是 jbroot，真实根在 /rootfs。
 # 两个都试一次；失败也无所谓，插件加载时会自己再建。
@@ -28,9 +28,10 @@ for ROOT in /var/mobile /rootfs/var/mobile; do
 
     # the single log file the operator is told to look at
     LOG="$ROOT/Aevon.log"
-    if [ ! -f "$LOG" ]; then
-        : > "$LOG" 2>/dev/null
-    fi
+    # 0.2.21 — 升级安装先把上一版日志清空，省得每次都要进 Filza 手动删。
+    # 截断而不是删除：文件权限和属主都在下面重新给，Settings 的日志页也
+    # 不会因为文件突然消失而报错。
+    : > "$LOG" 2>/dev/null
     chown mobile:mobile "$LOG" 2>/dev/null
     # Settings runs sandboxed; without group/other write it cannot record why
     # a panel failed to load, which is the only diagnostic channel that exists

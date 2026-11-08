@@ -2643,8 +2643,9 @@ zStackParticipantDidChange:
 
     /// 一个把 scene 画面端到屏幕上的视图，以及窗口实际持有的那一层祖先。
     private struct FullScreenCover {
-        let view: UIView
-        let name: String
+        let window: UIWindow
+        let topName: String
+        let windowName: String
         let previous: CGFloat
     }
 
@@ -2741,20 +2742,35 @@ zStackParticipantDidChange:
             Log.write("win: refused to demote " + topName)
             return
         }
-        let previous = hit.top.alpha
-        fullScreenCovers[bundle] = FullScreenCover(view: hit.top, name: topName,
+        // 0.2.21 — 只把 `hit.top` 的 alpha 置 0 时，日志里它是一层裸 UIView；
+        // 藏完屏幕还是黑的：黑来自它所在的**窗口**背景，不是这层视图。
+        // 所以改藏窗口本体，但仍然只藏承载这个 scene 的那一个窗口。
+        guard let window = hit.node.window, !(window is FloatWindow) else {
+            Log.write("win: no window for the fullscreen carrier")
+            return
+        }
+        let windowName = NSStringFromClass(type(of: window))
+        if windowName.contains("HomeScreen") || windowName.contains("Icon")
+            || windowName.contains("StatusBar") || windowName.contains("Wallpaper") {
+            Log.write("win: refused to demote window " + windowName)
+            return
+        }
+        let previous = window.alpha
+        fullScreenCovers[bundle] = FullScreenCover(window: window, topName: topName,
+                                                  windowName: windowName,
                                                   previous: previous)
-        hit.top.alpha = 0
-        Log.write("win: fullscreen demoted " + topName
+        window.alpha = 0
+        Log.write("win: fullscreen window demoted " + windowName
                   + " alpha " + String(format: "%.1f", previous) + "->0"
-                  + " ident=" + hit.ident + " from=" + hit.name)
+                  + " top=" + topName + " ident=" + hit.ident
+                  + " from=" + hit.name)
     }
 
     /// 按 bundle 还回去。没有藏过就是空操作。
     private static func restoreFullScreen(_ bundle: String) {
         guard let saved = fullScreenCovers.removeValue(forKey: bundle) else { return }
-        saved.view.alpha = saved.previous
-        Log.write("win: fullscreen restored " + saved.name + " for " + bundle
+        saved.window.alpha = saved.previous
+        Log.write("win: fullscreen window restored " + saved.windowName + " for " + bundle
                   + " alpha=" + String(format: "%.1f", saved.previous))
     }
 
