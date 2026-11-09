@@ -550,7 +550,8 @@ def build_root(panel_items, wired):
                                 "③ 场景帧当拍写不了时（`AevonPushSceneFrame` 在被钩的系统回调里会拒绝，键盘弹起常撞上）补推 4 次、每次 40 ms，"
                                 "把原来等守护循环的 200 ms 空档压掉，App 侧拿到的原点不再是旧值。"
                                 "判据：`win: kb spring t=0.24 zeta=1.00 v=0.35` 只出现一次；"
-                                "`win: keyboard fill on … push=` 后面若紧跟 `win: kb push late gave up door=0`，说明 4 次都没推成。"
+                                "`win: keyboard fill on … push=` 后面若紧跟 `win: kb push late gave up why=`"
+                                "（0.2.56 及更早是 `gave up door=0`），说明补推到最后一次都没推成。"
                                 "另看 `win: placement put back 1.000 was=1.000 dC=0,215 org=215`："
                                 "修正前后缩放比相同、只有中心偏了，说明卡片的承载面被系统按 scene 原点重设过 —— 这一行是那一下闪的物证。"
                                 "0.2.52 起：**让抖音真正按浮窗大小重排 —— 改的是「它以为自己的屏幕有多大」，不是再补一次画面位置**。"
@@ -622,7 +623,24 @@ def build_root(panel_items, wired):
                                 "② `notify: sso` 行新增 `link=`（类名:scheme/长度）、`ua=`（activityType）与 "
                                 "`ptk=`（`__PasteSharingToken` 的 ivar 名字，最多 6 个，只记名字不读值）。"
                                 "若 `link=` 真给出一条深链、或 `ptk=` 里有粘贴板名字，下一版就能改成本地投递，"
-                                "把这一下全屏彻底去掉。"})
+                                "把这一下全屏彻底去掉。"
+                                "0.2.57 起：**补推学会按「为什么没写成」收手**。"
+                                "0.2.54 的日志里键盘张开 5 次全部 `keyboard fill on … push=0`，"
+                                "补推 4 × 40 ms = 160 ms 盖不住 0.24 s 的张开动画，撞出 `kb push late gave up door=0`，"
+                                "只能等下一拍 `frame drift` 用门 3 补上 —— 那 ≤200 ms 里画面原点还是旧的。"
+                                "病根是 `AevonPushSceneFrame` 五种失败都返回同一个 `0`，调用方分不清"
+                                "「可以继续等」和「等也没用」。现在每个返回点落一格原因码："
+                                "1 nil / 2 非主线程 / 3 在钩子里 / 4 重入 / 5 未登记 / 6 无 settings / "
+                                "7 已等值（门里那笔要写的跟当前一模一样）/ 8 写了没门。"
+                                "`AevonPushSceneFrameWhy()` 读它；`pushSceneLater` 按码分岔："
+                                "`7` 立刻收手（顺带消掉「drift 刚修好、补推又写一次」的重复提交）、"
+                                "`1/2/6` 立刻放弃、`3/4/5/8` 续试，次数 4 → 9（≈360 ms，盖住整段动画）。"
+                                "判据：`keyboard fill on` 之后应看到 `kb push late stop ack` 或 `stop why=7`，"
+                                "`gave up` 变成罕见且行尾带 why。"
+                                "另把 `scene deactivation #N` 的计数从「钩子被调了几次」（`deact_set`）"
+                                "改成「真的被清零了几次」（`stripped`）—— 0.2.54 的日志里 `deact_set=21` 而 "
+                                "`stripped=6`，那个涨到 #26 的数是噪声，还因为两张卡读同一个全局计数而在同一秒印两遍。"
+                                "行里同时补 `reasons=`（系统这一次给的原因位）与 `b=`（哪张卡）。"})
 
 
     return {"title": "Aevon", "items": items}

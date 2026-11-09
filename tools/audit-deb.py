@@ -654,7 +654,10 @@ def main():
                   #     每开一次键盘就出现一次，说明 `AevonPushSceneFrame` 一直在
                   #     hook 里被拒，得回头看那条死锁纪律的边界。
                   b"win: kb spring t=%.2f zeta=%.2f v=%.2f",
-                  b"win: kb push late gave up door=0",
+                  # 0.2.57 — 放弃那一行带上了原因码。旧串 `gave up door=0` 已经
+                  # 不存在：它分不开「已经等于目标」与「被钩子挡了」。
+                  b"win: kb push late gave up why=%d b=%@ left=%ld",
+                  b"win: kb push late stop why=%d b=%@ left=%ld",
                   # 0.2.46 — 「让抖音真重排」这一版的四条：显示覆盖 / 参考尺寸 /
                   # 屏幕跟随 / 回执。逐条都要能在产物里 grep 到，缺哪条就等于那一步
                   # 没有证词：

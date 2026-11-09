@@ -890,7 +890,8 @@ zStackParticipantDidChange:
                       + " fg=" + flag(foreground)
                       + " reasons=" + reasonsOf(scene))
             emitNotes(AevonHookSummary())
-            float(scene)
+            // 0.2.57 — 带上 bundle：`scene deactivation` 那行要用它区分两张卡。
+            float(scene, bundleID: bundle)
             // 0.0.33 — this used to be the teardown, because the card came down
             // after eight seconds. It is not one any more: the card stays, and a
             // disarmed hook under a live card is the 0.0.28 black screen with a
@@ -2159,7 +2160,7 @@ zStackParticipantDidChange:
         // the gap is in the compositor (then no write will help). This counter is
         // the one thing that tells them apart — it moves only when the system runs
         // its own deactivation path.
-        var deact = AevonDeactCount()
+        var deact = AevonDeactStrippedCount()
         // 0.0.55 — 上次重打空闲计时的时间。20 秒 ≪ 系统最短的「自动锁定 30 秒」，
         // 又不会每秒烧一次私有 API（旧版 V0.2.49 定的频率，原样保留）。
         var idleAt = Date()
@@ -2346,17 +2347,24 @@ zStackParticipantDidChange:
             // 攒出来的。现在交给 `watchFirstFrame`（50 ms 一拍、连续两拍确认）。
             // Read before the push, so the line below describes what the system
             // did rather than what this turn did.
-            let attempts = AevonDeactCount()
+            let attempts = AevonDeactStrippedCount()
             if attempts != deact {
                 deact = attempts
-                // 0.2.54 — 补 `cs= sub= wake=`，这一行从此能回答「是不是我
-                // 自己刚写的那一笔把它推下去的」：`wake=` 不是 0 就说明这次
-                // deactivate 之前我们往同一个 scene 提交过 settings。
-                // Aevon(197) 的开卡里 `deact #3/#4/#5` 与两次 wake 交叠，旧行
-                // 没有这两个数，只能靠时间戳猜。
+                // 0.2.57 — 三处改动，都是为了这一行能直接读。
+                //
+                // ① 数换成「真正被清零的次数」。旧数 `AevonDeactCount()` 数的是
+                //    钩子被调了几次，其中一大半 `reasons` 本来就是 0（系统在重新
+                //    声明「可以睡」）。Aevon(198) 里 45 秒就涨到 26，同一秒还会
+                //    打印两遍，看上去像场景被反复收走 —— 实际被拦下的只有 6 次。
+                // ② 带 `reasons=`：32 / 34 / 2 这几种位对应不同的系统动作。
+                // ③ 带 `b=`：多窗时两张卡的 watcher 读的是**同一个**全局计数，都会
+                //    各打一行，于是同一个 `#10` 出现两次。补上 bundle 之后，
+                //    「两台是同一件事」和「两台各是各的」一眼可分。
                 Log.write("win: scene deactivation #" + String(attempts)
                           + " fg=" + flag(fg) + " cs=" + String(content)
-                          + " sub=" + String(sublayers) + " wake=" + String(wakes))
+                          + " sub=" + String(sublayers) + " wake=" + String(wakes)
+                          + " reasons=" + String(AevonDeactLastReasons())
+                          + " b=" + (bundleID ?? "-"))
             }
             var door = 0
             if fg == 1 {

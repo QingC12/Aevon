@@ -80,6 +80,16 @@ unsigned long long AevonReasonsOf(id _Nullable scene);
 /// how to do.
 long AevonDeactCount(void);
 
+/// 0.2.57 — 上面那个数是「钩子被调了几次」，里面有一大半 `reasons` 本来就是 0
+/// （系统只是在重新声明「可以睡」，不是要收走场景）。真正被我们清零的只有
+/// `reasons != 0` 那一种，也就是**场景确实被要求去激活、而我们把它撤掉**。
+/// Aevon(198) 里这两个数的比例是 21 : 6 —— 用前者记「掉画」，等于把日常噪声
+/// 当成故障。
+long AevonDeactStrippedCount(void);
+/// 最近一次被清零的 reasons 位掩码（见到过 32 / 34 / 2）。留着是为了回答
+/// 「是哪一类理由」——位不同，处置也不同。
+int AevonDeactLastReasons(void);
+
 /// 0.0.31 — ask the system to treat this scene as being in front, so its app
 /// starts committing frames again. `foreground=YES` and `backgrounded=NO` are
 /// written through whichever door the method table actually offers, and the
@@ -135,6 +145,15 @@ long AevonFrameOrphanCount(void);
 /// `win: scene ack slot=N`。`AevonSceneFrameAcked` 就是读这个回执 —— 拿到了
 /// 就别再用「四拍定时重推」去赌它到底送到没有。
 NSInteger AevonPushSceneFrame(id _Nullable scene);
+/// 0.2.57 — 上一次 `AevonPushSceneFrame` 返回 0 的原因。0 写成了；1 scene 是
+/// nil；2 不在主线程；3 在钩子里；4 上一次推送还没收尾；5 这一格没登记；
+/// 6 scene 没有 settings；7 已经是目标（不必写，调用方应当收手）；
+/// 8 值写进去了但没有门。
+///
+/// 这一格存在的理由：`7` 与 `3/4/5` 都是 0，但前者要停、后者要继续等。
+/// 分不开就会出现 Aevon(198) 那种「四次补推全撞在同一格，最后写一句
+/// `gave up door=0`」—— 日志上看不出到底是被挡了还是本来就没事。
+int AevonPushSceneFrameWhy(void);
 /// 这个 bundle 的目标尺寸有没有拿到过回执（1 = 拿到）。`AevonSceneFrameSet`
 /// 登记新目标时会把回执作废，所以「拿到」永远指的是当前这个目标。
 int AevonSceneFrameAcked(const char *_Nullable bundle);

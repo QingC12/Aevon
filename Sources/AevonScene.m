@@ -1598,6 +1598,13 @@ static long AevonArmedRefused = 0;
 
 static long AevonDeactSetCalls = 0;
 static long AevonDeactStripped = 0;
+/// 0.2.57 — 最近一次被清零的 reasons 位掩码。Aevon(198) 里 `deact_set=21`
+/// 却有 `stripped=6`：这条钩子被调的 21 次里，15 次 `reasons` 本来就是 0
+/// （系统只是在重新声明「可以睡」），真正被我们拦下来的只有 6 次。日志里那个
+/// `scene deactivation #26` 数的是前者，所以它既不能说明场景真的被去激活过，
+/// 也不能说明我们动过手。留一份原值，「32 / 34 / 2」这几种位分别对应什么处置
+/// 才有据可查。
+static volatile long AevonDeactReasons = 0;
 
 /// Eight lines of what the hooks actually saw, written as C strings on purpose:
 /// these run inside SpringBoard's scene-update path, and formatting an
@@ -1821,6 +1828,19 @@ static long AevonPushWrote = 0;
 /// 1 = pushed through the scene's own update method, 2 = through the
 /// manager's amendment entry, 0 = no door opened.
 static long AevonPushPath = 0;
+/// 0.2.57 — 上一次 `AevonPushSceneFrame` 返回 0 的**原因**。
+///
+/// Aevon(198) 里这条函数有五个不同的 0：键盘每一拍都是 `push=0`、补推四次
+/// 全 `0`，最后一行只写 `kb push late gave up door=0` —— 从这行读不出是「已经
+/// 等于目标，不用写」还是「被钩子挡了，五次都没进去」。前者应当立刻收手，
+/// 后者应当继续等，而当时的代码分不开，只能两者都按同一个次数硬扛。
+///
+/// 现在每个返回点先落一格原因：
+///   0 写成了            1 scene 是 nil        2 不在主线程
+///   3 在钩子里（深度）   4 上一次推送还没收尾  5 这一格没登记
+///   6 scene 没有 settings 7 已经是目标，不必写 8 写了但没有门
+static volatile int AevonPushWhy = 0;
+int AevonPushSceneFrameWhy(void) { return AevonPushWhy; }
 static CFAbsoluteTime AevonLastPush = 0;
 /// Re-entry is not theoretical: the amendment entry calls back into the
 /// deactivation setter this file hooks, and that hook pushes again.
@@ -2274,12 +2294,19 @@ static BOOL AevonWriteFrame(id settings, int slot) {
 ///
 /// 返回用过的门（3 = transition，1 = 普通），0 = 没写成或没有门。
 NSInteger AevonPushSceneFrame(id scene) {
+    // 0.2.57 — 每个返回点先落一格原因，见 `AevonPushWhy` 那张表。
+    AevonPushWhy = 1;
     if (scene == nil) return 0;
+    AevonPushWhy = 2;
     if (![NSThread isMainThread]) return 0;
+    AevonPushWhy = 3;
     if (AevonHookDepth > 0) return 0;
+    AevonPushWhy = 4;
     if (AevonInPush) return 0;
+    AevonPushWhy = 5;
     int slot = AevonSlotOfScene(scene);
     if (slot < 0 || !(AevonFrameMask & (1 << slot))) return 0;
+    AevonPushWhy = 6;
     SEL settingsSel = sel_registerName("settings");
     if (![scene respondsToSelector:settingsSel]) return 0;
     id current = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
@@ -2308,6 +2335,12 @@ NSInteger AevonPushSceneFrame(id scene) {
     AevonInPush = 0;
     // 只有屏幕、没有 frame 的那一次也算「写成了」：它是 staged 之后的那一次
     // display 纠正，调用方（`pushSceneLater` / 守护循环）要看见它真的落了地。
+    //
+    // 0.2.57 — `7` 与 `8` 是两种完全不同的「0」：`7` 说明 frame 与屏幕都已经
+    // 等于目标（一次 settings 也没花），调用方应当立刻收手；`8` 是值写进了
+    // candidate 却没有门把它交出去，下一次还得再试。分不开这两个数，补推就
+    // 只能按次数硬扛 —— Aevon(198) 里四次全撞在同一格上。
+    AevonPushWhy = (wrote || screen) ? (path != 0 ? 0 : 8) : 7;
     return (wrote || screen) ? path : 0;
 }
 
@@ -2866,6 +2899,7 @@ NSString *AevonHookInstall(void) {
             unsigned long long use = reasons;
             if (ours && reasons != 0) {
                 use = 0;
+                AevonDeactReasons = (long)reasons;
                 if (__sync_fetch_and_add(&AevonDeactStripped, 1) < 4) {
                     AevonRawTrace("stripped", "%llu->0 scene=%s",
                                   reasons, AevonSceneName(scene));
@@ -2992,6 +3026,17 @@ long AevonInterceptWrites(void) { return AevonInterceptRewrote; }
 /// everything else in this file, and cannot cache it by accident.
 long AevonDeactCount(void) {
     return AevonDeactSetCalls;
+}
+
+/// 0.2.57 — 真正被我们清零掉的次数（`reasons != 0` 那一种）。这是「场景被
+/// 要求去激活、而我们把要求撤掉了」的计数，不是「钩子被调了几次」。
+long AevonDeactStrippedCount(void) {
+    return __sync_fetch_and_add(&AevonDeactStripped, 0);
+}
+
+/// 0.2.57 — 最近一次被清零的 reasons 位掩码（Aevon(198) 里见到 32 / 34 / 2）。
+int AevonDeactLastReasons(void) {
+    return (int)AevonDeactReasons;
 }
 
 /// The system's own answer to "may this scene go to sleep". `ULLONG_MAX` means

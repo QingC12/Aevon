@@ -3821,6 +3821,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 重试跑在主队列的下一拍（`asyncAfter`），**不在 hook 栈内**，所以不会撞
     /// 同一条纪律。4 × 40 ms 盖住守护循环那 200 ms，够了就停。
     ///
+    /// 0.2.57 — 上面这句是 0.2.43 的算法，Aevon(198) 证伪了它：键盘张开动画本身
+    /// 0.24 s，160 ms 的窗口盖不住，四次全撞在同一个原因上，最后只留一句
+    /// `gave up door=0`。现在按原因码收手、上限放到 9 次（≈360 ms）。
+    ///
     /// 0.2.46 — 从「定时盲推」改成「有回执就停」。
     ///
     /// 盲推的代价不是四次调用，是**四次 settings 更新 = 四次 App 重排**。而抖音
@@ -3829,6 +3833,25 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 这样的机会，所以这里先问回执（`AevonSceneFrameAcked`，读的是
     /// `updateSettings:withTransitionContext:completion:` 的回调）：系统已经收下
     /// 这个目标就不再推，只有真没送到才继续。
+    /// 0.2.57 — 补推改成「按原因收手」，次数只管上限。
+    ///
+    /// Aevon(198) 把旧做法的两个短板同时拍下来了：
+    ///
+    ///     17:31:48 keyboard fill on … push=0
+    ///     17:31:48 kb push late stop ack b=com.ss.iphone.ugc.Aweme left=3
+    ///     …
+    ///     17:31:52 keyboard fill on … push=0
+    ///     17:31:52 kb push late gave up door=0
+    ///
+    /// ① `AevonPushSceneFrame` 的 0 有五种含义，旧代码一律当成「没落地，再试」。
+    ///    其中「已经是目标」那一种（现在的原因码 7）再试一万次也是 0，白烧四次
+    ///    调用；而「被钩子挡了」（原因码 3/4/5）是真的要等，四次 ×40 ms = 160 ms
+    ///    又常常不够 —— 张开动画本身 0.24 s，键盘通知落在钩子里那一拍之后，
+    ///    紧接着的一串回调还在同一条路径上。
+    /// ② 于是两边都错：该停的没停，该等的没等够。现在读原因码分岔：
+    ///    `7` 立刻收手（值已经对了，一个字节都不用再花）；
+    ///    `1/2/6` 立刻放弃（路径根本不通，等也没有意义）；
+    ///    `3/4/5/8` 继续试，上限 9 次（≈360 ms，盖住 0.24 s 动画 + 两拍余量）。
     private func pushSceneLater(_ scene: UIScene, bundle: String, tries: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self, weak scene] in
             guard let self = self, let scene = scene else { return }
@@ -3838,8 +3861,18 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 return
             }
             if AevonPushSceneFrame(scene) != 0 { return }
+            let why = AevonPushSceneFrameWhy()
+            // 已经是目标：这一条链本来就没有要写的东西。
+            if why == 7 { return }
+            // 路径不通（nil / 非主线程 / 没有 settings）：再等也不会变。
+            if why == 1 || why == 2 || why == 6 {
+                Log.write(String(format: "win: kb push late stop why=%d b=%@ left=%ld",
+                                 why, bundle, tries))
+                return
+            }
             if tries <= 1 {
-                Log.write("win: kb push late gave up door=0")
+                Log.write(String(format: "win: kb push late gave up why=%d b=%@ left=%ld",
+                                 why, bundle, tries))
                 return
             }
             self.pushSceneLater(scene, bundle: bundle, tries: tries - 1)
@@ -3965,7 +3998,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 // 0.2.43 — 写不了就补推（见 `pushSceneLater`）。原来这里只等
                 // 守护循环那 200 ms，而 `fill on … push=0` 后面紧接着就是一条
                 // `frame drift`，错位正好落在放大动画的前半段。
-                if door == 0 { self.pushSceneLater(sc, bundle: bundle, tries: 4) }
+                if door == 0 { self.pushSceneLater(sc, bundle: bundle, tries: 9) }
             }
             // 0.2.43 — 场景原点一变，系统那一次「把承载视图 frame 重设成 scene
             // frame」就会把画面推走 215 pt（见 `reapplySoon`）。连对四次，别等
