@@ -947,26 +947,44 @@ zStackParticipantDidChange:
         // `own start … live=0`）根本不经过它，于是全屏 App 还在屏上时就直接
         // 建了卡 —— 用户看到的是「全屏又黑一次，而且不回桌面」。
         //
-        // 现在进门先看桌面在不在前台：不在就先发 home，等它真的在屏（或 1.4 s
-        // 上限）再走整条流程。`homed` 只用来防止这条路自己递归；
-        // `pollForScene` 里那道老门保留，它管的是「启动之后才变成全屏」的另一种情形。
+        // 0.2.33 — 只有「目标 App 就是屏上那个全屏 App」才先回桌面。
+        //
+        // 0.2.32 的判据只有 `AevonSpringboardActive() != 1`，于是全屏 Sileo 时从
+        // 圆盘选任何一个别的 App 也会先发 home、等桌面在屏，再建卡 —— 用户看到
+        // 的是「全屏 app 自动返回桌面，然后才出现悬浮窗，即使两者不同」。
+        // 回桌面本来只为解决一件事：目标 App 的 scene 正被全屏页占着，直接搬进
+        // 卡片会把全屏页抽空（黑）并让这个 scene 掉画。目标 App 不是屏上那个时，
+        // 它要么在后台、要么没起进程，建卡借的是另一份 scene，不需要动当前全屏页。
+        //
+        // 判据与 `pollForScene` 那道门同一口径：目标自己的 scene 现在是不是
+        // 「前台可见」。不是 → 一个 home 都不发，原流程直接往下走。
+        // `homed` 只用来防止这条路自己递归；`pollForScene` 里那道老门保留，
+        // 它管的是「启动之后才变成全屏」的另一种情形。
         if !homed, AevonSpringboardActive() != 1 {
-            let step = AevonHomeStep(1, nil)
-            Log.write("win: home first open " + (step ?? "step nil") + " b=" + bundleID)
-            var waited = 0
-            func afterHome() {
-                let active = AevonSpringboardActive()
-                if (active == 1 && waited >= 10) || waited >= 28 {
-                    Log.write(String(format: "win: home first open ready waited=%ldms springboard=%ld",
-                                     waited * 50, Int(active)))
-                    openCard(bundleID, homed: true, fallback: fallback)
-                    return
+            let onScreen = sceneFor(bundleID).map {
+                AevonBoolOf($0, "accessibilitySceneIsForegroundVisible") == 1
+            } ?? false
+            if !onScreen {
+                Log.write("win: home first skip b=" + bundleID
+                          + " (target is not the full-screen app)")
+            } else {
+                let step = AevonHomeStep(1, nil)
+                Log.write("win: home first open " + (step ?? "step nil") + " b=" + bundleID)
+                var waited = 0
+                func afterHome() {
+                    let active = AevonSpringboardActive()
+                    if (active == 1 && waited >= 10) || waited >= 28 {
+                        Log.write(String(format: "win: home first open ready waited=%ldms springboard=%ld",
+                                         waited * 50, Int(active)))
+                        openCard(bundleID, homed: true, fallback: fallback)
+                        return
+                    }
+                    waited += 1
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { afterHome() }
                 }
-                waited += 1
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { afterHome() }
+                return
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { afterHome() }
-            return
         }
         // 0.1.29 — 圆盘选中的图标**已经在停靠小窗里**：把它升回主悬浮窗，
         // 不要再开一张。
