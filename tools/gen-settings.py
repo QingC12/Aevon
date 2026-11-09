@@ -578,7 +578,19 @@ def build_root(panel_items, wired):
                                 "② 链接 / 登录那一支原来排在 `__PasteSharingToken` 早退之后，微信 / QQ 授权一捎带 token 就连判据都进不去，"
                                 "只能走「先全屏激活、再收回卡片」；现在整支提到 paste 之前，并用 `file://` / `data:` 把 QQ 的文件分享排掉"
                                 "（登录是网页或 SDK 深链，分享是文件 URL）。判据 `notify: link b=com.tencent.xin kind=oauth scheme=…`；"
-                                "若仍看到 `notify: link skip … url=none keys=…`，说明这次登录只带 paste token，没有 URL 可投递。"})
+                                "若仍看到 `notify: link skip … url=none keys=…`，说明这次登录只带 paste token，没有 URL 可投递。"
+                                "0.2.54 起：**冷启动不再被当成「掉画」**。`contentState` 在开卡这一路上是爬着上来的"
+                                "（0 还没准备好 → 1 已连接、还没出首帧 → 2 有画），旧判据只排掉 2，等于把 `cs=1` 也算成黑。"
+                                "于是那半秒里每拍都在喊 `picture dropped cs=1`，还连着两次 `AevonWakeScene`（`wake=1`、`wake=2`）"
+                                "往一个**还没画过第一帧**的 scene 推 settings —— Aevon(197) 里那两次提交正好夹在 "
+                                "`scene deactivation #3/#4/#5` 与 `first frame shown 527ms` 中间。"
+                                "① 掉画判据只排掉「还没出过首帧、读数停在 `cs=1`」这一种过渡态 —— `cs=0` 那条兜底原样留着，"
+                                "不跟着一起关掉；② `deadBeats`（连续两拍零层 ⇒ 关卡重开）的门从 `dropped != 0` 换成同一格记忆，"
+                                "不再依赖「画面回来」那一行有没有跑到；"
+                                "③ `scene deactivation` 与 `picture dropped` 各补两个现场数（`cs= sub= wake=`）——"
+                                "「是不是我自己刚写的那一笔把它推下去的」从此能直接从行里读，不用对时间戳。"
+                                "判据：开卡时**不该再出现** `picture dropped cs=1`；`scene deactivation` 行尾的 `wake=0` "
+                                "说明那几次 deactivate 与我们的写入无关。"})
 
 
     return {"title": "Aevon", "items": items}

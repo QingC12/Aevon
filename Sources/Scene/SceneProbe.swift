@@ -2131,6 +2131,24 @@ zStackParticipantDidChange:
         var dropped = 0
         var droppedAt = Date()
         var wakes = 0
+        // 0.2.54 — 这张卡到底见过画面没有。
+        //
+        // `contentState` 在这条路上是爬着上来的：0（还没准备好）→ 1（已连接、
+        // 还没出首帧）→ 2（有画）。旧判据只排掉 2，等于把 `cs=1` 也算成「掉画」，
+        // 而冷启动那 500 ms 里它一直是 1。
+        //
+        // Aevon(197) 的开卡现场：`beat 3 / 4 / 5` 全在读 `cs=1`，于是
+        // `picture dropped cs=1` 这个假警报后面紧跟两次 `AevonWakeScene`
+        // （`wake=1`、`wake=2`）—— 往一个**还没画过第一帧**的 scene 推 settings。
+        // 那两次提交正好夹在 `scene deactivation #3/#4/#5` 与
+        // `first frame shown after 527ms` 中间，是本轮最可疑的一段。
+        //
+        // 加这一格之后：`cs=1` 在首帧之前不再算掉画，唤醒配额留给真的掉下去
+        // （`cs=0`，0.2.25 回桌面那次读到的就是这个数）。注意判据只排「还没出过
+        // 首帧的 1」，不是把冷启动整段关掉 —— `cs=0` 那一路的兜底必须留着。
+        // 这也是 `watchFirstFrame` 一直在用的口径（它认的是 `cs==2`），
+        // 两个模块从此对同一件事只有一个答案。
+        var sawContent = false
         // 0.0.91 — 「画面掉了、而且再也没回来」连续几拍。两拍就够：一拍可能是
         // 切换的中间态，两拍（稳态 0.2 s 一拍）就是真的没了。
         var deadBeats = 0
@@ -2331,8 +2349,14 @@ zStackParticipantDidChange:
             let attempts = AevonDeactCount()
             if attempts != deact {
                 deact = attempts
+                // 0.2.54 — 补 `cs= sub= wake=`，这一行从此能回答「是不是我
+                // 自己刚写的那一笔把它推下去的」：`wake=` 不是 0 就说明这次
+                // deactivate 之前我们往同一个 scene 提交过 settings。
+                // Aevon(197) 的开卡里 `deact #3/#4/#5` 与两次 wake 交叠，旧行
+                // 没有这两个数，只能靠时间戳猜。
                 Log.write("win: scene deactivation #" + String(attempts)
-                          + " fg=" + flag(fg))
+                          + " fg=" + flag(fg) + " cs=" + String(content)
+                          + " sub=" + String(sublayers) + " wake=" + String(wakes))
             }
             var door = 0
             if fg == 1 {
@@ -2360,13 +2384,25 @@ zStackParticipantDidChange:
             // 掉下去的那一刻记一行，回来的那一刻记一行带毫秒数 —— 下一份日志
             // 就能直接回答「黑了多少毫秒」，不用再靠肉眼对时间戳。
             var wake = 0
-            if beat >= 3, content >= 0, content != 2 {
+            // 0.2.54 — 先记账再判掉画。见 `sawContent` 那一段：冷启动的
+            // `cs=1` 是过渡态，不是黑。
+            if content == 2 { sawContent = true }
+            // 只排掉「还没出过首帧、读数停在 1」这一种。`cs=0` 照旧算掉画 ——
+            // 那时 scene 是真的没准备好，写一次 settings 把它推起来是这条兜底
+            // 本来要做的事，不能跟着 `cs=1` 一起被关掉。判据窄一格，兜底少丢一件。
+            let transitional = (content == 1 && !sawContent)
+            if beat >= 3, content >= 0, content != 2, !transitional {
                 if dropped == 0 {
                     dropped = beat
                     droppedAt = Date()
                     let one = String(format: "%.1f", level)
+                    // 0.2.54 — 补 `sub=`。「cs 掉下去」有两种完全不同的病：
+                    // 有层（进程活着，只是没渲染）与零层（进程没了）。旧行只有
+                    // cs 与 fg，两者分不开，而它们的处置正好是两条路 —— 前者
+                    // 写 settings 有用，后者只能关卡重开。
                     Log.write("win: picture dropped cs=" + String(content)
-                              + " lvl=" + one + " fg=" + flag(fg))
+                              + " lvl=" + one + " fg=" + flag(fg)
+                              + " sub=" + String(sublayers))
                 }
                 // 0.0.52 — 唤醒从「掉画期间每拍都写」降成**兜底**：一段黑最多
                 // 三次，其余拍只读数。母本的做法是事前改参数（AevonScene.m 的
@@ -2396,7 +2432,13 @@ zStackParticipantDidChange:
             // settings 管的是「这个场景该不该睡」，管不了「进程还在不在」。
             //
             // 于是：连续两拍确认，然后关卡、0.6 秒后用同一个 bundle 重开。
-            if beat >= 6, content == 0, sublayers == 0, dropped != 0 {
+            //
+            // 0.2.54 — 门从 `dropped != 0` 换成 `sawContent`。它们本来指同一件
+            // 事（「曾经有过画」），但 `dropped` 会在 `picture back` 那一刻归零，
+            // 而进程死掉时画面回来这一行往往压根不写 —— 用 `dropped` 当门，等于
+            // 让判据依赖另一段代码有没有跑到。`sawContent` 是这张卡自己的记忆，
+            // 不欠任何人的时序。
+            if beat >= 6, sawContent, content == 0, sublayers == 0 {
                 deadBeats += 1
             } else {
                 deadBeats = 0
