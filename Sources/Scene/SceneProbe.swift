@@ -1765,10 +1765,16 @@ zStackParticipantDidChange:
         // that is already invalid is exactly the kind of call that costs a phone.
         var stopped = false
         var closed = false
+        // 0.2.36 — 这张卡在 `FloatHost.cardClosers` 里的键。用 `bundleID`（这张卡
+        // 自己的），不用 `hostedBundle` —— 多窗之后后者是「最后登记的那个 App」。
+        let yieldKey = bundleID ?? hostedBundle ?? ""
         func closeCard(_ reason: String) {
             if closed { return }
             closed = true
             stopped = true
+            // 0.2.36 — 出口表在拆的第一拍就摘：让路那条路是同步调用，摘掉之后
+            // 同一张卡不会被第二次 `closeCard` 碰到（`closed` 之外的保险）。
+            if !yieldKey.isEmpty { FloatHost.cardClosers[yieldKey] = nil }
             // 0.0.55 — 先把空闲熄屏还原，再做别的。反过来的话，中间任何一次
             // 提前 return（deactivate 抛异常、presenter 已失效）都会让断言留在
             // 系统里 —— 浮窗关掉之后手机不再自动锁屏，比不修更糟。
@@ -2007,6 +2013,13 @@ zStackParticipantDidChange:
             // 继续认领热区吃手指。
             FloatHost.abandonTakenSlot()
             return
+        }
+        // 0.2.36 — 卡片真的上屏了，才把「怎么关它」登记出去。
+        //
+        // 登记点必须在 `FloatHost.show` 成功之后：失败那条路会自己拆 presenter，
+        // 从不调 `closeCard`，提前登记就是留一个指向空槽的出口。
+        if !yieldKey.isEmpty {
+            FloatHost.cardClosers[yieldKey] = { reason in closeCard(reason) }
         }
         cardUp = true
         // 0.0.55 — 卡片在屏时右缘带闭嘴（与浮窗外侧手势环在右下角重叠）。
@@ -2978,5 +2991,25 @@ public func AevonCardIsComingFor(_ bundle: UnsafePointer<CChar>?) -> Int32 {
     let identifier = String(cString: bundle)
     guard identifier.count > 2 else { return 0 }
     return SceneProbe.cardIsComing(identifier) ? 1 : 0
+}
+
+/// 0.2.36 — 「系统要全屏打开这个 App 了，把正在承载它的卡片让开」。
+///
+/// 只在 `AevonOpenDecide` 的 `plain` 那一支调用：那里是**系统原实现之前**，
+/// 所以同步拆卡来得及。卡片拆完时 `closeCard` 已经把 scene 的 frame 目标写回
+/// 整屏（`win: scene frame restored`），系统接着拉起的就是一份干净的 scene。
+///
+/// 返回 1 = 真的拆了一张卡；0 = 这个 App 没有卡片（绝大多数打开请求都是这个）。
+/// 非主线程一律答 0：`closeCard` 动的是 scene / window，必须有主线程。
+@_cdecl("AevonCardYieldForFullscreen")
+public func AevonCardYieldForFullscreen(_ bundle: UnsafePointer<CChar>?) -> Int32 {
+    guard let bundle = bundle else { return 0 }
+    let identifier = String(cString: bundle)
+    guard identifier.count > 2 else { return 0 }
+    guard Thread.isMainThread else { return 0 }
+    guard let close = FloatHost.cardClosers[identifier] else { return 0 }
+    Log.write("win: card yielded to fullscreen b=" + identifier)
+    close("fullscreen launch")
+    return 1
 }
 

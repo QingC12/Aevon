@@ -47,6 +47,9 @@ extern int AevonCardIsComingFor(const char *bundle);
 // 0.1.92 — 分享面板那条路的独立开关（`share.off`）。`notify.off` 仍然是总闸：
 // 两个文件任一存在，分享一律不接管。
 extern int AevonShareSwitchOff(void);
+// 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
+// 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
+extern int AevonCardYieldForFullscreen(const char *bundle);
 
 /// The scene manager is a singleton with no public door, and its spelling has
 /// changed across releases. Resolving it here keeps the class-method dispatch
@@ -4707,6 +4710,27 @@ static int AevonOpenDecide(id request, id options,
         kind = "share";
     }
 
+    // 0.2.36 — 「粘贴板文件」这种分享**不能直投卡片**。
+    //
+    // 0.2.35 的真机现场（QQ 分享文件）：
+    //   keys=__PayloadOptions,__PayloadURL,__PasteSharingToken
+    //   notify: appurl send b=com.tencent.mqq opt=2/2 …
+    //   notify: appurl ack  b=com.tencent.mqq ok=1 via=app-src
+    //
+    // 真正装着文件的是 `__PasteSharingToken`：一个私有对象，`AevonAppOpenSafe`
+    // 装不进 plist（`opt=2/2` 的第二个 2 就是它和它里面那件）。扩展拿到的回执
+    // 是「成功」，主 App 却拿不到文件 → 用户同时看到「发送成功」和「发送失败」，
+    // 文件也确实没发出去。
+    //
+    // 这种分享唯一完整的通道是系统原路（token 随激活请求过 XPC，扩展也才知道
+    // 真实的成败）。所以整条放行、不建卡：`why=paste`。文件真的送到，比「这次
+    // 分享以浮窗打开」重要 —— 普通 file:// 分享仍走卡片直投，一个字节没变。
+    if (kind != NULL && strcmp(kind, "share") == 0 &&
+        AevonOpenAnyValue(request, options, @"__PasteSharingToken") != nil) {
+        *why = "paste";
+        return 0;
+    }
+
     // 0.2.10 — 分享黑名单：只对「这次是分享」生效，命中就**整条放行**。
     //
     // 放在判据之后、`sameChain` 之前：`sameChain` 会把同一 App 的第二条吞成
@@ -4739,6 +4763,19 @@ static int AevonOpenDecide(id request, id options,
         if (sameChain && carrier && sysFrom) {
             *why = "syschain";
             return 2;
+        }
+        // 0.2.36 — 卡片正开着这个 App，而系统现在要「普通全屏启动」它。
+        //
+        // 必须在这里让路：这一支返回 0 之后**紧接着**就是原实现，系统会立刻把
+        // 那个 App 推上前台。卡片不让，系统就和我们抢同一份 scene —— 而 intercept
+        // 钩子还在按 430x717 写 frame，真机上就是「卡片黑 + 全屏页底部 215 pt 黑」。
+        //
+        // 同步拆（`closeCard` → 还 frame → 拆 presenter → 交还后台），所以原实现
+        // 拿到 scene 时它已经是干净的整屏尺寸。`why=yield` 是这条路的日志判据。
+        if (AevonCardIsUpFor(bundle) == 1) {
+            int yielded = AevonCardYieldForFullscreen(bundle);
+            *why = yielded == 1 ? "yield" : "plain";
+            return 0;
         }
         *why = "plain";
         return 0;

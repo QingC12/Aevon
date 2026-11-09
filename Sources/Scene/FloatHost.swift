@@ -142,6 +142,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 被降级」和「新主窗建好」两处各写一次，升窗直接用它。
     static var lastMainFrame: CGRect?
 
+    /// 0.2.36 — bundle → 「立刻把这张卡拆掉」的出口。
+    ///
+    /// 只为一件事存在：卡片开着时，系统要从桌面把同一个 App 全屏拉起来
+    /// （`AevonOpenDecide` 的 `plain` 那条路）。0.2.35 的真机现场是双黑 ——
+    /// 系统把我们 hosted 的那份 scene 拿去全屏，而 intercept 钩子仍按
+    /// 430x717 写 frame，全屏页底下 215 pt 什么都没有，卡片里也没了画面。
+    ///
+    /// 让路必须发生在**原实现之前**（`_handleUserActionRequest:` 等四条都在
+    /// 调原实现之前问 `AevonOpenDecide`），所以这里的出口不走动画、同步拆。
+    /// 键是这张卡自己的 bundle，`closeCard` 一开始就把它摘掉 —— 同一张卡不会
+    /// 被拆第二次（`closed` 位之外的第二道保险）。
+    static var cardClosers: [String: (String) -> Void] = [:]
+
     private static func ensureSlots() {
         if slots.isEmpty { slots = (0..<slotCap).map { _ in FloatHost() } }
     }
