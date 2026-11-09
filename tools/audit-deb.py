@@ -701,6 +701,7 @@ def main():
                   b"landing: url %s b=%s display=%d run=%d cut=%d n=%ld",
                   b"landing: url card b=%s",
                   b"landing: url card skip b=%s",
+                  b"landing: url offmain b=%s",
                   b"landing: %s cls=%@ types=%s",
                   # 0.2.60 — 卡片走了、App 窗口还回场景高（「全屏中下黑」的另一半）。
                   # 0.2.46 — 「让抖音真重排」这一版的四条：显示覆盖 / 参考尺寸 /

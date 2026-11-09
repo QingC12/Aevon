@@ -18,6 +18,12 @@ import CoreFoundation
 @_silgen_name("AevonInstallTouchTap")
 private func AevonInstallTouchTap()
 
+/// 0.2.63 — 落点钩子（`_openURLCore:display:…`）。**必须在开机这一拍装**：
+/// `AevonHookInstall()` 是建第一张卡时才调用的，而这条钩子要管的正是「第一张卡
+/// 还不存在」的那一刻。装晚一步，系统那次 URL 打开已经过去了。
+@_silgen_name("AevonLandingBoot")
+private func AevonLandingBoot()
+
 // Two notifications, two callbacks. Deciding "which notification is this" by
 // comparing the name needs a CFString -> String bridge that this toolchain
 // refuses (CFNotificationName is not class-constrained here), so the name is
@@ -112,6 +118,10 @@ public func AevonStart() {
     // 直接拿对象去 withdraw。钩子只登记、原样转发，不改变通知的任何行为；
     // 类不存在时它自己 3 秒后重试（通知栈懒加载）。
     AevonNotificationCaptureInstall()
+
+    // 0.2.63 — 落点：系统的 URL 打开入口带一个 `display` 参数，要进卡片的那个
+    // App 传 NO。放在这里而不是 `openCard` 里，理由写在 `AevonLandingBoot` 上。
+    AevonLandingBoot()
 
     // 0.1.85 — 通知点击观察器。**只取证，不接管**：挂的是 SpringBoard 的
     // App 激活总入口，替身只读一遍参数、原样转发、写一行日志。

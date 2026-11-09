@@ -3034,7 +3034,16 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, BOOL display,
     if (target != NULL) {
         NSString *bundleID = [NSString stringWithUTF8String:target];
         running = AevonAppPid(bundleID) > 0 ? 1 : 0;
-        if (running && display && AevonCardIsUpFor(target) == 0) cut = 1;
+        // `AevonCardIsUpFor` 读的是主线程上的窗口状态，跨线程读会撞上正在拆窗
+        // 的那一拍（那条纪律写在 `AevonCardIsUpFor` 自己的注释里）。不在主队列
+        // 就只记录、不切：宁可这一次全屏，也不许读一个正在被释放的窗口。
+        if (running && display) {
+            if ([NSThread isMainThread]) {
+                if (AevonCardIsUpFor(target) == 0) cut = 1;
+            } else if (seen < 2) {
+                AevonLogRaw([[NSString stringWithFormat:@"landing: url offmain b=%s", target] UTF8String]);
+            }
+        }
     }
     if (cut) __sync_fetch_and_add(&AevonURLCuts, 1);
     if (seen < 6 || cut) {
@@ -3073,7 +3082,14 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, BOOL display,
 }
 
 /// 装落点钩子，并把两个「还没用上」的入口记进日志（只记，不钩）。
+static int AevonLandingInstalled = 0;
+
 static void AevonLandingInstall(NSMutableString *out) {
+    if (AevonLandingInstalled) {
+        [out appendString:@"landing: already installed in this process\n"];
+        return;
+    }
+    AevonLandingInstalled = 1;
     SEL urlSel = NSSelectorFromString(
         @"_openURLCore:display:animating:activationSettings:origin:withResult:");
     Class owners[4] = { Nil, Nil, Nil, Nil };
@@ -3129,10 +3145,24 @@ static void AevonLandingInstall(NSMutableString *out) {
     }
 }
 
+/// 开机就装。**必须是开机**：`AevonHookInstall` 是建第一张卡时才调的，而落点要
+/// 管的恰恰是「第一张卡还不存在」的那一刻（第一次授权、第一次分享）。装晚一步，
+/// `_openURLCore` 那一拍已经过去了，这一版就等于没发。
+void AevonLandingBoot(void) {
+    NSMutableString *out = [NSMutableString string];
+    AevonLandingInstall(out);
+    // 一行一条：日志是按行读的，把一整段塞进一条会让下一轮的 grep 全部落空。
+    for (NSString *raw in [out componentsSeparatedByString:@"\n"]) {
+        NSString *line = [raw stringByTrimmingCharactersInSet:
+                          [NSCharacterSet whitespaceCharacterSet]];
+        if (line.length == 0) continue;
+        AevonLogRaw([line UTF8String]);
+    }
+}
+
 /// Installs every hook the mother ship's route needs and returns the notes.
 /// Idempotent: a second tap in the same process reports the first install rather
 /// than stacking a replacement on top of a replacement.
-///
 /// 0.2.32 — 幂等判据从 `AevonSlotCount` 换成独立标志。通知接口的 `nc-cap`
 /// 在开机时就占一格，旧判据于是一直为真：deact 与 intercept 从未安装，
 /// 0.2.31 日志里的 `hook: live=1 deact_set=0 intercept=0/0` 就是这两个被
