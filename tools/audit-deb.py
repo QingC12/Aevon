@@ -657,8 +657,6 @@ def main():
                   # 不存在：它分不开「已经等于目标」与「被钩子挡了」。
                   # 这两行是**拼接**出来的（`String(format:)` 在那个闭包里会让
                   # 类型检查器超时），所以 `__cstring` 里只有前缀，没有 `%d` 尾巴。
-                  b"win: kb push late gave up why=",
-                  b"win: kb push late stop why=",
                   # 0.2.59 — 五件事各有自己的一行证词，缺哪条就等于那一步没接上：
                   #   `warm start/done` = 圆盘悬停预热（抖音冷启动那 749 ms 从这里挪走）；
                   #   `auth card close` = 授权交接完成后收微信/QQ 卡；
@@ -674,7 +672,6 @@ def main():
                   # `notify: link b=… kind=oauth` 紧跟 `appurl send`。
                   b"notify: oauth pass b=%s scheme=%s card=%d",
                   # 0.2.60 — 卡片走了、App 窗口还回场景高（「全屏中下黑」的另一半）。
-                  b"kb: win unfit h=%.0f scene=%.0f",
                   # 0.2.46 — 「让抖音真重排」这一版的四条：显示覆盖 / 参考尺寸 /
                   # 屏幕跟随 / 回执。逐条都要能在产物里 grep 到，缺哪条就等于那一步
                   # 没有证词：
@@ -692,7 +689,6 @@ def main():
                   b"win: display follow %.0fx%.0f -> %.0fx%.0f slot=%d",
                   b"win: display follow skip slot=%d dt=%.0fms",
                   b"win: scene ack slot=%d",
-                  b"win: kb push late stop ack b=%@ left=%ld",
                   # 两个私有选择子名必须真的进二进制：它们同时是「这条路走的是哪个
                   # 入口」和下一版要不要换路的依据。名字来自对比报告第五节那张表。
                   b"copyWithOverrideBounds:",

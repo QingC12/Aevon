@@ -75,6 +75,9 @@ PANELS = [
         dict(k="@ring.host", cn="桌面状态", cell="title", d="—",
              note="桌面进程回报的当前状态。显示「未加载」表示 Aevon 没有在桌面里跑，"
                   "多半是安全闸门开着，或刚改完还没重载。"),
+        dict(k="@ring.summary", cn="当前承载", cell="title", d="—",
+             note="圆盘现在用的几何（圈数与每圈容量）。它随你在编辑器里的增删"
+                  "自动变化，不用手调。"),
         dict(k="@ring.apps", cn="已选应用", cell="title", d="自动",
              note="圆盘里装哪些 App。留空时自动挑最近使用的 12 个。"),
     ]),
