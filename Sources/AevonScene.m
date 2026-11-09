@@ -2963,8 +2963,8 @@ static NSInteger AevonProbeSelfTest(void) {
 //  两道闸，都是为了「宁可退回旧行为，也不许点了没反应」：
 //    1. 目标 App 的进程必须已经在（`AevonAppPid > 0`）。冷启动那种「进程还没起」
 //       不切 display —— 那时 scene 也不存在，切了没人接管，就是黑屏一分钟。
-//    2. 形状不对就不装。私有方法的调用约定是猜不得的：编码里必须正好两个 BOOL、
-//       五个对象参数、返回 void，少一条就只记一行、不装钩子。
+//    2. 形状不对就不装。私有方法的调用约定是猜不得的：编码必须正好是
+//       `v|@ @ : @ B B @ @ @`（四个对象、两个 BOOL），少一条就只记一行、不装钩子。
 
 typedef void (*AevonURLCoreProc)(id, SEL, id, BOOL, BOOL, id, id, id);
 
@@ -3034,12 +3034,14 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, BOOL display,
     if (target != NULL) {
         NSString *bundleID = [NSString stringWithUTF8String:target];
         running = AevonAppPid(bundleID) > 0 ? 1 : 0;
-        // `AevonCardIsUpFor` 读的是主线程上的窗口状态，跨线程读会撞上正在拆窗
-        // 的那一拍（那条纪律写在 `AevonCardIsUpFor` 自己的注释里）。不在主队列
-        // 就只记录、不切：宁可这一次全屏，也不许读一个正在被释放的窗口。
+        // 主队列才切：`AevonOpenCardDirect` 与窗口状态都是主线程的东西，在系统
+        // 的工作区队列上读它们会撞上正在拆窗的那一拍。不在主队列就只记录。
+        //
+        // 不为「卡已经在」留例外：卡在的时候更应该切 —— 那时系统把它摆成全屏
+        // 只会把卡片盖掉，而我们要的是那条 URL 落进已经开着的那张卡。
         if (running && display) {
             if ([NSThread isMainThread]) {
-                if (AevonCardIsUpFor(target) == 0) cut = 1;
+                cut = 1;
             } else if (seen < 2) {
                 AevonLogRaw([[NSString stringWithFormat:@"landing: url offmain b=%s", target] UTF8String]);
             }
