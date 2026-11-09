@@ -1304,6 +1304,7 @@ zStackParticipantDidChange:
     /// 名字不含 bundle id = 我们的匹配口径错了。
     private static func pollForScene(_ bundleID: String, ticks: Int, start: Date,
                                      probed: Int = 0, retried: Int = 0, fell: Bool = false,
+                                     homed: Bool = false,
                                      fallback: @escaping (String) -> Void) {
         // 0.2.13 — 自建 scene 是**第一个**来源，排在系统 scene 之前。
         //
@@ -1356,11 +1357,50 @@ zStackParticipantDidChange:
             }
         }
         if let scene = sceneFor(bundleID) {
+            // 0.2.30 — **先回桌面，再建卡**。这是「全屏黑屏 + 浮窗黑闪」的根因修复。
+            //
+            // 0.2.23~0.2.29 的顺序都是「先挂卡、0.05~0.12 s 后再发 home」：
+            //   ① 挂卡那一拍把 App 的 scene 从全屏页里搬进卡片，全屏页立刻变空
+            //      —— 操作者先看到**一整屏黑**，然后桌面才进来把黑盖掉；
+            //   ② home 的过渡会把借来的 scene 判成后台，层掉一次
+            //      （`win: picture dropped`），60~200 ms 后才回来 —— 卡片里那一下黑。
+            // 快照盖帧只能盖住 ②，盖不住 ①，而且用户已经明确不要这种做法。
+            //
+            // 把顺序反过来，两个黑都不存在：
+            //   发 home 时 scene 还完整地摆在页里，过渡演的就是这个 App；
+            //   等桌面真的在屏（`isSpringboardActive == 1`，再留 0.4 s 让过渡走完）
+            //   之后才回到这条等待链，建卡时 App 已经在后台 —— 那正是
+            //   「后台 App → 浮窗」这条一直在用、从没黑过的路。
+            // 所以这里不拍快照、不盖任何视图，只是把时序放到正确的位置。
+            if !homed, AevonOwnIsOwned(bundleID) == 0,
+               AevonSpringboardActive() != 1,
+               AevonBoolOf(scene, "accessibilitySceneIsForegroundVisible") == 1 {
+                unmark()
+                let step = AevonHomeStep(1, nil)
+                Log.write("win: home first " + (step ?? "step nil") + " b=" + bundleID)
+                var waited = 0
+                func afterHome() {
+                    let active = AevonSpringboardActive()
+                    // 0.5 s = home 过渡本身走完；1.4 s = 「系统没接这一下」的上限。
+                    if (active == 1 && waited >= 10) || waited >= 28 {
+                        Log.write(String(format: "win: home first ready waited=%ldms springboard=%ld",
+                                         waited * 50, Int(active)))
+                        pollForScene(bundleID, ticks: 0, start: start, probed: probed,
+                                     retried: retried, fell: fellOver, homed: true,
+                                     fallback: fallback)
+                        return
+                    }
+                    waited += 1
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { afterHome() }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { afterHome() }
+                return
+            }
             unmark()
             let ms = Int(Date().timeIntervalSince(start) * 1000)
             Log.write("win: icon scene up after " + String(ms) + "ms ticks=" + String(ticks))
             emitNotes(AevonTakeNotes())
-            float(scene, bundleID: bundleID)
+            float(scene, bundleID: bundleID, holdFirst: homed)
             // 0.2.14 — 系统那条路也一样：scene 已经在手里了再投 payload。
             // 0.2.15 — 同样先走「App 内投递」，失败才交回系统。
             AevonForwardDeliver("scene up")
@@ -1436,7 +1476,7 @@ zStackParticipantDidChange:
         let gap: Double = ticks < 30 ? 0.04 : 0.25
         DispatchQueue.main.asyncAfter(deadline: .now() + gap) {
             pollForScene(bundleID, ticks: ticks + 1, start: start, probed: seen,
-                         retried: again, fell: fellOver, fallback: fallback)
+                         retried: again, fell: fellOver, homed: homed, fallback: fallback)
         }
     }
 
@@ -1597,7 +1637,8 @@ zStackParticipantDidChange:
 
     /// The chain, in the mother ship's order, with the one step she never has to
     /// take because the system takes it for her.
-    private static func float(_ scene: NSObject, bundleID: String? = nil) {
+    private static func float(_ scene: NSObject, bundleID: String? = nil,
+                              holdFirst: Bool = false) {
         guard let manager = value(of: scene, "uiPresentationManager") else {
             Log.write("win: no uiPresentationManager")
             return
@@ -1852,16 +1893,11 @@ zStackParticipantDidChange:
         // `seen` 只是读数，不参与判断：热启动回来的 App 同样 seen=0（它在后台），
         // 若拿它当条件，快速通道永远不会被走到，热启动也要白等 100 ms。
         var awaiting = false
-        // 0.2.23 — 这颗 App 在接手之前是不是**已经摆在屏幕上**（seen=1）。
-        // 只有这一种情况会留下「空的 app-switcher 页」，也就是用户看到的黑屏；
-        // 后台 App 被拉进卡片时 seen=0，不需要任何收尾。
-        var liveFront = false
         if bundleID != nil {
             let state = AevonContentStateOf(scene)
             let layers = count(of: value(of: scene, "layerManager"), "layers")
             let seen = AevonBoolOf(scene, "accessibilitySceneIsForegroundVisible")
-            awaiting = (state != 2) || (layers == 0)
-            liveFront = (seen == 1)
+            awaiting = (state != 2) || (layers == 0) || holdFirst
             Log.write(String(format: "win: launch state cs=%ld layers=%ld seen=%ld held=%ld",
                              state, layers, seen, awaiting ? 1 : 0))
         }
@@ -1947,46 +1983,16 @@ zStackParticipantDidChange:
         // 上面那段：写在 `activate` 之前的那一次不算「App 的窗口变了」。
         host.reassertCanvas()
 
-        // 0.2.29 — 回桌面走回 0.2.27 的时序。
+        // 0.2.30 — 这一段原来是「回桌面」的三级阶梯（0.2.25~0.2.29）。
         //
-        // 0.2.28 把「藏空页 + 发 home」提到同步，真机两个后果：全屏页黑屏又回来了，
-        // 而且 app-switcher 的后台卡片上滑关不掉 —— 回桌面指令和卡片首帧撞在同一
-        // 个事务里，切换器那一页被藏掉时手势还在等它。这里整段恢复 0.2.27：
-        // 0.05 s 藏空页，0.12 s 发第一级 home，快照留在第一级里拍。
-        if let b = bundleID, AevonOwnIsOwned(b) == 0, liveFront {
-            let page = centeredSwitcherPage()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                if closed { return }
-                if AevonSpringboardActive() != 1 { _ = hideEmptyPage(b, animated: false) }
-            }
-            // 回桌面的过渡会把借来的 scene 判成后台，画面随即掉一帧黑。
-            // 下面那串连写专门覆盖这半秒（0.2.25：掉画后 63 ms 才回来，
-            // 那正好是 200 ms 节拍剩下的余量）。
-            AevonHomeWakeReset()
-            func climb(_ step: Int) {
-                if closed { return }
-                if AevonSpringboardActive() == 1 {
-                    Log.write("win: home already in front, skip step " + String(step))
-                    return
-                }
-                if step == 1 { holdPicture(view, seconds: 0.90) }
-                Log.write("win: home " + (AevonHomeStep(Int32(step), page) ?? "step nil"))
-                for offset in [0.0, 0.06, 0.14, 0.24, 0.36] {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + offset) {
-                        if closed { return }
-                        _ = AevonHomeWake(scene)
-                    }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
-                    if closed { return }
-                    let active = AevonSpringboardActive()
-                    Log.write("win: home check " + String(step) + " springboard=" + String(active))
-                    if active == 1 { return }
-                    if step < 3 { climb(step + 1) } else { hideEmptyPage(b) }
-                }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { climb(1) }
-        }
+        // 它发得太晚了：卡片已经把这个 App 的 scene 从全屏页里搬走，全屏页
+        // 从这一拍起就是黑的，而 home 还要再等 0.12 s 才发。操作者看到的第一屏
+        // 黑就是这么来的；home 过渡本身又把借来的 scene 判成后台，层掉一次，
+        // 那是卡片里那一下黑。0.2.27 的 `holdPicture` 只能盖后者。
+        //
+        // 0.2.30 把这件事整体前移到 `pollForScene`：scene 还在全屏页里、画面
+        // 完整的时候发 home，桌面真的在屏之后才回到这里建卡。所以这里不再
+        // 需要任何回桌面动作，也不需要快照。
 
         // 0.0.59 — 首帧交给自己的观察器，不再等保活时钟。
         //
@@ -2796,38 +2802,13 @@ zStackParticipantDidChange:
                   + NSStringFromClass(type(of: saved.view)))
     }
 
-    /// 0.2.27 — 回桌面过渡里，把卡片最后一帧贴在卡片上。
+    /// 0.2.30 — 快照盖帧整段删除。
     ///
-    /// 0.2.25/0.2.26 两次真机都是同一个形状：回桌面那一刻借来的 scene 被系统判成
-    /// 后台，`picture dropped` 先落一行，连写 settings 只能让它早点回来 ——
-    /// 那几十到两百毫秒里合成的仍是空画面，操作者看到「浮窗黑一下」。
-    /// `snapshotView(afterScreenUpdates: false)` 不重绘、只取当前渲染树，
-    /// 贴在卡片顶部就能把这段空白盖住；0.60 秒后自己摘掉。
-    private static var homeSnapshot: UIView?
-
-    private static func holdPicture(_ view: UIView, seconds: Double) {
-        if homeSnapshot != nil { return }
-        let bounds = view.bounds
-        guard bounds.width > 1, bounds.height > 1 else {
-            Log.write("win: home snapshot skipped empty")
-            return
-        }
-        guard let snap = view.snapshotView(afterScreenUpdates: false) else {
-            Log.write("win: home snapshot none")
-            return
-        }
-        snap.frame = bounds
-        snap.isUserInteractionEnabled = false
-        view.addSubview(snap)
-        homeSnapshot = snap
-        Log.write("win: home snapshot held " + rectText(bounds))
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
-            snap.removeFromSuperview()
-            if homeSnapshot === snap { homeSnapshot = nil }
-            Log.write("win: home snapshot released")
-        }
-    }
-
+    /// 0.2.27 的 `holdPicture` 用 `snapshotView(afterScreenUpdates:false)` 把
+    /// 最后一帧贴在卡片上 0.9 秒，用来盖住回桌面过渡里掉层的那几十毫秒。
+    /// 用户明确否掉了这种做法（「我不要那种用快照盖第一帧的方法」），而且它
+    /// 本来就盖不住另一处黑：全屏页被搬空的那一屏。0.2.30 改成「先回桌面、
+    /// 桌面在屏之后才建卡」，两处黑都不再产生，盖帧也就不需要了。
     private static func rectText(_ rect: CGRect) -> String {
         String(format: "%.0f,%.0f %.0fx%.0f", rect.origin.x, rect.origin.y,
                rect.size.width, rect.size.height)
