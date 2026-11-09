@@ -194,6 +194,32 @@ int AevonAppFrontmost(NSString *bundleID) {
 
 // MARK: - Notes
 
+/// 0.2.35 — 「这个 scene 的 settings 说它在前台吗」。
+///
+/// 0.2.34 的 `AevonAppFrontmost` 在真机上答不出来：同机日志里
+/// `win: pose … front=-1 bg=-1 run=-1 pid=-2` —— `SBApplicationController`
+/// 对 `org.coolstar.SileoStore` 返回 nil，于是全屏 QQ 选自己也被判成
+/// 「不是前台」，`home first skip` 一写，卡片就把正在全屏的那份 scene 搬走，
+/// 全屏页抽空变黑。
+///
+/// 这个读数是 scene 自己的：`FBScene.settings.isForeground`。系统每次切前台都
+/// 会写它（我们的 intercept 钩子读的就是同一个字段，日志里的 `fg=`）。
+/// 返回 1 = 前台 / 0 = 后台 / -1 = 读不到（selector 缺失，不猜）。
+int AevonSceneForeground(id scene) {
+    if (scene == nil) return -1;
+    @try {
+        SEL settingsSel = NSSelectorFromString(@"settings");
+        if (![scene respondsToSelector:settingsSel]) return -1;
+        id settings = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
+        if (settings == nil) return -1;
+        SEL fgSel = NSSelectorFromString(@"isForeground");
+        if (![settings respondsToSelector:fgSel]) return -1;
+        return ((BOOL (*)(id, SEL))objc_msgSend)(settings, fgSel) ? 1 : 0;
+    } @catch (__unused NSException *exception) {
+        return -1;
+    }
+}
+
 /// Notes are collected here and drained by Swift in one go, so the log gets
 /// twenty lines from one crossing instead of twenty. Nothing is written to
 /// disk — the caller decides when the moment is safe enough to log.

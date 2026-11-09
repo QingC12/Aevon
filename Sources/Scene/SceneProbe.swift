@@ -940,64 +940,6 @@ zStackParticipantDidChange:
         // 0.1.91 — 「这张卡正在建」的登记。必须在**第一个** return 之前：
         // 收面板那条路要用它区分「卡在路上，可以先收」与「根本没有卡，不许收」。
         markPending(bundleID)
-        // 0.2.32 — 「先回桌面」挪到进门第一拍，而且不再只认借来的 scene。
-        //
-        // 0.2.30 的那道门写在 `pollForScene` 里，判据是 `AevonOwnIsOwned(b) == 0`：
-        // 只覆盖「借系统现成 scene」这一条。自建 scene（日志里的
-        // `own start … live=0`）根本不经过它，于是全屏 App 还在屏上时就直接
-        // 建了卡 —— 用户看到的是「全屏又黑一次，而且不回桌面」。
-        //
-        // 0.2.33 — 只有「目标 App 就是屏上那个全屏 App」才先回桌面。
-        //
-        // 0.2.32 的判据只有 `AevonSpringboardActive() != 1`，于是全屏 Sileo 时从
-        // 圆盘选任何一个别的 App 也会先发 home、等桌面在屏，再建卡 —— 用户看到
-        // 的是「全屏 app 自动返回桌面，然后才出现悬浮窗，即使两者不同」。
-        // 回桌面本来只为解决一件事：目标 App 的 scene 正被全屏页占着，直接搬进
-        // 卡片会把全屏页抽空（黑）并让这个 scene 掉画。目标 App 不是屏上那个时，
-        // 它要么在后台、要么没起进程，建卡借的是另一份 scene，不需要动当前全屏页。
-        //
-        // 判据与 `pollForScene` 那道门同一口径：目标 App 此刻**是不是屏上那个
-        // 全屏 App**。不是 → 一个 home 都不发，原流程直接往下走。
-        //
-        // 0.2.34 — 判据从 scene 的 `accessibilitySceneIsForegroundVisible` 换成
-        // SpringBoard 的 `SBApplication.isFrontmost`。0.2.33 的真机日志把它证伪了：
-        // 桌面在屏时点圆盘里的 QQ（11:14:04），那个 scene 可见位照样答 1，于是
-        // 进了 home 分支；而 home 又因为灵动岛 scene 抛异常没发出去，白等 1.4 秒
-        // 才建卡 —— 用户看到的就是「又不会回桌面 + 黑屏 + 分享全屏」。
-        // 读不到（-1）也按「不是」处理：0.2.32 的「不同 App 也先回桌面」不能回来。
-        // `homed` 只用来防止这条路自己递归；`pollForScene` 里那道老门保留，
-        // 它管的是「启动之后才变成全屏」的另一种情形。
-        if !homed, AevonSpringboardActive() != 1 {
-            let frontmost = AevonAppFrontmost(bundleID)
-            if frontmost != 1 {
-                Log.write("win: home first skip b=" + bundleID
-                          + " (target is not the frontmost app)")
-            } else {
-                let step = AevonHomeStep(1, nil)
-                Log.write("win: home first open " + (step ?? "step nil") + " b=" + bundleID)
-                var waited = 0
-                func afterHome() {
-                    let active = AevonSpringboardActive()
-                    let front = AevonAppFrontmost(bundleID)
-                    // 0.2.34 — 两个读数任一成立就算「已经离开全屏」：桌面在屏，
-                    // 或者目标 App 不再是前台。0.2.33 的日志里桌面明明在屏，
-                    // `isSpringboardActive` 仍然答 0（卡片窗口存在时它不一定回 1），
-                    // 只看它就会把每次 home 都拖满 1.4 秒。
-                    // 前 0.5 秒不建卡：home 过渡本身要走完，0.2.30 的「先回桌面
-                    // 再挂卡」正是靠这段间隔才不黑。
-                    if ((active == 1 || front != 1) && waited >= 10) || waited >= 28 {
-                        Log.write(String(format: "win: home first open ready waited=%ldms springboard=%ld front=%ld",
-                                         waited * 50, Int(active), Int(front)))
-                        openCard(bundleID, homed: true, fallback: fallback)
-                        return
-                    }
-                    waited += 1
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { afterHome() }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { afterHome() }
-                return
-            }
-        }
         // 0.1.29 — 圆盘选中的图标**已经在停靠小窗里**：把它升回主悬浮窗，
         // 不要再开一张。
         //
@@ -1051,6 +993,56 @@ zStackParticipantDidChange:
                 // 编译器编成立即数，二进制里 grep 不到 —— 闸门会拦，也确实拦对了。
                 Log.write(String(format: "win: demote old=%@ side=%@ new=%@",
                                  hostedBundle ?? "?", side, bundleID))
+            }
+        }
+
+        // 0.2.32 — 「先回桌面」进门第一拍；0.2.33 收紧成「只有目标就是屏上那个」；
+        // 0.2.34 换成 `SBApplication.isFrontmost`；0.2.35 再补一个 scene 自己的读数。
+        //
+        // 这道门只为解决一件事：目标 App 的 scene 正被全屏页占着，直接搬进卡片
+        // 会把全屏页抽空（黑）。目标不是屏上那个时，它要么在后台、要么没起进程，
+        // 建卡借的是另一份 scene，一个 home 都不该发（0.2.32 的回归）。
+        //
+        // 0.2.35 — `isFrontmost` 在真机上答不出来。同机日志里
+        // `win: pose … front=-1 bg=-1 run=-1 pid=-2`：`SBApplicationController` 对
+        // Sileo 返回 nil，`AevonAppObject` 空手 → 全屏 QQ 选自己也被判成「不是
+        // 前台」→ `home first skip` → 卡片搬走正在全屏的那份 scene → 黑屏。
+        // 现在两个读数任一为 1 即可：`isFrontmost`（认得出来时最准）或
+        // `FBScene.settings.isForeground`（scene 自己报的前台位，系统每次切前台都写，
+        // 即 intercept 日志里的 `fg=`）。两个都读不到才按「不是」处理。
+        //
+        // 位置也从函数入口挪到了这里：上面两段（已在停靠小窗 / 已经是主窗）都直接
+        // return，那时目标 App 的 scene 由我们自己的窗口承载、`isForeground` 也是 1，
+        // 留在入口会把「点一下已在卡片里的 App」误判成全屏而白发一次 home。
+        if !homed, AevonSpringboardActive() != 1 {
+            let target = sceneFor(bundleID)
+            let front = AevonAppFrontmost(bundleID)
+            let sceneFG = AevonSceneForeground(target)
+            if front != 1 && sceneFG != 1 {
+                Log.write(String(format: "win: home first skip b=%@ front=%ld scene_fg=%ld",
+                                 bundleID, Int(front), Int(sceneFG)))
+            } else {
+                let step = AevonHomeStep(1, nil)
+                Log.write("win: home first open " + (step ?? "step nil") + " b=" + bundleID)
+                var waited = 0
+                func afterHome() {
+                    let active = AevonSpringboardActive()
+                    let fgNow = AevonSceneForeground(target)
+                    let frontNow = AevonAppFrontmost(bundleID)
+                    // 0.5 s = home 过渡本身走完；1.4 s = 「系统没接这一下」的上限。
+                    // 任一读数说明「已经离开全屏」即可；前 0.5 秒照样不建卡 ——
+                    // 那正是 0.2.30 修掉黑屏的间隔。
+                    if ((active == 1 || fgNow != 1 || frontNow != 1) && waited >= 10) || waited >= 28 {
+                        Log.write(String(format: "win: home first open ready waited=%ldms springboard=%ld scene_fg=%ld front=%ld",
+                                         waited * 50, Int(active), Int(fgNow), Int(frontNow)))
+                        openCard(bundleID, homed: true, fallback: fallback)
+                        return
+                    }
+                    waited += 1
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { afterHome() }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { afterHome() }
+                return
             }
         }
 
@@ -1437,9 +1429,13 @@ zStackParticipantDidChange:
             // 0.2.34 — 判据与 `openCard` 那道门同一口径：`SBApplication.isFrontmost`。
             // scene 可见位对后台 scene 也答 1（0.2.33 真机日志里桌面在屏时它仍然
             // 答 1），拿它判「目标是不是屏上那个」会把每一次都带进 home 分支。
+            // 0.2.35 — 再补 scene 自己的 `settings.isForeground`：`isFrontmost` 在
+            // 这台机器上对不少 App 答 -1/0（`SBApplicationController` 认不出 bundle），
+            // 全屏 QQ 选自己也会被漏掉。两个读数任一为 1 即可。
+            let sceneFG = AevonSceneForeground(scene)
             if !homed, AevonOwnIsOwned(bundleID) == 0,
                AevonSpringboardActive() != 1,
-               AevonAppFrontmost(bundleID) == 1 {
+               (AevonAppFrontmost(bundleID) == 1 || sceneFG == 1) {
                 unmark()
                 let step = AevonHomeStep(1, nil)
                 Log.write("win: home first " + (step ?? "step nil") + " b=" + bundleID)
@@ -1447,13 +1443,15 @@ zStackParticipantDidChange:
                 func afterHome() {
                     let active = AevonSpringboardActive()
                     let front = AevonAppFrontmost(bundleID)
+                    let fgNow = AevonSceneForeground(scene)
                     // 0.5 s = home 过渡本身走完；1.4 s = 「系统没接这一下」的上限。
                     // 0.2.34 — `front != 1` 也算走完：桌面在屏时 `isSpringboardActive`
                     // 不一定会回 1（卡片窗口存在时它就是 0），只看它每次都要等满。
+                    // 0.2.35 — scene 前台位回落同样算「已经离开全屏」。
                     // 前 0.5 秒照样不建卡 —— 那正是 0.2.30 修掉黑屏的间隔。
-                    if ((active == 1 || front != 1) && waited >= 10) || waited >= 28 {
-                        Log.write(String(format: "win: home first ready waited=%ldms springboard=%ld front=%ld",
-                                         waited * 50, Int(active), Int(front)))
+                    if ((active == 1 || front != 1 || fgNow != 1) && waited >= 10) || waited >= 28 {
+                        Log.write(String(format: "win: home first ready waited=%ldms springboard=%ld front=%ld scene_fg=%ld",
+                                         waited * 50, Int(active), Int(front), Int(fgNow)))
                         pollForScene(bundleID, ticks: 0, start: start, probed: probed,
                                      retried: retried, fell: fellOver, homed: true,
                                      fallback: fallback)

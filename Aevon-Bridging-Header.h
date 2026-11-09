@@ -398,6 +398,9 @@ int AevonSpringboardActive(void);
 /// -1 = 读不到。`openCard` 的「先回桌面」只用它当判据：0.2.33 用的 scene
 /// 可见位对后台 scene 也答 1，真机上把桌面在屏的那一次也带进了 home 分支。
 int AevonAppFrontmost(NSString *_Nullable bundleID);
+// 0.2.35 — `FBScene.settings.isForeground`：这个 scene 自己报的前台位。
+// 1 = 前台 / 0 = 后台 / -1 = 读不到。`isFrontmost` 在真机上答不出时靠它。
+int AevonSceneForeground(id _Nullable scene);
 
 // 0.0.65 的 `AevonColdStartReady` 已随该功能一起删除（0.0.66）：它靠「名片文件
 // 写上 pid」判断进程新旧，而名片写不进去时（沙箱、目录权限、装包顺序）判据就永远
