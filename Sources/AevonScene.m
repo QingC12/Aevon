@@ -3119,6 +3119,123 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
     // 之前建窗会和 FrontBoard 抢同一份 scene（0.0.31 的死锁纪律）。60 ms 的固定
     // 延时在冷启动那一次不够用（QQ 首次起来要一秒多），所以按 scene 登记来。
     AevonLandCardSchedule(target);
+    // 0.2.71 — 看门狗：万一这一拍把前台弄丢，1.8 s 后自己拉回来。
+    AevonLandingGuardStart(target);
+}
+
+// MARK: - 0.2.71 — 落点看门狗
+//
+// 0.2.69 的现场：一次落点被放行后既没有卡片、也没有全屏 App、桌面也不在前台，
+// 系统停在「没有前台」的状态 —— 上滑失效，连注销都做不到。
+//
+// 逆向 TrollOpenJB 1.5.2 得到的结构是「吞掉 + 自建浮窗」：它的
+// `_openURLCore:display:animating:activationSettings:origin:withResult:` 只读
+// display / target / origin（日志里 `display=(nil)` 是读数，不是它传出去的值），
+// 真正开窗走自己的 `TOS_openFloatingViewForURL`。它敢吞，是因为自建那条路
+// 在它自己的进程里一定成功；我们没有这个前提，所以不能照抄「吞」。
+//
+// 这里只加一条**读后写**：落点放行 1.8 s 后，卡片 / 桌面 / 任意全屏 App 三样
+// 一个都没有，就判定这一拍把前台弄丢了，直接用 `LSApplicationWorkspace`
+// 把来源 App（没有就目标 App）拉回前台；拉不起来就强建卡。正常路径一个字节
+// 都不改，只在最坏情况下保证「手机还能操作」。
+
+static void AevonLandingSourceCopy(char *out, size_t size);
+
+/// 现在有没有**任意**一个 App 在前台。1 = 有 / 0 = 没有 / -1 = 读不到。
+/// 只读 `SBApplication.isFrontmost`，与 `AevonAppFrontmost` 同源。
+static int AevonAnyAppFrontmost(void) {
+    @try {
+        Class cls = NSClassFromString(@"SBApplicationController");
+        if (cls == Nil) return -1;
+        SEL sharedSel = NSSelectorFromString(@"sharedInstance");
+        if (![cls respondsToSelector:sharedSel]) return -1;
+        id ctrl = ((id (*)(id, SEL))objc_msgSend)((id)cls, sharedSel);
+        SEL appsSel = NSSelectorFromString(@"applications");
+        if (ctrl == nil || ![ctrl respondsToSelector:appsSel]) return -1;
+        id apps = ((id (*)(id, SEL))objc_msgSend)(ctrl, appsSel);
+        if (apps == nil || ![apps respondsToSelector:@selector(count)]) return -1;
+        SEL fgSel = NSSelectorFromString(@"isFrontmost");
+        for (id app in (NSArray *)apps) {
+            if ([app respondsToSelector:fgSel] &&
+                ((BOOL (*)(id, SEL))objc_msgSend)(app, fgSel)) {
+                return 1;
+            }
+        }
+        return 0;
+    } @catch (__unused NSException *e) {
+        return -1;
+    }
+}
+
+/// 用系统自己的入口把一个 App 拉回前台。返回 1 表示这句发出去了。
+static int AevonLandOpenApp(const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return 0;
+    @try {
+        Class cls = NSClassFromString(@"LSApplicationWorkspace");
+        if (cls == Nil) return 0;
+        SEL sharedSel = NSSelectorFromString(@"defaultWorkspace");
+        if (![cls respondsToSelector:sharedSel]) return 0;
+        id ws = ((id (*)(id, SEL))objc_msgSend)((id)cls, sharedSel);
+        if (ws == nil) return 0;
+        SEL openSel = NSSelectorFromString(@"openApplicationWithBundleID:");
+        if (![ws respondsToSelector:openSel]) return 0;
+        BOOL ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(
+            ws, openSel, [NSString stringWithUTF8String:bundle]);
+        return ok ? 1 : 0;
+    } @catch (__unused NSException *e) {
+        return 0;
+    }
+}
+
+static void AevonLandingGuardTick(char *target, int tick) {
+    if (target == NULL) return;
+    if (target[0] == '\0') { free(target); return; }
+    int card = AevonCardIsUpFor(target);
+    int board = AevonSpringboardActive();
+    int any = AevonAnyAppFrontmost();
+    if (card == 1 || board == 1 || any == 1) {
+        if (tick >= 4) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"landing: guard ok b=%s tick=%d card=%d board=%d any=%d",
+                          target, tick, card, board, any] UTF8String]);
+        }
+        free(target);
+        return;
+    }
+    if (tick < 9) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            AevonLandingGuardTick(target, tick + 1);
+        });
+        return;
+    }
+    char src[128];
+    AevonLandingSourceCopy(src, sizeof(src));
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"landing: guard dead b=%s src=%s tick=%d card=%d board=%d any=%d",
+                  target, src[0] != '\0' ? src : "-", tick, card, board, any] UTF8String]);
+    int ok = 0;
+    if (src[0] != '\0' && strcmp(src, target) != 0) ok = AevonLandOpenApp(src);
+    if (!ok) ok = AevonLandOpenApp(target);
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"landing: guard revive b=%s via=%s ok=%d",
+                  target, ok ? (src[0] != '\0' ? "src" : "target") : "none", ok] UTF8String]);
+    if (ok) { free(target); return; }
+    // 拉不起来就强建卡：哪怕内容没投进去，至少给用户一个能关掉的窗口，
+    // 不至于停在一块没有任何前台 App 的桌面上。
+    AevonLogRaw([[NSString stringWithFormat:@"landing: guard card b=%s", target] UTF8String]);
+    AevonOpenCardDirect(target);
+    free(target);
+}
+
+static void AevonLandingGuardStart(const char *target) {
+    if (target == NULL || target[0] == '\0') return;
+    char *copy = strdup(target);
+    if (copy == NULL) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonLandingGuardTick(copy, 0);
+    });
 }
 
 /// 装落点钩子，并把两个「还没用上」的入口记进日志（只记，不钩）。
@@ -5692,6 +5809,16 @@ static CFAbsoluteTime AevonPastePromoteAt = 0;
 /// 只认「前台且不是目标、不是桌面、不是分享服务」的第一条 scene。
 static char AevonShareSource[128];
 static CFAbsoluteTime AevonShareSourceAt = 0;
+
+/// 0.2.71 — 给落点看门狗读「这次打开是谁发起的」。30 秒窗口与分享那条一致：
+/// 超时就不猜，宁可空着让看门狗去拉目标 App。
+static void AevonLandingSourceCopy(char *out, size_t size) {
+    if (out == NULL || size == 0) return;
+    out[0] = '\0';
+    if (AevonShareSource[0] == '\0') return;
+    if (CFAbsoluteTimeGetCurrent() - AevonShareSourceAt > 30.0) return;
+    snprintf(out, size, "%s", AevonShareSource);
+}
 
 /// 0.2.44 — 从 scene identifier 里还原**真正的 bundle id**。
 ///
