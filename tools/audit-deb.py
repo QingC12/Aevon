@@ -683,13 +683,13 @@ def main():
                   # `giveup` = 收不进来时把登记彻底撤掉（否则整屏只画上半截）。
                   b"notify: auth swap card b=%s after=%dms fg=%d board=%d",
                   b"notify: auth swap giveup b=%s fg=%d live=%d tick=%d",
-                  # 0.2.63 — 落点（对比报告的方案 A）：系统的 URL 打开入口带一个
-                  # `display` 参数，要进卡片的那个 App 传 NO ⇒ **没有全屏帧**，
-                  # URL 仍由系统原生投递。这六条是判据：
+                  # 0.2.63/0.2.66 — 落点（对比报告的方案 A）：系统的 URL 打开入口带一个
+                  # `display` 参数（真机编码 `v60@0:8@16@24B32@36@44@?52` ⇒ 它是对象），
+                  # 要进卡片的那个 App 传 nil ⇒ **没有全屏帧**，URL 仍由系统原生投递。
                   #   `owners=` / `cls=… types=` = 这个选择子在这台系统上存不存在、
                   #      形状对不对（对不上就不装，只留一行 shape skip）；
                   #   `hooked` = 真装上了；
-                  #   `url … cut=1` = 那一次真的把 display 切成了 NO；
+                  #   `url … cut=1` = 那一次真的把 display 换成了 nil；
                   #   `url card` = 随后把那份 scene 收进了卡片。
                   # 另两条 `landing: %s cls=` 是 Stheno 的激活口与 TrollOpen 的
                   # 实体口的普查，只记录、不改变行为 —— 它们的答案决定下一版要不要
@@ -698,7 +698,9 @@ def main():
                   b"landing: url owners=%d",
                   b"landing: url cls=%@ types=%s",
                   b"landing: url hooked",
-                  b"landing: url %s b=%s display=%d run=%d cut=%d n=%ld",
+                  b"landing: url shape ok (sig=%s)",
+                  b"landing: url shape skip (sig=%s args=%d)",
+                  b"landing: url %s b=%s d=%s a=%d run=%d cut=%d n=%ld",
                   b"landing: url card b=%s",
                   b"landing: url card skip b=%s",
                   b"landing: url offmain b=%s",

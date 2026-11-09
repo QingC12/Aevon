@@ -22,6 +22,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2955,7 +2956,7 @@ static NSInteger AevonProbeSelfTest(void) {
 //  入口，它带着一个 `display` 参数**。TrollOpen 就是钩这一个（它的 `URLJump`
 //  开关），Aevon 从来没有这个钩子（11-08 的报告里写着「Aevon 没有 URL 钩子」）。
 //
-//  做法只有一句：要进卡片的那个 App，`display` 传 NO。
+//  做法只有一句：要进卡片的那个 App，`display` 传 nil。
 //    · URL 仍由系统原生投递 ⇒ 微信的 `NSUserActivity`、QQ 的 SSO 回跳都在；
 //    · 系统不把它摆到屏幕上 ⇒ 没有全屏帧，也就没有「下半黑」；
 //    · 我们再把那份已经存在的 scene 收进卡片（`AevonOpenCardDirect` 认活 scene）。
@@ -2963,10 +2964,19 @@ static NSInteger AevonProbeSelfTest(void) {
 //  两道闸，都是为了「宁可退回旧行为，也不许点了没反应」：
 //    1. 目标 App 的进程必须已经在（`AevonAppPid > 0`）。冷启动那种「进程还没起」
 //       不切 display —— 那时 scene 也不存在，切了没人接管，就是黑屏一分钟。
-//    2. 形状不对就不装。私有方法的调用约定是猜不得的：编码必须正好是
-//       `v|@ @ : @ B B @ @ @`（四个对象、两个 BOOL），少一条就只记一行、不装钩子。
+//    2. 形状不对就不装。私有方法的调用约定是猜不得的：这一版只认真机读回来的那一份
+//       编码（参数序列 `@@B@@@?`），别的一律只记一行、不装钩子。
+//
+//  0.2.66 — 0.2.65 的闸写的是「两个 BOOL」（`@ B B @ @ @?`），因为按名字以为
+//  `display:` 是 BOOL。Aevon(204) 把真机的答案打了出来：
+//      `v60@0:8@16@24B32@36@44@?52`
+//  六个参数里只有一个 BOOL，而且它在第 3 位 —— 第 2 位的 `display:` 是**对象**。
+//  TrollOpen 的字符串表里就摆着同一件事：`display=(nil)`、
+//  `displayClass=%@ display=%@ displayBundle=%@ displayIdentifier=%@`。
+//  它按对象读 display，并且把 nil 当成一个正常取值。
+//  所以「不摆到屏幕上」这一个动作，传的不是 `NO`，是把这个 display 对象传 nil。
 
-typedef void (*AevonURLCoreProc)(id, SEL, id, BOOL, BOOL, id, id, id);
+typedef void (*AevonURLCoreProc)(id, SEL, id, id, BOOL, id, id, id);
 
 static AevonURLCoreProc AevonURLCoreOriginal = NULL;
 static long AevonURLCalls = 0;
@@ -2981,46 +2991,58 @@ static const char *AevonLandingBundleForURL(const char *url) {
     return NULL;
 }
 
+/// 日志里那一段 URL 的「门牌」：scheme://host，最多 40 个字符。
+///
+/// 0.2.65 只打 scheme，结果 `https` 这一个词什么也说明不了 —— 微信 / QQ 的
+/// 登录走的正是 https 通用链接（Aevon(204)：`scheme=https/204`），要认它就
+/// 必须看见 host。这里只截断、不解析，也不改任何判断。
 static void AevonLandingShape(const char *url, char *out, size_t size) {
     if (out == NULL || size == 0) return;
     out[0] = '\0';
     if (url == NULL) { snprintf(out, size, "-"); return; }
     size_t i = 0;
-    while (url[i] != '\0' && url[i] != ':' && i + 1 < size) {
-        out[i] = url[i];
+    while (url[i] != '\0' && i + 1 < size && i < 40) {
+        char c = url[i];
+        if (c == '?' || c == '#' || c == ' ' || c == '\n' || c == '\t') break;
+        out[i] = c;
         i += 1;
     }
     out[i] = '\0';
 }
 
-/// 只认这一种形状：`v|@ @ : @ B B @ @ @`（返回可有可无，第三、四个参数是 BOOL）。
+/// 把类型编码压成「只有类型、没有偏移」的一串，再跟真机读数逐字比。
+///   `v60@0:8@16@24B32@36@44@?52` ⇒ `v@:@@B@@@?`
 ///
-/// 私有方法的调用约定猜不得：如果第二个参数其实是对象、第三个才是 BOOL，装上去
-/// 就是把一个指针当 BOOL 读，而且发生在系统每一次打开 URL 的路径上。宁可这一版
-/// 只记一行 `shape skip`，也不许装一个位置可能错的钩子。
-static int AevonLandingEncodingOK(const char *encoding) {
-    if (encoding == NULL) return 0;
-    char t[24];
-    int n = 0;
-    for (const char *p = encoding; *p != '\0' && n < 23; p++) {
+/// 0.2.65 的闸是自己拼了一个「两个 BOOL」的形状再去比，比错了方向：它拒掉的
+/// 正是唯一实现这个选择子的类。这里不猜形状，只认那一次真机读回来的字符串。
+static void AevonLandingSig(const char *encoding, char *out, size_t size) {
+    if (out == NULL || size == 0) return;
+    out[0] = '\0';
+    if (encoding == NULL) return;
+    size_t n = 0;
+    for (const char *p = encoding; *p != '\0' && n + 2 < size; p++) {
         char c = *p;
         if ((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '"' || c == '[' ||
             c == ']' || c == '{' || c == '}' || c == '(' || c == ')' || c == '^' ||
-            c == '?' || c == '<' || c == '>' || c == '=' || c == 'b' || c == 'n' ||
+            c == '<' || c == '>' || c == '=' || c == 'b' || c == 'n' ||
             c == 'r' || c == 'N' || c == 'o' || c == 'O' || c == 'R' || c == 'V') {
             continue;
         }
-        t[n++] = c;
+        out[n++] = c;
     }
-    t[n] = '\0';
-    if (n < 6) return 0;
-    if (t[0] != 'v' && t[0] != '@') return 0;
-    if (t[1] != '@' || t[2] != ':' || t[3] != '@') return 0;
-    if ((t[4] != 'B' && t[4] != 'c') || (t[5] != 'B' && t[5] != 'c')) return 0;
-    return 1;
+    out[n] = '\0';
 }
 
-static void AevonURLCoreReplacement(id self, SEL _cmd, id url, BOOL display,
+/// 唯一认的形状：`v @ : @ @ B @ @ @ ?`。
+/// 返回 void、self、_cmd，然后 url(@) display(@) animating(B)
+/// activationSettings(@) origin(@) withResult(@?)。少一条都不装。
+static int AevonLandingEncodingOK(const char *encoding) {
+    char sig[32];
+    AevonLandingSig(encoding, sig, sizeof(sig));
+    return strcmp(sig, "v@:@@B@@@?") == 0 ? 1 : 0;
+}
+
+static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
                                     BOOL animating, id settings, id origin, id result) {
     long seen = __sync_fetch_and_add(&AevonURLCalls, 1);
     NSString *text = nil;
@@ -3039,7 +3061,7 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, BOOL display,
         //
         // 不为「卡已经在」留例外：卡在的时候更应该切 —— 那时系统把它摆成全屏
         // 只会把卡片盖掉，而我们要的是那条 URL 落进已经开着的那张卡。
-        if (running && display) {
+        if (running) {
             if ([NSThread isMainThread]) {
                 cut = 1;
             } else if (seen < 2) {
@@ -3049,16 +3071,28 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, BOOL display,
     }
     if (cut) __sync_fetch_and_add(&AevonURLCuts, 1);
     if (seen < 6 || cut) {
-        char shape[40];
+        char shape[48];
         AevonLandingShape(raw, shape, sizeof(shape));
+        // display 是对象，可能本来就是 nil（系统自己也会传 nil）。只读类名。
+        const char *dcls = "-";
+        if (display == nil) dcls = "nil";
+        else if ((uintptr_t)display > 0x1000) {
+            const char *name = object_getClassName(display);
+            dcls = name != NULL ? name : "?";
+        } else {
+            dcls = "scalar";
+        }
         AevonLogRaw([[NSString stringWithFormat:
-                      @"landing: url %s b=%s display=%d run=%d cut=%d n=%ld",
-                      shape, target != NULL ? target : "-",
-                      display ? 1 : 0, running, cut, seen + 1] UTF8String]);
+                      @"landing: url %s b=%s d=%s a=%d run=%d cut=%d n=%ld",
+                      shape, target != NULL ? target : "-", dcls,
+                      animating ? 1 : 0, running, cut, seen + 1] UTF8String]);
     }
 
     if (AevonURLCoreOriginal != NULL) {
-        AevonURLCoreOriginal(self, _cmd, url, cut ? NO : display, animating,
+        // 切口只有一处：把 display 换成 nil ——「打开，但不摆到任何屏幕上」。
+        // 别的参数原样下去：URL 仍由系统投递，微信的 NSUserActivity、QQ 的
+        // SSO 回跳都还在。
+        AevonURLCoreOriginal(self, _cmd, url, cut ? nil : display, animating,
                              settings, origin, result);
     }
     if (!cut) return;
@@ -3103,14 +3137,20 @@ static void AevonLandingInstall(NSMutableString *out) {
         [out appendFormat:@"landing: url cls=%@ types=%s\n",
          NSStringFromClass(owners[i]), encoding != NULL ? encoding : "?"];
         if (encoding == NULL || !AevonLandingEncodingOK(encoding)) {
-            [out appendFormat:@"landing: url shape skip (args=%d)\n",
+            char sig[32];
+            AevonLandingSig(encoding, sig, sizeof(sig));
+            [out appendFormat:@"landing: url shape skip (sig=%s args=%d)\n",
+             encoding != NULL ? sig : "?",
              encoding != NULL ? AevonObjectArgs(encoding) : -1];
             continue;
         }
+        char sig[32];
+        AevonLandingSig(encoding, sig, sizeof(sig));
+        [out appendFormat:@"landing: url shape ok (sig=%s)\n", sig];
         AevonHookSlot *slot = AevonReserve("landing-url");
         if (slot == NULL) { [out appendString:@"landing: url no slot\n"]; break; }
         AevonHookSlot *mine = slot;
-        id block = ^(id host, id target, BOOL display, BOOL animating,
+        id block = ^(id host, id target, id display, BOOL animating,
                      id settings, id origin, id result) {
             AevonURLCoreReplacement(host, mine->sel, target, display,
                                     animating, settings, origin, result);
