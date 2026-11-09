@@ -604,7 +604,25 @@ def build_root(panel_items, wired):
                                 "同一版给微信 / QQ 的每次打开加一行 `notify: sso b=… pay=… cont=… share=… sys=… "
                                 "front=… src=… act=…#… url=… board=… keys=…`（独立预算 40 行，只读）。"
                                 "若微信仍是 `pay=paste` + `url=none`，`board=` 会给出粘贴板里那个值的 scheme / 长度"
-                                "（内容不落日志）—— 下一版能不能在本地投递，就看这一格。"})
+                                "（内容不落日志）—— 下一版能不能在本地投递，就看这一格。"
+                                "0.2.56 起：**微信登录那一下全屏：先把「系统必须激活它」这一段压到最短，"
+                                "同时把下一版要用的两个读数补进日志**。"
+                                "0.2.55 的日志第一次照全了这条请求：`pay=paste` + `cont=1` + 顶层没有任何 URL"
+                                "（`url=- len=0`），`board=-` 说明 SpringBoard 这边也读不到粘贴板内容 —— "
+                                "没有 URL 可投递，而 paste token 只能随系统真正激活过 XPC（0.2.37 的"
+                                "「先建卡再交回」已被真机证伪：卡片和全屏抢同一份 scene，卡片黑）。"
+                                "所以这一版不再假装能绕开它，只压缩可见时间：`AevonPastePromoteSchedule` "
+                                "首拍 0.20 s → 0.02 s，轮询 0.125 s → 0.06 s（总窗口仍是 3 s）。"
+                                "`AevonPastePromoteTick` 原本就用 `sceneFG / front` 判「目标是不是真的已经上前台」，"
+                                "提前来问不会抢跑 —— 目标一翻前台就收卡，不再多等一个固定节拍。"
+                                "判据：`notify: paste promote schedule` 与 `notify: paste promote … tick=0` 几乎同一拍，"
+                                "紧随其后的 `notify: share swap card b=com.tencent.xin after=60ms` 前面不再空 0.2 s。"
+                                "① 另把 `__AppLink4LS`（`LSAppLink`）补进 URL 查找：它是对象，"
+                                "`AevonOpenScanURL` 那套按形状扫进不到内部，0.2.55 的 `url=-` 可能漏在这里。"
+                                "② `notify: sso` 行新增 `link=`（类名:scheme/长度）、`ua=`（activityType）与 "
+                                "`ptk=`（`__PasteSharingToken` 的 ivar 名字，最多 6 个，只记名字不读值）。"
+                                "若 `link=` 真给出一条深链、或 `ptk=` 里有粘贴板名字，下一版就能改成本地投递，"
+                                "把这一下全屏彻底去掉。"})
 
 
     return {"title": "Aevon", "items": items}

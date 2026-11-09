@@ -5105,6 +5105,15 @@ static NSString *AevonOpenURLOf(id request, id options) {
         if (value == nil) value = AevonActRead(activity, @"_webpageURL");
     }
     if (value == nil) {
+        // 0.2.56 — 分享面板的续接请求（`UIActivityContinuationAction`）会把目标 App 的
+        // app link 装进 `__AppLink4LS`（`LSAppLink`）。它既不是字典也不是字符串，
+        // 0.2.51 那套「按形状扫」进不到对象内部 —— 微信登录那一条的 `url=-`
+        // 可能就漏在这里。`LSAppLink.URL` 是公开属性，KVC 就能读；读不到返回 nil。
+        id appLink = AevonOpenAnyValue(request, options, @"__AppLink4LS");
+        value = AevonActRead(appLink, @"URL");
+        if (value == nil) value = AevonActRead(appLink, @"url");
+    }
+    if (value == nil) {
         // 0.2.51 — 最后一道：按形状扫。`options` 在真机上就是 `__NSDictionaryM`，
         // 登录链接无论挂在哪一层都会被这一扫找到；`request` 通常只是 bundle id 串，
         // 扫它是为了覆盖对象形状的那几代系统。
@@ -5528,7 +5537,7 @@ static void AevonPastePromoteTick(char *copy, int tick) {
     // `board != 1` 是 `openCard` 那条 home-first 的门：桌面在屏时它不会先回桌面，
     // 而「全屏 App 直接贴卡」正是 0.2.30 修掉的那次黑屏。这里提前按同一条门等。
     int up = (front == 1 || sceneFG == 1) ? 1
-           : ((front == -1 && sceneFG == -1 && live == 1 && tick >= 4) ? 1 : 0);
+           : ((front == -1 && sceneFG == -1 && live == 1 && tick >= 8) ? 1 : 0);
     if (board != 1 && up) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"notify: paste promote b=%s front=%d board=%d live=%d scene=%d tick=%d",
@@ -5539,14 +5548,16 @@ static void AevonPastePromoteTick(char *copy, int tick) {
         free(copy);
         return;
     }
-    if (tick >= 24) {
+    if (tick >= 50) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"notify: paste promote b=%s giveup front=%d board=%d live=%d scene=%d tick=%d",
                       copy, front, board, live, sceneFG, tick] UTF8String]);
         free(copy);
         return;
     }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.125 * NSEC_PER_SEC)),
+    // 0.2.56 — 60 ms 一拍（原 125 ms）：目标 scene 一翻前台就收卡，
+    // 不再多等一个固定节拍。50 拍仍覆盖原来的 3 秒窗口。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         AevonPastePromoteTick(copy, tick + 1);
     });
@@ -5564,10 +5575,74 @@ static void AevonPastePromoteSchedule(const char *bundle) {
     char *copy = strdup(bundle);
     if (copy == NULL) return;
     AevonLogRaw([[NSString stringWithFormat:@"notify: paste promote schedule b=%s", copy] UTF8String]);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
+    // 0.2.56 — 首拍从 0.20 s 改到 0.02 s：这 0.20 s 不是「等内容就绪」，只是
+    // 排队的固定延迟。`AevonPastePromoteTick` 自己会用 `sceneFG / front` 判
+    // 「目标是不是真的已经上前台」，不到就继续等 —— 所以提前来问不会抢跑，
+    // 只会在目标上前台的那一拍立刻收卡，把用户看到的全屏窗口压到最短。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.02 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         AevonPastePromoteTick(copy, 0);
     });
+}
+
+/// 0.2.56 — 一条 URL 的形状：scheme 与长度。内容（ticket / code）不进日志。
+static void AevonURLShape(NSString *url, char *out, size_t size) {
+    if (out == NULL || size == 0) return;
+    out[0] = '\0';
+    if (![url isKindOfClass:[NSString class]] || url.length == 0) {
+        snprintf(out, size, "-");
+        return;
+    }
+    const char *raw = url.UTF8String;
+    size_t i = 0;
+    if (raw != NULL) {
+        while (raw[i] != '\0' && raw[i] != ':' && i < size - 1) {
+            out[i] = raw[i];
+            i += 1;
+        }
+    }
+    out[i] = '\0';
+    size_t used = strlen(out);
+    snprintf(out + used, size - used, "/%d", (int)url.length);
+}
+
+/// 0.2.56 — 一个对象的 ivar 名字（只记名字，一个值都不读）。
+///
+/// 为什么需要：`__PasteSharingToken` 不是一个公开类，0.2.38 的探针只拿到
+/// 「类名 + description（对象地址）」。若它身上带着一个粘贴板名字，那就有可能在
+/// 本地把登录载荷读出来、完全绕开系统那次全屏激活 —— 但不知道 ivar 叫什么，
+/// 下一版还是只能猜。这里只列名字，最多三级父类、六个名字。
+static void AevonIvarNamesOf(id object, char *out, size_t size, int maxNames) {
+    if (out == NULL || size == 0) return;
+    out[0] = '\0';
+    if (object == nil) { snprintf(out, size, "-"); return; }
+    @try {
+        size_t used = 0;
+        int names = 0;
+        Class cls = object_getClass(object);
+        for (int level = 0; cls != Nil && level < 3 && names < maxNames; level++) {
+            unsigned int count = 0;
+            Ivar *list = class_copyIvarList(cls, &count);
+            if (list != NULL) {
+                for (unsigned int i = 0; i < count && names < maxNames; i++) {
+                    const char *name = ivar_getName(list[i]);
+                    if (name == NULL) continue;
+                    size_t need = strlen(name);
+                    if (used + need + 2 >= size) break;
+                    if (used > 0) out[used++] = ',';
+                    memcpy(out + used, name, need);
+                    used += need;
+                    out[used] = '\0';
+                    names += 1;
+                }
+                free(list);
+            }
+            cls = class_getSuperclass(cls);
+        }
+        if (used == 0) snprintf(out, size, "-");
+    } @catch (__unused NSException *exception) {
+        snprintf(out, size, "!");
+    }
 }
 
 /// 0.2.55 — 微信 / QQ 的每一次打开先照一张相。
@@ -5623,8 +5698,42 @@ static void AevonSsoProbe(id request, id options, const char *bundle) {
                 snprintf(board, sizeof(board), "threw");
             }
         }
+        // 0.2.56 — `__AppLink4LS` 与 `__UserActivity4LS` 的形状。
+        //
+        // 微信登录（`pay=paste` + `cont=1`）在顶层 options 里既没有 URL，也读不到
+        // 粘贴板内容。若 app link / 用户活动里其实装着一条可投递的 URL，这一格会
+        // 直接给出 scheme 与长度；`ptk=` 是 token 对象的 ivar 名字 —— 下一版能不能
+        // 在本地读出载荷，就看这两个字段。
+        id appLink = AevonOpenAnyValue(request, options, @"__AppLink4LS");
+        char link[72] = "-";
+        if (appLink != nil) {
+            id linkValue = AevonActRead(appLink, @"URL");
+            NSString *linkText = nil;
+            if ([linkValue isKindOfClass:[NSURL class]]) {
+                linkText = [(NSURL *)linkValue absoluteString];
+            } else if ([linkValue isKindOfClass:[NSString class]]) {
+                linkText = (NSString *)linkValue;
+            }
+            char shape[40];
+            AevonURLShape(linkText, shape, sizeof(shape));
+            snprintf(link, sizeof(link), "%s:%s", object_getClassName(appLink), shape);
+        }
+        id activity = AevonOpenAnyValue(request, options, @"__UserActivity4LS");
+        char uaText[72] = "-";
+        if (activity != nil) {
+            id type = AevonActRead(activity, @"activityType");
+            if ([type isKindOfClass:[NSString class]] && [(NSString *)type length] > 0) {
+                const char *rawType = [(NSString *)type UTF8String];
+                snprintf(uaText, sizeof(uaText), "%s", rawType != NULL ? rawType : "-");
+            } else {
+                snprintf(uaText, sizeof(uaText), "#%s", object_getClassName(activity));
+            }
+        }
+        char tokenKeys[104] = "-";
+        id token = AevonOpenAnyValue(request, options, @"__PasteSharingToken");
+        if (token != nil) AevonIvarNamesOf(token, tokenKeys, sizeof(tokenKeys), 6);
         AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: sso b=%s pay=%s cont=%d share=%d sys=%d front=%d src=%@ act=#%s url=%s len=%d board=%s keys=%s",
+                      @"notify: sso b=%s pay=%s cont=%d share=%d sys=%d front=%d src=%@ act=#%s url=%s len=%d board=%s link=%s ua=%s ptk=%s keys=%s",
                       bundle, pay,
                       AevonOpenIsContinuation(request, options),
                       AevonOpenIsShareSource(request, options) ? 1 : 0,
@@ -5632,7 +5741,7 @@ static void AevonSsoProbe(id request, id options, const char *bundle) {
                       AevonAppFrontmost([NSString stringWithUTF8String:bundle]),
                       [src isKindOfClass:[NSString class]] ? (NSString *)src : @"-",
                       action != nil ? object_getClassName(action) : "-",
-                      scheme, (int)url.length, board,
+                      scheme, (int)url.length, board, link, uaText, tokenKeys,
                       keys[0] != '\0' ? keys : "-"]
                      UTF8String]);
     } @catch (__unused NSException *exception) {
