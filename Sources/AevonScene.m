@@ -4918,8 +4918,13 @@ static void AevonShareRestoreSchedule(const char *target) {
 /// 本来就是为了「目标还占着全屏时不许抽 scene」，目标已经退到后台，这道门
 /// 既不需要、也不该再按一次 Home。
 ///
-/// 150 ms 一拍：切 App 的动画是异步的，但目标的 `isForeground` 一翻 0 就说明
-/// scene 已经可以安全搬走；最长 1.8 s 后退回 0.2.44 的顺序兜底。
+/// 60 ms 一拍：切 App 的动画是异步的，但目标的 `isForeground` 一翻 0 就说明
+/// scene 已经可以安全搬走；最长 1.2 s 后退回 0.2.44 的顺序兜底。
+///
+/// 0.2.47 — 用户要的是「别看见全屏 QQ」。真正不出现全屏只有本地投递一条路，
+/// 而 `UISPasteSharingToken` 的 description 只有对象地址（0.2.38 的探针），
+/// 这条钥匙不存在；0.2.37「先建卡再交回」也被真机证伪。所以这里只做一件事：
+/// 把「QQ 占屏」的这一段压到最短，让它落在分享面板收起的动画里。
 static char AevonShareSwapTarget[128];
 static CFAbsoluteTime AevonShareSwapAt = 0;
 
@@ -4947,7 +4952,7 @@ static void AevonShareSwapTick(char *target, char *source, int tick) {
         AevonLogRaw([[NSString stringWithFormat:@"notify: share swap restore b=%s door=%d",
                       source, (int)door] UTF8String]);
         AevonShareRestoreLaunch(source, door);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             AevonShareSwapTick(target, source, tick + 1);
         });
@@ -4965,13 +4970,13 @@ static void AevonShareSwapTick(char *target, char *source, int tick) {
     if (targetGone || sourceBack) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"notify: share swap card b=%s after=%dms target_fg=%d src_fg=%d board=%d",
-                      target, tick * 150, targetFG, sourceFG, AevonSpringboardActive()]
+                      target, tick * 60, targetFG, sourceFG, AevonSpringboardActive()]
                       UTF8String]);
         AevonOpenCardDirect(target);
         free(target); free(source);
         return;
     }
-    if (tick >= 12) {
+    if (tick >= 20) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"notify: share swap giveup b=%s target_fg=%d src_fg=%d tick=%d",
                       target, targetFG, sourceFG, tick] UTF8String]);
@@ -4981,7 +4986,7 @@ static void AevonShareSwapTick(char *target, char *source, int tick) {
         free(target); free(source);
         return;
     }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         AevonShareSwapTick(target, source, tick + 1);
     });
@@ -5067,7 +5072,7 @@ static void AevonPastePromoteSchedule(const char *bundle) {
     char *copy = strdup(bundle);
     if (copy == NULL) return;
     AevonLogRaw([[NSString stringWithFormat:@"notify: paste promote schedule b=%s", copy] UTF8String]);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         AevonPastePromoteTick(copy, 0);
     });
