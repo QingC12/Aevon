@@ -3047,6 +3047,7 @@ static int AevonLandingEncodingOK(const char *encoding) {
 }
 
 static void AevonLandCardSchedule(const char *target);
+static void AevonLandingGuardStart(const char *target);
 
 static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
                                     BOOL animating, id settings, id origin, id result) {
