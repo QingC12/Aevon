@@ -1879,11 +1879,12 @@ static BOOL AevonWriteFrame(id settings, int slot) {
                           AevonArmed[slot],
                           now.size.width, now.size.height,
                           target.size.width, target.size.height] UTF8String]);
-            char name[128];
-            strlcpy(name, AevonArmed[slot], sizeof(name));
+            char *name = strdup(AevonArmed[slot]);
+            if (name == NULL) return NO;
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (name[0] == '\0') return;
+                if (name[0] == '\0') { free(name); return; }
                 AevonCardYieldForFullscreen(name);
+                free(name);
             });
             return NO;
         }
@@ -6438,9 +6439,9 @@ static void AevonClearLater(const char *bundle, NSString *identifier) {
         }
         char *b1 = strdup(bundle);
         if (b1 == NULL) { free(b2); continue; }
-        const int64_t delay = pass == 0 ? 0.60 : 1.60;
+        const double delay = pass == 0 ? 0.60 : 1.60;
         const int retry = pass;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay * NSEC_PER_SEC),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             AevonClearRetry = retry;
             AevonClearNotification(b1, b2);
