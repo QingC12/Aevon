@@ -569,7 +569,16 @@ def build_root(panel_items, wired):
                                 "判据：`win: own display 430x932 -> 430x717 via=override`（不再是 via=mutable / keep）、"
                                 "`win: own ref 430x717 via=settings`、`win: display follow 430x932 -> 430x717 slot=0`、"
                                 "`win: scene ack slot=0` 四条都出现；然后看 `video band` 的 `gap` 是否掉到 8 以下、"
-                                "`via=tick` 的写入次数是否归零 —— 归零就说明视频居中补丁可以删了。"})
+                                "`via=tick` 的写入次数是否归零 —— 归零就说明视频居中补丁可以删了。"
+                                "0.2.53 起：**网页链接一步到 Safari；微信 / QQ 登录不再先整屏**。"
+                                "① 通用链接会先被系统解析到声明了 Associated Domains 的 App（点 GitHub 链接先去 GitHub App），"
+                                "0.2.52 把这类请求当普通 App 打开放行，所以中间多弹一下；现在识别 "
+                                "`__UserActivity4LS.activityType = NSUserActivityTypeBrowsingWeb`（且没有 paste token、不是分享），"
+                                "把目标直接改写成 Safari 再建卡 —— 判据 `notify: link retarget from=… to=safari scheme=https`。"
+                                "② 链接 / 登录那一支原来排在 `__PasteSharingToken` 早退之后，微信 / QQ 授权一捎带 token 就连判据都进不去，"
+                                "只能走「先全屏激活、再收回卡片」；现在整支提到 paste 之前，并用 `file://` / `data:` 把 QQ 的文件分享排掉"
+                                "（登录是网页或 SDK 深链，分享是文件 URL）。判据 `notify: link b=com.tencent.xin kind=oauth scheme=…`；"
+                                "若仍看到 `notify: link skip … url=none keys=…`，说明这次登录只带 paste token，没有 URL 可投递。"})
 
 
     return {"title": "Aevon", "items": items}

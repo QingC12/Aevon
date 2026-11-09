@@ -5002,6 +5002,31 @@ static int AevonOpenIsContinuation(id request, id options) {
     return (name != NULL && strstr(name, "UIActivityContinuationAction") != NULL) ? 1 : 0;
 }
 
+static id AevonActRead(id object, NSString *key);
+
+/// 0.2.53 — 这一次是不是「用户点了一个网页链接」。
+///
+/// 通用链接（`https://`）会先被系统解析到声明了 Associated Domains 的那个 App：
+/// 用户点 GitHub 链接时，SpringBoard 收到的请求目标是 GitHub App，`__PayloadURL`
+/// 里没有 URL —— URL 装在 `__UserActivity4LS.webpageURL`，activityType 是
+/// `NSUserActivityTypeBrowsingWeb`。0.2.51 把这类请求当普通 App 打开放行，
+/// 于是 GitHub App 先整屏弹一下、再由它转去 Safari（用户看到的「多一步跳转」）。
+///
+/// 只认这一种形状：有 browsing-web 活动，且没有 paste token。分享、深链回调、
+/// 从桌面点图标都不会命中。
+static int AevonOpenIsBrowsingWeb(id request, id options) {
+    id activity = AevonOpenAnyValue(request, options, @"__UserActivity4LS");
+    if (activity == nil) {
+        id payload = AevonOpenPayload(request, options);
+        if (payload != nil) {
+            activity = AevonActRead(payload, @"UIApplicationLaunchOptionsUserActivityKey");
+        }
+    }
+    id type = AevonActRead(activity, @"activityType");
+    if (![type isKindOfClass:[NSString class]]) return 0;
+    return [(NSString *)type isEqualToString:@"NSUserActivityTypeBrowsingWeb"] ? 1 : 0;
+}
+
 static void AevonOpenKeysOf(id options, char *out, size_t size);
 
 /// 0.2.51 — 「长得像 URL 的那个值」。
@@ -5599,6 +5624,149 @@ static int AevonOpenDecide(id request, id options,
         kind = "share";
     }
 
+    // 判据先于「同一次点击的第二条」：先确认这是要接管的那两种之一，再谈它是不是
+    // 上一次的后续。顺序反过来，用户在 1.5 秒内点桌面图标也会被当成链条吞掉 ——
+    // 那是一个真实的「点了没反应」。
+    //
+    // 同一次点击的第二条（open → trusted 之间只隔几毫秒）。第一条被吞掉之后
+    // 链条通常就断了；真来了也不能再开一次卡片，否则屏幕上一大一小的两个。
+    double now = CFAbsoluteTimeGetCurrent();
+    int sameChain = (AevonDivertAt > 0 && now - AevonDivertAt < 1.5 &&
+                     strcmp(bundle, AevonDivertBundle) == 0);
+
+    // 0.2.49 — 链接 / 登录授权**先于分享判定**。
+    //
+    // 0.2.48 把它放在 `kind == NULL` 里，真机上两类请求都到不了：应用调
+    // `openURL:` 时来源是那个 App（不是 SpringBoard）且带 payload，于是先被上面
+    // 的判据归成 `share`；微信 / QQ 的 SSO 深链还常常捎带 `__PasteSharingToken`
+    // （Aevon 0.2.48 日志，14:42:31 的 `src=com.midea.msmart.appstore pay=url`），
+    // 又被 `paste` 那一支整条放行 ⇒ 先全屏、再回桌面、最后才建卡。
+    //
+    // 判据只看「带 URL」：从桌面点图标没有 URL，相册里的文件也没有 URL，
+    // 误吞它们等于「点了没反应」。Safari 只认 http(s)；微信 / QQ 认它们的
+    // SDK 深链族（登录授权、支付、分享回跳）。通知点击不走这一支，那条路还要
+    // 清通知，顺序不能动。
+    if (!notifyKind) {
+        NSString *linkURL = AevonOpenURLOf(request, options);
+        int isSafari = strncmp(bundle, "com.apple.mobilesafari", 22) == 0;
+        int isOAuth = !isSafari &&
+            (strncmp(bundle, "com.tencent.xin", 15) == 0 ||
+             strncmp(bundle, "com.tencent.mqq", 15) == 0);
+        // 0.2.53 — 通用链接被系统解析到了别的 App（GitHub 之类）：改投 Safari。
+        // 条件是「browsing-web 活动 + 没有 paste token + 不是分享」，所以只命中
+        // 「用户点了一个网页链接」这一种，不会误伤深链回调和分享。
+        int isWebLink = (!isSafari && !isOAuth &&
+                         AevonOpenIsBrowsingWeb(request, options) == 1 &&
+                         AevonOpenAnyValue(request, options, @"__PasteSharingToken") == nil &&
+                         AevonOpenIsContinuation(request, options) == 0 &&
+                         !AevonOpenIsShareSource(request, options));
+        if (isSafari || isOAuth || isWebLink) {
+            if (linkURL.length == 0) {
+                // 登录也可能整条装在 paste token 里（没有 URL）。留一行，下一轮
+                // 就能看出「微信登录到底是 url 还是 paste」，不用再靠猜。
+                // 0.2.51 — 补上 `keys=`：上一版只知道「没 URL」，不知道 options 里
+                // 到底有什么键。这一行能直接把「URL 挂在哪一层」照下来。
+                char linkKeys[152];
+                AevonOpenKeysOf(options, linkKeys, sizeof(linkKeys));
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"notify: link skip b=%s scheme=- pay=%s cont=%d url=none keys=%s",
+                              bundle, AevonOpenPayloadKind(request, options),
+                              AevonOpenIsContinuation(request, options),
+                              linkKeys[0] != '\0' ? linkKeys : "-"]
+                             UTF8String]);
+            } else {
+                NSString *low = [linkURL lowercaseString];
+                const char *scheme = low.UTF8String;
+                int web = (strncmp(scheme, "http://", 7) == 0 ||
+                           strncmp(scheme, "https://", 8) == 0);
+                int wanted = 0;
+                if (isSafari || isWebLink) {
+                    wanted = web;
+                } else {
+                    // 0.2.51 — 不再按 scheme 白名单猜。
+                    //
+                    // 登录走哪条深链由微信 / QQ 的 SDK 决定（`weixin://`、
+                    // `mqqopensdkapi://`、通用链接……换一个 SDK 版本就变），
+                    // 白名单每漏一条，用户看到的就是「又先全屏了」。真正稳定的分界
+                    // 只有两条：
+                    //   · `UIActivityContinuationAction` = 分享面板，必须原样交给系统
+                    //     （分享内容在系统那次激活里，本地投递顶掉就等于丢内容）；
+                    //   · 来源是 sharingd / ShareExtension / sharetimeline = 分享，同理。
+                    // 两条都不是、又确实带 URL 的，就是登录授权，可以建卡本地投递。
+                    //
+                    // 0.2.53 — 再排掉 `file://` / `data:`。QQ 的文件分享走的是
+                    // 「带 paste token 的 payload」：`act=-`（没有 continuation），
+                    // 来源也是普通 App，只看前两条会和登录一模一样。区别在载荷本身：
+                    // 分享的是文件 URL，登录的是网页 / SDK 深链。认错这一条的代价是
+                    // 文件根本发不出去。
+                    int fileURL = (strncmp(scheme, "file://", 7) == 0 ||
+                                   strncmp(scheme, "data:", 5) == 0);
+                    wanted = (AevonOpenIsContinuation(request, options) == 0 &&
+                              !AevonOpenIsShareSource(request, options) &&
+                              !fileURL);
+                }
+                if (wanted) {
+                    if (isWebLink) {
+                        // 0.2.53 — 用户点的是网页链接，系统却把它解析给了另一个 App
+                        // （GitHub 之类）。把目标改写成 Safari：原请求不再交给系统，
+                        // 那个 App 整屏弹一下的中间步骤就不会发生；卡片和 URL 投递
+                        // 走的还是同一条路。
+                        AevonLogRaw([[NSString stringWithFormat:
+                                      @"notify: link retarget from=%s to=safari scheme=%s",
+                                      bundle,
+                                      scheme != NULL && scheme[0] != '\0' ? scheme : "-"]
+                                     UTF8String]);
+                        snprintf(bundle, size, "%s", "com.apple.mobilesafari");
+                    }
+                    // 目标已经整屏在屏上（例如 Safari 正开着，后台某个 App 又发了
+                    // 一条链接）：这条请求放它照常走，别为了建卡把用户按回桌面。
+                    // `isFrontmost` 只对 SpringBoard 的 `SBApplication` 有效，读不到
+                    // 时是 0 / -1，仍然走卡片，不影响正常场景。
+                    if (AevonAppFrontmost([NSString stringWithUTF8String:bundle]) == 1) {
+                        *why = "plain";
+                        return 0;
+                    }
+                    // 同一次点击派生出来的第二条：第一条已经把卡和 URL 接过去了，
+                    // 这条再吞一次，绝不能让它落回原实现把 App 拉成整屏。
+                    if (sameChain) {
+                        *why = "linkchain";
+                        return 2;
+                    }
+                    *why = (isSafari || isWebLink) ? "safari" : "oauth";
+                    AevonDivertAt = now;
+                    snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
+                    // 只记 scheme，不记整条 URL：授权链接里带 ticket / code，
+                    // 不该落进日志。
+                    char schemeText[16] = {0};
+                    size_t slen = 0;
+                    while (scheme != NULL && scheme[slen] != '\0' &&
+                           scheme[slen] != ':' && slen < sizeof(schemeText) - 1) {
+                        schemeText[slen] = scheme[slen];
+                        slen += 1;
+                    }
+                    AevonLogRaw([[NSString stringWithFormat:
+                                  @"notify: link b=%s kind=%s scheme=%s",
+                                  bundle, *why, schemeText[0] != '\0' ? schemeText : "-"]
+                                 UTF8String]);
+                    return 1;
+                }
+                // 0.2.50 — 没认出来的那一次也留一份形状，下一轮不用再猜：
+                // `pay` 是 none / url / paste / payload，`cont` 是分享 action 位。
+                // 0.2.51 — 补 `share`（来源是不是分享链路）与 `keys`。
+                char skipKeys[152];
+                AevonOpenKeysOf(options, skipKeys, sizeof(skipKeys));
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"notify: link skip b=%s scheme=%s pay=%s cont=%d share=%d keys=%s",
+                              bundle,
+                              scheme != NULL && scheme[0] != '\0' ? scheme : "-",
+                              AevonOpenPayloadKind(request, options),
+                              AevonOpenIsContinuation(request, options),
+                              AevonOpenIsShareSource(request, options) ? 1 : 0,
+                              skipKeys[0] != '\0' ? skipKeys : "-"]
+                             UTF8String]);
+            }
+        }
+    }
     // 0.2.38 — 粘贴板分享（`__PasteSharingToken`）**不建卡**，整条放行。
     //
     // 0.2.36 放行：文件真的发得出去（token 随系统激活过 XPC），但目标 App 全屏。
@@ -5641,120 +5809,6 @@ static int AevonOpenDecide(id request, id options,
     // 0.2.39 — 这里原来有一条「分享黑名单：命中整条放行」。微信移出后名单为空，
     // 整块随 `AevonShareNativeListed` 一起删掉（见该函数位置上的说明）。
 
-    // 判据先于「同一次点击的第二条」：先确认这是要接管的那两种之一，再谈它是不是
-    // 上一次的后续。顺序反过来，用户在 1.5 秒内点桌面图标也会被当成链条吞掉 ——
-    // 那是一个真实的「点了没反应」。
-    //
-    // 同一次点击的第二条（open → trusted 之间只隔几毫秒）。第一条被吞掉之后
-    // 链条通常就断了；真来了也不能再开一次卡片，否则屏幕上一大一小的两个。
-    double now = CFAbsoluteTimeGetCurrent();
-    int sameChain = (AevonDivertAt > 0 && now - AevonDivertAt < 1.5 &&
-                     strcmp(bundle, AevonDivertBundle) == 0);
-
-    // 0.2.49 — 链接 / 登录授权**先于分享判定**。
-    //
-    // 0.2.48 把它放在 `kind == NULL` 里，真机上两类请求都到不了：应用调
-    // `openURL:` 时来源是那个 App（不是 SpringBoard）且带 payload，于是先被上面
-    // 的判据归成 `share`；微信 / QQ 的 SSO 深链还常常捎带 `__PasteSharingToken`
-    // （Aevon 0.2.48 日志，14:42:31 的 `src=com.midea.msmart.appstore pay=url`），
-    // 又被 `paste` 那一支整条放行 ⇒ 先全屏、再回桌面、最后才建卡。
-    //
-    // 判据只看「带 URL」：从桌面点图标没有 URL，相册里的文件也没有 URL，
-    // 误吞它们等于「点了没反应」。Safari 只认 http(s)；微信 / QQ 认它们的
-    // SDK 深链族（登录授权、支付、分享回跳）。通知点击不走这一支，那条路还要
-    // 清通知，顺序不能动。
-    if (!notifyKind) {
-        NSString *linkURL = AevonOpenURLOf(request, options);
-        int isSafari = strncmp(bundle, "com.apple.mobilesafari", 22) == 0;
-        int isOAuth = !isSafari &&
-            (strncmp(bundle, "com.tencent.xin", 15) == 0 ||
-             strncmp(bundle, "com.tencent.mqq", 15) == 0);
-        if (isSafari || isOAuth) {
-            if (linkURL.length == 0) {
-                // 登录也可能整条装在 paste token 里（没有 URL）。留一行，下一轮
-                // 就能看出「微信登录到底是 url 还是 paste」，不用再靠猜。
-                // 0.2.51 — 补上 `keys=`：上一版只知道「没 URL」，不知道 options 里
-                // 到底有什么键。这一行能直接把「URL 挂在哪一层」照下来。
-                char linkKeys[152];
-                AevonOpenKeysOf(options, linkKeys, sizeof(linkKeys));
-                AevonLogRaw([[NSString stringWithFormat:
-                              @"notify: link skip b=%s scheme=- pay=%s cont=%d url=none keys=%s",
-                              bundle, AevonOpenPayloadKind(request, options),
-                              AevonOpenIsContinuation(request, options),
-                              linkKeys[0] != '\0' ? linkKeys : "-"]
-                             UTF8String]);
-            } else {
-                NSString *low = [linkURL lowercaseString];
-                const char *scheme = low.UTF8String;
-                int web = (strncmp(scheme, "http://", 7) == 0 ||
-                           strncmp(scheme, "https://", 8) == 0);
-                int wanted = 0;
-                if (isSafari) {
-                    wanted = web;
-                } else {
-                    // 0.2.51 — 不再按 scheme 白名单猜。
-                    //
-                    // 登录走哪条深链由微信 / QQ 的 SDK 决定（`weixin://`、
-                    // `mqqopensdkapi://`、通用链接……换一个 SDK 版本就变），
-                    // 白名单每漏一条，用户看到的就是「又先全屏了」。真正稳定的分界
-                    // 只有两条：
-                    //   · `UIActivityContinuationAction` = 分享面板，必须原样交给系统
-                    //     （分享内容在系统那次激活里，本地投递顶掉就等于丢内容）；
-                    //   · 来源是 sharingd / ShareExtension / sharetimeline = 分享，同理。
-                    // 两条都不是、又确实带 URL 的，就是登录授权，可以建卡本地投递。
-                    wanted = (AevonOpenIsContinuation(request, options) == 0 &&
-                              !AevonOpenIsShareSource(request, options));
-                }
-                if (wanted) {
-                    // 目标已经整屏在屏上（例如 Safari 正开着，后台某个 App 又发了
-                    // 一条链接）：这条请求放它照常走，别为了建卡把用户按回桌面。
-                    // `isFrontmost` 只对 SpringBoard 的 `SBApplication` 有效，读不到
-                    // 时是 0 / -1，仍然走卡片，不影响正常场景。
-                    if (AevonAppFrontmost([NSString stringWithUTF8String:bundle]) == 1) {
-                        *why = "plain";
-                        return 0;
-                    }
-                    // 同一次点击派生出来的第二条：第一条已经把卡和 URL 接过去了，
-                    // 这条再吞一次，绝不能让它落回原实现把 App 拉成整屏。
-                    if (sameChain) {
-                        *why = "linkchain";
-                        return 2;
-                    }
-                    *why = isSafari ? "safari" : "oauth";
-                    AevonDivertAt = now;
-                    snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
-                    // 只记 scheme，不记整条 URL：授权链接里带 ticket / code，
-                    // 不该落进日志。
-                    char schemeText[16] = {0};
-                    size_t slen = 0;
-                    while (scheme != NULL && scheme[slen] != '\0' &&
-                           scheme[slen] != ':' && slen < sizeof(schemeText) - 1) {
-                        schemeText[slen] = scheme[slen];
-                        slen += 1;
-                    }
-                    AevonLogRaw([[NSString stringWithFormat:
-                                  @"notify: link b=%s kind=%s scheme=%s",
-                                  bundle, *why, schemeText[0] != '\0' ? schemeText : "-"]
-                                 UTF8String]);
-                    return 1;
-                }
-                // 0.2.50 — 没认出来的那一次也留一份形状，下一轮不用再猜：
-                // `pay` 是 none / url / paste / payload，`cont` 是分享 action 位。
-                // 0.2.51 — 补 `share`（来源是不是分享链路）与 `keys`。
-                char skipKeys[152];
-                AevonOpenKeysOf(options, skipKeys, sizeof(skipKeys));
-                AevonLogRaw([[NSString stringWithFormat:
-                              @"notify: link skip b=%s scheme=%s pay=%s cont=%d share=%d keys=%s",
-                              bundle,
-                              scheme != NULL && scheme[0] != '\0' ? scheme : "-",
-                              AevonOpenPayloadKind(request, options),
-                              AevonOpenIsContinuation(request, options),
-                              AevonOpenIsShareSource(request, options) ? 1 : 0,
-                              skipKeys[0] != '\0' ? skipKeys : "-"]
-                             UTF8String]);
-            }
-        }
-    }
 
     if (kind == NULL) {
         // 0.2.1 — 系统自己接着那条链发来的、带东西的请求：不建卡，但也不许放它
