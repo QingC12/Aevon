@@ -1765,6 +1765,11 @@ zStackParticipantDidChange:
         // that is already invalid is exactly the kind of call that costs a phone.
         var stopped = false
         var closed = false
+        // 0.2.36 — 这一次拆卡是不是「给系统全屏让路」。只影响下面那条 0.35 s 的
+        // 后台补写：让路时系统紧接着就会自己激活这个 App，补写会把刚拉起来的
+        // 全屏再按回后台（0.0.82 注释里 Aevon(73) 撞的就是这一拍，只是那次是
+        // 用户手动点图标）。让路是有意的，所以跳过。
+        var yielding = false
         // 0.2.36 — 这张卡在 `FloatHost.cardClosers` 里的键。用 `bundleID`（这张卡
         // 自己的），不用 `hostedBundle` —— 多窗之后后者是「最后登记的那个 App」。
         let yieldKey = bundleID ?? hostedBundle ?? ""
@@ -1934,7 +1939,7 @@ zStackParticipantDidChange:
             // 与「用户关掉卡片立刻点图标」撞在一起，补写把刚被系统拉起来的 App
             // 又按回后台。窗口越短越不会撞上；真撞上（新卡已经开出来）就不补了
             // —— 那时 scene 属于新的一张卡，再写后台就是错的。
-            if back != 0 && !owned {
+            if back != 0 && !owned && !yielding {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                     // 0.0.98 — 判据按名字，不按「有没有卡」。多窗时 `cardUp` 大概
                     // 率还是 true（停靠小窗还在），用它判等于这条补写永远不执行；
@@ -2019,7 +2024,10 @@ zStackParticipantDidChange:
         // 登记点必须在 `FloatHost.show` 成功之后：失败那条路会自己拆 presenter，
         // 从不调 `closeCard`，提前登记就是留一个指向空槽的出口。
         if !yieldKey.isEmpty {
-            FloatHost.cardClosers[yieldKey] = { reason in closeCard(reason) }
+            FloatHost.cardClosers[yieldKey] = { reason in
+                yielding = true
+                closeCard(reason)
+            }
         }
         cardUp = true
         // 0.0.55 — 卡片在屏时右缘带闭嘴（与浮窗外侧手势环在右下角重叠）。
