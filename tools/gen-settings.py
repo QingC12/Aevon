@@ -640,7 +640,22 @@ def build_root(panel_items, wired):
                                 "另把 `scene deactivation #N` 的计数从「钩子被调了几次」（`deact_set`）"
                                 "改成「真的被清零了几次」（`stripped`）—— 0.2.54 的日志里 `deact_set=21` 而 "
                                 "`stripped=6`，那个涨到 #26 的数是噪声，还因为两张卡读同一个全局计数而在同一秒印两遍。"
-                                "行里同时补 `reasons=`（系统这一次给的原因位）与 `b=`（哪张卡）。"})
+                                "行里同时补 `reasons=`（系统这一次给的原因位）与 `b=`（哪张卡）。"
+                                "0.2.58 起：**授权回调不再把卡里的 App 拽成全屏**。"
+                                "微信 / QQ 处理完 SSO 会回到发起登录的那个 App，这条请求里带着 "
+                                "`<app>://oauth?code=…`。分流层原来有一句「目标已经整屏在屏上就放行」，"
+                                "判的是 SpringBoard 的 `isFrontmost`；而卡片里的 App 在我们自己的 scene 里"
+                                "本来就被设成 foreground，`isFrontmost` 对它同样答 1 —— 两种完全不同的处境"
+                                "被当成了同一件事，于是这条请求整条交回系统，系统就把那个 App 从卡片里"
+                                "拽成全屏。用户看到的就是「授权时跳一下全屏，然后才回到浮窗」。"
+                                "现在这两件事分开判：`front=1` 且 `card=0`（真的整屏在前台）才放行；"
+                                "`front=1` 且 `card=1`（它就在我们卡里）继续往下走，落到 `oauth` 分支 → "
+                                "`openCard`。`openCard` 对「已是主窗」「在停靠小窗」都有判重，认出来之后"
+                                "调 `AevonForwardDeliver` 把 URL 投进同一张卡，不重建 scene。"
+                                "判据：`notify: link b=… front=1 card=1` 出现 ⇒ 旧版正是在这里放行；"
+                                "紧随其后应是 `notify: link card b=…` 而**不是**整屏。"
+                                "`notify: link` / `notify: link skip` 两行都补了 `front=` 与 `card=`，"
+                                "以后不用再猜「卡里算不算前台」。"})
 
 
     return {"title": "Aevon", "items": items}

@@ -5899,10 +5899,15 @@ static int AevonOpenDecide(id request, id options,
                 // 到底有什么键。这一行能直接把「URL 挂在哪一层」照下来。
                 char linkKeys[152];
                 AevonOpenKeysOf(options, linkKeys, sizeof(linkKeys));
+                // 0.2.58 — 同样补 `card=`：微信登录最常见的那一种（`pay=paste` +
+                // `url=none`）走的就是这一支，有没有卡直接决定下一版能不能本地投递。
+                int inCardSkip = (AevonCardIsUpFor(bundle) == 1 ||
+                                  AevonCardIsComingFor(bundle) == 1) ? 1 : 0;
                 AevonLogRaw([[NSString stringWithFormat:
-                              @"notify: link skip b=%s scheme=- pay=%s cont=%d url=none keys=%s",
+                              @"notify: link skip b=%s scheme=- pay=%s cont=%d url=none card=%d keys=%s",
                               bundle, AevonOpenPayloadKind(request, options),
                               AevonOpenIsContinuation(request, options),
+                              inCardSkip,
                               linkKeys[0] != '\0' ? linkKeys : "-"]
                              UTF8String]);
             } else {
@@ -5953,9 +5958,34 @@ static int AevonOpenDecide(id request, id options,
                     // 一条链接）：这条请求放它照常走，别为了建卡把用户按回桌面。
                     // `isFrontmost` 只对 SpringBoard 的 `SBApplication` 有效，读不到
                     // 时是 0 / -1，仍然走卡片，不影响正常场景。
-                    if (AevonAppFrontmost([NSString stringWithUTF8String:bundle]) == 1) {
+                    //
+                    // 0.2.58 — 「整屏在屏上」不等于「在我方卡片里」。
+                    //
+                    // 卡片里的 App 在我们的 scene 里被设成 foreground，SpringBoard 的
+                    // `isFrontmost` 对它同样答 1。旧判据把这两种混成一件事，于是
+                    // 授权回调（微信 / QQ 处理完 SSO 回到发起登录的那个 App）被当成
+                    // 「用户正开着它」，整条放行 —— 系统就把那个 App 从卡片里拽成
+                    // 全屏。用户看到的就是「授权时跳一下全屏，然后才回到浮窗」。
+                    //
+                    // 卡里的那一种不该放行：它本来就该留在卡里。继续往下走会落到
+                    // `*why = kind`（oauth / safari）→ 返回 1 → `openCard`。而
+                    // `openCard` 对「已是主窗」「在停靠小窗」都有判重，认出来之后
+                    // 调的是 `AevonForwardDeliver` 把 URL 投进同一张卡，不重建 scene。
+                    int frontNow = AevonAppFrontmost([NSString stringWithUTF8String:bundle]);
+                    int inCard = (AevonCardIsUpFor(bundle) == 1 ||
+                                  AevonCardIsComingFor(bundle) == 1) ? 1 : 0;
+                    if (frontNow == 1 && inCard == 0) {
                         *why = "plain";
                         return 0;
+                    }
+                    if (frontNow == 1 && inCard == 1) {
+                        // 判据：这一行出现 ⇒ 卡里的 App 被 SpringBoard 认成前台，
+                        // 旧版正是在这里放行成全屏。
+                        AevonLogRaw([[NSString stringWithFormat:
+                                      @"notify: link incard b=%s scheme=%s front=%d",
+                                      bundle, scheme != NULL && scheme[0] != '\0' ? scheme : "-",
+                                      frontNow]
+                                     UTF8String]);
                     }
                     // 同一次点击派生出来的第二条：第一条已经把卡和 URL 接过去了，
                     // 这条再吞一次，绝不能让它落回原实现把 App 拉成整屏。
@@ -5975,9 +6005,12 @@ static int AevonOpenDecide(id request, id options,
                         schemeText[slen] = scheme[slen];
                         slen += 1;
                     }
+                    // 0.2.58 — 补 `card=`：这一格把「整屏在屏上」与「在我方卡片里」
+                    // 分开，也是判断上面那条判据有没有生效的唯一读数。
                     AevonLogRaw([[NSString stringWithFormat:
-                                  @"notify: link b=%s kind=%s scheme=%s",
-                                  bundle, *why, schemeText[0] != '\0' ? schemeText : "-"]
+                                  @"notify: link b=%s kind=%s scheme=%s front=%d card=%d",
+                                  bundle, *why, schemeText[0] != '\0' ? schemeText : "-",
+                                  frontNow, inCard]
                                  UTF8String]);
                     return 1;
                 }
@@ -6059,6 +6092,28 @@ static int AevonOpenDecide(id request, id options,
         // 同步拆（`closeCard` → 还 frame → 拆 presenter → 交还后台），所以原实现
         // 拿到 scene 时它已经是干净的整屏尺寸。`why=yield` 是这条路的日志判据。
         if (AevonCardIsUpFor(bundle) == 1) {
+            // 0.2.58 — 卡里这个 App 自己发起的那条回调：**不拆卡**。
+            //
+            // 微信 / QQ 处理完 SSO，会带着 `<app>://oauth?code=…` 回到发起登录的
+            // App。这条请求的目标是**第三方 App**（不是微信），所以既不进上面那条
+            // `isOAuth` 分支、也没有通知 action，`kind` 一直是 NULL —— 旧做法落到
+            // 这里，`AevonCardYieldForFullscreen` 把卡拆掉、把 scene 交还整屏，
+            // 于是「授权完跳一下全屏，再被重新收进浮窗」。用户报的就是这一下。
+            //
+            // 让路的理由（0.2.36）是「卡片和原实现抢同一份 scene ⇒ 卡片黑」。但那条
+            // 理由只对「系统要把这个 App 整屏推到前台」成立。带 URL 的回调不是
+            // 「用户要全屏看它」，是「有事要告诉它」：把 URL 投进卡里的 App 就够了，
+            // 根本不必让系统启动任何东西。
+            //
+            // 返回 1 之后走的就是「建卡 + 本地投递」那条现成的链：`openCard` 认出
+            // 这个 App 已经在卡里，直接 `AevonForwardDeliver`，不重建 scene。
+            // 条件是 `carrier` —— 没有 payload 就没有可投的东西，那种情况仍然让路，
+            // 否则等于把这次打开吞掉。
+            NSString *callbackURL = AevonOpenURLOf(request, options);
+            if (callbackURL.length > 0 && carrier) {
+                *why = "incard";
+                return 1;
+            }
             int yielded = AevonCardYieldForFullscreen(bundle);
             *why = yielded == 1 ? "yield" : "plain";
             return 0;
@@ -8693,7 +8748,10 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             int forwarded = 0;
             // 0.2.48 — 链接 / 登录授权与分享共用「先建卡、再把 URL 投进 App」这条
             // 链；区别只在失败时的收尾：分享就地销毁，链接退回系统全屏。
-            int linkKind = (strcmp(why, "safari") == 0 || strcmp(why, "oauth") == 0);
+            // 0.2.58 — `incard`（卡里那个 App 自己发起的授权 / 深链回调）走同一条
+            // 投递链：建卡这一步会被 `openCard` 认成「已经在卡里」，实际只做投递。
+            int linkKind = (strcmp(why, "safari") == 0 || strcmp(why, "oauth") == 0 ||
+                            strcmp(why, "incard") == 0);
             if ((strcmp(why, "share") == 0 || linkKind) &&
                 AevonOpenCarriesPayload(request, options)) {
                 // 不在这里发。先让 `AevonOpenFromNotification` 把卡片的 process +

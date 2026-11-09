@@ -916,7 +916,11 @@ def main():
                   # 0.2.48 — 应用内链接跳 Safari / 微信 QQ 登录授权不再整屏：
                   # 认出带 URL 的打开请求、建卡、把 URL 投进卡片里的 App。
                   # 少任意一条，这两类请求就又回到 `plain` 全屏那条老路。
-                  b"notify: link b=%s kind=%s scheme=%s",
+                  # 0.2.58 — 这条行尾补了 `front=` 与 `card=`：
+                  #     `front=1 card=1` 就是「卡里的 App 被 SpringBoard 认成前台」，
+                  #     旧版在这里放行成全屏，授权回调一跳全屏就是这个。
+                  b"notify: link b=%s kind=%s scheme=%s front=%d card=%d",
+                  b"notify: link incard b=%s scheme=%s front=%d",
                   b"notify: link card b=%@ kind=%s fwd=%d n=%d",
                   b"notify: link fallback b=%@ why=%s",
                   b"linkchain",

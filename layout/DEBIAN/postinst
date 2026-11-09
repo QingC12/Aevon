@@ -15,7 +15,7 @@
 #
 set +e
 
-VERSION="0.2.57"
+VERSION="0.2.58"
 # roothide 的维护脚本跑在 libvroot 里："/" 是 jbroot，真实根在 /rootfs。
 # 两个都试一次；失败也无所谓，插件加载时会自己再建。
 for ROOT in /var/mobile /rootfs/var/mobile; do
