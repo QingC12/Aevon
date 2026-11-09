@@ -875,6 +875,14 @@ def main():
                   b"notify: share restore b=%s after=%dms door=%d",
                   # 0.2.44 — UIApplication 拒绝时的备份启动通道。
                   b"notify: share restore ls b=%s ok=%d",
+                  # 0.2.46 — 分享收卡不再先回桌面：先把来源 App 顶回前台，
+                  # 等目标离开前台后直接建卡（homed: true）。少任意一条，
+                  # 真机上就又会看到「QQ 全屏 → 桌面 → 文件列表 → 卡片」。
+                  b"notify: share swap restore b=%s door=%d",
+                  b"notify: share swap card b=%s after=%dms target_fg=%d src_fg=%d board=%d",
+                  b"notify: share swap giveup b=%s target_fg=%d src_fg=%d tick=%d",
+                  b"notify: share swap skip b=%s tick=%d",
+                  b"win: direct card declined (",
                   # 0.2.15 —— 尺寸 + 分享两件：
                   #   own display       scene 的 displayConfiguration 被改成画布大小
                   #                     （不改就是「UIScreen 932 / 窗口 717」，按屏幕

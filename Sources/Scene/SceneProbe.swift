@@ -2975,6 +2975,31 @@ public func AevonOpenFromNotification(_ bundle: UnsafePointer<CChar>?) {
     }
 }
 
+/// 0.2.46 — 分享专用的建卡入口：不按 Home，直接把目标收进卡片。
+///
+/// 调用方（`AevonScene.m` 的 `AevonShareSwapSchedule`）已经先把来源 App
+/// 顶回前台、并等到目标离开前台，`openCard` 的 home-first 那道门不再需要。
+/// `homed: true` 在这里的含义只是「屏上已经没有目标的全屏页」，不是
+/// 「已经按过一次 Home」。
+///
+/// 失败不回落全屏：这条路的背景是来源 App，把目标硬拉到前台只会再跳一次。
+@_cdecl("AevonOpenCardDirect")
+public func AevonOpenCardDirect(_ bundle: UnsafePointer<CChar>?) {
+    guard let bundle = bundle else { return }
+    let identifier = String(cString: bundle)
+    guard identifier.count > 2 else { return }
+    let work = {
+        SceneProbe.openCard(identifier, homed: true) { reason in
+            Log.write("win: direct card declined (" + reason + ") " + identifier)
+        }
+    }
+    if Thread.isMainThread {
+        work()
+    } else {
+        DispatchQueue.main.async(execute: work)
+    }
+}
+
 /// 0.1.88 — 「这个 App 已经在卡片里了吗」。
 ///
 /// `AevonScene.m` 的分流看门狗靠它决定要不要把原实现补调一次。注意它问的是

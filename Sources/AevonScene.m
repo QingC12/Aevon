@@ -34,6 +34,9 @@
 // `extern`：签名必须与那两处逐字一致（`const char *`，可空）。
 extern void AevonLogRaw(const char *line);
 extern void AevonOpenFromNotification(const char *bundleID);
+// 0.2.46 — 跳过 openCard 的 home-first，直接建卡。
+// 分享那条路先把来源 App 顶回前台，目标已经不占全屏，不需要再按一次 Home。
+extern void AevonOpenCardDirect(const char *bundleID);
 // 0.1.88 — 两条只读查询，都由 Swift 侧 `@_cdecl` 导出：
 //   AevonActivateSwitchOff()  → 1 表示 `notify.off` 在，一个字节都不许改行为；
 //   AevonCardIsUpFor(bundle)  → 1 表示这个 App 已经在主悬浮窗/停靠小窗里。
@@ -4903,6 +4906,105 @@ static void AevonShareRestoreSchedule(const char *target) {
     });
 }
 
+/// 0.2.46 — 分享收卡的顺序反过来：**先请来源 App 回前台，再建卡**。
+///
+/// 0.2.44 的顺序是 `openCard` 的 home-first：按 Home → 桌面 → 建卡 →
+/// 再把来源 App 拉回来。真机上这四拍都看得见，用户看到的就是
+/// 「QQ 全屏 → 桌面 → 文件列表 → 卡片」一路跳。
+///
+/// 这里换一条路：目标 App 此刻正占着全屏（文件刚靠系统那次激活送出去），
+/// 直接 `launchApplicationWithIdentifier:suspended:NO` 把来源 App 顶回前台，
+/// 等目标真的离开前台之后，再用 `homed: true` 建卡。`openCard` 的 home-first
+/// 本来就是为了「目标还占着全屏时不许抽 scene」，目标已经退到后台，这道门
+/// 既不需要、也不该再按一次 Home。
+///
+/// 150 ms 一拍：切 App 的动画是异步的，但目标的 `isForeground` 一翻 0 就说明
+/// scene 已经可以安全搬走；最长 1.8 s 后退回 0.2.44 的顺序兜底。
+static char AevonShareSwapTarget[128];
+static CFAbsoluteTime AevonShareSwapAt = 0;
+
+static void AevonShareSwapTick(char *target, char *source, int tick) {
+    if (target == NULL || source == NULL) { free(target); free(source); return; }
+    if (target[0] == '\0') { free(target); free(source); return; }
+    if (AevonCardIsUpFor(target) == 1 || AevonCardIsComingFor(target) == 1) {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: share swap skip b=%s tick=%d",
+                      target, tick] UTF8String]);
+        free(target); free(source);
+        return;
+    }
+    NSString *targetID = [NSString stringWithUTF8String:target];
+    NSString *sourceID = [NSString stringWithUTF8String:source];
+    if (targetID.length == 0 || sourceID.length == 0) { free(target); free(source); return; }
+
+    if (tick == 0) {
+        if (source[0] == '\0') {
+            // 没记到来源：退回 0.2.44 的 home-first，行为一字不改。
+            AevonOpenFromNotification(target);
+            free(target); free(source);
+            return;
+        }
+        NSInteger door = AevonLaunchForeground(sourceID);
+        AevonLogRaw([[NSString stringWithFormat:@"notify: share swap restore b=%s door=%d",
+                      source, (int)door] UTF8String]);
+        AevonShareRestoreLaunch(source, door);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            AevonShareSwapTick(target, source, tick + 1);
+        });
+        return;
+    }
+
+    int targetFront = AevonAppFrontmost(targetID);
+    id targetScene = AevonSeenSceneForBundle(targetID);
+    int targetFG = (targetScene != nil) ? AevonSceneForeground(targetScene) : -1;
+    int sourceFront = AevonAppFrontmost(sourceID);
+    id sourceScene = AevonSeenSceneForBundle(sourceID);
+    int sourceFG = (sourceScene != nil) ? AevonSceneForeground(sourceScene) : -1;
+    int targetGone = (targetFront != 1 && targetFG != 1) ? 1 : 0;
+    int sourceBack = (sourceFront == 1 || sourceFG == 1) ? 1 : 0;
+    if (targetGone || sourceBack) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: share swap card b=%s after=%dms target_fg=%d src_fg=%d board=%d",
+                      target, tick * 150, targetFG, sourceFG, AevonSpringboardActive()]
+                      UTF8String]);
+        AevonOpenCardDirect(target);
+        free(target); free(source);
+        return;
+    }
+    if (tick >= 12) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: share swap giveup b=%s target_fg=%d src_fg=%d tick=%d",
+                      target, targetFG, sourceFG, tick] UTF8String]);
+        // 兜底：回到 0.2.44 的顺序（先回桌面，再由 afterHome 建卡）。
+        AevonShareRestoreSchedule(target);
+        AevonOpenFromNotification(target);
+        free(target); free(source);
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonShareSwapTick(target, source, tick + 1);
+    });
+}
+
+static void AevonShareSwapSchedule(const char *target) {
+    if (target == NULL || target[0] == '\0') return;
+    if (AevonShareSource[0] == '\0') { AevonOpenFromNotification(target); return; }
+    if (CFAbsoluteTimeGetCurrent() - AevonShareSourceAt > 30.0) {
+        AevonOpenFromNotification(target);
+        return;
+    }
+    if (strcmp(AevonShareSource, target) == 0) { AevonOpenFromNotification(target); return; }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (strcmp(AevonShareSwapTarget, target) == 0 && now - AevonShareSwapAt < 3.0) return;
+    snprintf(AevonShareSwapTarget, sizeof(AevonShareSwapTarget), "%s", target);
+    AevonShareSwapAt = now;
+    char *t = strdup(target);
+    char *s = strdup(AevonShareSource);
+    if (t == NULL || s == NULL) { free(t); free(s); return; }
+    AevonShareSwapTick(t, s, 0);
+}
+
 
 static void AevonPastePromoteTick(char *copy, int tick) {
     if (copy == NULL) return;
@@ -4934,9 +5036,9 @@ static void AevonPastePromoteTick(char *copy, int tick) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"notify: paste promote b=%s front=%d board=%d live=%d scene=%d tick=%d",
                       copy, front, board, live, sceneFG, tick] UTF8String]);
-        AevonOpenFromNotification(copy);
-        // 0.2.43 — 卡片贴好后把来源 App 请回全屏，让卡片浮在它上方。
-        AevonShareRestoreSchedule(copy);
+        // 0.2.46 — 不再先回桌面。先把来源 App 顶回前台，等目标离开前台之后
+        // 再用 `homed: true` 直接建卡；没记到来源时才退回 home-first。
+        AevonShareSwapSchedule(copy);
         free(copy);
         return;
     }
