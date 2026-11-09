@@ -929,7 +929,8 @@ zStackParticipantDidChange:
     /// `fallback` is called when this route cannot even start: a suspended launch
     /// that never produces a scene would otherwise be a tap that does nothing,
     /// and a dead control on the home screen is worse than a full-screen app.
-    static func openCard(_ bundleID: String, fallback: @escaping (String) -> Void) {
+    static func openCard(_ bundleID: String, homed: Bool = false,
+                         fallback: @escaping (String) -> Void) {
         guard !bundleID.isEmpty, !bundleID.hasPrefix("placeholder.") else { return }
         // 0.2.0 — 这条链路的起点时刻。Aevon(168) 的 22:30:26~44 有 18 秒主线程
         // 连续不通（6 条 `win: main stall ~3000ms`），而那一段里同时有三件事在跑：
@@ -939,6 +940,34 @@ zStackParticipantDidChange:
         // 0.1.91 — 「这张卡正在建」的登记。必须在**第一个** return 之前：
         // 收面板那条路要用它区分「卡在路上，可以先收」与「根本没有卡，不许收」。
         markPending(bundleID)
+        // 0.2.32 — 「先回桌面」挪到进门第一拍，而且不再只认借来的 scene。
+        //
+        // 0.2.30 的那道门写在 `pollForScene` 里，判据是 `AevonOwnIsOwned(b) == 0`：
+        // 只覆盖「借系统现成 scene」这一条。自建 scene（日志里的
+        // `own start … live=0`）根本不经过它，于是全屏 App 还在屏上时就直接
+        // 建了卡 —— 用户看到的是「全屏又黑一次，而且不回桌面」。
+        //
+        // 现在进门先看桌面在不在前台：不在就先发 home，等它真的在屏（或 1.4 s
+        // 上限）再走整条流程。`homed` 只用来防止这条路自己递归；
+        // `pollForScene` 里那道老门保留，它管的是「启动之后才变成全屏」的另一种情形。
+        if !homed, AevonSpringboardActive() != 1 {
+            let step = AevonHomeStep(1, nil)
+            Log.write("win: home first open " + (step ?? "step nil") + " b=" + bundleID)
+            var waited = 0
+            func afterHome() {
+                let active = AevonSpringboardActive()
+                if (active == 1 && waited >= 10) || waited >= 28 {
+                    Log.write(String(format: "win: home first open ready waited=%ldms springboard=%ld",
+                                     waited * 50, Int(active)))
+                    openCard(bundleID, homed: true, fallback: fallback)
+                    return
+                }
+                waited += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { afterHome() }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { afterHome() }
+            return
+        }
         // 0.1.29 — 圆盘选中的图标**已经在停靠小窗里**：把它升回主悬浮窗，
         // 不要再开一张。
         //

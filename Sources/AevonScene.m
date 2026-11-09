@@ -2074,10 +2074,51 @@ static AevonHookSlot *AevonReserve(const char *label) {
     return slot;
 }
 
+/// 0.2.32 — 谁真的实现了这个选择子。
+///
+/// 0.2.31 的日志把「钩子没响」钉在一个数字上：`hook: live=1 deact_set=0
+/// intercept=0/0`。那一格 live 不是 deact —— 通知接口的 `nc-cap` 在开机时就
+/// 占了一格，而 `AevonHookInstall` 拿 `AevonSlotCount > 0` 当「本进程已经装过」
+/// 的判据，于是 deact 与 intercept **一次都没被尝试**。判据换成独立标志之后，
+/// 剩下的问题是这两个选择子挂在哪个类上 —— 那不能再靠类名猜（iOS 换过实现者）。
+/// 把 ObjC 全类表走一遍，谁的方法表里有这个选择子，谁就是实现者。
+static int AevonOwnersOf(SEL sel, Class *owners, int limit) {
+    if (sel == NULL || owners == NULL || limit <= 0) return 0;
+    int capacity = objc_getClassList(NULL, 0);
+    if (capacity <= 0) return 0;
+    Class *classes = (Class *)malloc(sizeof(Class) * (size_t)capacity);
+    if (classes == NULL) return 0;
+    int total = objc_getClassList(classes, capacity);
+    if (total > capacity) total = capacity;
+    int found = 0;
+    for (int i = 0; i < total && found < limit; i++) {
+        Class cls = classes[i];
+        if (cls == Nil) continue;
+        unsigned int count = 0;
+        Method *list = class_copyMethodList(cls, &count);
+        if (list == NULL) continue;
+        BOOL owns = NO;
+        for (unsigned int j = 0; j < count; j++) {
+            if (method_getName(list[j]) == sel) { owns = YES; break; }
+        }
+        free(list);
+        if (!owns) continue;
+        BOOL dup = NO;
+        for (int k = 0; k < found; k++) {
+            if (owners[k] == cls) { dup = YES; break; }
+        }
+        if (!dup) owners[found++] = cls;
+    }
+    free(classes);
+    return found;
+}
+
 /// Installs one replacement and says in the notes exactly what happened. The
 /// IMP that comes back from `imp_implementationWithBlock` is the runtime's own,
 /// which is why the read-back can differ from it on arm64e and still be live —
 /// the counter, not this number, is the answer.
+static void AevonRelease(AevonHookSlot *slot);
+
 static BOOL AevonAttach(NSMutableString *out, AevonHookSlot *slot,
                         Class cls, NSString *selName, id block) {
     if (out == nil || slot == NULL || cls == Nil || selName == nil || block == nil) return NO;
@@ -2086,6 +2127,7 @@ static BOOL AevonAttach(NSMutableString *out, AevonHookSlot *slot,
     Method method = class_getInstanceMethod(cls, sel);
     if (method == NULL) {
         [out appendFormat:@"hook %s: no method\n", slot->label];
+        AevonRelease(slot);
         return NO;
     }
 
@@ -2093,6 +2135,7 @@ static BOOL AevonAttach(NSMutableString *out, AevonHookSlot *slot,
     IMP replacement = imp_implementationWithBlock(block);
     if (replacement == NULL) {
         [out appendFormat:@"hook %s: no trampoline\n", slot->label];
+        AevonRelease(slot);
         return NO;
     }
 
@@ -2170,9 +2213,7 @@ static BOOL AevonAttachShaped(NSMutableString *out, AevonHookSlot *slot,
     }
     [out appendFormat:@"hook %s shape cls=%@ types=%s args=%d\n",
      slot->label, NSStringFromClass(cls), encoding, args];
-    BOOL wrote = AevonAttach(out, slot, cls, selName, block);
-    if (!wrote) AevonRelease(slot);
-    return wrote;
+    return AevonAttach(out, slot, cls, selName, block);
 }
 
 // The self test. A class of our own, a method that returns its argument plus
@@ -2213,9 +2254,16 @@ static NSInteger AevonProbeSelfTest(void) {
 /// Installs every hook the mother ship's route needs and returns the notes.
 /// Idempotent: a second tap in the same process reports the first install rather
 /// than stacking a replacement on top of a replacement.
+///
+/// 0.2.32 — 幂等判据从 `AevonSlotCount` 换成独立标志。通知接口的 `nc-cap`
+/// 在开机时就占一格，旧判据于是一直为真：deact 与 intercept 从未安装，
+/// 0.2.31 日志里的 `hook: live=1 deact_set=0 intercept=0/0` 就是这两个被
+/// 跳过的钩子。`live` 只该报告装上了几个，不该兼任「装过没有」。
+static int AevonSceneHooksInstalled = 0;
+
 NSString *AevonHookInstall(void) {
     NSMutableString *out = [NSMutableString string];
-    if (AevonSlotCount > 0) {
+    if (AevonSceneHooksInstalled) {
         [out appendString:@"hook: already installed in this process\n"];
         return out;
     }
@@ -2234,88 +2282,110 @@ NSString *AevonHookInstall(void) {
         return out;
     }
 
+    AevonSceneHooksInstalled = 1;
+
     // 1. The one the whole route rests on. `_setDeactivationReasons:` is how
     //    SpringBoard decides whether a scene may sleep; stripping the reasons of
     //    exactly one bundled scene is the mother ship's mechanism, and it is the
     //    only thing that keeps a backgrounded app drawing.
-    Class deact = NSClassFromString(@"UIApplicationSceneDeactivationManager");
-    if (deact == Nil) {
-        [out appendString:@"hook deact-set: no UIApplicationSceneDeactivationManager\n"];
-    } else {
+    //
+    //    0.2.32 — 目标类不再按名字猜。登录日志里 0.0.35 曾经 `deact_set=119`，
+    //    但 0.2.31 这一格是 0；类名在这台系统上还能不能对上，只有方法表知道。
+    //    按选择子扫全类表，谁实现谁挨钩，扫到几个就写几个。
+    SEL deactSel = NSSelectorFromString(@"_setDeactivationReasons:onScene:withSettings:reason:");
+    Class deactOwners[4] = { Nil, Nil, Nil, Nil };
+    int deactCount = AevonOwnersOf(deactSel, deactOwners, 4);
+    [out appendFormat:@"hook deact-set: scan owners=%d\n", deactCount];
+    if (deactCount == 0) {
+        [out appendString:@"hook deact-set: no class owns _setDeactivationReasons:onScene:withSettings:reason:\n"];
+    }
+    for (int i = 0; i < deactCount; i++) {
+        Class owner = deactOwners[i];
+        Method method = class_getInstanceMethod(owner, deactSel);
+        const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
+        if (encoding == NULL || strcmp(encoding, "v48@0:8Q16@24@32@40") != 0) {
+            [out appendFormat:@"hook deact-set: skip cls=%@ types=%s\n",
+             NSStringFromClass(owner), encoding != NULL ? encoding : "?"];
+            continue;
+        }
         AevonHookSlot *slot = AevonReserve("deact-set");
         if (slot == NULL) {
             [out appendString:@"hook deact-set: no slot\n"];
-        } else {
-            id block = ^(id manager, unsigned long long reasons, id scene,
-                         id settings, id reason) {
-                long seen = __sync_fetch_and_add(&AevonDeactSetCalls, 1);
-                // The instance this file spent two versions failing to find is
-                // the first argument of the one hook the device does call.
-                if (AevonDeactManager == nil) AevonDeactManager = manager;
-                BOOL mine = AevonSceneIsMine(scene);
-                if (seen < 4) {
-                    AevonRawTrace("deact-set", "reasons=%llu mine=%d scene=%s",
-                                  reasons, mine ? 1 : 0, AevonSceneName(scene));
-                }
-                unsigned long long use = reasons;
-                if (mine && reasons != 0) {
-                    use = 0;
-                    if (__sync_fetch_and_add(&AevonDeactStripped, 1) < 4) {
-                        AevonRawTrace("stripped", "%llu->0 scene=%s",
-                                      reasons, AevonSceneName(scene));
-                    }
-                }
-                // Keeping the scene awake is half of it, and it is the half that
-                // stays here. Aevon(28) had it working — `stripped=8` — and a
-                // black card, because the app had been told it was in the
-                // background and had stopped drawing.
-                //
-                // The other half used to be written right here, inside this
-                // callback, and Aevon(29) is the price: `push path=1 wrote=1
-                // fg=1`, a card with a picture in it, and then silence until the
-                // watchdog replaced the process. This body runs on FrontBoard's
-                // scene-update path, which holds the lock that `updateSettings…`
-                // needs, so writing from here takes it twice. The push lives on
-                // the main-thread keepalive clock in SceneProbe now; all this
-                // hook does is announce that it is on the stack so nothing else
-                // can write through it.
-                __sync_fetch_and_add(&AevonHookDepth, 1);
-                void (*original)(id, SEL, unsigned long long, id, id, id) =
-                    (void (*)(id, SEL, unsigned long long, id, id, id))slot->original;
-                if (original != NULL) {
-                    original(manager, slot->sel, use, scene, settings, reason);
-                }
-                __sync_fetch_and_sub(&AevonHookDepth, 1);
-            };
-            AevonAttach(out, slot, deact,
-                        @"_setDeactivationReasons:onScene:withSettings:reason:", block);
+            break;
         }
+        AevonHookSlot *mine = slot;
+        id block = ^(id manager, unsigned long long reasons, id scene,
+                     id settings, id reason) {
+            long seen = __sync_fetch_and_add(&AevonDeactSetCalls, 1);
+            // The instance this file spent two versions failing to find is
+            // the first argument of the one hook the device does call.
+            if (AevonDeactManager == nil) AevonDeactManager = manager;
+            BOOL ours = AevonSceneIsMine(scene);
+            if (seen < 4) {
+                AevonRawTrace("deact-set", "reasons=%llu mine=%d scene=%s",
+                              reasons, ours ? 1 : 0, AevonSceneName(scene));
+            }
+            unsigned long long use = reasons;
+            if (ours && reasons != 0) {
+                use = 0;
+                if (__sync_fetch_and_add(&AevonDeactStripped, 1) < 4) {
+                    AevonRawTrace("stripped", "%llu->0 scene=%s",
+                                  reasons, AevonSceneName(scene));
+                }
+            }
+            // Keeping the scene awake is half of it, and it is the half that
+            // stays here. Aevon(28) had it working — `stripped=8` — and a
+            // black card, because the app had been told it was in the
+            // background and had stopped drawing.
+            //
+            // The other half used to be written right here, inside this
+            // callback, and Aevon(29) is the price: `push path=1 wrote=1
+            // fg=1`, a card with a picture in it, and then silence until the
+            // watchdog replaced the process. This body runs on FrontBoard's
+            // scene-update path, which holds the lock that `updateSettings…`
+            // needs, so writing from here takes it twice. The push lives on
+            // the main-thread keepalive clock in SceneProbe now; all this
+            // hook does is announce that it is on the stack so nothing else
+            // can write through it.
+            __sync_fetch_and_add(&AevonHookDepth, 1);
+            void (*original)(id, SEL, unsigned long long, id, id, id) =
+                (void (*)(id, SEL, unsigned long long, id, id, id))mine->original;
+            if (original != NULL) {
+                original(manager, mine->sel, use, scene, settings, reason);
+            }
+            __sync_fetch_and_sub(&AevonHookDepth, 1);
+        };
+        AevonAttach(out, slot, owner,
+                    @"_setDeactivationReasons:onScene:withSettings:reason:", block);
     }
 
-    // 2. The mother ship's real door, on the class she actually hooked.
+    // 2. The mother ship's real door, on the class(es) that actually implement it.
     //
     //    `SBMainDisplaySceneManager` is a subclass of `SBSceneManager`, and
     //    0.0.29 patched the parent: `intercept=0` for eight seconds, twice. A
     //    subclass that overrides a method never runs the parent's IMP, so a
-    //    patch on the parent is a patch on a method nothing calls. Both classes
-    //    are tried here, and the log says which one owns a method with the right
-    //    shape — that single line is the whole question 0.0.29 could not answer.
+    //    patch on the parent is a patch on a method nothing calls. Both names
+    //    are no longer assumed: the selector is scanned for, and every owner is
+    //    hooked — a subclass with its own IMP and its parent both need one.
     //
     //    The amendment happens *before* the original runs: whatever the original
     //    does with the settings — apply them itself, or hand them back to its
     //    caller to apply — it does it to the version we changed.
-    for (NSString *className in @[@"SBMainDisplaySceneManager", @"SBSceneManager"]) {
-        Class mgr = NSClassFromString(className);
-        if (mgr == Nil) {
-            [out appendFormat:@"hook intercept: no %@\n", className];
-            continue;
-        }
+    SEL interceptSel = NSSelectorFromString(@"_scene:interceptUpdateWithNewSettings:");
+    Class interceptOwners[4] = { Nil, Nil, Nil, Nil };
+    int interceptCount = AevonOwnersOf(interceptSel, interceptOwners, 4);
+    [out appendFormat:@"hook intercept: scan owners=%d\n", interceptCount];
+    if (interceptCount == 0) {
+        [out appendString:@"hook intercept: no class owns _scene:interceptUpdateWithNewSettings:\n"];
+    }
+    for (int i = 0; i < interceptCount; i++) {
+        Class owner = interceptOwners[i];
         AevonHookSlot *slot = AevonReserve("intercept");
         if (slot == NULL) {
             [out appendString:@"hook intercept: no slot\n"];
             break;
         }
-        __block AevonHookSlot *mine = slot;
+        AevonHookSlot *mine = slot;
         id block = ^(id manager, id scene, id settings) {
             long seen = __sync_fetch_and_add(&AevonInterceptCalls, 1);
             // 0.2.4 — 第二条口径：系统每推一次 settings，就说明这个 scene 真的在。
@@ -2343,7 +2413,7 @@ NSString *AevonHookInstall(void) {
             if (original != NULL) original(manager, mine->sel, scene, settings);
             __sync_fetch_and_sub(&AevonHookDepth, 1);
         };
-        AevonAttachShaped(out, slot, mgr, @"_scene:interceptUpdateWithNewSettings:", 2, block);
+        AevonAttachShaped(out, slot, owner, @"_scene:interceptUpdateWithNewSettings:", 2, block);
     }
 
     return out;
