@@ -4646,6 +4646,54 @@ static int AevonOpenIsContinuation(id request, id options) {
     return (name != NULL && strstr(name, "UIActivityContinuationAction") != NULL) ? 1 : 0;
 }
 
+static void AevonOpenKeysOf(id options, char *out, size_t size);
+
+/// 0.2.51 — 「长得像 URL 的那个值」。
+///
+/// 0.2.50 的 QQ 授权现场是 `pay=url` 却取不到 URL：它躺在某个我们还没点名的键下面。
+/// 0.2.49 猜 `__PayloadURL`、0.2.50 猜 `__UserActivity4LS.webpageURL`，两次都没中；
+/// 再猜第三个键名只是把同一件事推迟一版。这里按形状找：只认 NSURL 和带 scheme 的
+/// 字符串，最多下潜两层，其它一律不看（来源 bundle id、ticket 之类不会被误取）。
+static NSString *AevonOpenScanURL(id container, int depth) {
+    if (container == nil || depth > 2) return nil;
+    @try {
+        if ([container isKindOfClass:[NSURL class]]) {
+            return [(NSURL *)container absoluteString];
+        }
+        if ([container isKindOfClass:[NSString class]]) {
+            NSString *text = (NSString *)container;
+            if (text.length < 8 || text.length > 4096) return nil;
+            const char *raw = text.UTF8String;
+            if (raw == NULL) return nil;
+            static const char *prefixes[] = {
+                "http://", "https://", "weixin://", "weixinapp://", "mqq://",
+                "mqqapi://", "mqqopensdk", "mqqwpa://", "wx", NULL
+            };
+            for (int i = 0; prefixes[i] != NULL; i++) {
+                if (strncmp(raw, prefixes[i], strlen(prefixes[i])) == 0) return text;
+            }
+            return nil;
+        }
+        if ([container isKindOfClass:[NSDictionary class]]) {
+            for (id key in (NSDictionary *)container) {
+                NSString *found = AevonOpenScanURL([(NSDictionary *)container objectForKey:key],
+                                                   depth + 1);
+                if (found != nil) return found;
+            }
+            return nil;
+        }
+        if ([container isKindOfClass:[NSArray class]]) {
+            for (id item in (NSArray *)container) {
+                NSString *found = AevonOpenScanURL(item, depth + 1);
+                if (found != nil) return found;
+            }
+        }
+    } @catch (__unused NSException *exception) {
+        return nil;
+    }
+    return nil;
+}
+
 /// 0.2.48 — 这次打开带的那个 URL。`__PayloadURL` 优先，其次
 /// `__PayloadOptions[UIApplicationLaunchOptionsURLKey]`（分享那条路已经证明
 /// 两种形状都在真机上出现过，见 `AevonForwardHeldURL`）。
@@ -4674,6 +4722,14 @@ static NSString *AevonOpenURLOf(id request, id options) {
         value = AevonActRead(activity, @"webpageURL");
         if (value == nil) value = AevonActRead(activity, @"URL");
         if (value == nil) value = AevonActRead(activity, @"_webpageURL");
+    }
+    if (value == nil) {
+        // 0.2.51 — 最后一道：按形状扫。`options` 在真机上就是 `__NSDictionaryM`，
+        // 登录链接无论挂在哪一层都会被这一扫找到；`request` 通常只是 bundle id 串，
+        // 扫它是为了覆盖对象形状的那几代系统。
+        value = AevonOpenScanURL(AevonOpenPayload(request, options), 0);
+        if (value == nil) value = AevonOpenScanURL(options, 0);
+        if (value == nil) value = AevonOpenScanURL(request, 0);
     }
     if ([value isKindOfClass:[NSURL class]]) return [(NSURL *)value absoluteString];
     if ([value isKindOfClass:[NSString class]]) return (NSString *)value;
@@ -5261,10 +5317,15 @@ static int AevonOpenDecide(id request, id options,
             if (linkURL.length == 0) {
                 // 登录也可能整条装在 paste token 里（没有 URL）。留一行，下一轮
                 // 就能看出「微信登录到底是 url 还是 paste」，不用再靠猜。
+                // 0.2.51 — 补上 `keys=`：上一版只知道「没 URL」，不知道 options 里
+                // 到底有什么键。这一行能直接把「URL 挂在哪一层」照下来。
+                char linkKeys[152];
+                AevonOpenKeysOf(options, linkKeys, sizeof(linkKeys));
                 AevonLogRaw([[NSString stringWithFormat:
-                              @"notify: link skip b=%s scheme=- pay=%s cont=%d url=none",
+                              @"notify: link skip b=%s scheme=- pay=%s cont=%d url=none keys=%s",
                               bundle, AevonOpenPayloadKind(request, options),
-                              AevonOpenIsContinuation(request, options)]
+                              AevonOpenIsContinuation(request, options),
+                              linkKeys[0] != '\0' ? linkKeys : "-"]
                              UTF8String]);
             } else {
                 NSString *low = [linkURL lowercaseString];
@@ -5275,20 +5336,18 @@ static int AevonOpenDecide(id request, id options,
                 if (isSafari) {
                     wanted = web;
                 } else {
-                    // 0.2.50 — 微信 / QQ 登录现在多半走通用链接（https），
-                    // 0.2.49 只认自定义 scheme，于是又落回 paste 全屏。
-                    // 用「有没有 `UIActivityContinuationAction`」把登录和分享分开：
-                    // 分享必须原样交给系统（内容在系统那次激活里），不能被本地投递
-                    // 顶掉；登录没有这个 action，可以建卡本地投递。
-                    wanted = (strncmp(scheme, "weixin://", 9) == 0 ||
-                              strncmp(scheme, "weixinapp://", 12) == 0 ||
-                              strncmp(scheme, "mqq://", 6) == 0 ||
-                              strncmp(scheme, "mqqapi://", 9) == 0 ||
-                              strncmp(scheme, "mqqopensdkapi://", 16) == 0 ||
-                              strncmp(scheme, "mqqopensdkapiv2://", 18) == 0 ||
-                              strncmp(scheme, "mqqopensdkapiv3://", 18) == 0 ||
-                              strncmp(scheme, "mqqwpa://", 9) == 0 ||
-                              (web && AevonOpenIsContinuation(request, options) == 0));
+                    // 0.2.51 — 不再按 scheme 白名单猜。
+                    //
+                    // 登录走哪条深链由微信 / QQ 的 SDK 决定（`weixin://`、
+                    // `mqqopensdkapi://`、通用链接……换一个 SDK 版本就变），
+                    // 白名单每漏一条，用户看到的就是「又先全屏了」。真正稳定的分界
+                    // 只有两条：
+                    //   · `UIActivityContinuationAction` = 分享面板，必须原样交给系统
+                    //     （分享内容在系统那次激活里，本地投递顶掉就等于丢内容）；
+                    //   · 来源是 sharingd / ShareExtension / sharetimeline = 分享，同理。
+                    // 两条都不是、又确实带 URL 的，就是登录授权，可以建卡本地投递。
+                    wanted = (AevonOpenIsContinuation(request, options) == 0 &&
+                              !AevonOpenIsShareSource(request, options));
                 }
                 if (wanted) {
                     // 目标已经整屏在屏上（例如 Safari 正开着，后台某个 App 又发了
@@ -5325,12 +5384,17 @@ static int AevonOpenDecide(id request, id options,
                 }
                 // 0.2.50 — 没认出来的那一次也留一份形状，下一轮不用再猜：
                 // `pay` 是 none / url / paste / payload，`cont` 是分享 action 位。
+                // 0.2.51 — 补 `share`（来源是不是分享链路）与 `keys`。
+                char skipKeys[152];
+                AevonOpenKeysOf(options, skipKeys, sizeof(skipKeys));
                 AevonLogRaw([[NSString stringWithFormat:
-                              @"notify: link skip b=%s scheme=%s pay=%s cont=%d",
+                              @"notify: link skip b=%s scheme=%s pay=%s cont=%d share=%d keys=%s",
                               bundle,
                               scheme != NULL && scheme[0] != '\0' ? scheme : "-",
                               AevonOpenPayloadKind(request, options),
-                              AevonOpenIsContinuation(request, options)]
+                              AevonOpenIsContinuation(request, options),
+                              AevonOpenIsShareSource(request, options) ? 1 : 0,
+                              skipKeys[0] != '\0' ? skipKeys : "-"]
                              UTF8String]);
             }
         }

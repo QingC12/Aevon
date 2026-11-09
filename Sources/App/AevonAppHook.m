@@ -4745,6 +4745,42 @@ static NSString *AevonOpenURLPath(NSString *leaf) {
     [_annotation release];
     [super dealloc];
 }
+
+// 0.2.51 — 私有 getter 必须**全部**显式实现，因为 App 的 scene 代理不问
+// `respondsToSelector:`，直接按 `UISceneOpenURLOptions` 的私有形状读。
+//
+// 0.2.50 真机日志（15:08:49 起，连续十四条一模一样的失败）：
+//   `-[AevonOpenURLOptions _sourceProcessHandle]: unrecognized selector`
+// 每抛一次 `scene:openURLContexts:` 就整条作废，重试 14 次（6.4 秒）后宿主只能
+// 回落全屏 —— 用户看到的就是「Safari 开了卡却不打开链接，过几秒整屏弹出来」。
+//
+// 返回值一律「空」：系统在没有来源进程时给的也是 nil / NO，调用方对 nil 发消息安全。
+- (id)_sourceProcessHandle { return nil; }
+- (id)sourceProcessHandle { return nil; }
+- (id)_sourceApplication { return _sourceApplication; }
+- (id)_eventAttribution { return _eventAttribution; }
+- (id)_activityContinuationAction { return nil; }
+- (id)_linkConnectionAction { return nil; }
+- (id)_annotation { return _annotation; }
+- (BOOL)_openInPlace { return _openInPlace; }
+- (BOOL)_universalLinksOnly { return _universalLinksOnly; }
+- (BOOL)_isFromService { return NO; }
+- (BOOL)isFromService { return NO; }
+
+// 兜底：以后系统再加一条私有 getter，也只会读到「空」，不会再抛异常。
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)selector {
+    NSMethodSignature *signature = [super methodSignatureForSelector:selector];
+    if (signature != nil) return signature;
+    return [NSMethodSignature signatureWithObjCTypes:"@@:"];
+}
+
+- (void)forwardInvocation:(NSInvocation *)invocation {
+    NSUInteger length = invocation.methodSignature.methodReturnLength;
+    if (length > 0 && length <= 64) {
+        unsigned char zero[64] = {0};
+        [invocation setReturnValue:zero];
+    }
+}
 @end
 
 /// 把「来源 + 就地打开」装进一个形状正确的 options 对象。返回 +1 引用，调用方释放。
@@ -4756,12 +4792,31 @@ static id AevonOpenURLOptionsMake(NSString *source, int *real) {
         id box = nil;
         @try {
             box = [[cls alloc] init];
-            if (source.length > 0) [box setValue:source forKey:@"sourceApplication"];
-            [box setValue:[NSNumber numberWithBool:NO] forKey:@"openInPlace"];
-            if (real != NULL) *real = 1;
-            return box;
-        } @catch (NSException *exception) {
-            [box release];
+        } @catch (__unused NSException *exception) {
+            box = nil;
+        }
+        if (box != nil) {
+            // 0.2.51 — 这个系统类把 KVC 关了（`accessInstanceVariablesDirectly = NO`），
+            // 0.2.42 起那句 `setValue:forKey:` 每次都在抛，于是**一次真对象都没造出来**
+            // （真机日志里的 `ctx opt stub` 就是它）。这里改成直接写 ivar：
+            // 只要能写进去，递出去的就是系统自己的类，私有 getter 一个都不缺。
+            @try {
+                if (source.length > 0) {
+                    Ivar ivar = class_getInstanceVariable(cls, "_sourceApplication");
+                    if (ivar == NULL) {
+                        ivar = class_getInstanceVariable(cls, "_sourceApplicationIdentifier");
+                    }
+                    if (ivar != NULL) {
+                        // 直接写 ivar 不会 retain；`copy` 返回的 +1 正好交给这个
+                        // 对象自己的 dealloc 去 release。
+                        object_setIvar(box, ivar, [source copy]);
+                    }
+                }
+                if (real != NULL) *real = 1;
+                return box;
+            } @catch (__unused NSException *exception) {
+                [box release];
+            }
         }
     }
     AevonOpenURLOptions *stub = [[AevonOpenURLOptions alloc] init];
