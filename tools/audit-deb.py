@@ -641,7 +641,14 @@ def main():
                   # 0.2.60 — 键盘不再改几何：`fill on/off` 与 `armed hold` 三条
                   # 一起下线，只剩这一行「键盘来了 / 走了，卡片没动」。这一行
                   # 出现却看不到卡片几何变化，才是这一版要的行为。
+                  #
+                  # 0.2.62 — 它现在只在 `kb.keep` 开关**打开**时出现（默认关：
+                  # 走母版的键盘态）。所以这条断言证明的是「退路还在」，不是主路径。
                   b"win: keyboard %@ card kept %.0fx%.0f at %.0f,%.0f scene=%.0f",
+                  # 0.2.62 — 主路径：键盘态把卡片撑满屏宽、1:1，键盘原生尺寸。
+                  # 这一行带 `native` 才说明走的是母版那条路（Stheno 分屏键盘实测）；
+                  # 只有 `card kept` 没有 `native` = 开关被打开着。
+                  b"win: keyboard native on card=",
                   # `kb-to-card=` 仍由 `finishKeyboardUnfill` 保留（迁移路径）。
                   b" kb-to-card=%.0fms",
                   # 0.2.43 — 键盘让位那一段的曲线与补推。
@@ -671,6 +678,11 @@ def main():
                   # 的登录由系统原生打开；同一份日志里**不该**再有
                   # `notify: link b=… kind=oauth` 紧跟 `appurl send`。
                   b"notify: oauth pass b=%s scheme=%s card=%d",
+                  # 0.2.62 — 放行之后 100 ms 内收进卡片（Aevon(203) 第 1 条：授权
+                  # 不能停在整屏）。两行一起断言：`card` = 真的收进来了，
+                  # `giveup` = 收不进来时把登记彻底撤掉（否则整屏只画上半截）。
+                  b"notify: auth swap card b=%s after=%dms fg=%d board=%d",
+                  b"notify: auth swap giveup b=%s fg=%d live=%d tick=%d",
                   # 0.2.60 — 卡片走了、App 窗口还回场景高（「全屏中下黑」的另一半）。
                   # 0.2.46 — 「让抖音真重排」这一版的四条：显示覆盖 / 参考尺寸 /
                   # 屏幕跟随 / 回执。逐条都要能在产物里 grep 到，缺哪条就等于那一步

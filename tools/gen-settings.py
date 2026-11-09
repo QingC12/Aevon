@@ -45,6 +45,7 @@ VERSION = control_version()
 # 一个拧了没反应的开关比没有更糟。
 WIRED = {
     "HeightFraction",        # CardLayout：浮窗首帧高度
+    "kb.keep",               # FloatHost.setKeyboardFill：键盘态是否保持浮窗尺寸
     "windowBlacklistText",   # AevonOpenDecide：名单里的 App 走原生
     "!ring.desktop",         # RingHost：桌面是否挂圆盘
     "!gate.notify",          # 写 notify.off 文件闸
@@ -62,6 +63,11 @@ PANELS = [
              note="浮窗第一次打开时占屏幕高度的比例。宽度按 5:3 跟随，"
                   "所以只要调这一个数。拖动或缩放过之后，以那张卡自己的记忆为准；"
                   "长按卡片底角可以复位到这里。"),
+        dict(grp="键盘", k="kb.keep", cn="保持浮窗尺寸", cell="switch", d=False,
+             note="关掉（默认）时键盘按原生尺寸显示：键盘弹出的那一刻，浮窗会临时"
+                  "撑满屏宽、缩放回到 1:1、底边压在键盘上沿，收起后像素级还原 —— "
+                  "这是母版 Stheno 实测出来的唯一一条原生键盘形状。"
+                  "开启后浮窗一动不动，代价是键盘跟着浮窗一起缩小（约为原生的八成）。"),
         dict(grp="名单", k="windowBlacklistText", cn="不走浮窗的 App", cell="text",
              d="", note="填 bundle id，用逗号或空格分隔。名单里的 App 不进浮窗："
                         "通知、分享、链接都按系统原生方式打开，是某个 App 在浮窗里"

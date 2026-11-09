@@ -5748,6 +5748,85 @@ static void AevonShareSwapSchedule(const char *target) {
 }
 
 
+/// 0.2.62 — 授权族的「收卡」：系统激活之后，100 ms 内把它变成浮窗。
+///
+/// 背景（Aevon(203) 第 1 条）：0.2.60 把授权整条交回系统，登录终于能成，但
+/// QQ / 微信是**整屏**打开的 —— 用户不接受。而 0.2.59 的「本地投递」又证明
+/// 走不通（微信只开主页、QQ 回跳断在半路）。两条都试过的结论只有一句：
+///
+///   **这一次激活不能被我们吞掉，但激活之后停在哪种形态，是我们说了算的。**
+///
+/// 所以这里不改「放不放行」，只补「放行之后」。`AevonOpenDecide` 放行 ⇒ 系统
+/// 真的把 QQ 拉到前台（SSO 的 XPC 回跳、微信的 NSUserActivity 都成立）⇒ 这张
+/// 票在 100 ms 后由 `AevonOpenCardDirect` 收进卡片。用户看到的是「卡片里开着
+/// QQ」，而登录流程一步没少。
+///
+/// 与 `AevonShareSwapTick` 的区别只有一条：**不去顶来源 App**。那条是给分享用
+/// 的（分享面板开在来源 App 里，要先把它顶回来才能看见下一屏）；授权时来源 App
+/// 正在等 QQ 的 code，把它顶上来只会把 QQ 挤下去。
+static void AevonAuthSwapTick(char *target, int tick) {
+    if (target == NULL) return;
+    if (target[0] == '\0') { free(target); return; }
+    if (AevonCardIsUpFor(target) == 1 || AevonCardIsComingFor(target) == 1) {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: auth swap skip b=%s tick=%d",
+                      target, tick] UTF8String]);
+        free(target);
+        return;
+    }
+    NSString *targetID = [NSString stringWithUTF8String:target];
+    if (targetID.length == 0) { free(target); return; }
+    int live = AevonAppPid(targetID) > 0 ? 1 : 0;
+    id scene = AevonSeenSceneForBundle(targetID);
+    int fg = (scene != nil) ? AevonSceneForeground(scene) : -1;
+    // 收卡的门：进程起来 + scene 已经登记。`tick >= 2`（约 100 ms）是为了让
+    // 系统那次激活先落地 —— 抢在它前面建卡会和 SpringBoard 抢同一份 scene，
+    // 那正是「卡片黑 + 全屏底部黑」的老路。
+    //
+    // 不等 `fg == 1`：QQ 的 scene 在激活过程中会短暂报 0，等它反而会多停在
+    // 全屏几百毫秒。`live` 与 `scene` 两条同时成立，就说明这一份 scene 已经
+    // 可以被我们接管了。
+    if (tick >= 2 && live == 1 && scene != nil) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: auth swap card b=%s after=%dms fg=%d board=%d",
+                      target, tick * 50, fg, AevonSpringboardActive()] UTF8String]);
+        AevonOpenCardDirect(target);
+        free(target);
+        return;
+    }
+    if (tick >= 60) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: auth swap giveup b=%s fg=%d live=%d tick=%d",
+                      target, fg, live, tick] UTF8String]);
+        // 收不进卡就彻底松手：留着登记会让这个 App 的整屏只画上半截。
+        AevonSceneFrameClearBundle(targetID);
+        AevonHookDisarm(targetID);
+        free(target);
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonAuthSwapTick(target, tick + 1);
+    });
+}
+
+static char AevonAuthSwapTarget[128];
+static CFAbsoluteTime AevonAuthSwapAt = 0;
+
+/// 同一次授权会连来两条（untrusted / user），只排一条等待链。
+static void AevonAuthSwapSchedule(const char *target) {
+    if (target == NULL || target[0] == '\0') return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (strcmp(AevonAuthSwapTarget, target) == 0 && now - AevonAuthSwapAt < 3.0) return;
+    snprintf(AevonAuthSwapTarget, sizeof(AevonAuthSwapTarget), "%s", target);
+    AevonAuthSwapAt = now;
+    char *copy = strdup(target);
+    if (copy == NULL) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.02 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonAuthSwapTick(copy, 0);
+    });
+}
+
 static void AevonPastePromoteTick(char *copy, int tick) {
     if (copy == NULL) return;
     if (copy[0] == '\0') { free(copy); return; }
@@ -5774,6 +5853,24 @@ static void AevonPastePromoteTick(char *copy, int tick) {
     // 而「全屏 App 直接贴卡」正是 0.2.30 修掉的那次黑屏。这里提前按同一条门等。
     int up = (front == 1 || sceneFG == 1) ? 1
            : ((front == -1 && sceneFG == -1 && live == 1 && tick >= 8) ? 1 : 0);
+    // 0.2.62 — **目标一能接管就接管，不等它先整屏站住。**
+    //
+    // Aevon(203) 第 4 条：文件分享到 QQ「先全屏打开 QQ，然后变成浮窗」。
+    // 旧判据要求 `front == 1`（SpringBoard 已经把它认成前台）才收卡，而那一刻
+    // 系统已经把整屏画出来了 —— 用户在 `share swap card … after=60ms` 这行日志
+    // 之前，看到的是 QQ 的整屏启动图。改判「进程活着 + scene 已登记」，在系统
+    // 刚开始摆动画时就接过来，那一帧还没有内容，接收等于换了个容器。
+    //
+    // 文件本身不受影响：`__PasteSharingToken` 是系统在激活这一拍交给 QQ 的，
+    // 我们在它之后才动 scene；QQ 进程没有被挂起，读剪贴板与收卡互不阻塞。
+    if (tick >= 1 && live == 1 && scene != nil) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: paste promote card b=%s front=%d board=%d live=%d scene=%d tick=%d",
+                      copy, front, board, live, sceneFG, tick] UTF8String]);
+        AevonOpenCardDirect(copy);
+        free(copy);
+        return;
+    }
     if (board != 1 && up) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"notify: paste promote b=%s front=%d board=%d live=%d scene=%d tick=%d",
@@ -6138,9 +6235,33 @@ static int AevonOpenDecide(id request, id options,
                 // scene 更新那把锁，0.0.31 的死锁纪律同样适用于 destroy。
                 // 「全屏中下黑」的另一半（App 仍按卡片高度排）在 App 侧修：
                 // band 被清成 none 的那一刻把窗口还回场景高。
+                // 0.2.62 — 放行这一拍**先松手**。
+                //
+                // Aevon(203) 第 2 条：QQ 整屏打开时下半部分是黑的。这一族请求
+                // 在 0.2.61 之前都由 `openCard` 接走，目标是「按 430×717 摆」；
+                // 现在改成放行，如果我们还留着那条登记，`intercept` 就会继续把
+                // 系统的全屏 settings 改回 717 —— 全屏只画上半截，剩下 215 pt
+                // 没有窗口在画，就是黑的。所以「交给系统」这三个字必须包含
+                // 「把我们的登记撤掉」，否则等于一边放手一边拽着。
+                NSString *targetID = [NSString stringWithUTF8String:bundle];
+                if (targetID != nil) {
+                    AevonSceneFrameClearBundle(targetID);
+                    AevonHookDisarm(targetID);
+                }
                 if (AevonCardIsUpFor(bundle) == 1) {
                     AevonCardYieldForFullscreen(bundle);
                 }
+                // 0.2.62 — **放行，但只让它整屏存在一百毫秒。**
+                //
+                // Aevon(203) 第 1 条：0.2.60 的「授权一律交回系统」把登录修好了，
+                // 代价是 QQ / 微信整屏 —— 用户当场退回来。两条路都试过之后，
+                // 能同时成立的只剩这一种组合：
+                //   · 请求照常交给系统 ⇒ QQ 的 SSO 回跳、微信的 NSUserActivity
+                //     都由系统投递（这两条我们自己补不出来，0.2.55~0.2.59 已证）；
+                //   · 激活之后立刻收卡 ⇒ 用户看到的是浮窗，不是全屏。
+                // 判据在日志里成对出现：`notify: oauth pass …` 紧跟
+                // `notify: auth swap card b=… after=100ms`。
+                AevonAuthSwapSchedule(bundle);
                 *why = "oauthpass";
                 AevonDivertAt = now;
                 snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
