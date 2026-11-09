@@ -2360,11 +2360,17 @@ zStackParticipantDidChange:
                 // ③ 带 `b=`：多窗时两张卡的 watcher 读的是**同一个**全局计数，都会
                 //    各打一行，于是同一个 `#10` 出现两次。补上 bundle 之后，
                 //    「两台是同一件事」和「两台各是各的」一眼可分。
-                Log.write("win: scene deactivation #" + String(attempts)
-                          + " fg=" + flag(fg) + " cs=" + String(content)
-                          + " sub=" + String(sublayers) + " wake=" + String(wakes)
-                          + " reasons=" + String(AevonDeactLastReasons())
-                          + " b=" + (bundleID ?? "-"))
+                //
+                // 0.2.57 — 先落成三个局部量再拼。这一整段在 `keep` 那个大闭包里，
+                // 直接写成一长串 `+`（里面还夹着 `??`）会让 Swift 的类型检查器
+                // 在 2185 行超时 —— CI 上就是栽在这里，不是逻辑错。
+                let whyReasons = Int(AevonDeactLastReasons())
+                let whoBundle = bundleID ?? "-"
+                let deactLine = "win: scene deactivation #" + String(attempts)
+                    + " fg=" + flag(fg) + " cs=" + String(content)
+                    + " sub=" + String(sublayers) + " wake=" + String(wakes)
+                    + " reasons=" + String(whyReasons) + " b=" + whoBundle
+                Log.write(deactLine)
             }
             var door = 0
             if fg == 1 {

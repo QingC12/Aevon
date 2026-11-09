@@ -3864,15 +3864,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             let why = AevonPushSceneFrameWhy()
             // 已经是目标：这一条链本来就没有要写的东西。
             if why == 7 { return }
+            // 0.2.57 — 用拼接而不是 `String(format:)`：三个不同类型的
+            // CVarArg（Int32 / String / Int）凑在一起推断，和 `keep` 那个大闭包
+            // 里同一类写法一样容易让类型检查器超时。CI 已经在那条路上栽过一次。
+            let tail = " b=" + bundle + " left=" + String(tries)
             // 路径不通（nil / 非主线程 / 没有 settings）：再等也不会变。
             if why == 1 || why == 2 || why == 6 {
-                Log.write(String(format: "win: kb push late stop why=%d b=%@ left=%ld",
-                                 why, bundle, tries))
+                Log.write("win: kb push late stop why=" + String(why) + tail)
                 return
             }
             if tries <= 1 {
-                Log.write(String(format: "win: kb push late gave up why=%d b=%@ left=%ld",
-                                 why, bundle, tries))
+                Log.write("win: kb push late gave up why=" + String(why) + tail)
                 return
             }
             self.pushSceneLater(scene, bundle: bundle, tries: tries - 1)

@@ -656,8 +656,10 @@ def main():
                   b"win: kb spring t=%.2f zeta=%.2f v=%.2f",
                   # 0.2.57 — 放弃那一行带上了原因码。旧串 `gave up door=0` 已经
                   # 不存在：它分不开「已经等于目标」与「被钩子挡了」。
-                  b"win: kb push late gave up why=%d b=%@ left=%ld",
-                  b"win: kb push late stop why=%d b=%@ left=%ld",
+                  # 这两行是**拼接**出来的（`String(format:)` 在那个闭包里会让
+                  # 类型检查器超时），所以 `__cstring` 里只有前缀，没有 `%d` 尾巴。
+                  b"win: kb push late gave up why=",
+                  b"win: kb push late stop why=",
                   # 0.2.46 — 「让抖音真重排」这一版的四条：显示覆盖 / 参考尺寸 /
                   # 屏幕跟随 / 回执。逐条都要能在产物里 grep 到，缺哪条就等于那一步
                   # 没有证词：
