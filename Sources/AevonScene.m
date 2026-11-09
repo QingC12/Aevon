@@ -4700,6 +4700,147 @@ static void AevonPasteTokenProbe(id request, id options, const char *bundle) {
 static char AevonPastePromoteBundle[128];
 static CFAbsoluteTime AevonPastePromoteAt = 0;
 
+/// 0.2.43 — 「这次分享是从哪个 App 发起的」。
+///
+/// 用户要的是「卡片浮在发起分享的 App 上方」，而不是落在桌面。openCard 的
+/// home-first 只对**目标 App 正占着全屏**这一种情况生效；分享恰好就是这种：
+/// 文件必须靠系统那次激活送出去，目标 App 因此成了前台，收起卡片时剩下的
+/// 背景只能是桌面（Aevon 0.2.39 真机日志：`background after teardown door=1`）。
+///
+/// 所以必须在放行之前把来源记下来：hook 这一拍分享面板还开在来源 App 里，
+/// 它的 scene `settings.isForeground` 还是 1。目标 App 起来之后这份记录就是
+/// 「等卡片贴好、再把来源 App 请回全屏」的唯一线索。
+///
+/// 只认「前台且不是目标、不是桌面、不是分享服务」的第一条 scene。
+static char AevonShareSource[128];
+static CFAbsoluteTime AevonShareSourceAt = 0;
+
+static int AevonShareSourceSkip(const char *name) {
+    if (name == NULL || name[0] == '\0') return 1;
+    if (strcmp(name, "com.apple.springboard") == 0) return 1;
+    if (strstr(name, "SharingViewService") != NULL) return 1;
+    if (strstr(name, "ShareSheet") != NULL) return 1;
+    if (strstr(name, "ViewService") != NULL) return 1;
+    return 0;
+}
+
+/// 从 live scene 里认来源 App。只在主线程调（hook 就在主线程）。
+static void AevonShareSourceCapture(const char *target) {
+    AevonShareSource[0] = '\0';
+    AevonShareSourceAt = 0;
+    if (target == NULL || target[0] == '\0') return;
+    id manager = AevonSceneManager();
+    if (manager == nil) return;
+    __block char picked[128] = {0};
+    AevonEnumerateScenes(manager, ^(id scene) {
+        if (scene == nil || picked[0] != '\0') return;
+        if (AevonSceneForeground(scene) != 1) return;
+        SEL idSel = sel_registerName("identifier");
+        if (![scene respondsToSelector:idSel]) return;
+        id value = ((id (*)(id, SEL))objc_msgSend)(scene, idSel);
+        if (![value isKindOfClass:[NSString class]]) return;
+        NSString *text = (NSString *)value;
+        if ([text hasPrefix:@"sceneID:"]) text = [text substringFromIndex:8];
+        if ([text hasSuffix:@"-default"]) {
+            text = [text substringToIndex:text.length - 8];
+        }
+        const char *name = text.UTF8String;
+        if (AevonShareSourceSkip(name)) return;
+        if (strcmp(name, target) == 0) return;
+        snprintf(picked, sizeof(picked), "%s", name);
+    });
+    if (picked[0] == '\0') {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: share source none target=%s",
+                      target] UTF8String]);
+        return;
+    }
+    snprintf(AevonShareSource, sizeof(AevonShareSource), "%s", picked);
+    AevonShareSourceAt = CFAbsoluteTimeGetCurrent();
+    AevonLogRaw([[NSString stringWithFormat:@"notify: share source b=%s target=%s",
+                  picked, target] UTF8String]);
+}
+
+/// 「把来源 App 请回全屏」。
+///
+/// 只用 SpringBoard 自己的 `launchApplicationWithIdentifier:suspended:NO` ——
+/// 母本用同一条选择子做启动（`suspended:YES`），说明它在 iOS 17 上还在；
+/// `LSApplicationWorkspace.openApplicationWithBundleID:` 是同步 XPC，0.2.1
+/// 的日志里 10 次调用全部 10 秒超时，不能拿来做这一拍。
+/// 返回 1 = 系统接了 / 2 = 拒绝 / 0 = 选择子不在 / 3 = 抛异常。
+static NSInteger AevonLaunchForeground(NSString *bundleID) {
+    if (bundleID.length == 0) return 0;
+    Class appCls = NSClassFromString(@"UIApplication");
+    if (appCls == Nil) return 0;
+    SEL sharedSel = sel_registerName("sharedApplication");
+    if (![appCls respondsToSelector:sharedSel]) return 0;
+    id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, sharedSel);
+    SEL sel = sel_registerName("launchApplicationWithIdentifier:suspended:");
+    if (app == nil || ![app respondsToSelector:sel]) return 0;
+    @try {
+        BOOL (*call)(id, SEL, id, BOOL) = (BOOL (*)(id, SEL, id, BOOL))objc_msgSend;
+        return call(app, sel, bundleID, NO) ? 1 : 2;
+    } @catch (__unused NSException *exception) {
+        return 3;
+    }
+}
+
+/// 等卡片贴稳、桌面在屏的那一拍，把来源 App 请回全屏；卡片会留在它上面。
+///
+/// 不抢在卡片之前：openCard 的 home-first 需要先看到系统离开目标 App 的
+/// 全屏 scene（0.2.30 的黑屏修复）。这里只等 `AevonCardIsUpFor`，命中即止。
+static void AevonShareRestoreTick(char *target, char *source, int tick) {
+    if (target == NULL || source == NULL) { free(target); free(source); return; }
+    if (source[0] == '\0' || strcmp(source, target) == 0) {
+        free(target); free(source);
+        return;
+    }
+    if (AevonCardIsUpFor(source) == 1) {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: share restore skip b=%s card=1",
+                      source] UTF8String]);
+        free(target); free(source);
+        return;
+    }
+    if (AevonCardIsUpFor(target) != 1) {
+        if (tick >= 48) {
+            AevonLogRaw([[NSString stringWithFormat:@"notify: share restore giveup b=%s tick=%d",
+                          source, tick] UTF8String]);
+            free(target); free(source);
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            AevonShareRestoreTick(target, source, tick + 1);
+        });
+        return;
+    }
+    if (AevonSpringboardActive() != 1) {
+        // 卡片贴好时来源 App 还在屏上 —— 这次根本没发 home，已经是要的样子。
+        AevonLogRaw([[NSString stringWithFormat:@"notify: share restore skip b=%s board=0",
+                      source] UTF8String]);
+        free(target); free(source);
+        return;
+    }
+    NSInteger door = AevonLaunchForeground([NSString stringWithUTF8String:source]);
+    AevonLogRaw([[NSString stringWithFormat:@"notify: share restore b=%s after=%dms door=%d",
+                  source, tick * 100, (int)door] UTF8String]);
+    free(target); free(source);
+}
+
+static void AevonShareRestoreSchedule(const char *target) {
+    if (target == NULL || target[0] == '\0') return;
+    if (AevonShareSource[0] == '\0') return;
+    if (CFAbsoluteTimeGetCurrent() - AevonShareSourceAt > 30.0) return;
+    if (strcmp(AevonShareSource, target) == 0) return;
+    char *t = strdup(target);
+    char *s = strdup(AevonShareSource);
+    if (t == NULL || s == NULL) { free(t); free(s); return; }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonShareRestoreTick(t, s, 0);
+    });
+}
+
+
 static void AevonPastePromoteTick(char *copy, int tick) {
     if (copy == NULL) return;
     if (copy[0] == '\0') { free(copy); return; }
@@ -4731,6 +4872,8 @@ static void AevonPastePromoteTick(char *copy, int tick) {
                       @"notify: paste promote b=%s front=%d board=%d live=%d scene=%d tick=%d",
                       copy, front, board, live, sceneFG, tick] UTF8String]);
         AevonOpenFromNotification(copy);
+        // 0.2.43 — 卡片贴好后把来源 App 请回全屏，让卡片浮在它上方。
+        AevonShareRestoreSchedule(copy);
         free(copy);
         return;
     }
@@ -4754,6 +4897,8 @@ static void AevonPastePromoteSchedule(const char *bundle) {
     if (strcmp(AevonPastePromoteBundle, bundle) == 0 && now - AevonPastePromoteAt < 6.0) return;
     snprintf(AevonPastePromoteBundle, sizeof(AevonPastePromoteBundle), "%s", bundle);
     AevonPastePromoteAt = now;
+    // 0.2.43 — 先记账：这一拍分享面板还开在来源 App 里，目标 App 还没顶上来。
+    AevonShareSourceCapture(bundle);
     char *copy = strdup(bundle);
     if (copy == NULL) return;
     AevonLogRaw([[NSString stringWithFormat:@"notify: paste promote schedule b=%s", copy] UTF8String]);

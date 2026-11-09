@@ -854,6 +854,10 @@ def main():
                   # 少了这两条，分享要么停在原生全屏，要么根本没人去收卡。
                   b"notify: paste promote schedule b=%s",
                   b"notify: paste promote b=%s",
+                  # 0.2.43 — 分享完成后把来源 App 请回全屏，卡片浮在它上方：
+                  # 少了 source/restore 这一对，卡片背后就只有桌面。
+                  b"notify: share source b=%s target=%s",
+                  b"notify: share restore b=%s after=%dms door=%d",
                   # 0.2.15 —— 尺寸 + 分享两件：
                   #   own display       scene 的 displayConfiguration 被改成画布大小
                   #                     （不改就是「UIScreen 932 / 窗口 717」，按屏幕
