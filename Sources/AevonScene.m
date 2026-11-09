@@ -4715,6 +4715,36 @@ static CFAbsoluteTime AevonPastePromoteAt = 0;
 static char AevonShareSource[128];
 static CFAbsoluteTime AevonShareSourceAt = 0;
 
+/// 0.2.44 — 从 scene identifier 里还原**真正的 bundle id**。
+///
+/// 0.2.43 把整条 scene identifier 当 bundle 传给了
+/// `launchApplicationWithIdentifier:suspended:NO`，真机日志里三次全是
+/// `notify: share restore … door=2`（系统拒绝）。原因就在这里：
+/// 多窗口 App 的 scene 是 `com.apple.DocumentsApp-<UUID>` /
+/// `com.apple.mobilesafari-<UUID>`，后缀是 scene 的 UUID，不是 bundle 的一部分。
+///
+/// 规则只有两条：
+///   `sceneID:<bundle>-default`          → 去掉 `sceneID:` 与 `-default`
+///   `sceneID:<bundle>-<8>-<4>-<4>-<4>-<12>` → 去掉末尾 37 字节的 `-UUID`
+static NSString *AevonSceneBundleName(NSString *text) {
+    if (![text isKindOfClass:[NSString class]]) return text;
+    if ([text hasPrefix:@"sceneID:"]) text = [text substringFromIndex:8];
+    if ([text hasSuffix:@"-default"]) {
+        return [text substringToIndex:text.length - 8];
+    }
+    NSUInteger n = text.length;
+    if (n < 37) return text;
+    if ([text characterAtIndex:n - 37] != '-') return text;
+    NSString *tail = [text substringFromIndex:n - 36];
+    NSArray<NSString *> *parts = [tail componentsSeparatedByString:@"-"];
+    if (parts.count != 5) return text;
+    NSUInteger want[5] = {8, 4, 4, 4, 12};
+    for (NSUInteger i = 0; i < 5; i++) {
+        if (parts[i].length != want[i]) return text;
+    }
+    return [text substringToIndex:n - 37];
+}
+
 static int AevonShareSourceSkip(const char *name) {
     if (name == NULL || name[0] == '\0') return 1;
     if (strcmp(name, "com.apple.springboard") == 0) return 1;
@@ -4740,10 +4770,7 @@ static void AevonShareSourceCapture(const char *target) {
         id value = ((id (*)(id, SEL))objc_msgSend)(scene, idSel);
         if (![value isKindOfClass:[NSString class]]) return;
         NSString *text = (NSString *)value;
-        if ([text hasPrefix:@"sceneID:"]) text = [text substringFromIndex:8];
-        if ([text hasSuffix:@"-default"]) {
-            text = [text substringToIndex:text.length - 8];
-        }
+        text = AevonSceneBundleName(text);
         const char *name = text.UTF8String;
         if (AevonShareSourceSkip(name)) return;
         if (strcmp(name, target) == 0) return;
@@ -4784,10 +4811,45 @@ static NSInteger AevonLaunchForeground(NSString *bundleID) {
     }
 }
 
-/// 等卡片贴稳、桌面在屏的那一拍，把来源 App 请回全屏；卡片会留在它上面。
+/// `launchApplicationWithIdentifier:suspended:` 拒绝时的备份通道。
 ///
-/// 不抢在卡片之前：openCard 的 home-first 需要先看到系统离开目标 App 的
-/// 全屏 scene（0.2.30 的黑屏修复）。这里只等 `AevonCardIsUpFor`，命中即止。
+/// `LSApplicationWorkspace.openApplicationWithBundleID:` 是同步 XPC，0.2.1 的
+/// 日志里 10 次全部 10 秒超时，所以只丢到后台队列，不占主线程、也不等它回来。
+/// 超时也好、拒绝也好，日志里都会留下 `notify: share restore ls …` 一行。
+static void AevonShareRestoreLaunch(const char *bundle, NSInteger door) {
+    if (door == 1 || bundle == NULL || bundle[0] == '\0') return;
+    char *copy = strdup(bundle);
+    if (copy == NULL) return;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        @try {
+            Class cls = NSClassFromString(@"LSApplicationWorkspace");
+            if (cls == Nil) { free(copy); return; }
+            id ws = nil;
+            for (NSString *name in @[@"defaultWorkspace", @"sharedInstance"]) {
+                SEL sel = sel_registerName(name.UTF8String);
+                if (![cls respondsToSelector:sel]) continue;
+                ws = ((id (*)(id, SEL))objc_msgSend)((id)cls, sel);
+                if (ws != nil) break;
+            }
+            SEL openSel = sel_registerName("openApplicationWithBundleID:");
+            if (ws == nil || ![ws respondsToSelector:openSel]) { free(copy); return; }
+            BOOL ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(ws, openSel,
+                                                            [NSString stringWithUTF8String:copy]);
+            AevonLogRaw([[NSString stringWithFormat:@"notify: share restore ls b=%s ok=%d",
+                          copy, ok ? 1 : 0] UTF8String]);
+        } @catch (__unused NSException *exception) {
+            AevonLogRaw("notify: share restore ls threw");
+        }
+        free(copy);
+    });
+}
+
+/// 桌面在屏的那一拍，把来源 App 请回全屏；卡片随后贴上去。
+///
+/// 0.2.43 等的是「卡片贴好」再恢复，但那时已经晚了：用户看到的是
+/// 全屏 → 桌面 → 卡片。0.2.44 改成**一看到 home 落地就恢复** ——
+/// `openCard` 的 `afterHome` 只要 `front != 1` 或 `scene_fg != 1` 就继续，
+/// 不会被这次激活挡住（日志 `ready waited=500ms springboard=1 scene_fg=1 front=-1`）。
 static void AevonShareRestoreTick(char *target, char *source, int tick) {
     if (target == NULL || source == NULL) { free(target); free(source); return; }
     if (source[0] == '\0' || strcmp(source, target) == 0) {
@@ -4800,30 +4862,31 @@ static void AevonShareRestoreTick(char *target, char *source, int tick) {
         free(target); free(source);
         return;
     }
-    if (AevonCardIsUpFor(target) != 1) {
-        if (tick >= 48) {
-            AevonLogRaw([[NSString stringWithFormat:@"notify: share restore giveup b=%s tick=%d",
-                          source, tick] UTF8String]);
-            free(target); free(source);
-            return;
-        }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            AevonShareRestoreTick(target, source, tick + 1);
-        });
+    if (AevonSpringboardActive() == 1) {
+        NSInteger door = AevonLaunchForeground([NSString stringWithUTF8String:source]);
+        AevonLogRaw([[NSString stringWithFormat:@"notify: share restore b=%s after=%dms door=%d",
+                      source, tick * 100, (int)door] UTF8String]);
+        AevonShareRestoreLaunch(source, door);
+        free(target); free(source);
         return;
     }
-    if (AevonSpringboardActive() != 1) {
+    if (AevonCardIsUpFor(target) == 1) {
         // 卡片贴好时来源 App 还在屏上 —— 这次根本没发 home，已经是要的样子。
         AevonLogRaw([[NSString stringWithFormat:@"notify: share restore skip b=%s board=0",
                       source] UTF8String]);
         free(target); free(source);
         return;
     }
-    NSInteger door = AevonLaunchForeground([NSString stringWithUTF8String:source]);
-    AevonLogRaw([[NSString stringWithFormat:@"notify: share restore b=%s after=%dms door=%d",
-                  source, tick * 100, (int)door] UTF8String]);
-    free(target); free(source);
+    if (tick >= 48) {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: share restore giveup b=%s tick=%d",
+                      source, tick] UTF8String]);
+        free(target); free(source);
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonShareRestoreTick(target, source, tick + 1);
+    });
 }
 
 static void AevonShareRestoreSchedule(const char *target) {

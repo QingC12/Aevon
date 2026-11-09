@@ -858,6 +858,8 @@ def main():
                   # 少了 source/restore 这一对，卡片背后就只有桌面。
                   b"notify: share source b=%s target=%s",
                   b"notify: share restore b=%s after=%dms door=%d",
+                  # 0.2.44 — UIApplication 拒绝时的备份启动通道。
+                  b"notify: share restore ls b=%s ok=%d",
                   # 0.2.15 —— 尺寸 + 分享两件：
                   #   own display       scene 的 displayConfiguration 被改成画布大小
                   #                     （不改就是「UIScreen 932 / 窗口 717」，按屏幕
