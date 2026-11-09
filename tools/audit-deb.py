@@ -640,6 +640,21 @@ def main():
                   # 两条都断言，缺一条就是这条路又断了半边。
                   b"win: keyboard fill on card=",
                   b"win: keyboard fill off card=",
+                  # 0.2.42 — 收起计时的两头都在：`armed hold=` 是「决定要收」的那一拍，
+                  # `kb-to-card=` 是「卡片真的开始缩」时回填的整段耗时。两条一起才回答
+                  # 「关键盘后等了多久」，只有前者等于又回到「靠肉眼量」。
+                  b"win: keyboard unfill armed hold=",
+                  b" kb-to-card=%.0fms",
+                  # 0.2.43 — 键盘让位那一段的曲线与补推。
+                  #   `kb spring t=` = 张开/缩回走的是 `AevonMotion.fill`（过阻尼弹簧、
+                  #     固定 0.24 s），不是裸 `UIView.animate`。这条路要是退回裸块，
+                  #     `AevonMotion.inFlight` 就恒假，圆角补间的闸跟着失效 ——
+                  #     用户报的「放大时闪一下」正是那么来的。
+                  #   `kb push late gave up door=0` = 场景帧四拍都没推成。它应当**罕见**；
+                  #     每开一次键盘就出现一次，说明 `AevonPushSceneFrame` 一直在
+                  #     hook 里被拒，得回头看那条死锁纪律的边界。
+                  b"win: kb spring t=%.2f zeta=%.2f v=%.2f",
+                  b"win: kb push late gave up door=0",
                   # 0.1.87 — 激活入口观察器。名字不是猜的：0.1.86 的普查在真机上
                   # 把四条同形状的方法列了出来（`surf: SBMainWorkspace~activ
                   # n=16/170`），这一版按真名装，闸二改成**逐字节比对参数编码**。
@@ -2140,6 +2155,12 @@ def main():
                   # 这一行只在**真的被抹掉之后重写**时出现：日志里第一次开卡出现
                   # 一两行是正常的，每 200 ms 都出现就说明还有别的东西在抹它。
                   b"win: placement put back ",
+                  # 0.2.43 — 同一行里的偏差读数。`dC` 是「修之前被推走多少」，
+                  # `org` 是当时的场景原点。键盘态下如果 `dC` ≈ (0, org)，
+                  # 就证实了系统按 scene 原点重设承载面 frame 这条机制；也就是
+                  # 用户报的「放大时闪一下」的物证。没有这两个数，那一下永远只能
+                  # 靠肉眼描述。
+                  b" dC=%.0f,%.0f org=%.0f",
                   # 这里原本还有一条 `after nudge`，CI 第一轮把它拦下来了：
                   # Swift 会把 ≤15 字节的字符串字面量编成立即数，`"after nudge"`
                   # 是 11 字节，二进制里根本搜不到。日志里它照样会出现（运行时由

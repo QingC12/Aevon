@@ -103,6 +103,7 @@ enum AevonMotion {
             Log.write(String(format: "win: motion spring response=%.3f damping=%.3f blend=%.3f",
                              response, Swift.min(1, Swift.max(0.05, elasticity)), 0))
         }
+        transitionDuration = response
         UIView.animate(withDuration: response,
                        delay: 0,
                        usingSpringWithDamping: Swift.min(1, Swift.max(0.05, elasticity)),
@@ -113,7 +114,10 @@ enum AevonMotion {
         // 动画块已经登记完，这一拍里排队的「块外手术」现在可以跑了 —— 仍然是
         // 同一拍 runloop，屏幕上与这次 spring 同时开始。
         depth -= 1
-        if depth == 0 { drain() }
+        if depth == 0 {
+            transitionDuration = 0
+            drain()
+        }
         return true
     }
 
@@ -153,6 +157,15 @@ enum AevonMotion {
     /// 现在是「已经在一次过渡里」吗。给圆角这类**不是** UIView 动画属性的东西用：
     /// `cornerRadius` 在 `UIView.animate` 块里是硬赋值，必须自己补一条 CABasicAnimation。
     static var inFlight: Bool { depth > 0 }
+
+    /// 0.2.43 — 这一次过渡有多长。补间（圆角）必须与几何同长。
+    ///
+    /// 0.1.26 起 `applyCorner` 补的那条 `CABasicAnimation` 用的是 `response`
+    /// （母本 0.2727 s）。几何走 `spring` 时两者相等，看不出问题；0.2.43 把键盘
+    /// 让位换成固定 0.24 s 的 `fill` 之后，圆角就会比框慢 0.033 s 落地 ——
+    /// 一个 60 Hz 屏上是两帧的「角还在动、框已停」。这里记下当前过渡的真时长，
+    /// 让补间读同一个数。0 表示不在过渡里（调用方回退到 `response`）。
+    private(set) static var transitionDuration: TimeInterval = 0
 
     // MARK: - 入场 / 出场
 
@@ -264,6 +277,61 @@ enum AevonMotion {
     /// 落地也同拍，中间不再有多余尾段。曲线仍是 ease-out（实测前大后小、无过冲）。
     static let fillDuration: TimeInterval = 0.24
 
+    /// 0.2.43 — 键盘让位这一段**改回弹簧**，阻尼取过阻尼边界。
+    ///
+    /// 0.1.76/0.1.77 用的是 `curveEaseOut` 0.24 s，判据是「前大后小、没有过冲」。
+    /// 那个判据本身没错，问题出在**它不是一次 `AevonMotion` 过渡**：
+    /// `applyCorner` 靠 `AevonMotion.inFlight`（`depth > 0`）判断「正在过渡，圆角
+    /// 要补一条同时长的 `CABasicAnimation`」。裸 `UIView.animate` 不抬 `depth`，
+    /// 于是卡片 352→430 的那 0.24 s 里框在长大、`cornerRadius` 从 44.8 硬跳到
+    /// 54.7 —— 角先变大、框后跟上，用户看到的就是「放大过程中闪一下」。
+    ///
+    /// 阻尼 1.0 是母本 `1.1` 在 UIKit 侧的收敛值（见文件头）：过阻尼、不回弹。
+    /// 这里**不要**为了「弹一下」把阻尼调小 —— 放大的终点是屏幕底边（932），
+    /// 过冲那一段落在屏幕外，肉眼拿不到任何弹性，只会让落地晚一拍。
+    /// 初速 0.35 只补一件事：过阻尼弹簧起手是零速度，跟键盘同拍时会显得
+    /// 「键盘先动、卡片后动」；给一点初速，第一帧就跟上。
+    static let fillDamping: CGFloat = 1.0
+    static let fillVelocity: CGFloat = 0.35
+
+    /// 0.2.43 — 键盘张开/缩回自己的一条弹簧。
+    ///
+    /// 与 `spring` 的唯一区别是**时长固定** `fillDuration`：0.1.77 量过，这一段
+    /// 必须与系统键盘同速，不能跟着「动画弹性」滑条变。除此之外与 `spring`
+    /// 完全一致：抬 `depth`（让 `inFlight` 成立、圆角补间生效）、嵌套并入外层、
+    /// 返回后清 `outside` 队列。
+    @discardableResult
+    static func fill(_ changes: @escaping () -> Void,
+                     completion: ((Bool) -> Void)? = nil) -> Bool {
+        depth += 1
+        if depth > 1 {
+            changes()
+            depth -= 1
+            if depth == 0 { drain() }
+            return false
+        }
+        if !announcedFill {
+            announcedFill = true
+            Log.write(String(format: "win: kb spring t=%.2f zeta=%.2f v=%.2f",
+                             fillDuration, fillDamping, fillVelocity))
+        }
+        transitionDuration = fillDuration
+        UIView.animate(withDuration: fillDuration, delay: 0,
+                       usingSpringWithDamping: fillDamping,
+                       initialSpringVelocity: fillVelocity,
+                       options: [.beginFromCurrentState, .allowUserInteraction],
+                       animations: changes,
+                       completion: completion)
+        depth -= 1
+        if depth == 0 {
+            transitionDuration = 0
+            drain()
+        }
+        return true
+    }
+
+    private static var announcedFill = false
+
     /// 0.1.83 — **收起前先挂起这么久。**
     ///
     /// Aevon(151) 里 `fill off` 与下一条 `fill on` 常常落在同一秒内：App 侧一次
@@ -273,7 +341,31 @@ enum AevonMotion {
     /// 0.60 s 的依据是 App 那串心跳：键盘还在时 `com.aevon.kb.up` 每秒一发，
     /// 假收起后面一定紧跟一条「又起来了」。真收起时也只多等 0.60 s —— 那 0.60 s
     /// 里卡片仍是键盘态几何，屏幕上是「键盘已经下去、窗口还贴着底」，不会露黑。
-    static let unfillHold: TimeInterval = 0.60
+    ///
+    /// 0.2.42 — **0.60 → 0.10。** 那 0.60 s 是对同一个事实的**第二次确认**。
+    ///
+    /// 0.1.84 起 App 侧已经不是「一次判定就报」了：`AevonKbSettleWait` 先等
+    /// 0.30 s、再每 0.18 s 量一次三态，要连续两次 `GONE` 才 `settle gone` 并
+    /// 下发 `com.aevon.kb.off`；量到 `TOP` 的那一拍走 `settle keep`，一个字都不发。
+    /// 也就是说假收起在 App 那一层就被吃掉了，桌面这一侧再压 0.60 s 只是在等
+    /// 一个**已经等过的时间**：真收起时整条链是
+    ///   键盘动画 0.25 + App 侧确认 ~0.48 + 0.60（这里）+ 0.15（场景落地）
+    ///   + 0.24（缩回动画）≈ 1.7 s，
+    /// 用户量到的「关了键盘要等一秒左右才还原」就是这一段。
+    ///
+    /// 留 0.10 s 只为一件事：Darwin 通知不保证顺序，收起的同一拍里可能还有一条
+    /// 在途的 `kb.up`。0.10 s 足够吃掉它，再短就等于不留。
+    static let unfillHold: TimeInterval = 0.10
+
+    /// 0.2.42 — 收起时「先放场景、再动卡片」之间的那一拍。
+    ///
+    /// `AevonPushSceneFrame` 走 `updateSettings:withTransitionContext:`，写完即返回，
+    /// 真正落地要等系统下一帧。0.1.67 量的 0.15 s 是这个落地时间的保守值（60 Hz
+    /// 下九帧）。这一段**不能省**：省掉就是 0.1.66 那个「卡片先收、场景后搬」，
+    /// 中间那一拍 App 按 215 摆、卡片按 0 装，用户看到的是「关键盘时闪黑一下」。
+    /// 它只是从代码里的字面量挪到这里，与 `unfillHold` 放在一起，好让「收起一共
+    /// 要多久」只有一处能读。
+    static let unfillSettle: TimeInterval = 0.15
 
     @discardableResult
     static func lift(_ views: [UIView], from scale: CGFloat, center: CGPoint?,

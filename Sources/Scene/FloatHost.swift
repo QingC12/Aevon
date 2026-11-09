@@ -764,6 +764,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var bandInset: CGPoint = .zero
     private var card: UIView?
     private var content: UIView?
+    /// 0.2.42 — 卡片里最下面那层不透明底板（见 `show` 里创建它的那一段）。
+    ///
+    /// 它只做一件事：App 的画面真的透出来时，露出来的是系统底色，不是桌面。
+    /// `applyBars` 把「留边」也画在这一层上（黑），所以卡片自己的
+    /// `backgroundColor` 从头到尾都是 `.clear` —— 两个答案会互相盖住。
+    private var backing: UIView?
     private var grip: GripView?
     /// 0.1.34 — 拖动 / 缩放期间的**目标几何**，`nil` = 静止。
     ///
@@ -1320,8 +1326,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // # gone — `FloatHost.lastMainFrame = frame`
         // 0.0.81 — 画布装不满卡片时（哔哩哔哩竖版：430×932 按高等比缩进 5:3），
         // 两边会各露出一条。留透明就是把桌面透进来，看上去像卡片没画完；填黑
-        // 是「这一页之外」的通用答案，和播放器留边同一套观感。画布正好是 5:3
-        // 时（其余所有 App）这一行等于 `.clear`，和以前一模一样。
+        // 是「这一页之外」的通用答案，和播放器留边同一套观感。
+        //
+        // 0.2.42 — 卡片自己仍然是 `.clear`，「填什么颜色」这件事整体搬到下面的
+        // `backing`（子视图）上，`applyBars` 也只写那一层。两个地方写同一个
+        // 像素的后果是它们会互相盖住，而卡片在图层树里是底板的下层。
         card.backgroundColor = .clear
         // 0.0.48 — 白色描边撤掉（Aevon(46) #2「边缘的白色线条太明显」）。
         //
@@ -1331,6 +1340,27 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 边框不保留。
         card.clipsToBounds = true
         card.isUserInteractionEnabled = true
+        // 0.2.42 — 卡片里先垫一层**不透明底板**，承载面在它上面。
+        //
+        // 起因（本轮用户报）：在浮窗里打开 Safari 后，浮窗有概率整块变成透明背景
+        // —— 看到的是桌面，不是 Safari 的画面。Aevon(171)/(188)/(189) 的
+        // `app: geom` 里 Safari 的那一层叫 `SCSafariPageLightEffectView:0,0,430x717`：
+        // 整页铺满的是一块「浅色效果」视图（起始页就是壁纸模糊），它本身不是
+        // 不透明面。卡片这一路（`window` / `card` / 承载视图）全都是 `.clear`，
+        // 于是一块半透明材质下面什么都没有 —— 桌面直接透上来。
+        //
+        // 底板不改变任何几何、不写别人的视图：它只是**在我们自己的卡片里**把
+        // 「空」填成系统底色。App 正常画满时它被完全盖住（5:3 画布与卡片同比例，
+        // `applyBars` 判为无留边），一个字都看不见；只有 App 真的透出来时才露。
+        //
+        // ⛔ 它必须是卡片最下面那一层，而且不接触摸：`isUserInteractionEnabled`
+        // 关掉，否则卡片里的点击会被这块板吃掉。
+        let backing = UIView(frame: card.bounds)
+        backing.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        backing.isUserInteractionEnabled = false
+        backing.backgroundColor = .systemBackground
+        card.addSubview(backing)
+        host.backing = backing
         host.card = card
         host.content = view
         host.natural = source
@@ -1680,7 +1710,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         kbSavedOriginY = 0
         canvasHeight = 0
         kbSavedHeight = 0
+        // 0.2.43 — 动画截止时刻也要清。留一个未来的时间会让新卡开窗后
+        // `reapplySoon` 的最后一拍跳过光晕对齐。
+        kbAnimUntil = 0
         card = nil
+        // 0.2.42 — 底板跟着卡片走。这个 host 会被下一张卡复用，留一个指向已拆
+        // 视图的引用，下一次 `applyBars` 就会往一个不在屏幕上的对象里填色。
+        backing = nil
         content = nil
         visible = .zero
         cropTop = 0
@@ -2051,7 +2087,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             let anim = CABasicAnimation(keyPath: "cornerRadius")
             anim.fromValue = card.layer.cornerRadius
             anim.toValue = radius
-            anim.duration = AevonMotion.response
+            // 0.2.43 — 用**这一次过渡的真时长**，不再一律 `response`。键盘让位是
+            // 固定 0.24 s、弹簧过渡是 0.27 s，读同一个数圆角才不会比框晚两帧落地。
+            anim.duration = AevonMotion.transitionDuration > 0
+                ? AevonMotion.transitionDuration
+                : AevonMotion.response
             anim.timingFunction = CAMediaTimingFunction(name: .easeOut)
             card.layer.add(anim, forKey: "aevon.corner")
         }
@@ -3648,6 +3688,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 0.1.83 — 收起意向的令牌。每收到一次「键盘还在」就加一，挂起中的收起
     /// 到点发现令牌变了就自己作废（见 `setKeyboardFill` 的 else 分支）。
     private var kbUnfillToken = 0
+    /// 0.2.42 — 收起意向登记的时刻。`win: keyboard fill off` 里的 `wait=` 由它算：
+    /// 「键盘说不在了」到「卡片真的开始缩」一共花了多久，一行就能对账。
+    private var kbUnfillAt: CFAbsoluteTime = 0
     /// 让位前的卡片几何，收起时原样还回去。
     private var kbSavedFrame: CGRect = .null
     /// 0.1.49 — 键盘态的「画布顶对齐」补偿量（pt），收起时清零。
@@ -3664,6 +3707,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var kbSavedHeight: CGFloat = 0
     /// 0.1.66 — 收起过程中「守着守护循环快查」的截止时刻（秒，0 = 不在收）。
     private var kbSettleUntil: CFAbsoluteTime = 0
+    /// 0.2.43 — 张开/缩回那一段动画的结束时刻。
+    ///
+    /// 用来回答「现在画面还在动吗」。`AevonMotion.inFlight` 不能回答这个问题：
+    /// 它是 `depth > 0`，`fill` 返回那一刻就归零了。光晕在动画中途被贴到终点
+    /// 就是一次闪，所以这个判断必须靠时间，不能靠那个标记。
+    private var kbAnimUntil: CFAbsoluteTime = 0
 
     /// 全体宿主里挑主窗让位。
     ///
@@ -3755,6 +3804,72 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return value
     }
 
+    /// 0.2.43 — 当拍没写成的场景帧，补推几次。
+    ///
+    /// Aevon(188) 把那个空档拍下来了：
+    ///
+    ///     21:29:22 win: keyboard fill on card=430x717 at 0,215 … push=0
+    ///     21:29:22 win: frame drift now=430x717@0 want=430x717@215 door=3 wrote=4
+    ///
+    /// `push=0` 在这里不是「不用写」，是**这一拍写不了**：`AevonPushSceneFrame`
+    /// 开头的 `AevonHookDepth > 0` 会在任何被钩的系统回调里直接返回 0（那是
+    /// 0.0.31 那条死锁纪律，不能动）。键盘弹起的那一刻恰好常落在
+    /// `_setDeactivationReasons:…` 上，于是只有卡片动了、场景还停在 0，直到
+    /// 守护循环**下一拍（200 ms）**才对上。这 200 ms 里 App 拿到的还是旧原点，
+    /// 键盘让位与实际可视区错开一截 —— 眼睛看到的就是放大过程中的那一下错位。
+    ///
+    /// 重试跑在主队列的下一拍（`asyncAfter`），**不在 hook 栈内**，所以不会撞
+    /// 同一条纪律。4 × 40 ms 盖住守护循环那 200 ms，够了就停。
+    private func pushSceneLater(_ scene: UIScene, tries: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self, weak scene] in
+            guard let self = self, let scene = scene else { return }
+            if AevonPushSceneFrame(scene) != 0 { return }
+            if tries <= 1 {
+                Log.write("win: kb push late gave up door=0")
+                return
+            }
+            self.pushSceneLater(scene, tries: tries - 1)
+        }
+    }
+
+    /// 0.2.43 — 场景帧写完之后，承载面的位置要重新对账几次。
+    ///
+    /// 0.0.73 的注释写过：系统每写一次 scene settings 都会把承载视图的 `frame`
+    /// 重设成 **scene 的 frame**。当时 scene 原点恒 0，这条重设等于「摆回原来的
+    /// 样子」，看不见；0.1.50 让键盘态的场景下移到 215 之后，同一条重设就把承载面
+    /// 一起推了 215 pt —— 画面在卡片里向下错位，两拍之后才对上。
+    ///
+    /// Aevon(188) 那一拍留下了它的指纹：
+    ///
+    ///     21:29:22 win: keyboard fill on card=430x717 at 0,215 … push=0
+    ///     21:29:22 win: frame drift now=430x717@0 want=430x717@215 door=3 wrote=4
+    ///     21:29:22 win: placement put back 1.000 was=1.000 (beat)
+    ///
+    /// 缩放比一模一样（旧值、新值都是 1.000），**只有中心偏了** —— 那不是我们自己
+    /// 算错，是别人动了 `content.center`。而且偏差只在键盘态出现（scene 原点
+    /// 非 0 的场合），与用户报的「放大过程中会闪一下」在时间上完全对得上。
+    ///
+    /// 这里在写入之后连对四次（0.03 / 0.07 / 0.15 / 0.30 s）：守卫循环那 200 ms
+    /// 一拍太稀，第一帧错位要等它下一拍才被看见。对账本身很便宜（读一个
+    /// transform、算一个 scale），`reapplyPlacement` 自己判「差多少才写」。
+    private func reapplySoon(_ why: String) {
+        for (index, delay) in [0.03, 0.07, 0.15, 0.30].enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self = self else { return }
+                _ = self.reapplyPlacement(why)
+                // 光晕的收尾在这里兜一次（只在最后一拍）。
+                //
+                // ⛔ 不能用 `AevonMotion.inFlight` 判「动画还在跑」：它表示的是
+                // 「正在一个动画块里执行」，`fill` 返回那一刻就归零了，与动画何时
+                // 结束无关。真判据是 `kbAnimUntil`（动画的结束时刻）。否则 0.03 s
+                // 那一拍就会把光晕硬贴到终点 —— 修一个闪，造另一个闪。
+                if index == 3, CFAbsoluteTimeGetCurrent() >= self.kbAnimUntil {
+                    self.applyGlow()
+                }
+            }
+        }
+    }
+
     func setKeyboardFill(_ on: Bool) {
         guard let card = card, let window = window, visible.height > 16 else { return }
         if on {
@@ -3831,7 +3946,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             AevonSceneFrameSet(bundle, 0, Double(y),
                                Double(visible.width), Double(height))
             var door: Int = 0
-            if let sc = window.windowScene { door = Int(AevonPushSceneFrame(sc)) }
+            if let sc = window.windowScene {
+                door = Int(AevonPushSceneFrame(sc))
+                // 0.2.43 — 写不了就补推（见 `pushSceneLater`）。原来这里只等
+                // 守护循环那 200 ms，而 `fill on … push=0` 后面紧接着就是一条
+                // `frame drift`，错位正好落在放大动画的前半段。
+                if door == 0 { self.pushSceneLater(sc, tries: 4) }
+            }
+            // 0.2.43 — 场景原点一变，系统那一次「把承载视图 frame 重设成 scene
+            // frame」就会把画面推走 215 pt（见 `reapplySoon`）。连对四次，别等
+            // 守卫循环那 200 ms。
+            self.reapplySoon("kb-up")
             // 0.1.80 — **撤掉 0.1.78 的「等两拍再动卡片」。**
             //
             // 0.1.78 看到 `fill on … push=0` 紧跟一条 `frame drift now=@0
@@ -3852,14 +3977,30 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 // 同速；0.36 s 会留下「键盘已到位、窗口还在长」的拖尾）。
                 // `followContent` 必须放在块里：内容的 center / transform 要跟卡片
                 // 一起插值，否则卡片在长、内容不动，中途会露出一圈黑。
-                UIView.animate(withDuration: AevonMotion.fillDuration, delay: 0,
-                               options: [.curveEaseOut, .beginFromCurrentState,
-                                         .allowUserInteraction]) {
+                //
+                // 0.2.43 — 两条改动，都是为了那一下「闪」：
+                //   ① 走 `AevonMotion.fill`（会抬 `depth`）。裸 `UIView.animate`
+                //      不抬，`applyCorner` 里「正在过渡就补一条圆角动画」那个闸
+                //      形同不存在 —— 352→430 时圆角从 44.8 硬跳到 54.7，框在长、
+                //      角先到位，这就是放大过程里那一下跳。
+                //   ② 光晕**跟着一起走**：`applyGlow` 读的是 `card.frame` 的
+                //      model 值（赋值后立刻是终点），放在块外调用等于把整圈阴影
+                //      瞬间搬到 430×717@0,215 —— 比卡片早 0.24 s 到位，肉眼就是
+                //      一片光先闪出来。块内给 `glow.frame` 同一条曲线，收尾再让
+                //      `applyGlow` 重建一次 `shadowPath`（逐帧重建才是 0.1.29
+                //      避开的那个开销，收尾一次没有代价）。
+                kbAnimUntil = CFAbsoluteTimeGetCurrent() + AevonMotion.fillDuration
+                AevonMotion.fill({
                     card.frame = target
+                    self.glow?.frame = target
                     self.followContent()
-                }
-                // 光晕不在动画里：它是 layer 的阴影属性，跟着 frame 逐帧重算会掉帧。
-                self.applyGlow()
+                }, completion: { [weak self] done in
+                    // `done == false` 表示这次动画被下一条 `fill on` 接管了
+                    // （`beginFromCurrentState`）—— 那种时候卡片还在半路，现在把
+                    // 光晕贴到终点等于又造一次闪。等真正落地的那一次再来。
+                    guard let self = self, done else { return }
+                    self.applyGlow()
+                })
                 Log.write("win: keyboard fill on card=" + self.size(card.frame.size)
                           + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
                           + " scene=" + String(format: "%.0f", self.canvasOriginY)
@@ -3875,7 +4016,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             grow()
         } else {
             guard kbFilled else { return }
-            // 0.1.83 — **先挂起 0.60 s，再决定要不要真收。**
+            // 0.1.83 — **先挂起一小段，再决定要不要真收。**
             //
             // Aevon(151) 的循环是：App 报「键盘收了」→ 这里当场把卡片收回小窗
             // （0.24 s 动画）→ 一两拍之后 App 又报「键盘起来了」→ 再张开。用户
@@ -3884,11 +4025,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // （见 `AevonKbVisualTop` 的换窗与双证据），这里再加一层：收起不是
             // 落地动作，而是一个可以被下一拍否决的意向。
             //
-            // 代价：真收起时卡片晚 0.60 s 缩回。这与「键盘已经消失、窗口还撑满
-            // 屏 0.6 s」是同一件事，比来回抖一次好得多；而 0.60 s 又是 App 侧
-            // 那串 `keyboard up` 心跳的间隔量级 —— 只要键盘还在，一定有下一拍。
+            // 代价：真收起时卡片晚 `unfillHold` 缩回。这与「键盘已经消失、窗口还撑满
+            // 屏」是同一件事，比来回抖一次好得多。
+            //
+            // 0.2.42 — 那个代价从 0.60 s 降到 0.10 s：App 侧 0.1.84 起已经是三态轮询
+            // （`kb: settle keep` 吃掉假收起、连续两次 `GONE` 才发 `kb.off`），这一层
+            // 的长时间挂起等于把同一个确认做两遍。见 `AevonMotion.unfillHold`。
             kbUnfillToken &+= 1
             let token = kbUnfillToken
+            kbUnfillAt = CFAbsoluteTimeGetCurrent()
+            Log.write(String(format: "win: keyboard unfill armed hold=%.0fms",
+                             AevonMotion.unfillHold * 1000))
             DispatchQueue.main.asyncAfter(deadline: .now() + AevonMotion.unfillHold) { [weak self] in
                 guard let self = self, self.kbUnfillToken == token, self.kbFilled else { return }
                 self.performKeyboardUnfill()
@@ -3960,34 +4107,51 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         if kbFilled { return }              // 期间又开了 ⇒ 这次收起作废
         if tries == 0 {
             _ = window.windowScene.map { AevonPushSceneFrame($0) }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + AevonMotion.unfillSettle) { [weak self] in
                 self?.finishKeyboardUnfill(bundle: bundle, door: door, tries: tries + 1)
             }
             return
         }
         kbSettleUntil = 0
         kbTopCrop = kbSavedCrop
+        // 0.2.42 — 「键盘说不在了」到「卡片开始缩」的总耗时。挂起 0.10 + 场景落地
+        // 0.15 ≈ 0.25 s，正好是键盘自己的收起动画；超过 0.5 s 就说明有人在中间
+        // 把它作废重排了（`kb: keep` 之后又来一条 `off`），Logcat 里一眼能看出。
+        let waited = kbUnfillAt > 0 ? (CFAbsoluteTimeGetCurrent() - kbUnfillAt) * 1000 : -1
         if !kbSavedFrame.isNull {
             // 0.1.76 — 缩回也用同一条曲线、同一个时长：张开与缩小若不同速，
             // 快速开关时会看到「啪一下撑开、慢慢缩回」。`beginFromCurrentState`
             // 是必须的 —— 用户可能在动画中途又开键盘，得从当前尺寸接着走。
+            //
+            // 0.2.43 — 与张开同一套（`AevonMotion.fill` + 光晕进块）：缩回时圆角
+            // 54.7→44.8，走裸 `UIView.animate` 同样会硬跳，只是那一下发生在
+            // 卡片变小的末尾，看起来像「角先缩好、框后收」，不如张开时刺眼。
             let restore = kbSavedFrame
-            UIView.animate(withDuration: AevonMotion.fillDuration, delay: 0,
-                           options: [.curveEaseOut, .beginFromCurrentState,
-                                     .allowUserInteraction]) {
+            kbAnimUntil = CFAbsoluteTimeGetCurrent() + AevonMotion.fillDuration
+            AevonMotion.fill({
                 card.frame = restore
+                self.glow?.frame = restore
                 self.followContent()
-            }
+            }, completion: { [weak self] done in
+                guard let self = self, done else { return }
+                self.applyGlow()
+            })
         } else {
             followContent()
+            applyGlow()
         }
-        applyGlow()
+        // 0.2.43 — 收起时场景原点是 215→0，同一条「重设 frame」会把承载面往上
+        // 推 215 pt。这一步已经在卡片缩回之前（`unfillSettle` 0.15 s），四次对账
+        // 覆盖到动画收尾，正好把错位压在缩回这一段里。
+        reapplySoon("kb-down")
         Log.write("win: keyboard fill off card=" + size(card.frame.size)
                   + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
                   + " scene=" + String(format: "%.0f", canvasOriginY)
                   + " crop=" + String(format: "%.0f", kbTopCrop)
                   + " push=" + String(format: "%d", door)
-                  + " land=" + String(format: "%d", tries))
+                  + " land=" + String(format: "%d", tries)
+                  + String(format: " kb-to-card=%.0fms", waited))
+        kbUnfillAt = 0
         // 0.1.53 — 上报推到下一拍（理由见原先这一段注释：卡片收回默认大小时
         // `bandRect` 还在插值，同拍上报会把中间态推给 App）。
         DispatchQueue.main.async { [weak self] in
@@ -3996,15 +4160,25 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
-    /// 画布在这张卡片里有没有留边。有就填黑，没有就透明 —— 一个判断，两个
-    /// 调用点（开窗、每次缩放之后），所以卡片不会出现「缩一下底色变了」。
+    /// 画布在这张卡片里有没有留边。有就填黑，没有就交给底板（系统底色）——
+    /// 一个判断，两个调用点（开窗、每次缩放之后），所以卡片不会出现「缩一下
+    /// 底色变了」。
+    ///
+    /// 0.2.42 — 填色的对象从 `card` 换成 `backing`：底板是 `card` 的子视图，
+    /// 卡片自己的 `backgroundColor` 在它**下面**，写在那儿等于被盖住 ——
+    /// 留边会变成一条系统底色，而不是留边该有的黑。
     private func applyBars() {
         guard let card = card else { return }
         let scale = FloatHost.fitScale(for: visible, in: card.bounds.size)
         let shown = CGSize(width: visible.width * scale, height: visible.height * scale)
         let bars = shown.width < card.bounds.width - 0.5 || shown.height < card.bounds.height - 0.5
-        let wanted: UIColor = bars ? .black : .clear
-        if card.backgroundColor != wanted { card.backgroundColor = wanted }
+        let wanted: UIColor = bars ? .black : .systemBackground
+        if let backing = backing {
+            if backing.backgroundColor != wanted { backing.backgroundColor = wanted }
+        } else if card.backgroundColor != wanted {
+            // 只有「没有底板」的旧卡会走到这里（正常建卡一定有底板）。
+            card.backgroundColor = wanted
+        }
     }
 
     // MARK: - 0.0.73 承载面的位置看门狗
@@ -4045,14 +4219,38 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             || abs(content.center.x - center.x) > 0.5
             || abs(content.center.y - center.y) > 0.5
         guard off else { return false }
-        content.transform = CGAffineTransform(scaleX: scale, y: scale)
-        content.center = center
+        // 0.2.43 — 修之前先把偏差记下来。`dC` 就是「别人把承载面推走多少」：
+        // 若它恰好是 (0, +215) 或 (0, −215)（等于 `org=`），那就证实了
+        // `reapplySoon` 那段写的机制 —— 系统按 scene 原点重设了承载面 frame。
+        // 这个数只在修之前有意义，写完就没了。
+        let dC = CGPoint(x: content.center.x - center.x,
+                         y: content.center.y - center.y)
+        // 0.2.43 — **两个属性分开判、分开写。**
+        //
+        // 键盘张开那 0.24 s 里，`transform` 正在被弹簧驱动；它的 model 值已经是
+        // 终点（`at.a == scale`），所以这条分支不会碰它。而 `center` 一旦被系统
+        // 推走（见 `reapplySoon`），model 值就与目标不同 —— 只有这一条会落笔。
+        //
+        // 0.2.43 之前是无条件两行一起写。对账从「每 200 ms」变成「写入后连四拍」
+        // 之后，那个无条件写会在动画中途把 transform 重新赋值一次 —— UIKit 对待
+        // 动画中属性的硬赋值是「撤掉动画、直接到终点」，于是画面会提前跳到终点
+        // 尺寸。修一个字反而闪一下，那不值得。
+        if abs(at.a - scale) > 0.004 || abs(at.d - scale) > 0.004 {
+            content.transform = CGAffineTransform(scaleX: scale, y: scale)
+        }
+        if abs(dC.x) > 0.5 || abs(dC.y) > 0.5 {
+            content.center = center
+        }
         // 前 12 次各写一行：这一条如果真的每拍都要重写，说明还有别的东西在抹它，
         // 日志会直接说出频率；稳定下来之后就不再占版面。
-        if placementLogs < 12 {
+        //
+        // 0.2.43 — 提到 24 次：键盘每开一次会连对四拍，12 次配额两次键盘就用完了，
+        // 而这条日志正是「闪」的唯一物证，宁可多留几行。
+        if placementLogs < 24 {
             placementLogs += 1
             Log.write("win: placement put back " + String(format: "%.3f", scale)
                       + " was=" + String(format: "%.3f", at.a)
+                      + String(format: " dC=%.0f,%.0f org=%.0f", dC.x, dC.y, canvasOriginY)
                       + " (" + why + ")")
         }
         return true
