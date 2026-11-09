@@ -4715,23 +4715,29 @@ static void AevonPastePromoteTick(char *copy, int tick) {
     int board = AevonSpringboardActive();
     int live = AevonAppPid(target) > 0 ? 1 : 0;
     // `front=-1` 是「读不到前台位」（`SBApplicationController` 对某些 App 返回 nil），
-    // 不是「不在前台」。这时用「桌面已经退场 + 进程活着」代替，但多等 0.5 秒，
+    // 不是「不在前台」。scene 自己的 `settings.isForeground` 是第二见证 ——
+    // `openCard` 的 home-first 用的就是它（日志里的 `scene_fg=`）。
+    id scene = AevonSeenSceneForBundle(target);
+    int sceneFG = (scene != nil) ? AevonSceneForeground(scene) : -1;
+    // `front=-1` 且 scene 也没记到时，用「进程活着」代替，但多等 0.5 秒，
     // 免得抢在系统摆动画之前把卡贴上去。
     //
     // `board != 1` 是 `openCard` 那条 home-first 的门：桌面在屏时它不会先回桌面，
     // 而「全屏 App 直接贴卡」正是 0.2.30 修掉的那次黑屏。这里提前按同一条门等。
-    if (board != 1 && (front == 1 || (front == -1 && live == 1 && tick >= 4))) {
+    int up = (front == 1 || sceneFG == 1) ? 1
+           : ((front == -1 && sceneFG == -1 && live == 1 && tick >= 4) ? 1 : 0);
+    if (board != 1 && up) {
         AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: paste promote b=%s front=%d board=%d live=%d tick=%d",
-                      copy, front, board, live, tick] UTF8String]);
+                      @"notify: paste promote b=%s front=%d board=%d live=%d scene=%d tick=%d",
+                      copy, front, board, live, sceneFG, tick] UTF8String]);
         AevonOpenFromNotification(copy);
         free(copy);
         return;
     }
     if (tick >= 24) {
         AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: paste promote b=%s giveup front=%d board=%d live=%d tick=%d",
-                      copy, front, board, live, tick] UTF8String]);
+                      @"notify: paste promote b=%s giveup front=%d board=%d live=%d scene=%d tick=%d",
+                      copy, front, board, live, sceneFG, tick] UTF8String]);
         free(copy);
         return;
     }
