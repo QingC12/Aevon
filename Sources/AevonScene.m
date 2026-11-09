@@ -4773,6 +4773,13 @@ static int AevonShareSourceSkip(const char *name) {
     if (strstr(name, "SharingViewService") != NULL) return 1;
     if (strstr(name, "ShareSheet") != NULL) return 1;
     if (strstr(name, "ViewService") != NULL) return 1;
+    // 0.2.49 — 系统自己的 scene 不是 App：真机日志里分享来源被抓成了
+    // `SuperHighLevelSystemAperture`（灵动岛），于是「把来源 App 请回全屏」
+    // 一路失败（door=2 / ls ok=0），最后只能按 Home 回桌面。
+    // 真 App 的 bundle id 一定带点；不带点的名字一律不认。
+    if (strchr(name, '.') == NULL) return 1;
+    if (strstr(name, "SystemAperture") != NULL) return 1;
+    if (strstr(name, "remote-keyboard") != NULL) return 1;
     return 0;
 }
 
@@ -5203,17 +5210,19 @@ static int AevonOpenDecide(id request, id options,
     int sameChain = (AevonDivertAt > 0 && now - AevonDivertAt < 1.5 &&
                      strcmp(bundle, AevonDivertBundle) == 0);
 
-    if (kind == NULL) {
-        // 0.2.48 — 应用内链接与登录授权也进卡片。
-        //
-        // 这两类今天都落在这个 `kind == NULL` 分支里：既不是通知，也不是分享，
-        // 于是走 `plain` → 返回 0 → 原实现把目标 App 整屏拉起。用户要的是
-        // 「应用里点链接 → 卡片里的 Safari 打开那条链接」以及「微信 / QQ 登录
-        // 授权页在卡片里出现，并且授权能走完」。
-        //
-        // 判据只看「带 URL」：从桌面点图标没有 URL，相册里的文件也没有 URL，
-        // 误吞它们等于「点了没反应」。Safari 只认 http(s)；微信 / QQ 认它们的
-        // SDK 深链族（登录授权、支付、分享回跳）。
+    // 0.2.49 — 链接 / 登录授权**先于分享判定**。
+    //
+    // 0.2.48 把它放在 `kind == NULL` 里，真机上两类请求都到不了：应用调
+    // `openURL:` 时来源是那个 App（不是 SpringBoard）且带 payload，于是先被上面
+    // 的判据归成 `share`；微信 / QQ 的 SSO 深链还常常捎带 `__PasteSharingToken`
+    // （Aevon 0.2.48 日志，14:42:31 的 `src=com.midea.msmart.appstore pay=url`），
+    // 又被 `paste` 那一支整条放行 ⇒ 先全屏、再回桌面、最后才建卡。
+    //
+    // 判据只看「带 URL」：从桌面点图标没有 URL，相册里的文件也没有 URL，
+    // 误吞它们等于「点了没反应」。Safari 只认 http(s)；微信 / QQ 认它们的
+    // SDK 深链族（登录授权、支付、分享回跳）。通知点击不走这一支，那条路还要
+    // 清通知，顺序不能动。
+    if (!notifyKind) {
         NSString *linkURL = AevonOpenURLOf(request, options);
         if (linkURL.length > 0) {
             int isSafari = strncmp(bundle, "com.apple.mobilesafari", 22) == 0;
@@ -5272,6 +5281,9 @@ static int AevonOpenDecide(id request, id options,
                 }
             }
         }
+    }
+
+    if (kind == NULL) {
         // 0.2.1 — 系统自己接着那条链发来的、带东西的请求：不建卡，但也不许放它
         // 过去。放过去就是「全屏把 App 拉起来」，而那正是用户 0.1.98 报的那一幕。
         // 只在紧跟在我们自己那次分流（1.5 秒）之内才这么判，免得把解锁回主屏之类
