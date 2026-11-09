@@ -5570,6 +5570,77 @@ static void AevonPastePromoteSchedule(const char *bundle) {
     });
 }
 
+/// 0.2.55 — 微信 / QQ 的每一次打开先照一张相。
+///
+/// 0.2.54 的真机反馈只有一句「QQ 全程悬浮，微信仍会闪一下全屏」，而那一版日志
+/// 里没有微信登录那一段 —— 又回到猜。这一行预算独立（40 拍），只读不改：
+/// `pay` / `cont` / `share` / `sys` / `front` / `src` / `act` / URL 的 scheme 与长度 /
+/// options 的全部键。下一次测试的日志里必然有微信登录的形状。
+///
+/// `board=` 只在「带 paste token 且不是分享链路」时探一下粘贴板：微信登录如果是
+/// 「裸开 App、ticket 放粘贴板」，这是唯一能本地投递的入口。只记 scheme 与长度，
+/// 内容（ticket / code）不进日志。
+static void AevonSsoProbe(id request, id options, const char *bundle) {
+    static int notes = 0;
+    if (notes >= 40) return;
+    notes += 1;
+    @try {
+        NSString *url = AevonOpenURLOf(request, options);
+        char scheme[20] = "-";
+        if (url.length > 0) {
+            const char *raw = url.UTF8String;
+            size_t i = 0;
+            while (raw != NULL && raw[i] != '\0' && raw[i] != ':' && i < sizeof(scheme) - 1) {
+                scheme[i] = raw[i];
+                i += 1;
+            }
+            scheme[i] = '\0';
+        }
+        id src = AevonOpenSourceApp(request, options);
+        id action = AevonOpenFirstAction(request, options);
+        char keys[136];
+        AevonOpenKeysOf(options, keys, sizeof(keys));
+        const char *pay = AevonOpenPayloadKind(request, options);
+        char board[40] = "-";
+        if (strcmp(pay, "paste") == 0 && !AevonOpenIsShareSource(request, options)) {
+            @try {
+                UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
+                NSString *text = pasteboard.URL.absoluteString;
+                if (text.length == 0) text = pasteboard.string;
+                if (text.length > 0) {
+                    const char *rawBoard = text.UTF8String;
+                    size_t i = 0;
+                    while (rawBoard != NULL && rawBoard[i] != '\0' && rawBoard[i] != ':' &&
+                           rawBoard[i] != '\n' && i < sizeof(board) - 12) {
+                        board[i] = rawBoard[i];
+                        i += 1;
+                    }
+                    board[i] = '\0';
+                    size_t used = strlen(board);
+                    snprintf(board + used, sizeof(board) - used, "/%d", (int)text.length);
+                }
+            } @catch (__unused NSException *exception) {
+                snprintf(board, sizeof(board), "threw");
+            }
+        }
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: sso b=%s pay=%s cont=%d share=%d sys=%d front=%d src=%@ act=#%s url=%s len=%d board=%s keys=%s",
+                      bundle, pay,
+                      AevonOpenIsContinuation(request, options),
+                      AevonOpenIsShareSource(request, options) ? 1 : 0,
+                      AevonOpenSourceIsSpringBoard(request, options) ? 1 : 0,
+                      AevonAppFrontmost([NSString stringWithUTF8String:bundle]),
+                      [src isKindOfClass:[NSString class]] ? (NSString *)src : @"-",
+                      action != nil ? object_getClassName(action) : "-",
+                      scheme, (int)url.length, board,
+                      keys[0] != '\0' ? keys : @"-"]
+                     UTF8String]);
+    } @catch (__unused NSException *exception) {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: sso b=%s probe=threw",
+                      bundle] UTF8String]);
+    }
+}
+
 /// 分流决定。
 ///   返回 1 → 吞掉，开卡片；
 ///   返回 2 → 吞掉，不再开（同一次点击的后续链）；
@@ -5593,6 +5664,12 @@ static int AevonOpenDecide(id request, id options,
 
     // SpringBoard 自己也有开请求（解锁后回到主屏之类）。吞掉它就是吞掉主屏。
     if (strncmp(bundle, "com.apple.springboard", 21) == 0) { *why = "springboard"; return 0; }
+
+    // 0.2.55 — 微信 / QQ 的每一次打开先照一张相（见 `AevonSsoProbe`）。
+    if (strncmp(bundle, "com.tencent.xin", 15) == 0 ||
+        strncmp(bundle, "com.tencent.mqq", 15) == 0) {
+        AevonSsoProbe(request, options, bundle);
+    }
 
     // 0.2.4 — 黑名单：命中就**整条放行**，既不进浮窗也不吞请求。
     //
@@ -8268,7 +8345,15 @@ static NSString *AevonForwardHeldURL(void) {
     }
     if ([value isKindOfClass:[NSURL class]]) return [(NSURL *)value absoluteString];
     if ([value isKindOfClass:[NSString class]]) return (NSString *)value;
-    return nil;
+    // 0.2.55 — 投递这一侧改用和分流判据同一套查找。
+    //
+    // 0.2.53 的判据已经靠 `AevonOpenScanURL` 在别的层里找到了登录 URL
+    // （QQ / 微信的 SSO 深链并不总在 `__PayloadURL`），可这里只读两个老键：
+    // 判据认出来了、卡片也建好了，投递却答「没有 URL」→
+    // `forward flush why=appurl no url` → 交回系统 → 微信被整屏拉一下。
+    // QQ 的 URL 恰好在 `__PayloadURL`（所以它没事），微信这一条不在，正好只闪它。
+    // 两边共用 `AevonOpenURLOf`，从此不会再走岔。
+    return AevonOpenURLOf(AevonFwdHoldRequest, AevonFwdHoldOptions);
 }
 
 /// 卡片把 scene 贴上时由 Swift 侧调用（主线程，或任意线程）。与

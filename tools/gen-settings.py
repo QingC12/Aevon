@@ -590,7 +590,21 @@ def build_root(panel_items, wired):
                                 "③ `scene deactivation` 与 `picture dropped` 各补两个现场数（`cs= sub= wake=`）——"
                                 "「是不是我自己刚写的那一笔把它推下去的」从此能直接从行里读，不用对时间戳。"
                                 "判据：开卡时**不该再出现** `picture dropped cs=1`；`scene deactivation` 行尾的 `wake=0` "
-                                "说明那几次 deactivate 与我们的写入无关。"})
+                                "说明那几次 deactivate 与我们的写入无关。"
+                                "0.2.55 起：**微信登录先闪一下全屏 —— 判据与投递用的不是同一套 URL 查找**。"
+                                "0.2.53 起分流判据会用 `AevonOpenScanURL` 到别的层里找登录深链，可投递这一侧"
+                                "（`AevonForwardHeldURL`）仍然只读 `__PayloadURL` 与 payload 里的 URL 键："
+                                "判据认出来了、卡片也建好了，投递却答「没有 URL」，于是 "
+                                "`forward flush why=appurl no url` 把请求交回系统，微信就被整屏拉一下再收回来。"
+                                "QQ 的深链恰好在 `__PayloadURL`（所以 0.2.54 里它已经全程悬浮），微信这一条不在，"
+                                "正好只闪它。现在两边共用 `AevonOpenURLOf`。"
+                                "判据：微信登录应有 `notify: link b=com.tencent.xin kind=oauth scheme=weixin`、"
+                                "`notify: appurl send b=com.tencent.xin …`、`notify: appurl ack … ok=1` 与 "
+                                "`notify: forward drop why=appurl ok`，**不该再出现** `why=appurl no url`。"
+                                "同一版给微信 / QQ 的每次打开加一行 `notify: sso b=… pay=… cont=… share=… sys=… "
+                                "front=… src=… act=…#… url=… board=… keys=…`（独立预算 40 行，只读）。"
+                                "若微信仍是 `pay=paste` + `url=none`，`board=` 会给出粘贴板里那个值的 scheme / 长度"
+                                "（内容不落日志）—— 下一版能不能在本地投递，就看这一格。"})
 
 
     return {"title": "Aevon", "items": items}
