@@ -1855,17 +1855,31 @@ final class AevonRingMenu: UIView {
     ///
     /// 令牌法的理由：只有「同一个图标停够 0.18 s」才值得热。换图标就把令牌加一，
     /// 之前排上的那一拍到点时会发现令牌变了、直接放弃 —— 不额外持有任何对象。
+    ///
+    /// 为什么不直接调 `AevonOwnWarm`：这个文件**同时编进宿主与设置包**。
+    /// 宿主侧的真身在 `AevonScene.m`（`Aevon.dylib`），设置进程里根本没有那个
+    /// dylib —— 直接声明会链接成空符号，设置里点一下「预览」划过图标就崩。
+    /// 所以现场 `dlsym` 找，找不到就当没有（设置包里恒为 nil，行为回到 0.2.58）。
+    private typealias AevonWarmFn = @convention(c) (AnyObject) -> Int
     private static var warmToken = 0
+    private static let warmSymbol: AevonWarmFn? = {
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "AevonOwnWarm") else {
+            return nil
+        }
+        return unsafeBitCast(sym, to: AevonWarmFn.self)
+    }()
 
     private func scheduleWarm(_ bundleID: String) {
         guard bundleID.count > 2 else { return }
+        guard AevonRingMenu.warmSymbol != nil else { return }
         AevonRingMenu.warmToken &+= 1
         let token = AevonRingMenu.warmToken
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
             guard let self = self else { return }
             guard AevonRingMenu.warmToken == token else { return }
             guard self.hoveredBundleID == bundleID else { return }
-            _ = AevonOwnWarm(bundleID)
+            guard let warm = AevonRingMenu.warmSymbol else { return }
+            _ = warm(bundleID as NSString)
         }
     }
 
