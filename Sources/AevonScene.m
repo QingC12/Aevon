@@ -1363,6 +1363,10 @@ static int AevonSlotCount = 0;
 /// 而「窗黑」与「名字没登记上」在日志里必须是两件能分开的事。
 #define AEVON_ARMED_MAX 16
 static char AevonArmed[AEVON_ARMED_MAX][128];
+/// 0.2.37 — 每一格是什么时候登记的（`AevonHookArm` 一拍）。只给「卡片给全屏让路」
+/// 的年龄闸用：建卡那一两百毫秒里系统本来就会把 scene 从整屏改成卡片尺寸，
+/// 那一次不是「系统要全屏接管它」。卡片活过 0.9 秒还收到整屏 frame 才是。
+static CFAbsoluteTime AevonArmedAt[AEVON_ARMED_MAX];
 static int AevonArmedCount = 0;
 static long AevonArmedRefused = 0;
 
@@ -1515,6 +1519,7 @@ void AevonHookArm(NSString *bundle) {
     for (int i = 0; i < AEVON_ARMED_MAX; i++) {
         if (AevonArmed[i][0] != '\0') continue;
         strlcpy(AevonArmed[i], text, sizeof(AevonArmed[i]));
+        AevonArmedAt[i] = CFAbsoluteTimeGetCurrent();
         __sync_fetch_and_add(&AevonArmedCount, 1);
         return;
     }
@@ -1525,7 +1530,10 @@ void AevonHookArm(NSString *bundle) {
 /// 一个参数位置上，好让还没改完的调用点不会悄悄变成空操作。
 void AevonHookDisarm(NSString *bundle) {
     if (bundle == nil || [bundle length] == 0) {
-        for (int i = 0; i < AEVON_ARMED_MAX; i++) AevonArmed[i][0] = '\0';
+        for (int i = 0; i < AEVON_ARMED_MAX; i++) {
+            AevonArmed[i][0] = '\0';
+            AevonArmedAt[i] = 0;
+        }
         AevonArmedCount = 0;
         return;
     }
@@ -1535,6 +1543,7 @@ void AevonHookDisarm(NSString *bundle) {
         if (AevonArmed[i][0] == '\0') continue;
         if (strcmp(AevonArmed[i], text) != 0) continue;
         AevonArmed[i][0] = '\0';
+        AevonArmedAt[i] = 0;
         if (AevonArmedCount > 0) __sync_fetch_and_sub(&AevonArmedCount, 1);
     }
 }
@@ -1841,6 +1850,43 @@ static BOOL AevonWriteFrame(id settings, int slot) {
     SEL getter = sel_registerName("frame");
     if ([settings respondsToSelector:getter]) {
         CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(settings, getter);
+        // 0.2.37 — **系统要整屏接管卡片里这个 App 了，卡片该让路。**
+        //
+        // 用户现场（0.2.36）：悬浮窗开着 QQ → 回桌面 → 点桌面 QQ 图标。系统把
+        // 我们 hosted 的 scene 挪进全屏窗口，日志里全屏页 `430x932` 而 scene 仍
+        // 被这里改回 `430x717` —— 这就是「悬浮窗黑 + 全屏底部 215 pt 黑」。
+        //
+        // 那条打开请求没有走到 `AevonOpenDecide` 的 plain 分支（0.2.36 的
+        // `why=yield` 一次都没出现），所以门必须开在 scene 这一侧：系统往一个
+        // **已经稳定承载卡片的 scene** 写整屏 frame，就是接管本身。
+        //
+        // 三个前提缺一不可：
+        //   · `AevonInPush == 0`：只认系统的更新。我们自己推 717 时 now 就是
+        //     整屏（刚建卡那一拍），那一趟绝不能触发；
+        //   · 年龄 > 0.9 s：建卡那两百毫秒里系统本来就会先给整屏再被我们改小；
+        //   · 目标高度 < 800 且新 frame > 850：卡片最大也就 719，整屏 932。
+        //
+        // 命中之后先撤掉 frame 目标（不再抢），再异步拆卡 —— 这里在 settings
+        // 更新路径里，同步拆卡会重入，只能排到主队列下一拍。
+        if (AevonInPush == 0
+            && now.size.height > 850
+            && target.size.height < 800
+            && (CFAbsoluteTimeGetCurrent() - AevonArmedAt[slot]) > 0.9) {
+            __sync_fetch_and_and(&AevonFrameMask, ~(1 << slot));
+            AevonArmedAt[slot] = 0;
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"win: card yield seen b=%s now=%.0fx%.0f want=%.0fx%.0f",
+                          AevonArmed[slot],
+                          now.size.width, now.size.height,
+                          target.size.width, target.size.height] UTF8String]);
+            char name[128];
+            strlcpy(name, AevonArmed[slot], sizeof(name));
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (name[0] == '\0') return;
+                AevonCardYieldForFullscreen(name);
+            });
+            return NO;
+        }
         // 0.1.51 — **原点也要比。**
         //
         // 0.1.50 让宿主把场景随卡片搬到屏幕 215（`(0,215,430,717)`，尺寸一点没改，
@@ -4710,25 +4756,20 @@ static int AevonOpenDecide(id request, id options,
         kind = "share";
     }
 
-    // 0.2.36 — 「粘贴板文件」这种分享**不能直投卡片**。
+    // 0.2.36 — 粘贴板分享（`__PasteSharingToken`）**仍然进卡片**，只是投递方式换一条。
     //
-    // 0.2.35 的真机现场（QQ 分享文件）：
-    //   keys=__PayloadOptions,__PayloadURL,__PasteSharingToken
-    //   notify: appurl send b=com.tencent.mqq opt=2/2 …
-    //   notify: appurl ack  b=com.tencent.mqq ok=1 via=app-src
-    //
-    // 真正装着文件的是 `__PasteSharingToken`：一个私有对象，`AevonAppOpenSafe`
-    // 装不进 plist（`opt=2/2` 的第二个 2 就是它和它里面那件）。扩展拿到的回执
-    // 是「成功」，主 App 却拿不到文件 → 用户同时看到「发送成功」和「发送失败」，
-    // 文件也确实没发出去。
-    //
-    // 这种分享唯一完整的通道是系统原路（token 随激活请求过 XPC，扩展也才知道
-    // 真实的成败）。所以整条放行、不建卡：`why=paste`。文件真的送到，比「这次
-    // 分享以浮窗打开」重要 —— 普通 file:// 分享仍走卡片直投，一个字节没变。
+    // 0.2.36 第一版把这类分享整条放行给系统：文件能发（token 随激活请求过 XPC），
+    // 代价是目标 App 全屏 —— 用户回的原话是「全屏状态下文件可以正常发送，但是我要
+    // 的悬浮窗打开目标 app，而不是全屏」。所以 0.2.37 改成：照常分流建卡，卡片的
+    // scene 起来之后由 `AevonForwardDeliver` 把**原请求原样**交给原实现（不写 plist、
+    // 不序列化），token 就跟着系统那条真正的激活请求进 App。
+    // 这与 file:// 分享已经在真机上跑通的那条路（Sileo 卡片里弹文件面板）同一条。
     if (kind != NULL && strcmp(kind, "share") == 0 &&
-        AevonOpenAnyValue(request, options, @"__PasteSharingToken") != nil) {
+        AevonOpenHasKey(options, @"__PasteSharingToken")) {
         *why = "paste";
-        return 0;
+        AevonDivertAt = CFAbsoluteTimeGetCurrent();
+        snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
+        return 1;
     }
 
     // 0.2.10 — 分享黑名单：只对「这次是分享」生效，命中就**整条放行**。
@@ -6183,7 +6224,33 @@ static BOOL AevonClearFromCapture(const char *bundle, char *how, size_t size) {
             if (section == nil) section = AevonCleanRead(request, "sectionID");
             const char *sectionRaw =
                 [section isKindOfClass:[NSString class]] ? [(NSString *)section UTF8String] : NULL;
-            if (sectionRaw != NULL && strcmp(sectionRaw, bundle) == 0) {
+            // 0.2.37 — 归属校验补一条「带后缀」的相等。
+            //
+            // 用户回的是「部分应用的通知不会自动清理」：这些 App 的 section 不是
+            // 裸 bundle，而是 `com.foo.app.<子系统>`（也有反过来的）。0.2.5 起这里
+            // 只认逐字相等，于是 `capture:section` 一写、截到的对象就扔掉了，剩下
+            // 的标识那条又查不到 → 通知留在中心里。
+            //
+            // 只在**点号边界**上放宽：`com.foo.app` 与 `com.foo.app.thread` 互认，
+            // 但 `com.foo.app` 与 `com.foo.application` 不互认 —— 后者是两个 App。
+            BOOL sameSection = NO;
+            BOOL prefixed = NO;
+            if (sectionRaw != NULL) {
+                size_t blen = strlen(bundle);
+                size_t slen = strlen(sectionRaw);
+                if (strcmp(sectionRaw, bundle) == 0) {
+                    sameSection = YES;
+                } else if (slen > blen && strncmp(sectionRaw, bundle, blen) == 0
+                           && sectionRaw[blen] == '.') {
+                    sameSection = YES;
+                    prefixed = YES;
+                } else if (blen > slen && strncmp(sectionRaw, bundle, slen) == 0
+                           && bundle[slen] == '.') {
+                    sameSection = YES;
+                    prefixed = YES;
+                }
+            }
+            if (sameSection) {
                 NSString *ident = AevonCleanRead(request, "identifier");
                 const char *identRaw =
                     [ident isKindOfClass:[NSString class]] ? [(NSString *)ident UTF8String] : "-";
@@ -6224,8 +6291,15 @@ static BOOL AevonClearFromCapture(const char *bundle, char *how, size_t size) {
                 if (used + 8 < size) {
                     snprintf(how + used, size - used, " un=%d", viaUN ? 1 : 0);
                 }
+                // 0.2.37 — 这一条是靠「点号边界」认下来的，不是逐字相等。
+                used = strlen(how);
+                if (prefixed && used + 10 < size) {
+                    snprintf(how + used, size - used, " prefix=1");
+                }
             } else {
-                snprintf(how, size, "capture:section");
+                // 0.2.37 — 把截到的 section 原样打出来：下一次真机日志就能直接看到
+                // 是哪个 App 的 section 拼法还没覆盖，不用再猜。
+                snprintf(how, size, "capture:section=%s", sectionRaw != NULL ? sectionRaw : "-");
             }
         }
     } @finally {
@@ -6279,6 +6353,9 @@ static void AevonClearMap(id dispatcher) {
     AevonLogRaw(line);
 }
 
+/// 0.2.37 — 这一拍是「补刀」（1.6 秒那次）还是第一拍（0.6 秒）。只影响日志前缀。
+static int AevonClearRetry = 0;
+
 /// 真正去做那件事。`bundle` / `identifier` 都是 C 串（跨帧传，自己复制的一份）。
 ///
 /// 0.2.5 — `identifier` 可以是 NULL。老路要靠它去比对，截对象那条路不需要；
@@ -6290,11 +6367,12 @@ static void AevonClearNotification(const char *bundle, const char *identifier) {
     AevonClearRuns += 1;
 
     char how[96], line[360];
+    const char *tag = AevonClearRetry ? " retry" : "";
     how[0] = '\0';
 
     // ① 截对象先走：不猜标识、不扫列表，是唯一「一定指得到那一条」的做法。
     if (AevonClearFromCapture(bundle, how, sizeof(how))) {
-        snprintf(line, sizeof(line), "notify: clear b=%s via=%s", bundle, how);
+        snprintf(line, sizeof(line), "notify: clear%s b=%s via=%s", tag, bundle, how);
         AevonLogRaw(line);
         return;
     }
@@ -6302,8 +6380,8 @@ static void AevonClearNotification(const char *bundle, const char *identifier) {
     if (identifier == NULL) {
         // 截对象没命中、老路又没有标识 —— 这一条本拍清不掉。记一行说明是哪一半缺的，
         // 下一份日志就不用再靠 `clear=noid` 去猜。
-        snprintf(line, sizeof(line), "notify: clear b=%s capture=%s id=absent",
-                 bundle, how[0] != '\0' ? how : "none");
+        snprintf(line, sizeof(line), "notify: clear%s b=%s capture=%s id=absent",
+                 tag, bundle, how[0] != '\0' ? how : "none");
         AevonLogRaw(line);
         return;
     }
@@ -6346,19 +6424,31 @@ static void AevonClearNotification(const char *bundle, const char *identifier) {
 static void AevonClearLater(const char *bundle, NSString *identifier) {
     if (bundle == NULL) return;
     const char *raw = identifier != nil ? [identifier UTF8String] : NULL;
-    char *b2 = NULL;
-    if (raw != NULL && strlen(raw) >= 4) {
-        b2 = strdup(raw);
-        if (b2 == NULL) return;
+    // 0.2.37 — 两次：0.60 秒是原来那一拍，1.60 秒是补刀。
+    //
+    // 用户回「部分应用的通知不会自动清理」，而日志里那条清成功的恰恰是第一拍
+    // 就命中的。剩下的多半是「点下去时通知还挂在 banner 手上、0.6 秒时列表里
+    // 还没有它」—— 补一刀的成本是一次查表，而 4 秒的截获窗还在有效期内
+    // （`AevonClearFromCapture` 每次都会重新校验 `AevonCapAt`）。
+    for (int pass = 0; pass < 2; pass++) {
+        char *b2 = NULL;
+        if (raw != NULL && strlen(raw) >= 4) {
+            b2 = strdup(raw);
+            if (b2 == NULL) continue;
+        }
+        char *b1 = strdup(bundle);
+        if (b1 == NULL) { free(b2); continue; }
+        const int64_t delay = pass == 0 ? 0.60 : 1.60;
+        const int retry = pass;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            AevonClearRetry = retry;
+            AevonClearNotification(b1, b2);
+            AevonClearRetry = 0;
+            free(b1);
+            free(b2);
+        });
     }
-    char *b1 = strdup(bundle);
-    if (b1 == NULL) { free(b2); return; }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        AevonClearNotification(b1, b2);
-        free(b1);
-        free(b2);
-    });
 }
 
 /// 点通知那一刻的绝对时间。只给日志里的 `at=` 用 —— 0.1.90 说「慢了」，那就得有一个
@@ -7149,6 +7239,21 @@ void AevonForwardDeliver(const char *why) {
         });
         return;
     }
+    // 0.2.37 — 粘贴板分享不能走「App 内投递」。
+    //
+    // 0.2.35 的 `appurl send … opt=2/2` 已经证明：`__PasteSharingToken` 是私有
+    // 对象，`AevonAppOpenSafe` 装不进 plist，文件根本没过去 —— 扩展报成功、
+    // 主 App 报失败，文件也确实没发出去。
+    //
+    // 这条请求现在就攥在我们手里（对象、token 都在），卡片的 scene 也已经起来
+    // 了（`AevonForwardDeliver` 只在卡片之后被调用），把**原请求原样**交给原
+    // 实现即可：token 随系统那条真正的激活请求进 App，卡片继续承载它。
+    // 真机先例是 file:// 分享给 Sileo —— `forward flush why=appurl no file` 之后
+    // 原实现照样把文件面板弹在卡片里。
+    if (AevonOpenHasKey(AevonFwdHoldOptions, @"__PasteSharingToken")) {
+        AevonForwardFlushNow("paste token");
+        return;
+    }
     NSString *url = AevonForwardHeldURL();
     NSString *bundle = AevonFwdHoldBundle;
     if (url.length == 0 || bundle.length == 0) {
@@ -7314,8 +7419,15 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             // 先交回系统就丢了 launch options。现在自建 scene 自己起进程
             // （launchIntent=4），payload 晚到变成「运行中的 App 收到一次 open URL」，
             // 而那正是 Aevon(183) 里成功的两次。
+            // 0.2.37 — `paste` 也是分享的一种（QQ 分享文件走 `__PasteSharingToken`）。
+            // 0.2.36 把它整条放行了，文件能发但目标 App 是全屏；这一版它照常进卡片，
+            // 只是投递方式改成「卡片就绪后把原请求原样交回原实现」—— 所以它必须
+            // 和 `share` 一样走 hold，否则 `AevonForwardDeliver` 里那条 paste 判据
+            // 永远读不到 `AevonFwdHoldOptions`。它同样不是通知，不能掉进 else 里
+            // 去收面板、清通知。
+            const int isShare = (strcmp(why, "share") == 0 || strcmp(why, "paste") == 0);
             int forwarded = 0;
-            if (strcmp(why, "share") == 0 && AevonOpenCarriesPayload(request, options)) {
+            if (isShare && AevonOpenCarriesPayload(request, options)) {
                 // 不在这里发。先让 `AevonOpenFromNotification` 把卡片的 process +
                 // scene 建起来，再把这个请求投回去。超时 1.6 秒兜底。
                 forwarded = AevonForwardHold(slot, self, _cmd, request, options,
@@ -7357,7 +7469,7 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             //
             // 0.1.95：`fwd=1` 表示这条请求已经带着 payload 交回系统（挂起启动），
             // 文件应该会到；`fwd=0` 表示没能交回去，目标 App 只会拿到一张空卡。
-            if (strcmp(why, "share") == 0) {
+            if (isShare) {
                 const char *srcRaw = [AevonOpenSourceApp(request, options) UTF8String];
                 AevonLogRaw([[NSString stringWithFormat:@"notify: share b=%@ src=%s pay=%s fwd=%d n=%d",
                               target, srcRaw != NULL ? srcRaw : "-",

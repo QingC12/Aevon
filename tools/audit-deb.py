@@ -745,8 +745,10 @@ def main():
                   b"notify: capture failed %@",
                   b"notify: capture class missing after 20 tries",
                   b"notify: capture req=%s dest=%s act=%s ok=%d",
-                  b"notify: clear b=%s via=%s",
-                  b"notify: clear b=%s capture=%s id=absent",
+                  # 0.2.37 — 两条清通知证词前面多了一格 `%s`（` retry` / 空串），
+                  # 1.6 秒那次补刀与第一拍在日志里要能分开。
+                  b"notify: clear%s b=%s via=%s",
+                  b"notify: clear%s b=%s capture=%s id=absent",
                   b"notify: clear b=%@ via=capture only",
                   # 0.2.7 —— 三家综合（TrollOpen / Myrtle / Mango）这一版的四条证词。
                   #
@@ -842,6 +844,12 @@ def main():
                   b"win: own live attach %@ t=%ldms wait=%ldms",
                   b"notify: forward held slot=%d form=%c",
                   b"notify: forward flush why=%s after=%.0fms",
+                  # 0.2.37 — 「桌面图标把卡片里的 App 拿去全屏」那一次的两个现场：
+                  #   card yield seen   系统往我们 hosted 的 scene 写了整屏 frame
+                  #   card yielded      卡片出口真的跑了（Swift 侧）
+                  # 少任意一条 = 这条反应式让路没有编进产物。
+                  b"win: card yield seen b=%s now=%.0fx%.0f want=%.0fx%.0f",
+                  b"win: card yielded to fullscreen b=",
                   # 0.2.15 —— 尺寸 + 分享两件：
                   #   own display       scene 的 displayConfiguration 被改成画布大小
                   #                     （不改就是「UIScreen 932 / 窗口 717」，按屏幕
