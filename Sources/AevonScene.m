@@ -53,6 +53,9 @@ extern int AevonShareSwitchOff(void);
 // 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
 // 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
 extern int AevonCardYieldForFullscreen(const char *bundle);
+// 0.2.59 — 「用完就收」：授权交接完成之后把那张卡正常关掉（不是让路）。
+// 返回 1 = 真的关了一张卡；0 = 那个 bundle 现在没有卡，调用方什么都不做。
+extern int AevonCardCloseFor(const char *bundle);
 
 /// The scene manager is a singleton with no public door, and its spelling has
 /// changed across releases. Resolving it here keeps the class-method dispatch
@@ -424,6 +427,9 @@ static int AevonOwnHeld = 0;
 static int AevonOwnGateRan = 0;
 static NSInteger AevonOwnGateMiss = -1;
 static int AevonOwnStartNotes = 0;
+// 0.2.59 — 预热去重：同一个 bundle 8 s 内只热一次（来回划圆盘不该连开三条启动链）。
+static char AevonWarmBundle[64] = {0};
+static double AevonWarmAt = 0;
 
 /// 一条现场行，带独立预算。这个工程里每一条现场行都得有自己的计数器：
 /// 跟别人共用一个，就会在几次操作之后静默，而静默和「没发生」长得一样。
@@ -1289,6 +1295,121 @@ id AevonOwnFetch(void) {
 /// 由 `openCard` 在决定来源之后调一次，否则上一次的「持有」会留到下一次关卡。
 void AevonOwnClear(void) {
     AevonOwnHeld = 0;
+}
+
+// 0.2.59 — 前向声明：真身在分流那一段（`AevonOpenDecide` 上面），预热要用它。
+static BOOL AevonWindowBlacklisted(const char *bundle);
+
+/// 0.2.59 — **预热**：把 App 的进程先拉起来，但不建 scene、不上屏。
+///
+/// 为什么需要：Aevon(200) 里抖音从圆盘打开是
+///   `own start … t=1ms wait=2ms` → **749 ms** → `own scene up` → 又 577 ms 才首帧
+/// 那 749 ms 全在「等 App 进程起来」（`app: boot pid=26158` 就落在这一段里）。
+/// 它不是我们的开销，但用户量的是「点了到看见」，所以只能把这一段挪到**用户还
+/// 在划圆盘**的时候去付：悬停 0.18 s 就开始拉进程，松手选中时进程往往已经在跑，
+/// `own start` 的等待就只剩建 scene 那一小截。
+///
+/// 与 `AevonOwnStart` 的关系：这条**完全不碰** `AevonOwnPhase / AevonOwnScene`。
+/// 它只做启动事务，completion 里什么都不建 —— 这样就算预热之后用户没选这个 App，
+/// 也不会留下一个「有 scene 没人取」的孤儿把下一次打开顶掉。
+///
+/// 闸（少一条都会变成为难用户）：
+///   · 总闸 `notify.off` 在；
+///   · 黑名单里的 App 不预热（那是「别碰我的路」）；
+///   · 进程已经在跑 ⇒ 预热没有意义，直接返回；
+///   · 同一个 bundle 8 s 内只热一次（来回划不会连开三次）；
+///   · `AevonOwnPhase` 不是 idle 时不动（另一条启动链正在跑，别开第二条）。
+NSInteger AevonOwnWarm(NSString *bundleID) {
+    if (![bundleID isKindOfClass:[NSString class]] || bundleID.length < 3) return 0;
+    if (![NSThread isMainThread]) {
+        NSString *copy = [bundleID copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonOwnWarm(copy);
+            [copy release];
+        });
+        return 0;
+    }
+    if (AevonActivateSwitchOff()) return 0;
+    const char *raw = [bundleID UTF8String];
+    if (raw == NULL) return 0;
+    if (AevonWindowBlacklisted(raw)) return 0;
+    if (AevonOwnPhase == 1 || AevonOwnPhase == 2) return 0;
+    // `> 0` 才是「在跑」；`-1/-2` 是「查不到」，那种情况预热正好有用。
+    if (AevonAppPid(bundleID) > 0) return 0;
+    double now = CFAbsoluteTimeGetCurrent();
+    if (strcmp(AevonWarmBundle, raw) == 0 && now - AevonWarmAt < 8.0) return 0;
+    snprintf(AevonWarmBundle, sizeof(AevonWarmBundle), "%s", raw);
+    AevonWarmAt = now;
+
+    double started = CFAbsoluteTimeGetCurrent();
+    NSString *doneBundle = [bundleID copy];
+    // `setCompletionBlock:` 把 block 拷到堆上时，MRC 会给捕获的 `doneBundle` 记一次 retain；
+    // 那之后这个字符串的寿命就归 block 了（block 执行完释放、或随 transaction 一起释放）。
+    // 所以后面对「已交出」的路径**一个字节都不再 release** —— 宁可漏一个小字符串，
+    // 也不能在「begin 返回 NO 但 completion 仍然被调」这种实现细节上踩双释放。
+    BOOL handedOff = NO;
+    @try {
+        Class idCls = NSClassFromString(@"RBSProcessIdentity");
+        id identity = ((id (*)(id, SEL, id))objc_msgSend)(
+            idCls, sel_registerName("identityForEmbeddedApplicationIdentifier:"), bundleID);
+        if (identity == nil) { [doneBundle release]; return 0; }
+
+        Class mgrCls = NSClassFromString(@"FBProcessManager");
+        id manager = ((id (*)(id, SEL))objc_msgSend)(
+            mgrCls, sel_registerName("sharedInstance"));
+        if (manager == nil) { [doneBundle release]; return 0; }
+
+        Class ctxCls = NSClassFromString(@"FBMutableProcessExecutionContext");
+        Class txnCls = NSClassFromString(@"FBApplicationProcessLaunchTransaction");
+        id (^provider)(void) = ^id {
+            id context = ((id (*)(id, SEL))objc_msgSend)(ctxCls, sel_registerName("new"));
+            if (context == nil) return nil;
+            ((void (*)(id, SEL, id))objc_msgSend)(
+                context, sel_registerName("setIdentity:"), identity);
+            ((void (*)(id, SEL, id))objc_msgSend)(
+                context, sel_registerName("setEnvironment:"), @{});
+            ((void (*)(id, SEL, NSInteger))objc_msgSend)(
+                context, sel_registerName("setLaunchIntent:"), (NSInteger)4);
+            return ((id (*)(id, SEL, id))objc_msgSend)(
+                manager, sel_registerName("launchProcessWithContext:"), context);
+        };
+        // 与 `AevonOwnStart` 同一条理由：MRC 下栈上的 block 会被 `setCompletionBlock:`
+        // 拷到堆上，捕获的 `identity` / `manager` 要各存一份 —— 显式 copy，且故意不
+        // release（每预热一次漏几十字节，换「不会因为一个不知道有没有 retain 的
+        // 初始化器而崩」）。
+        id providerHeap = [provider copy];
+        id allocated = ((id (*)(id, SEL))objc_msgSend)(txnCls, sel_registerName("alloc"));
+        id transaction = allocated != nil
+            ? ((id (*)(id, SEL, id, id))objc_msgSend)(
+                  allocated, sel_registerName("initWithProcessIdentity:executionContextProvider:"),
+                  identity, providerHeap)
+            : nil;
+        if (transaction == nil) { [doneBundle release]; return 0; }
+
+        void (^done)(void) = ^{
+            dispatch_async(dispatch_get_main_queue(), ^{
+                double ms = (CFAbsoluteTimeGetCurrent() - started) * 1000.0;
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"win: warm done b=%@ at=%.0fms pid=%d",
+                              doneBundle, ms, AevonAppPid(doneBundle)] UTF8String]);
+                [doneBundle release];
+            });
+        };
+        ((void (*)(id, SEL, id))objc_msgSend)(
+            transaction, sel_registerName("setCompletionBlock:"), done);
+        handedOff = YES;
+        if (!AevonCallVoid(transaction, @"begin")) {
+            AevonLogRaw([[NSString stringWithFormat:@"win: warm refused b=%@", doneBundle] UTF8String]);
+            return 0;
+        }
+        AevonLogRaw([[NSString stringWithFormat:@"win: warm start b=%@", doneBundle] UTF8String]);
+        return 1;
+    } @catch (NSException *e) {
+        AevonLogRaw([[NSString stringWithFormat:@"win: warm threw b=%@ %s", doneBundle,
+                      e.reason != nil ? [e.reason UTF8String] : "-"] UTF8String]);
+        if (!handedOff) [doneBundle release];
+        return 0;
+    }
 }
 
 /// 这张卡上的 scene 是不是我们建的。关卡的动作完全不同：
@@ -5033,6 +5154,43 @@ static BOOL AevonOpenCarriesPayload(id request, id options) {
     return strcmp(AevonOpenPayloadKind(request, options), "none") != 0;
 }
 
+/// 0.2.59 — 这条 URL 是不是「登录 / 授权」那一族。
+///
+/// 为什么要按 URL 认，而不是按 scheme 白名单：微信 / QQ 的 SDK 每一版换一种承载
+/// ——`weixin://`、`mqqopensdkapi://`、通用链接 `https://help.wechat.com/app/<appid>/auth/`。
+/// Aevon(200) 里微信登录落在最后那一种上：`url=https len=670`，路径里有 `/auth/`。
+/// 白名单每漏一条，用户看到的就是「又先全屏了」，所以这里只认**路径里的语义**
+/// （`/auth/` `/oauth` `open.weixin.qq.com` …），不认具体域名顺序。
+///
+/// 只读字符串、不碰对象，返回 0/1。
+static int AevonOpenIsAuthURL(NSString *url) {
+    if (![url isKindOfClass:[NSString class]] || url.length < 8) return 0;
+    NSString *low = [url lowercaseString];
+    static const char *marks[] = {
+        "/auth/", "/auth?", "/oauth", "oauth2/authorize",
+        "mqqopensdkssologin://", "mqqopensdkapi://", "weixin://",
+        "open.weixin.qq.com", "help.wechat.com", "graph.qq.com",
+    };
+    for (size_t i = 0; i < sizeof(marks) / sizeof(marks[0]); i++) {
+        NSString *mark = [NSString stringWithUTF8String:marks[i]];
+        if ([low rangeOfString:mark].location != NSNotFound) return 1;
+    }
+    return 0;
+}
+
+/// 0.2.59 — 来源是不是微信 / QQ。SSO 回跳只有一个来源：刚处理完授权的那一方。
+///
+/// ⚠️ 它同时是「微信分享给别的 App」的来源，所以**不能单独当回跳判据**：
+/// 分享带 `UIActivityContinuationAction`，回跳没有（Aevon(200) 的两条现场：
+/// 回跳 `ac=-`，分享 `ac=#UIActivityContinuationAction`）。两者要一起看。
+static int AevonOpenSourceIsSso(id request, id options) {
+    NSString *src = AevonOpenSourceApp(request, options);
+    if (![src isKindOfClass:[NSString class]] || src.length < 8) return 0;
+    if ([src hasPrefix:@"com.tencent.xin"]) return 1;
+    if ([src hasPrefix:@"com.tencent.mqq"]) return 1;
+    return 0;
+}
+
 /// 0.2.50 — 这一次是不是「分享面板递过来的」（`UIActivityContinuationAction`）。
 ///
 /// 真机日志里两类请求长得几乎一样（都带来源 App、都可能带 paste token 和 URL）：
@@ -5498,6 +5656,26 @@ static void AevonShareSwapTick(char *target, char *source, int tick) {
         AevonLogRaw([[NSString stringWithFormat:@"notify: share swap restore b=%s door=%d",
                       source, (int)door] UTF8String]);
         AevonShareRestoreLaunch(source, door);
+        // 0.2.59 — 「来源顶不回来」就别再等那 20 拍。
+        //
+        // Aevon(200) 的两条文件分享（18:11:58 / 13:46）里来源都是
+        // `com.apple.UIKit.OverlayUI.<uuid>`（分享面板的浮层，不是 App），
+        // `AevonLaunchForeground` 答 2（拒绝），备份通道 `ok=0` —— 也就是
+        // 「永远等不到 sourceBack」。旧版仍然每 60 ms 问一次，问满 20 拍
+        // （1.2 秒）才认输，那 1.2 秒里目标 App 一直整屏在屏上；认输之后才回桌面
+        // 建卡。用户看到的「先跳全屏一下，然后才出现悬浮窗」就是这 1.2 秒。
+        //
+        // 门只认 1（真的拉起来了）。不是 1 就地走 giveup 那一套 ——
+        // 同一条兜底代码，只是提前 1.2 秒执行，行为一模一样。
+        if (door != 1) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"notify: share swap nogate b=%s door=%d",
+                          source, (int)door] UTF8String]);
+            AevonShareRestoreSchedule(target);
+            AevonOpenFromNotification(target);
+            free(target); free(source);
+            return;
+        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             AevonShareSwapTick(target, source, tick + 1);
@@ -5795,6 +5973,25 @@ static void AevonSsoProbe(id request, id options, const char *bundle) {
     }
 }
 
+/// 0.2.59 — 授权交接完成 ⇒ 0.45 s 后把刚用完的那张卡正常关掉（不是「让路」）。
+///
+/// 时机取 0.45 s：`appurl ack` 只证明 App 的 `scene:openURLContexts:` 收下了，
+/// 它的 SDK 还要把 code 换成 token。0.45 s 是「够它发完请求」的量级，再长用户
+/// 就会觉得「授权完了窗口还杵在那儿」。
+///
+/// `who` 是**递结果的那一方**（微信 / QQ），不是拿到结果的 App —— 要收的是它。
+static void AevonAuthCardCloseSoon(NSString *who, const char *why) {
+    if (![who isKindOfClass:[NSString class]] || who.length < 8) return;
+    NSString *held = [who copy];
+    AevonLogRaw([[NSString stringWithFormat:@"notify: auth card close b=%@ why=%s",
+                  held, why != NULL ? why : "-"] UTF8String]);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonCardCloseFor([held UTF8String]);
+        [held release];
+    });
+}
+
 /// 分流决定。
 ///   返回 1 → 吞掉，开卡片；
 ///   返回 2 → 吞掉，不再开（同一次点击的后续链）；
@@ -5937,7 +6134,22 @@ static int AevonOpenDecide(id request, id options,
                     // 文件根本发不出去。
                     int fileURL = (strncmp(scheme, "file://", 7) == 0 ||
                                    strncmp(scheme, "data:", 5) == 0);
-                    wanted = (AevonOpenIsContinuation(request, options) == 0 &&
+                    // 0.2.59 — 授权链接**不受 `UIActivityContinuationAction` 约束**。
+                    //
+                    // Aevon(200) 里微信登录那一条是：
+                    //   notify: sso b=com.tencent.xin pay=paste cont=1 … url=https len=670
+                    //   notify: link skip b=com.tencent.xin scheme=https://help.wechat.com/app/…/auth/…
+                    //   notify: pass  b=com.tencent.xin why=paste src=com.midea… 
+                    // 也就是说微信的 SDKv2 把登录走成**通用链接 + 续接动作 + paste token**，
+                    // 三条特征里两条指向「分享」，于是 `wanted` 判成 0，整条放行 ——
+                    // 系统把微信拉成全屏，60 ms 后 `share swap` 再把它收进卡片，
+                    // 屏幕上来回跳的就是这两拍。
+                    //
+                    // 续接动作本来是「分享面板」的标记，但 URL 路径里写着 `/auth/`
+                    // 的时候，这次续接装的是**登录页**，不是分享内容：登录只需要那条
+                    // URL，本地投递就够，根本不必让系统激活任何东西。
+                    int authURL = AevonOpenIsAuthURL(linkURL);
+                    wanted = ((AevonOpenIsContinuation(request, options) == 0 || authURL) &&
                               !AevonOpenIsShareSource(request, options) &&
                               !fileURL);
                 }
@@ -6031,6 +6243,39 @@ static int AevonOpenDecide(id request, id options,
             }
         }
     }
+    // 0.2.59 — SSO 回跳：微信 / QQ 处理完授权，把结果送回**发起登录的那个 App**。
+    //
+    // 它和「分享」在 options 上长得一模一样（`kind=share` + 带 payload + 带 paste
+    // token），所以旧版落到下面那条 `paste` 分支：先整条放行给系统（目标 App 被
+    // 推成全屏），再排一拍 `paste promote` 把它收进卡片。用户报的两件事都在这一条
+    // 上：
+    //   · 「QQ 显示授权成功，全屏 App 没登录」—— 回跳被放行之后 60 ms 又被我们
+    //     收成卡片，App 在两次激活之间把 SDK 的回调吃掉了；
+    //   · 「微信和全屏 App 乱跳小窗」—— 放行那一拍全屏、收卡那一拍又回小窗。
+    //
+    // 回跳与分享的稳定分界只有一条：**回跳没有续接动作**（Aevon(200) 两条现场，
+    // 回跳 `ac=-`，分享 `ac=#UIActivityContinuationAction`）。所以：
+    //   · 目标已经在卡里 ⇒ 本地投递（`incard`），App 就在卡里登录，一次激活都不多；
+    //   · 目标整屏开着（用户本来就在用那个 App）⇒ **原样放行、不排 promote**。
+    //     放行会让系统把 URL 交给它，这正是 SDK 要的；不 promote 才不会在 60 ms
+    //     后把它从全屏拽进卡片，登录也就不会断在半路。
+    if (kind != NULL && strcmp(kind, "share") == 0 &&
+        AevonOpenSourceIsSso(request, options) == 1 &&
+        AevonOpenIsContinuation(request, options) == 0) {
+        int inCard = (AevonCardIsUpFor(bundle) == 1 ||
+                      AevonCardIsComingFor(bundle) == 1) ? 1 : 0;
+        // 两条路都要收那一方：授权已经交接完，微信 / QQ 那张卡留着没用。
+        // 注意这里收的是**递结果的那一方**，不是拿到结果的 App。
+        AevonAuthCardCloseSoon(AevonOpenSourceApp(request, options),
+                               inCard == 1 ? "incard" : "callback");
+        if (inCard == 1) {
+            *why = "incard";
+            return 1;
+        }
+        *why = "callback";
+        return 0;
+    }
+
     // 0.2.38 — 粘贴板分享（`__PasteSharingToken`）**不建卡**，整条放行。
     //
     // 0.2.36 放行：文件真的发得出去（token 随系统激活过 XPC），但目标 App 全屏。
@@ -8462,6 +8707,25 @@ static void AevonAppOpenGiveUp(const char *why) {
     AevonForwardDrop("appurl fail");
 }
 
+/// 0.2.59 — 授权交接完成 ⇒ 把刚用完的那张卡收掉。
+///
+/// 判据三条一起看，少一条都会误收：
+///   · **送信方**是微信 / QQ（`src=`）—— 只有它们会递 SSO 结果；
+///   · **送出去的 URL** 带 `oauth` 或 `code=`（回跳的形状）；
+///   · 那一方**真的还有卡**（`AevonCardCloseFor` 自己答 0/1，这里不预判）。
+///
+/// 与分流那条「回跳」分支互补：走本地投递（`incard`）时回执在这里判，
+/// 整屏放行（`callback`）时没有回执，由分流层直接排。两条都收到同一个函数。
+static void AevonAuthCardCloseMaybe(void) {
+    if (AevonAppOpenURL == nil || AevonAppOpenSource == nil) return;
+    if (![AevonAppOpenSource hasPrefix:@"com.tencent.xin"] &&
+        ![AevonAppOpenSource hasPrefix:@"com.tencent.mqq"]) return;
+    NSString *low = [AevonAppOpenURL lowercaseString];
+    if ([low rangeOfString:@"oauth"].location == NSNotFound &&
+        [low rangeOfString:@"code="].location == NSNotFound) return;
+    AevonAuthCardCloseSoon(AevonAppOpenSource, "ack");
+}
+
 /// 回执的三种答案：`ok=1` 收工、`ok=0` 立刻退回老路、文件根本没有就再等一拍。
 static void AevonAppOpenCheck(void) {
     if (!AevonAppOpenPending) return;
@@ -8503,6 +8767,7 @@ static void AevonAppOpenCheck(void) {
             // 投递成功 ⇒ 这条请求就地销毁，**绝不**交给 SpringBoard：
             // 交给它就是把 App 的 scene 抢去全屏（这一版唯一要避开的事）。
             AevonAppOpenDrop();
+            AevonAuthCardCloseMaybe();
             AevonForwardDrop("appurl ok");
             return;
         }

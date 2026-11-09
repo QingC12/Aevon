@@ -1851,6 +1851,24 @@ final class AevonRingMenu: UIView {
     /// 是跨进程 IPC，放进 `setHovered` 这种逐帧路径会拖慢触摸响应。
     var hoverZ: Double = AevonSpring.defaultDampingFraction
 
+    /// 0.2.59 — 划过预热（见 `setHovered` 里的调用点）。
+    ///
+    /// 令牌法的理由：只有「同一个图标停够 0.18 s」才值得热。换图标就把令牌加一，
+    /// 之前排上的那一拍到点时会发现令牌变了、直接放弃 —— 不额外持有任何对象。
+    private static var warmToken = 0
+
+    private func scheduleWarm(_ bundleID: String) {
+        guard bundleID.count > 2 else { return }
+        AevonRingMenu.warmToken &+= 1
+        let token = AevonRingMenu.warmToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+            guard let self = self else { return }
+            guard AevonRingMenu.warmToken == token else { return }
+            guard self.hoveredBundleID == bundleID else { return }
+            _ = AevonOwnWarm(bundleID)
+        }
+    }
+
     private func setHovered(_ icon: AevonRingIcon?) {
         let newID = icon?.bundleID ?? ""
         guard newID != hoveredBundleID else { return }
@@ -1862,6 +1880,19 @@ final class AevonRingMenu: UIView {
             hoverSwitchCount += 1
             hoverRecentNames.append(icon.displayName)
             if hoverRecentNames.count > 8 { hoverRecentNames.removeFirst() }
+            /* 0.2.59 — 划过预热。
+             *
+             * Aevon(200)：抖音从圆盘打开时 `own start … t=1ms` 之后要等
+             * **749 ms** 才 `own scene up`，那一段全在等 App 进程起来
+             * （`app: boot pid=26158` 就落在中间）。用户量的是「点了到看见」，
+             * 所以把这段挪到手指还停在图标上的时候去付：悬停满 0.18 s 就让宿主
+             * 用 `launchIntent=4` 把进程拉起来（不建 scene、不上屏），松手选中时
+             * 往往已经在跑，`own start` 只剩建 scene 那一小截。
+             *
+             * 只在真的「停下来了」才热：换一个图标就把令牌作废，快速划过整排
+             * 不会有任何启动 —— 那时用户还没决定，替他把半个桌面拉起来是错的。
+             */
+            scheduleWarm(icon.bundleID)
         }
         applyHover()
     }

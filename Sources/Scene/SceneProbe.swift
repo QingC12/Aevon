@@ -3117,3 +3117,30 @@ public func AevonCardYieldForFullscreen(_ bundle: UnsafePointer<CChar>?) -> Int3
     return 1
 }
 
+/// 0.2.59 — 「用完了就收」：授权交接完成之后把那张卡正常关掉。
+///
+/// 与上一条的区别只在**收尾语义**：`yield` 是「松手让系统把它拉成全屏」，
+/// 这里要的是「拆卡、把画面还给刚才那个整屏 App」。所以不能复用 yield
+/// （`yielding = true` 会走 handover，把 scene 交还给系统，用户看到的就是
+/// 「微信留在屏幕上」），必须走普通关闭。
+///
+/// Aevon(200) 的现场：微信授权完成、`appurl ack ok=1` 把 code 投给了全屏 App，
+/// 微信那张卡就再也没有理由留在屏幕上 —— 用户要的是「授权完自动关掉微信浮窗」。
+@_cdecl("AevonCardCloseFor")
+public func AevonCardCloseFor(_ bundle: UnsafePointer<CChar>?) -> Int32 {
+    guard let bundle = bundle else { return 0 }
+    return AevonCardCloseNamed(String(cString: bundle))
+}
+
+private func AevonCardCloseNamed(_ identifier: String) -> Int32 {
+    guard identifier.count > 2 else { return 0 }
+    guard Thread.isMainThread else {
+        DispatchQueue.main.async { _ = AevonCardCloseNamed(identifier) }
+        return 0
+    }
+    guard let close = FloatHost.cardClosers[identifier] else { return 0 }
+    Log.write("win: card closed after auth b=" + identifier)
+    close("auth done")
+    return 1
+}
+

@@ -381,6 +381,11 @@ NSInteger AevonOwnGate(void);
 /// 返回 0 = 闸不过（调用方必须回落老路）、1 = 已开始、2 = 已有一次在跑。
 NSInteger AevonOwnStart(NSString *_Nullable bundleID, CGRect frame, const char *_Nullable from);
 
+/// 0.2.59 — 只把进程拉起来，**不建 scene、不上屏**（圆盘悬停预热）。
+/// 返回 1 = 已开始 / 0 = 不必热（在跑 / 黑名单 / 刚热过 / 另一条链在跑）。
+/// 刻意不碰 `AevonOwnState` 那套状态机：预热没被用上也不会留下孤儿 scene。
+NSInteger AevonOwnWarm(NSString *_Nullable bundleID);
+
 /// 0 = 没在跑 / 1 = 在建 / 2 = 建好了（等取） / 3 = 失败。不消费状态。
 NSInteger AevonOwnState(void);
 
