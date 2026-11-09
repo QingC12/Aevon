@@ -140,7 +140,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 用户要的是**一个确定的东西**：你刚才那张主卡在哪儿、多大，点小窗升回来就是
     /// 那儿、那么大。所以这里记一帧**实际 frame**（不是百分比、不分边），在「主窗
     /// 被降级」和「新主窗建好」两处各写一次，升窗直接用它。
-    static var lastMainFrame: CGRect?
+    ///
+    /// 0.2.39 — **这一份撤了。** 上面那个需求没有变，变的是「唯一的那一份」放在
+    /// 哪儿：`lastMainFrame` 有三处写入（开新卡 / 被降级 / 升窗落地），写的都是
+    /// 「那一刻的 `card.frame`」。它有两个必坏的输入：
+    ///   · 键盘填充态下 `card.frame` 是 430×717（整块画布），不是用户选的尺寸；
+    ///   · 多窗时 A 被降级、B 开卡、A 升回，最后写进去的是**最后碰卡片的那张**，
+    ///     于是「点一列里的小窗」得到的是另一张卡的尺寸 —— 用户的话是「时大时小」。
+    /// 而且它只活在内存里：升窗后的几何不写盘，下次开窗又回到存盘值，屏幕上的
+    /// 卡片和「记忆」从此各说一套。
+    ///
+    /// 现在唯一的一份是 `CardLayout` 的存盘：`remember` 在拖动/缩放结束时写，
+    /// `plan` 在开窗/升窗/复位时读，两边是同一个函数、同一组夹子。
+    /// # gone — `static var lastMainFrame: CGRect?`
 
     /// 0.2.36 — bundle → 「立刻把这张卡拆掉」的出口。
     ///
@@ -252,7 +264,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let host = slots[mainIndex]
         // 0.0.99 — 停靠中的那个不算主窗。多窗之后「主窗」= 这个槽里有一张**大**
         // 卡片；一个被降级成停靠小窗的宿主仍然有 window，但它已经让位了。
-        guard host.window != nil, host.miniFrame == nil else { return "" }
+        guard host.window != nil, !host.docked else { return "" }
         return host.bundle
     }
 
@@ -493,8 +505,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             card.frame = target
             followContent()
         }
-        // `miniFrame` **不动**：它记的是「取消停靠要回到的那个大卡片」，不是
-        // 「小窗现在在哪」。在这里覆盖它，取消停靠就会回到一个小窗尺寸。
+        // 0.2.39 — 这里**不写任何几何记忆**。`docked` 只由 `applyMini` 置 true，
+        // 升窗目标由 `plan(loadRuntime())` 从存盘算（见 `performUndock`）；原来的
+        // `miniFrame`（「停靠前那张大卡」）已随这次统一撤掉，不再有第二份尺寸。
+        // # gone — 停靠时把 `card.frame` 存进 `miniFrame`
         // 0.1.7 — **停靠小窗里那块画面不再接触摸。**
         //
         // 用户第四次报「点小窗依旧会触发应用内的操作」。Aevon(94) 的证据把范围压到
@@ -685,7 +699,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 0.1.1 只看 `slots[mainIndex]`，而 `dockAsMini` **从来不换 `mainIndex`**
     /// （按上面的注释，换槽是 `takeMainSlot()` 的事）。于是主窗降级成小窗之后，
     /// `mainIndex` 一直指着那个已经变小的槽：下一次点别的停靠小窗来还原，
-    /// `demoteMain` 一看 `miniFrame != nil` 就回 `already`，**一张卡都没降级** ——
+    /// `demoteMain` 一看 `docked` 就回 `already`，**一张卡都没降级** ——
     /// 屏幕上两张一样大的卡片摞在一起，用户看到的是「点了一下，什么都没发生」。
     /// Aevon(91) 的 `replaced=already` / `replaced=self` 就是这条，一共出现 8 次。
     ///
@@ -697,9 +711,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let head = slots[mainIndex]
         let fromHead: FloatHost? =
             (head !== except && head.window != nil && head.card != nil
-             && head.miniFrame == nil) ? head : nil
+             && !head.docked) ? head : nil
         let pick = fromHead ?? slots.first {
-            $0 !== except && $0.window != nil && $0.card != nil && $0.miniFrame == nil
+            $0 !== except && $0.window != nil && $0.card != nil && !$0.docked
         }
         guard let host = pick else { return "none" }
         return host.dockAsMini(into: column)
@@ -879,8 +893,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// finger is on. The opposite corner is the anchor that never moves.
     private var resizeStart: CGRect?
     private var resizeFromLeft = false
-    /// The frame to come back to. Non-nil is the only definition of "docked".
-    private var miniFrame: CGRect?
+    /// 0.2.39 — **「停靠中」只是一个状态位，不再兼记几何。**
+    ///
+    /// 原来这里是 `private var miniFrame: CGRect?`：非 nil 表示停靠，里面的矩形
+    /// 是「停靠前的大卡片」。两件事挤在一个变量里，而那个矩形从来没有被当作
+    /// 升窗目标用过（0.1.5 起升窗读全局记忆），只留下误读的可能 —— 这次统一
+    /// 记忆口径，把它换成真正的布尔：停靠与否一清二楚，几何只有 `CardLayout`。
+    /// # gone — `private var miniFrame: CGRect?`
+    private var docked = false
     /// 0.0.47 — how many hitTest questions the band window has answered (and
     /// written down). Bounded, like every other probe here: SpringBoard's log is
     /// not the place for a stream.
@@ -1004,6 +1024,25 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private func miniHeight(in bounds: CGRect) -> CGFloat {
         return bounds.height * miniHeightFraction
     }
+
+    /// 0.2.39 — 主窗高度的**唯一合法区间**，缩放 / 记忆 / `plan` 三处共用。
+    ///
+    /// 以前三处各夹各的，于是「同一个尺寸」在三条路上是三个数：
+    ///   · 缩放上限是 `bounds.height - margin*2` = 916（932 屏），能一路拖到 916；
+    ///   · `plan` 里另有 `source.height`(716.7) 与 `bounds.height - 96`(836) 两道；
+    ///   · `remember` 把 916 原样存成 98.3 %，下次开窗被夹回 716.7。
+    /// 用户的原话是「大小是混乱的」：拖大一次，重开就小一圈；再拖、再变。
+    /// 现在上限取两者的交，缩放再也进不了「存得下、还原不回」的那一段 ——
+    /// 这一条是「remember 写进去的 f，plan 一定还原出同一个高度」的保证。
+    private func nominalHeightCeiling(in bounds: CGRect, source: CGSize) -> CGFloat {
+        return Swift.min(source.height, bounds.height - 96)
+    }
+
+    private func nominalHeightRange(in bounds: CGRect,
+                                    source: CGSize) -> ClosedRange<CGFloat> {
+        let floor = miniHeight(in: bounds)
+        return floor...Swift.max(floor, nominalHeightCeiling(in: bounds, source: source))
+    }
     /// `GestureBorderWidth` in her settings, described there as 减小浮窗手势宽度.
     /// The master's own edge band is 30 pt (`_edgeWidth`, legible in the same
     /// constant annotation that gave the height fractions); the *floating
@@ -1035,14 +1074,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 15.5 % 这个比例是从「373 宽 → 57.8」反推的：它让默认尺寸下的手感与
     /// 0.0.99 的 60 pt 几乎一样（差 2 pt，测不出来），同时把 275 宽的那档从
     /// 60 收到 42.6。
-    private var band: CGFloat {
-        let width = card?.bounds.width ?? 0
+    /// 0.2.39 — 环厚改成**纯函数**，不再读「此刻有没有卡片」。
+    ///
+    /// 这不是洁癖，是「位置差几个点」的成因之一：`plan` 在 `card` 还没建出来
+    /// 时就会被调用（`show` 里就是），那时 `band` 退回 `bandMax`(60)、`reach`
+    /// 是 66；而升窗时卡片在，同一张 352 宽的卡算出来是 54.6、`reach` 是 60.6。
+    /// 同一个高度系数、同一块屏幕，开窗与点小窗升回的 y 上限因此差 5.4 pt。
+    /// 现在厚度只由**目标卡片有多宽**决定：开窗、升窗、拖动三条路同源。
+    static func band(for width: CGFloat) -> CGFloat {
         guard width > 16 else { return bandMax }
         return Swift.min(bandMax, Swift.max(bandMin, width * bandRatio))
     }
-    private let bandRatio: CGFloat = 0.155
-    private let bandMin: CGFloat = 20
-    private let bandMax: CGFloat = 60
+    private var band: CGFloat { FloatHost.band(for: card?.bounds.width ?? 0) }
+    private static let bandRatio: CGFloat = 0.155
+    private static let bandMin: CGFloat = 20
+    private static let bandMax: CGFloat = 60
     /// 0.0.41 — 6 pt of tolerance on the *outside*. 0.0.37's Aevon(35) shows a
     /// thumb landing at x=390 on a card whose right edge was 375: 15 pt outside,
     /// comfortably inside a 40 pt band. The same thumb on 0.0.40's 32 pt band
@@ -1052,9 +1098,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     ///
     /// 0.1.0 — 也跟着成比例。它是 `band` 的一成，上下夹在 3~8 pt：环窄的时候
     /// 一层固定 6 pt 的外扩会把「窄环」变成「宽环」，等于白改。
-    private var slack: CGFloat { Swift.min(8, Swift.max(3, band * 0.10)) }
+    static func slack(for band: CGFloat) -> CGFloat {
+        return Swift.min(8, Swift.max(3, band * 0.10))
+    }
+    private var slack: CGFloat { FloatHost.slack(for: band) }
     /// The ring's real half-width: the band plus its tolerance.
-    private var reach: CGFloat { band + slack }
+    ///
+    /// 0.2.39 — 也改成纯函数（理由同 `band(for:)`）。`plan` 只能用目标宽度，
+    /// 不能用「此刻这张卡」的宽度：那个值在建卡之前不存在。
+    static func reach(for width: CGFloat) -> CGFloat {
+        let b = FloatHost.band(for: width)
+        return b + FloatHost.slack(for: b)
+    }
+    private var reach: CGFloat { FloatHost.reach(for: card?.bounds.width ?? 0) }
     /// 底排五格里的角格与侧格：正方形，边长与环同宽。
     ///
     /// 用户原话「底角的缩放手势热区应该是圆角（高和宽各占一点的角）」。以前角
@@ -1105,12 +1161,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 每次写 `windowLevel` 都是一次窗口表重排，平稳期不该有这种开销。
     private func applyWindowLevel() {
         guard let window = window else { return }
-        let want = miniFrame == nil ? FloatHost.mainLevel : FloatHost.miniLevel
+        let want = !docked ? FloatHost.mainLevel : FloatHost.miniLevel
         guard window.windowLevel != want else { return }
         let old = window.windowLevel.rawValue
         window.windowLevel = want
         Log.write(String(format: "win: level %.0f -> %.0f %@",
-                         old, want.rawValue, miniFrame == nil ? "main" : "mini"))
+                         old, want.rawValue, !docked ? "main" : "mini"))
     }
 
     /// 0.0.63 — 现在交给系统的画布尺寸。看门狗（SceneProbe 的保活时钟）拿它和
@@ -1248,6 +1304,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         view.autoresizingMask = []
         view.bounds = CGRect(origin: .zero, size: source)
 
+        // 0.2.39 — 记下这一次开窗的几何来源，供日志区分「存盘」与「出厂值」。
+        // 一次性读文件（开窗路径，不在热路径上）；`plan` 自己还会读一次，值一样。
+        let storedPlacement = CardLayout.load()
         let plan = host.plan(in: window.bounds, source: source)
         // 0.0.60 — 不再裁顶栏。要的是「完整展示」，可见块就是承载面本身。
         // `visible` 这个名字留着：`followContent` / `recenterCard` 都读它。
@@ -1256,7 +1315,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
         let card = UIView(frame: frame)
         // 0.1.7 — 新开的这张就是主窗，它的几何就是「上一个主悬浮窗」的基准。
-        FloatHost.lastMainFrame = frame
+        // 0.2.39 — 不再另存一帧：开窗几何本身来自 `plan(loadRuntime())`，
+        // 「基准」就是同一份存盘。
+        // # gone — `FloatHost.lastMainFrame = frame`
         // 0.0.81 — 画布装不满卡片时（哔哩哔哩竖版：430×932 按高等比缩进 5:3），
         // 两边会各露出一条。留透明就是把桌面透进来，看上去像卡片没画完；填黑
         // 是「这一页之外」的通用答案，和播放器留边同一套观感。画布正好是 5:3
@@ -1373,11 +1434,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                           FloatHost.fatAspect,
                           window.bounds.width, window.bounds.height,
                           source.width, source.height)
-        let fatB = String(format: " hosted=%.0fx%.0f card=%.0fx%.0f at %.0f,%.0f held=%d",
+        let fatB = String(format: " hosted=%.0fx%.0f card=%.0fx%.0f at %.0f,%.0f held=%d f=%.4f src=%@",
                           source.width, source.height,
                           card.bounds.width, card.bounds.height,
                           card.frame.origin.x, card.frame.origin.y,
-                          host.awaitingFrame ? 1 : 0)
+                          host.awaitingFrame ? 1 : 0,
+                          card.bounds.height / Swift.max(window.bounds.height, 1),
+                          storedPlacement == nil ? "default" : "placed")
         Log.write(fatA + fatB)
         // 0.0.61 — 逻辑尺寸的证词。上面那行说的是「画布多大」，这一行说的才是
         // 「App 以为自己有多大」。两行都读到同一个数，小胖屏才真的成立。
@@ -1480,10 +1543,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard let card = card, bounds.width > 0, bounds.height > 0 else { return }
         // 0.0.99 — 停靠中不改记忆。
         //
-        // `miniFrame` 是「取消停靠要回到的那个大卡片」，不是「小窗现在在哪」。
-        // 0.0.98 及以前这里把 `card.frame`（小窗）写进去，于是拖一下停靠小窗、
-        // 再取消停靠，回到的是一个 168×280 的「大卡片」。
-        if miniFrame != nil { return }
+        // 停靠时 `card.frame` / `card.bounds` 是那份 98×163 的小窗几何，写进
+        // 存盘等于「用户选的尺寸变成小窗」—— 0.0.98 就是这么把大卡片弄丢的。
+        // 判据是 `docked`（0.2.39 起是布尔，不再是「`miniFrame` 非 nil」）。
+        if docked { return }
+        // 0.2.39 — **键盘填充态不是主窗的常态几何。**
+        //
+        // 键盘一起来，卡片会被撑成 `visible` 那块（430×717@y），那是「临时
+        // 铺满」，不是用户选的尺寸。`remember` 原来没有这一条，于是在键盘态
+        // 里拖一下卡片（或者任何一条走到 `dragEnd` 的路）就把 717/932 = 77 %
+        // 存成「高度系数」—— 下次开窗，一个从没缩放过的人拿到的是一张
+        // 77 % 的卡。这是「大小时大时小」里最没有规律的那一半。
+        guard !kbFilled, !isKeyboardSettling else {
+            Log.write("win: card remembered skipped (keyboard)")
+            return
+        }
         var placement = CardLayout.loadRuntime()
         let origin = card.frame.origin
         let normalized = CGPoint(x: origin.x / bounds.width, y: origin.y / bounds.height)
@@ -1493,13 +1567,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         } else {
             placement.right = normalized
         }
-        placement.heightFraction = card.bounds.height / bounds.height
+        // 0.2.39 — 写下去之前先落进 `plan` 能还原的那一段（见
+        // `nominalHeightRange`）。缩放已经按同一个区间夹过，这里是第二道：
+        // 旧存盘、设置滑条、旋转后的新屏高都可能把 f 送出去，而「写进去的
+        // 值还原不回来」正是下次开窗时尺寸跳一下的原因。
+        let race = nominalHeightRange(in: bounds, source: natural)
+        let wanted = card.frame.height / bounds.height
+        placement.heightFraction = Swift.min(race.upperBound, Swift.max(race.lowerBound, wanted))
 
         let ok = CardLayout.save(placement)
         let side = placement.edge == .left ? "left" : "right"
         let at = String(Int((normalized.x * 100).rounded())) + "% / "
             + String(Int((normalized.y * 100).rounded())) + "%"
         let tall = " h=" + String(Int((placement.heightFraction * 100).rounded())) + "%"
+            + String(format: " f=%.4f", placement.heightFraction)
         Log.write("win: card remembered " + side + " at " + at + tall
                   + (ok ? "" : " (write failed)"))
     }
@@ -1601,7 +1682,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         pan = nil
         press = nil
         tap = nil
-        miniFrame = nil
+        docked = false
         ringProbe = 0
         rawProbe = 0
         rawSeen = 0
@@ -1706,30 +1787,32 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 现在卡片永远是 5:3，画布按 `fitScale` 装进去（等比、居中）。
         let ratio = 1.0 / FloatHost.fatAspect
 
-        var h = bounds.height * placement.heightFraction
+        // 0.2.39 — 高度只剩**一道**夹子，来自 `nominalHeightRange`：下界是
+        // 「最小主窗」（屏高 30 %），上界是 `min(画布高, 屏高 - 96)`。缩放
+        // （`dragMove`）与记忆（`remember`）用的是同一个区间，所以
+        // 「拖到什么、存什么、开窗还原成什么」是同一个数。
+        //
+        // 0.0.24 那道「短屏也要留出看见背后」的保留量（96）没有删，它现在是
+        // 区间的上界之一；0.0.62 的「不放大」也没删，它是另一个上界
+        // （`source.height`）。两个常量都还在，只是从「三道各夹各的」变成
+        // 「一道在三个地方共用」。
+        let race = nominalHeightRange(in: bounds, source: source)
+        var h = Swift.min(race.upperBound,
+                          Swift.max(race.lowerBound, bounds.height * placement.heightFraction))
         var w = h * ratio
         let widest = bounds.width - margin * 2
         if w > widest {
             w = widest
-            h = w / ratio
-        }
-        // The tall guard from 0.0.24 stays: a short screen with a tall scene
-        // still has to leave room to see what is behind the card.
-        // 0.0.45 — 96, not 160: at 160 the master's own 85 % height was being
-        // clipped to 772 pt on a 932 screen, which reintroduced the strip.
-        let tallest = bounds.height - 96
-        if h > tallest {
-            h = tallest
-            w = h * ratio
+            h = Swift.min(race.upperBound, Swift.max(race.lowerBound, w / ratio))
         }
         // 0.0.62 — 不放大。卡片高过承载面高时 scale > 1，画面是插值出来的，
         // 字会变糊；高度系数调到 80 % 时正好踩到这条（717 × 0.8 = 573，勉强
         // 还没到，但没有这行就等于把「能不能放大」交给了滑条）。缩放比落在
         // 0<scale≤1 这一侧，圆角与字号才都只有「变小」这一个方向。
-        if h > source.height {
-            h = source.height
-            w = h * ratio
-        }
+        //
+        // 0.2.39 — 判定并进 `nominalHeightRange` 的上界（`source.height`），
+        // 这里不再重算一次：同一道夹子写两个地方，就是「同一个尺寸两个答案」。
+        // # gone — `if h > source.height { h = source.height; w = h * ratio }`
         let saved = placement.origin(for: placement.edge)
         var x = saved.x * bounds.width
         var y = saved.y * bounds.height
@@ -1757,19 +1840,29 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // A card that wide has already eaten the band's room; `bandRect` shrinks
         // the ring to whatever is actually left, so centring buys nothing and
         // costs the operator their place. Keep the place, clamp on screen.
-        let room = reach
-        if w + room * 2 <= bounds.width {
-            x = Swift.min(Swift.max(room, x), bounds.width - w - room)
-        } else {
-            x = Swift.min(Swift.max(0, x), Swift.max(0, bounds.width - w))
-        }
-        // Clamp as a rectangle, not as two numbers: a width change from a
-        // rotation must not leave the right edge 40 pt outside the screen.
-        if h + room * 2 <= bounds.height {
-            y = Swift.min(Swift.max(0, y), bounds.height - h - room)
-        } else {
-            y = Swift.min(Swift.max(0, y), Swift.max(0, bounds.height - h))
-        }
+        // 0.2.39 — **横向不再让 `reach`。**
+        //
+        // 0.0.46 在这里留环带，0.1.3 在拖动路径（`clamped`）里已经把它撤了：
+        // 环带按屏幕截断，贴边是用户要的能力。留下的这半条只对**窄卡片**生效，
+        // 而且很难看：卡宽 250 时 room = 44.75，x 只能落在 44.75~135.25 ——
+        // 「把卡贴左边、再缩小」之后存下去的是 0，下次开窗被夹到 44.75，
+        // 用户看到的就是「位置自己变了」。两条路必须给同一个答案：0 就是 0。
+        //
+        // 纵向保留底部那一段（`under`）：底中上滑是关闭手势，环不能没有。
+        // 这个量也按**目标宽度**算（`reach(for:)`），不读实例属性 —— 开窗那
+        // 一刻 `card` 还不存在，读实例会退回 bandMax，两个入口又差几个点。
+        let room = FloatHost.reach(for: w)
+        x = Swift.min(Swift.max(0, x), Swift.max(0, bounds.width - w))
+        let under = h + room * 2 <= bounds.height ? room : 0
+        y = Swift.min(Swift.max(0, y), Swift.max(0, bounds.height - h - under))
+        // 0.2.39 — 每一次「决定卡片几何」都留一行。开窗、升窗、复位三条路都在
+        // 这里汇合，所以这一行就是「这次用的到底是记忆还是出厂值」的唯一读数。
+        // 用户几次报「位置在变、大小在变」，前几版的日志里只有结果、没有来源，
+        // 只能靠 `card remembered` 反推 —— 现在前后两行可以直接对。
+        Log.write(String(format: "win: plan card=%.0fx%.0f at %.0f,%.0f f=%.4f range=%.0f..%.0f src=%@",
+                         w, h, x, y, h / Swift.max(bounds.height, 1),
+                         race.lowerBound, race.upperBound,
+                         given == nil ? "memory" : "default"))
         return (CGRect(x: x, y: y, width: w, height: h),
                 FloatHost.fitScale(for: source, in: CGSize(width: w, height: h)))
     }
@@ -1901,19 +1994,47 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     ///
     /// 小窗不动：两条反馈都只说主窗，而小窗的 13 是按「和主窗观感一族」定的，
     /// 主窗 +4 之后两者的绝对差从 21 变 25，98 宽的小窗上仍然读得出圆角。
-    static let mainCorner: CGFloat = 38
-    static let miniCorner: CGFloat = 13
+    ///
+    /// 0.2.39 — 固定档位撤回，改成**按卡宽的比例**，12.73 %。
+    ///
+    /// 0.1.29 那次「钉死一个数」解决的是「小窗比主窗方」，但它把另一件事一起
+    /// 冻住了：比例。38 在 347 宽上是 10.95 %，拖到 168 宽（最小档）就是
+    /// 22.6 % —— 同一张卡，手指往上推它就越来越圆，推回来又变方。用户原话：
+    /// 「悬浮窗越小，圆角化越大，反之悬浮窗越大，圆角化越小，看起来越方正」，
+    /// 说的就是这个比例漂移，不是绝对值。
+    ///
+    /// 12.73 % 是量出来的，不是拍的：Stheno 的演示视频里卡片宽 707 px、圆角
+    /// 90 px（同一张截图，同一把尺，见 `CardLayout.Placement.initial` 上面的
+    /// 量法）。39.9 pt 的绝对半径放在她 313.6 pt 宽的卡上是 12.73 %；我们
+    /// 352 pt 宽的卡按同一比例是 44.8 pt —— 换算的是比例不是点数，两台机器上
+    /// 才对得上。
+    ///
+    /// 两档共用一条比例是**故意**的：主窗最小可以拖到小窗那么大（`miniHeight`
+    /// 是同一个下界），如果两档各钉一个数，停靠那一下圆角会从 22 跳到 13，
+    /// 又回到「一缩就变形状」。一条比例下主窗缩到底和小窗完全同形，停靠看不出
+    /// 接缝。小窗 168 宽落 21.4 —— 比原来的 13 圆，那正是「和视频一致」的代价
+    /// 与目的。
+    static let cornerRatio: CGFloat = 0.1273
+    static let cornerFloor: CGFloat = 4
+
+    /// 唯一一处「卡宽 → 圆角」。`lift` 那条动画和 `applyCorner` 都走这里，
+    /// 免得两处各算一遍再对不上。
+    static func corner(for width: CGFloat) -> CGFloat {
+        return Swift.max(cornerFloor, width * cornerRatio)
+    }
 
     private func applyCorner() {
         guard let card = card, natural.width > 1 else { return }
-        let wanted = miniFrame != nil ? FloatHost.miniCorner : FloatHost.mainCorner
+        // 0.2.39 — 档位不再参与：半径只看这一张卡当前有多宽。
+        let wanted = FloatHost.corner(for: card.bounds.width)
         // 再圆的角也不能超过半张卡（超过就是胶囊）。只在卡片被拖到极小时生效。
         let side = Swift.min(card.bounds.width, card.bounds.height)
         let radius = Swift.max(4, Swift.min(wanted, side / 2))
         if !cornerAnnounced {
             cornerAnnounced = true
-            Log.write(String(format: "win: corner fixed main=%.0f mini=%.0f",
-                             FloatHost.mainCorner, FloatHost.miniCorner))
+            Log.write(String(format: "win: corner w=%.0f r=%.0f pct=%.1f",
+                             card.bounds.width, radius,
+                             FloatHost.cornerRatio * 100))
         }
         // 0.1.26 — 圆角跟着尺寸一起走。
         //
@@ -2241,8 +2362,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             //
             // 这也是最省的一条：App 从头到尾不知道窗口变过，没有一次重排，
             // 画面只是被 transform 放大缩小 —— 拖动是真跟手。
+            // 0.2.39 — 上限换成 `nominalHeightCeiling`，与 `plan` / `remember`
+            // 同一组数。原来这里是 `bounds.height - margin*2`（932 屏 = 916），
+            // 而 `plan` 最高只到 716.7（画布高）—— 于是「拖到 900 高 → 存 96 %
+            // → 下次开窗 717」，用户看到的是「拖大之后重开就小一圈，越拖越乱」。
+            // 现在缩放根本到不了那一段：最大的那块就是画布本身。
             let shortest = miniHeight(in: window.bounds)
-            let tallest = window.bounds.height - margin * 2
+            let tallest = nominalHeightCeiling(in: window.bounds, source: natural)
             let widest = window.bounds.width - margin * 2
             var h = Swift.min(tallest, Swift.max(shortest, start.height + total.y))
             let ratio = start.width / Swift.max(start.height, 1)
@@ -2251,7 +2377,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 压成另一条比例。
             if w > widest {
                 w = widest
-                h = Swift.max(shortest, w / ratio)
+                h = Swift.min(tallest, Swift.max(shortest, w / ratio))
             }
             var frame: CGRect
             if resizeFromLeft {
@@ -2388,7 +2514,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.0.99 — 两侧轻滑：闸门没开就什么都没发生。不做 `remember`，也不写
         // 「moved」—— 那张卡片根本一动没动，写一行只会让下一份日志看起来像
         // 「移动了但没生效」。
-        if (zone == .left || zone == .right) && !gateOpen && miniFrame == nil {
+        if (zone == .left || zone == .right) && !gateOpen && !docked {
             gateReset()
             return
         }
@@ -2406,7 +2532,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             gateReset()
             return
         }
-        if miniFrame != nil { return }
+        if docked { return }
         if zone.isCorner, resizeStart != nil {
             resizeStart = nil
             // 画布不动，也就没有重排要付：只把画面按新尺寸摆正、把圆角按新
@@ -2521,8 +2647,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
-    /// 吸附 — one tap on a side band. Docked is `miniFrame != nil`, and that is
-    /// the only thing that says so: a second flag would be a second answer.
+    /// 吸附 — one tap on a side band. `docked` is the only thing that says so:
+    /// a second flag would be a second answer.
     @objc private func handleDockTap(_ gesture: UITapGestureRecognizer) {
         guard let grip = grip else { return }
         dock(zone: zoneFor(cardPoint(gesture.location(in: grip))))
@@ -2535,7 +2661,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // `window` 不再在这里读：几何全部搬进 `applyMini` 了。留着这个判断是为了
         // 「没有窗口就没有卡片」这条早退语义不变 —— 少了它，`undock` 会拿到半死状态。
         guard card != nil, window != nil else { return }
-        if miniFrame != nil {
+        if docked {
             undock()
             return
         }
@@ -2569,10 +2695,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.1.7 — 缩之前先把这张主窗的实际几何记下来（升窗的唯一落点来源，
         // 见 `lastMainFrame`）。必须写在 `claimDock` / `relayoutDocked` 之前：
         // 那两步会把 frame 改成小窗的 98x163。
-        FloatHost.lastMainFrame = card.frame
+        //
+        // 0.2.39 — 不再记那一帧（`lastMainFrame` 已撤）：这个位置正是「键盘态
+        // 把它写成 430×717」的入口，而升窗的目标现在直接由 `plan` 从存盘算。
+        // # gone — `FloatHost.lastMainFrame = card.frame`
         // 展开前的 frame 只记一次：已经停靠过就不再覆盖，否则「取消停靠」会回到
         // 上一次的小窗尺寸，而不是回到大卡片。
-        if miniFrame == nil { miniFrame = card.frame }
+        if !docked { docked = true }
         // 0.1.3 — `column` 优先：`undock` 要求「被挤下去的那张主窗落在**这一列**
         // 的最后一格」，那条规则不能交给「右列先满」去猜（点左列的窗却排到右列，
         // 就是两列开始互相借位）。
@@ -2608,7 +2737,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 返回落到的边名，给 `win: demote` 那行日志用。
     private func dockAsMini(into column: Bool? = nil) -> String {
         guard let card = card, let window = window, natural.height > 16 else { return "none" }
-        if miniFrame != nil { return "already" }
+        if docked { return "already" }
         // `manual: false` —— 这是系统替用户做的决定，落哪一列由队列算，不由卡片
         // 原来漂在哪半边算（Aevon(88) 里 5 个全堆左列就是这条的锅）。
         applyMini(side: card.frame.midX < window.bounds.width / 2 ? .left : .right,
@@ -2762,19 +2891,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 外面（含四周一点点环的余量）什么都不做，原样放行。按下去之后手指移开
         // 超过 12 pt 就不算点按，但仍然吞到底 —— began 已经吞了，半路放手会让
         // UIKit 收到一根它从没见过的结束事件。
-        if miniFrame != nil || miniTapEaten {
+        if docked || miniTapEaten {
             // 降级可能发生在拖动中途：上一根手指的主窗状态必须现在清掉，
             // 否则 `rawActive` 会一直悬着 true，之后每一次抬起都以为自己在收尾。
             //
-            // 0.1.3 — `|| miniTapEaten`：小窗被点中升回主窗之后 `miniFrame` 立刻
-            // 变 nil，而那一根手指可能还有 `cancelled` 没走完。不留这条，它就会
+            // 0.1.3 — `|| miniTapEaten`：小窗被点中升回主窗之后 `docked` 立刻
+            // 变 false，而那一根手指可能还有 `cancelled` 没走完。不留这条，它就会
             // 掉进下面主窗那条路 —— App 会收到一根它从没见过的手指的收尾事件
             // （「半根手指」的老毛病）。这里只保证**同一根手指**收完，下一根手指
             // 的第一拍 `miniTouch` 会把 `miniTapEaten` 重新判成 false。
             // 0.1.5 — **没被小窗认领时要能继续走主窗这条路**。
             //
             // 0.1.1~0.1.4 这里直接 `return miniTouch(...)`：只要这张卡停靠着
-            // （`miniFrame != nil`），它自己那一侧的环带就**整块失效** ——
+            // （`docked`），它自己那一侧的环带就**整块失效** ——
             // `miniTouch` 回 false 之后没有再往下判的机会。Aevon(93) 里主窗被
             // 拖到小窗旁边时那一侧拖不动，一半是这个。
             //
@@ -2795,8 +2924,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 0.1.5 — **停靠着就到此为止**：小窗只有「点按升主窗」这一个手势
             // （母本 `SingleTapMinimize` 的「不可操作」）。少了这一行，落在小窗
             // 外面一点点（超出 6 pt 容忍带）的按下会继续掉进主窗那条路，把这张
-            // 小窗当成大卡片拖着走 —— `miniFrame` 非 nil 时它自己的环带也是坏的。
-            if miniFrame != nil { return false }
+            // 小窗当成大卡片拖着走 —— `docked` 时它自己的环带也是坏的。
+            if docked { return false }
         }
         switch phase {
         case 0:
@@ -2966,14 +3095,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private static var miniNear = 0
 
     /// 这张卡现在是不是停靠小窗。给多指那条窄入口用（`AevonFloatTouchMini`）。
-    var onMini: Bool { miniFrame != nil && window != nil }
+    var onMini: Bool { docked && window != nil }
 
     /// 屏幕坐标是不是落在这一张小窗里（含 `miniSlop` 容忍带）。
     ///
     /// 和 `rawTouch` 里那段 `screen - card.frame.origin` 是同一个算法 —— 两处必须
     /// 一致，否则「多指入口认领的」与「单指入口认领的」会变成两个不同的矩形。
     func miniHit(_ screen: CGPoint) -> Bool {
-        guard miniFrame != nil, let card = card else { return false }
+        guard docked, let card = card else { return false }
         let local = CGPoint(x: screen.x - card.frame.minX, y: screen.y - card.frame.minY)
         return card.bounds.insetBy(dx: -FloatHost.miniSlop, dy: -FloatHost.miniSlop)
             .contains(local)
@@ -2998,7 +3127,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // `card.bounds` 已经是那张 347×578 的大卡片 —— 少了这道门，下一根
             // 手指按在主窗里就会被 `inside` 判成「点在小窗上」，整块主窗的触摸
             // 全被吃掉。停靠状态是这一支唯一的入场券。
-            guard miniFrame != nil else { return false }
+            guard docked else { return false }
             // 手指在小窗外面：不认领，原样放行（屏幕别处该干嘛干嘛）。
             // 0.1.4 — 但「外面一点点」要认领：`miniSlop` 那 6 pt 不是装饰，
             // 它是 Aevon(92) 里「透传还在、可 down 与 eaten 却全相等」的唯一出口。
@@ -3052,7 +3181,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 0.1.5 — **这里不再清 `miniTapEaten`**。
             //
             // 0.1.3/0.1.4 在抬手那一拍把它清成 false，而 `undock` 又把
-            // `miniFrame` 清成 nil —— 于是这一根手指余下的任何一拍（UIKit 在
+            // `docked` 清成 false —— 于是这一根手指余下的任何一拍（UIKit 在
             // ended 之后还会补 `stationary`，或者取消路径晚到）都会掉进主窗
             // 那条路、`rawActive` 又是 false、于是**原样放行给 App**。
             // 那正是用户三次报的「点小窗还原成主窗时，App 里被点了一下」。
@@ -3192,7 +3321,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 停靠 / 拆窗时发 `CGRectNull`：不清的话那一片会一直归宿主，用户在 App 上
     /// 点它就没了反应 —— 这是这条通道唯一的破坏性失败模式。
     func reportBand() {
-        guard let card = card, window != nil, miniFrame == nil, !bundle.isEmpty else {
+        guard let card = card, window != nil, !docked, !bundle.isEmpty else {
             bandReported = .null
             if !bundle.isEmpty { _ = AevonAppBandSet(bundle, .null, .zero) }
             return
@@ -3317,7 +3446,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 排队也让 `miniTouch` 的返回值更干净：抬手那一拍先**完整吞掉**、`sendEvent`
     /// 正常返回，下一拍再升降。
     @objc private func undock() {
-        guard miniFrame != nil, !liftPending else { return }
+        guard docked, !liftPending else { return }
         liftPending = true
         Log.write("win: mini lift deferred " + bundle)
         DispatchQueue.main.async { [weak self] in
@@ -3340,12 +3469,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var liftPending = false
 
     private func performUndock() {
-        guard let card = card, let window = window, miniFrame != nil else { return }
+        guard let card = card, let window = window, docked else { return }
         // 0.1.27 — 刚缩下去还没落地（0.27 s 内）就点它：先把账本落地。
         // 不落地的话下面写 `bounds` 时 `transform` 上还挂着 0.321，两条一起算，
         // 画面会先小后大地跳一次。
         if dockFlightTarget != nil { landDock(dockFlight) }
-        miniFrame = nil
+        docked = false
         // 0.1.4 — 先抬层再改几何：反过来会有一帧「大卡片已经铺开、但还在小窗层」
         // 的画面，那正是用户报的「主窗被新小窗压住」（见 `mainLevel`）。
         applyWindowLevel()
@@ -3373,15 +3502,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 压回小窗此刻的大小。这样下面那个 spring 只接管 transform + center：
         // 0.1.27 判过「同块插值 bounds + transform + 圆角」会在中段翻转一次，
         // 而这一次真正在动画里的只有变换，翻转没有成立的条件。
+        //
+        // 0.2.39 — 终点改成 `plan(loadRuntime())`，与开窗是**同一个函数、同一份
+        // 状态**；`FloatHost.lastMainFrame` 那套「谁最后动谁写一帧」的静态缓存
+        // 整段删除（理由见文件里 `lastMainFrame` 原来的注释位置）。
         let liftBounds = window.bounds
         let liftPlan = self.plan(in: liftBounds, source: self.natural)
-        let target = self.clamped(FloatHost.lastMainFrame ?? liftPlan.frame, in: liftBounds)
+        let target = self.clamped(liftPlan.frame, in: liftBounds)
         let liftFrom = Swift.min(1, Swift.min(
             Swift.max(card.frame.width, 1) / Swift.max(target.width, 1),
             Swift.max(card.frame.height, 1) / Swift.max(target.height, 1)))
         let liftCentre = card.center
         card.bounds = CGRect(origin: .zero, size: target.size)
-        card.layer.cornerRadius = FloatHost.mainCorner
+        // 0.2.39 — 走同一个「卡宽 → 圆角」，否则升主窗那一下会先把角写成 38，
+        // 落地后再被 `applyCorner` 改成 44，看上去是「角跳了一下」。
+        card.layer.cornerRadius = FloatHost.corner(for: target.width)
         card.transform = CGAffineTransform(scaleX: liftFrom, y: liftFrom)
         card.center = liftCentre
         // 光晕的 bounds 也先按终点备好，`outside` 里再把 frame 从视觉框长到终点。
@@ -3406,15 +3541,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             if let index = FloatHost.slotIndex(of: self) {
                 FloatHost.mainIndex = index
             }
-            // 0.1.5 — **尺寸与位置都读全局记忆**，不再用 `miniFrame`。
+            // 0.1.5 — **尺寸与位置都读全局记忆**，不用「这张卡自己停靠前的样子」。
             //
-            // `miniFrame` 是「这张卡自己停靠之前长什么样」。用户的原话是：还原成
-            // 主悬浮窗时的尺寸应该是**上一个主悬浮窗**的尺寸（含位置），而不是它
-            // 吸附成小窗之前自己的那个。这也是母本的口径：`mfMainCardScale` /
-            // `mfMainCardPosX/Y` 是全局唯一的一份，不按 App 各存。
+            // 用户的原话是：还原成主悬浮窗时的尺寸应该是**上一个主悬浮窗**的
+            // 尺寸（含位置），而不是它吸附成小窗之前自己的那个。这也是母本的口径：
+            // `mfMainCardScale` / `mfMainCardPosX/Y` 是全局唯一的一份，不按 App 各存。
             //
             // 0.1.31 — `target` 已经在块外算好（见 `liftFrom` 那一段），块里不再重复。
-            FloatHost.lastMainFrame = target
+            //
+            // 0.2.39 — 那句「全局唯一的一份」以前是 `lastMainFrame` 这个静态
+            // 变量，而它有三处写入（开新卡 / 降级 / 升窗），每一处写的都是「那一
+            // 刻的 card.frame」：键键盘态时是 430×717，降级 B 卡时写的是 B 的
+            // 尺寸 —— 于是「点小窗升回来」得到的是**最后碰过卡片的那张卡**的
+            // 尺寸，时大时小、没有规律。现在「全局唯一的一份」就是 `CardLayout`
+            // 的存盘（`remember` 写、`plan` 读），不再有第二份内存真相。
             self.followContent()
             self.syncGrip()
             // 0.1.10 — 补位要看得见。
@@ -3438,8 +3578,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                                animations: { glow.frame = target })
             }
         })
-        Log.write("win: undock read last main frame "
-                  + point(card.frame.origin) + " " + size(card.frame.size))
+        Log.write("win: undock read placed frame "
+                  + point(card.frame.origin) + " " + size(card.frame.size)
+                  + String(format: " f=%.4f", liftPlan.frame.height / Swift.max(liftBounds.height, 1)))
         shield?.removeFromSuperview()
         shield = nil
         // 0.1.7 — 画面重新可操作（小窗那条锁在 `placeDock` 里上）。
@@ -3946,14 +4087,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         frame.origin.x = ((bounds.width - frame.width) / 2).rounded()
         frame.origin.y = ((bounds.height - frame.height) / 2).rounded()
         // 1.5 pt 是「同一个尺寸」的容差：`fatRender` 四舍五入、屏幕高度系数
-        // 取整，都可能让同一个默认值落成 347.4 与 347。停靠中（`miniFrame`
-        // 非 nil）永远不算默认，长按要能把它还原回来。
+        // 取整，都可能让同一个默认值落成 347.4 与 347。停靠中（`docked`）
+        // 永远不算默认，长按要能把它还原回来。
         //
         // 0.1.3 — **中心点也参与判定**。尺寸对了但位置没在正中，就不是「已经默认」：
         // 用户要的是「回 5:3 + 回屏幕正中心」，只判尺寸会让一台「尺寸刚好、位置
         // 偏 12 pt」的手机永远复位不回来（Aevon(91) 的 54,177 就是这样：尺寸
         // 347x578 与目标一模一样，`already default` 会直接早退）。
-        if miniFrame == nil,
+        if !docked,
            abs(card.frame.width - frame.width) < 1.5,
            abs(card.frame.height - frame.height) < 1.5,
            abs(card.frame.midX - frame.midX) < 1.5,
@@ -3968,7 +4109,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return false
         }
         CardLayout.reset()
-        miniFrame = nil
+        docked = false
         // 0.1.26 — 复位是「一次状态变化」：尺寸与位置一起走同一个 spring。
         // 原来这一句是硬赋值，长按之后卡片「啪」地换了个大小 —— 用户要的
         // 「移动/复位动画」就是这一句。
@@ -4050,7 +4191,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 屏幕截断），但另一侧、上边、底中三段都还在 —— 手势不缺路。底部那个
         // `under` 保留：底中上滑是关闭手势，那一段环不能没有。
         let side: CGFloat = 0
-        let under = frame.height + reach * 2 <= bounds.height ? reach : 0
+        // 0.2.39 — `under` 按**这一帧的宽度**算，不读实例 `reach`。
+        // 升窗那一拍卡片还是小窗（98 宽 ⇒ reach 26），而目标是大卡（352 宽
+        // ⇒ reach 60.6）：读实例会让同一个目标在「开窗」和「升窗」两条路上得到
+        // 两个 y 上限，差 34 pt。用户看到的正是「点小窗升回来位置偏一截」。
+        let room = FloatHost.reach(for: frame.width)
+        let under = frame.height + room * 2 <= bounds.height ? room : 0
         let maxX = max(side, bounds.width - result.width - side)
         let maxY = max(0, bounds.height - result.height - under)
         result.origin.x = min(max(result.origin.x, side), maxX)

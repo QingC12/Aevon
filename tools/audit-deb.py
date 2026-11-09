@@ -592,7 +592,10 @@ def main():
                   #   `style `         系统深浅色变了（桌面侧接住并转发）
                   # 0.1.31 — `lift bounce` 换成 `lift one shot`：升窗不再「长完再弹」，
                   # 改成一条从当前尺寸到目标的曲线（见 `AevonMotion.lift`）。
-                  b"win: corner fixed main=",
+                  # 0.2.40 — `corner fixed` 换成 `corner w=`：圆角不再是固定档位，
+                  # 改成「卡宽 × 12.73 %」，日志把卡宽、半径、比例一并打出来。
+                  # 用带格式符的整句：`win: corner w=` 只有 15 字节，会被编成立即数。
+                  b"win: corner w=%.0f r=%.0f pct=%.1f",
                   b"win: lift one shot ",
                   b"win: band report ",
                   b"win: style follow ",
@@ -1873,7 +1876,21 @@ def main():
                   #     接触摸。第四次报「点小窗依旧触发应用内的操作」的最后一道闸。
                   #   `ring: edge swipe cancelled by the system` = 贴边左滑被系统抢断
                   #     的分支（与 `released` 分开，抬手与中断不再混为一谈）。
-                  b"win: undock read last main frame ",
+                  #
+                  # 0.2.40 — 第一条约文字和它背后的机制一起换了：
+                  #   `win: undock read placed frame ` = 升窗目标由 `plan(存盘)` 算出，
+                  #     与开窗同一个函数、同一组夹子；`FloatHost.lastMainFrame` 那帧
+                  #     内存缓存已撤销（键盘态与别的 App 都会把它写歪，用户报「时大时小」）。
+                  #     判据：同一串「点小窗升回」操作里，这一行的 `WxH at X,Y` 每次
+                  #     都必须一样，且与上一次 `win: plan card=` 的落点对得上。
+                  #   # gone — b"win: undock read last main frame "
+                  b"win: undock read placed frame ",
+                  # 0.2.40 — 几何的唯一读数。开窗 / 升窗 / 复位三条路都汇到 `plan`，
+                  # 这一行写出结果、来源与合法区间：`src=memory` 是存盘、`src=default`
+                  # 是出厂值。一段日志里 `card=` 与 `remembered f=` 必须互相还原得回来。
+                  # 断言用**带格式符的那半句**：只有 `win: plan card=` 是 15 字节，
+                  # 会被编成立即数，二进制里搜不到（push-gate 会拦）。
+                  b"win: plan card=%.0fx%.0f at %.0f,%.0f f=%.4f",
                   b"win: mini touch lock content=0",
                   b"ring: edge swipe cancelled by the system",
                   # 0.1.8 — 停靠标记（Aevon(95) 第 1 条：点小窗仍触发 App 内点击，
