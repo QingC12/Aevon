@@ -4715,6 +4715,58 @@ static NSString *AevonOpenURLPath(NSString *leaf) {
     return [tmp stringByAppendingPathComponent:leaf];
 }
 
+/// 0.2.42 — `UIOpenURLContext._options` 必须是「长得像 UISceneOpenURLOptions」的对象，
+/// 不能是裸字典。
+///
+/// 微信分享真机崩溃（0.2.39 日志，13:06:49 / 13:06:51 / 13:07:24 三次）：
+/// `-[__NSDictionaryM sourceApplication]: unrecognized selector`，栈顶是
+/// `AevonApp.dylib +35205 / +33604` → 微信自己的 scene 处理 → 抛
+/// NSInvalidArgumentException，随后 sig=6。0.2.16 起我们把 options 字典直接塞进
+/// `_options`；系统不校验，但 App 拿到 `context.options` 后按公开 API 读
+/// `sourceApplication`，字典不认这一条，于是每次分享都把微信打崩。
+///
+/// 优先造真的 `UISceneOpenURLOptions`（公有类，没有公有构造器，只能 alloc/init +
+/// KVC 写它自己的 ivar）；KVC 摸不到就退回这个替身 —— 它只实现 App 会读的几个
+/// getter，形状对，调用方就不会崩。字典只留给 `application:openURL:options:`
+/// 那条老入口（那里本来就该是字典）。
+@interface AevonOpenURLOptions : NSObject
+@property (nonatomic, copy) NSString *sourceApplication;
+@property (nonatomic, copy) id annotation;
+@property (nonatomic, assign) BOOL openInPlace;
+@property (nonatomic, assign) BOOL universalLinksOnly;
+@end
+
+@implementation AevonOpenURLOptions
+- (void)dealloc {
+    [_sourceApplication release];
+    [_annotation release];
+    [super dealloc];
+}
+@end
+
+/// 把「来源 + 就地打开」装进一个形状正确的 options 对象。返回 +1 引用，调用方释放。
+/// `real` 带回 1 表示用的是系统类。
+static id AevonOpenURLOptionsMake(NSString *source, int *real) {
+    if (real != NULL) *real = 0;
+    Class cls = NSClassFromString(@"UISceneOpenURLOptions");
+    if (cls != Nil) {
+        id box = nil;
+        @try {
+            box = [[cls alloc] init];
+            if (source.length > 0) [box setValue:source forKey:@"sourceApplication"];
+            [box setValue:[NSNumber numberWithBool:NO] forKey:@"openInPlace"];
+            if (real != NULL) *real = 1;
+            return box;
+        } @catch (NSException *exception) {
+            [box release];
+        }
+    }
+    AevonOpenURLOptions *stub = [[AevonOpenURLOptions alloc] init];
+    stub.sourceApplication = source.length > 0 ? source : nil;
+    stub.openInPlace = NO;
+    return stub;
+}
+
 /// 0.2.17 — 回执里带上现场：进程、scene 数、窗口场景数、delegate 类名、它认不认
 /// `scene:openURLContexts:`（`rsp`）。
 ///
@@ -4877,11 +4929,17 @@ static void AevonOpenURLApply(void) {
             }
             if (context != nil) {
                 // options 单独接：摸不到就让它空着，URL 这条不能跟着一起废。
+                // 0.2.42 — 递出去的是**对象**，不是字典（微信崩溃的根因）。
+                int realBox = 0;
+                id box = AevonOpenURLOptionsMake(source, &realBox);
                 @try {
-                    [context setValue:options forKey:@"options"];
+                    [context setValue:box forKey:@"options"];
+                    AevonAppLogWrite(realBox ? "app: openurl ctx opt real\n"
+                                             : "app: openurl ctx opt stub\n");
                 } @catch (NSException *exception) {
                     AevonAppLogWrite("app: openurl ctx opt miss\n");
                 }
+                [box release];
             }
             if (context == nil) {
                 via = "nokvc";

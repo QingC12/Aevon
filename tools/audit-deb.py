@@ -1572,6 +1572,11 @@ def main():
                       b"application:openURL:sourceApplication:annotation:",
                       b"application:handleOpenURL:",
                       b"app: openurl ctx opt miss",
+                      # 0.2.42 —— 微信分享崩溃的修复标记：`_options` 必须是对象。
+                      # 这两行只有真的按「系统类 / 替身」二选一才存在，缺了说明
+                      # 又把裸字典塞回去了。
+                      b"app: openurl ctx opt real",
+                      b"app: openurl ctx opt stub",
                       b"app: openurl no file",
                       b"app: openurl bad plist",
                       b"setContentOffset:"):
