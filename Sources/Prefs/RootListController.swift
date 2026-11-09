@@ -106,6 +106,9 @@ final class RootListController: PSListController {
         case "!gate.panic":     return Gate.panicActive
         case "!gate.disabled":  return Gate.disabledActive
         case "@ring.summary":   return RingConfig.load().summary
+        // 0.2.60 — 两个分流开关。界面语义是「接管 = 开」，文件闸是它的反面。
+        case "!gate.notify":    return !Gate.notifyOffActive
+        case "!gate.share":     return !Gate.shareOffActive
         default:                return super.readPreferenceValue(specifier)
         }
     }
@@ -119,6 +122,14 @@ final class RootListController: PSListController {
                 Gate.setPanic(on)
                 Log.write("settings: G0 emergency stop -> \(on ? "on" : "off")")
                 refreshLiveRows()
+                return
+            case "!gate.notify":
+                Gate.setNotifyOff(!on)
+                Log.write("settings: notify divert -> \(on ? "on" : "off")")
+                return
+            case "!gate.share":
+                Gate.setShareOff(!on)
+                Log.write("settings: share divert -> \(on ? "on" : "off")")
                 return
             case "!gate.disabled":
                 Gate.setDisabled(on, reason: "manual:settings")

@@ -35,8 +35,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 
 BUNDLE = "layout/Library/PreferenceBundles/AevonPrefs.bundle"
-PANELS = ["Window", "Ring", "Gesture", "Keyboard",
-          "Notify", "Jump", "Listen", "Apps"]
+# 0.2.60 — 设置只保留两个二级页。
+PANELS = ["Window", "Ring"]
 
 # 只有这些东西属于「构建必需」或「工程文档」。其余一律不许进仓库。
 ALLOWED_EXACT = {
@@ -343,7 +343,8 @@ def check_plists():
         bad(f"plist: Root.plist 解析失败：{exc}")
         return
     items = root.get("items", [])
-    if len(items) < 20:
+    # 0.2.60 — 根页按功能重写后是 18 行（旧版 30+ 行全是死开关）。
+    if len(items) < 14:
         bad(f"plist: Root 只有 {len(items)} 行，页面会很空")
     else:
         ok(f"plist: Root {len(items)} 行")

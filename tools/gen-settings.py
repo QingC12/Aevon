@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-gen-settings.py — 唯一的数据源。
+gen-settings.py — 设置面板的唯一数据源。
+
+0.2.60 起按「已经做出来的功能」重写：只保留运行时会读的键，
+不再复刻母本那 81 个键，也不在界面里写版本更新日志。
 
 一张表同时产出：
-  · 设置面板的 8 份 plist（界面）
+  · 设置面板的 plist（界面）
   · build/settings-tbody.html（交付文档里的设置清单）
-  · build/settings-manifest.json（后续逐项接通时的对账表）
+  · build/settings-manifest.json（对账表）
 
-所以文档里写的和界面上显示的永远不会不一致。
-
-键名沿用 Stheno 母本的原样键名，这样逆向资料、界面、以后的实现三方可以
-逐条对上。中文标签按同一语义重写，不照抄母本文案。
+面板结构（两级）：
+  根页     状态 / 浮窗与圆盘 / 接管范围 / 诊断 / 安全
+  Window   浮窗尺寸与黑名单
+  Ring     圆盘开关、应用清单、预览
 """
 import json
 import os
 import plistlib
-import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUNDLE = os.path.join(
@@ -39,677 +41,166 @@ def control_version():
 
 VERSION = control_version()
 
-# 0.0.42 起圆盘本体换成旧版插件的实现（几何内定 64 / 46 / 40，见
-# AevonRingMenu.swift），Ring 面板里不再有「写一个数值、桌面立刻变」的母本键
-# —— 圆盘的增删排序走编辑器，几何不走滑条。接通口径改为按面板逐项核对。
-#
-# 0.0.65 — 「接通」是可以核对的，不是口径：窗口侧真的在读这个键
-# （CardLayout.preferredHeight），所以它在这里点名。
-# 0.0.64 的 `GeometryScaleEnabled` 随功能一起撤了（Aevon(57)：没任何用处），
-# 于是 `OWN_KEYS` 也空了 —— 本项目不再往母本的 81 键里加东西。
-WIRED_KEYS = {"HeightFraction"}
-OWN_KEYS = set()
-
-# 0.0.41 明确放弃的母本键。界面里没有它们，代码里也没有读取它们的地方 ——
-# 但 81 键的对账必须继续成立，所以放弃本身要记账，而不是让总数悄悄少五位。
-DROPPED = [
-    ("RTSIH", "半圆盘", "只要圆盘，半圆盘自 0.0.41 起不实现"),
-    ("RTSIQ", "直角盘", "只要圆盘，直角盘自 0.0.41 起不实现"),
-    ("RTSIZ", "任意角度", "只要圆盘，任意角度自 0.0.41 起不实现"),
-    ("RTSIF", "圆盘", "唯一的形状，不再需要开关 —— 常开即没有开关"),
-    ("LastIconAngle", "尾角", "只对任意角度有意义的开口角度"),
-    ("Radius", "半径", "0.0.42 圆盘本体换成旧版实现，几何内定（内圈 64 / 弧距 46 / 图标 40），滑条没有读取方"),
-    ("IconWidth", "图标宽度", "同上：旧版圆盘的图标尺寸按每圈弧距自适应（上限 40pt），不再由设置决定"),
-    ("RotationAngle", "旋转角", "同上：起点固定在正上方，旋转交给「按住圆心 1 秒」的旋转模式"),
-    ("Star", "收藏", "旧版圆盘没有收藏（长按图标）功能，0.0.42 随本体一并移交；增删排序全部走编辑器"),
-]
+# 运行时真的会读的键。没列在这里的键不该出现在界面上 ——
+# 一个拧了没反应的开关比没有更糟。
+WIRED = {
+    "HeightFraction",        # CardLayout：浮窗首帧高度
+    "windowBlacklistText",   # AevonOpenDecide：名单里的 App 走原生
+    "!ring.desktop",         # RingHost：桌面是否挂圆盘
+    "!gate.notify",          # 写 notify.off 文件闸
+    "!gate.share",           # 写 share.off 文件闸
+}
 
 # ---------------------------------------------------------------------------
-# 面板定义
-#    k      母本键名（保持原样，用于对账）
-#    cn     界面标签
-#    cell   switch | slider | title
-#    d      默认值
-#    rng    slider 的 (min, max)
-#    note   操作逻辑：这个开关到底管什么
+# 二级页面
 # ---------------------------------------------------------------------------
 
 PANELS = [
-    ("Window", "窗口与场景", "窗口的生命周期、几何与启动时序。", [
-        dict(k="SISI", cn="单窗口", cell="switch", d=False,
-             note="同一 App 只保留一个浮窗；切换 App 时状态同步，切回来还原默认尺寸。"),
-        dict(k="HVSeperate", cn="横竖分离", cell="switch", d=False,
-             note="横屏与竖屏各自独立，可同时存在两个浮窗。关掉则共用一个。"),
-        dict(k="SSTemperoryAutoClose", cn="临时窗口", cell="switch", d=False,
-             note="从底边激活新窗口时，自动关闭当前浮窗，避免叠窗。"),
-        dict(k="CustomFrameInit", cn="自定义初始比例", cell="switch", d=False,
-             note="浮窗首帧不套用系统比例，直接使用下面的宽度/高度系数。"),
-        dict(k="Width", cn="宽度", cell="slider", d=0.55, rng=(0.30, 1.00),
-             note="浮窗宽度占屏幕宽度的比例。"),
-        dict(k="HeightFraction", cn="高度系数", cell="slider", d=0.63, rng=(0.30, 0.80),
-             note="浮窗第一次打开时的高度（占屏幕高度的比例），宽度按 5:3 的卡片形状跟随。"
-                  "0.63 是量自参考演示视频的那个值（屏高 63 %，落在这台手机上约 352×587）。"
-                  "拖动或缩放过的浮窗以它自己的记忆为准；长按底角可复位到这个值。"),
-        dict(k="Size", cn="尺寸", cell="slider", d=0.60, rng=(0.40, 1.00),
-             note="基准尺寸，圆盘展开时按此推导各图标位置。"),
-        dict(k="BallparkFigure", cn="近似取值", cell="switch", d=False,
-             note="尺寸取近似值，省掉逐帧重算；视觉差异约 1pt。"),
-        dict(k="LeftCornerTrim", cn="左角微调", cell="switch", d=True,
-             note="左下角：滑动微调比例，长按反向调整。"),
-        dict(k="RightCornerTrim", cn="右角切换", cell="switch", d=True,
-             note="右下角：点击在基础比例之间切换。"),
-        dict(k="AutoPin", cn="自锁", cell="switch", d=False,
-             note="展开后立即固定，不再随内容高度变化。"),
-        dict(k="SingleTapMinimize", cn="单点缩小", cell="switch", d=False,
-             note="单击贴边缩成不可操作的缩略态，再点恢复。"),
-        dict(k="DelayResume", cn="延迟启动", cell="switch", d=False,
-             note="展开动画播完再启动 App，避免动画期掉帧。"),
-        dict(k="Speed", cn="速度", cell="slider", d=1.00, rng=(0.20, 2.00),
-             note="展开/收起的速度倍率，1.0 为母本默认节奏。"),
-        dict(k="DelayRotate", cn="延迟旋转", cell="switch", d=False,
-             note="等动画结束再旋转窗口，避免旋转与缩放同时插值。"),
+    ("Window", "浮窗", [
+        dict(k="HeightFraction", cn="高度", cell="slider", d=0.63, rng=(0.30, 0.80),
+             note="浮窗第一次打开时占屏幕高度的比例。宽度按 5:3 跟随，"
+                  "所以只要调这一个数。拖动或缩放过之后，以那张卡自己的记忆为准；"
+                  "长按卡片底角可以复位到这里。"),
+        dict(k="windowBlacklistText", cn="不走浮窗的 App", cell="text",
+             d="", note="填 bundle id，用逗号或空格分隔。名单里的 App 不进浮窗："
+                        "通知、分享、链接都按系统原生方式打开，是某个 App 在浮窗里"
+                        "用不了时唯一的自救手段。写前缀会盖住它名下所有 App，"
+                        "例如 com.autonavi 也命中 com.autonavi.amap。"),
     ]),
 
-    ("Ring", "承载形状", "旧版插件的圆盘整体移入（0.0.42）：呼出、展开、划过、旋转与收藏列表全部按旧版实现 1:1。", [
-        dict(k="IOMI0", cn="旋转 自适应", cell="switch", d=True,
-             note="让系统决定何时旋转。三选一，建议只开一个。"),
-        dict(k="IOMI1", cn="旋转 立即", cell="switch", d=False,
-             note="立刻跟随，游戏内视角容易错乱。"),
-        dict(k="IOMI2", cn="旋转 延迟", cell="switch", d=False,
-             note="等内容稳定后再旋转，观感最稳。"),
-    ]),
-
-    ("Gesture", "手势与动效", "边缘手势区、触感反馈与弹簧动画。", [
-        dict(k="EBCI", cn="可调触发边", cell="switch", d=False,
-             note="开启后边缘触发区的宽度由下面一项决定，否则用系统默认。"),
-        dict(k="GestureBorderWidth", cn="手势宽度", cell="slider", d=18.0, rng=(8.0, 40.0),
-             note="边缘可识别区域的宽度，单位 pt；越窄越容易误触内部控件。"),
-        dict(k="FastMoveControl", cn="快滑灵敏度", cell="slider", d=1.00, rng=(0.20, 2.00),
-             note="快速滑动时的输入增益。"),
-        dict(k="SIFEI", cn="四边扩展", cell="switch", d=False,
-             note="浮窗四条边都参与交互，而不只是贴边那一侧。"),
-        dict(k="IconJump", cn="防遮挡跳动", cell="switch", d=False,
-             note="托盘被浮窗挡住时自动跳位。"),
-        dict(k="VIBRATE", cn="震动", cell="switch", d=True,
-             note="手势落点时给触感反馈。"),
-        dict(k="INTENSITY", cn="强度", cell="slider", d=0.70, rng=(0.10, 1.00),
-             note="触感强度，对应 impactOccurredWithIntensity: 的参数。"),
-        dict(k="DampingFraction", cn="阻尼系数", cell="slider", d=0.82, rng=(0.10, 1.00),
-             note="弹簧动画阻尼，越小回弹越明显。"),
-        dict(k="CustomSpringAnimation", cn="动画弹性", cell="switch", d=True,
-             note="使用自定义弹簧参数，关掉则走系统默认曲线。"),
-    ]),
-
-    ("Keyboard", "键盘与输入", "浮窗是独立场景，键盘在场景之外，必须桥接。", [
-        dict(k="PortraitKeyboard", cn="竖向键盘", cell="switch", d=False,
-             note="横屏时把键盘强制按竖向布局绘制进浮窗。"),
-        dict(k="IntersectionHeightFraction", cn="键盘避让", cell="slider", d=0.50, rng=(0.00, 1.00),
-             note="浮窗与键盘相交时向上让出的高度比例。"),
-        dict(k="HookUIKit", cn="注入 UIKit", cell="switch", d=False,
-             note="扩大注入范围到 UIKit 进程。改动此项必须重启桌面，且只对已添加的 App 生效。"),
-    ]),
-
-    ("Notify", "通知", "通知如何进入浮窗。", [
-        dict(k="Notification", cn="通知总开关", cell="switch", d=True,
-             note="关掉后下面三项全部失效。"),
-        dict(k="SISNFI", cn="通知转浮窗", cell="switch", d=False,
-             note="收到通知时直接把对应 App 拉进浮窗。"),
-        dict(k="ForegroundNotify", cn="前台通知", cell="switch", d=False,
-             note="仅对已经在浮窗里的 App 生效，不打扰其他。"),
-        dict(k="FrontmostNotify", cn="附加主 App", cell="switch", d=False,
-             note="通知同时附加到当前主 App 上。"),
-    ]),
-
-    ("Jump", "跳转与伪装", "App 内链接、第三方登录、支付与广告的落地策略。", [
-        dict(k="SISURLI", cn="URL 跳转", cell="switch", d=True,
-             note="授权、支付、广告等 URL 统一在浮窗里打开。"),
-        dict(k="SSNoUniversalLinks", cn="UniversalLinks 转 Safari", cell="switch", d=False,
-             note="把 UniversalLink 改走 Safari 打开，需要 UIKit 注入。"),
-        dict(k="SSNoSafariViewService", cn="SafariViewService 转 Safari", cell="switch", d=False,
-             note="把应用内浏览器改走 Safari，需要进程注入。"),
-        dict(k="SISATI", cn="Activity", cell="switch", d=False,
-             note="分享面板里的 Activity 请求同样走浮窗。"),
-        dict(k="SISASI", cn="StoreKitUIService", cell="switch", d=False,
-             note="内购界面接管；母本注明伪装失败率较高。"),
-        dict(k="SISSBI", cn="SpringBoard 请求", cell="switch", d=False,
-             note="允许 SpringBoard 侧发起激活目标浮窗。"),
-        dict(k="SIVSI", cn="视图服务", cell="switch", d=False,
-             note="授予浮窗向外跳转的权限。"),
-        dict(k="SSInterceptor", cn="跳转伪装", cell="switch", d=False,
-             note="拦截跳转并给图标提示；建议按单个 App 开启，全局开容易误伤。"),
-        dict(k="BlockInterceptor", cn="拦截", cell="switch", d=False,
-             note="直接阻断跳转，不放行。"),
-        dict(k="SSInterceptorSilence", cn="静默", cell="switch", d=False,
-             note="伪装成功时不提示；SafariViewService 是例外，仍会提示。"),
-        dict(k="SIPI", cn="预览", cell="switch", d=False,
-             note="浮窗里显示 App 快照而不是实时画面，省电但会滞后。"),
-    ]),
-
-    ("Listen", "监听与系统动作", "系统级服务请求如何落到浮窗。", [
-        dict(k="SSListen", cn="浮窗激活", cell="switch", d=False,
-             note="系统服务请求激活时，改为在浮窗里打开。"),
-        dict(k="ServiceListen", cn="服务监听", cell="switch", d=False,
-             note="监听系统服务调用，是上面一项的前置。"),
-        dict(k="SISRI", cn="缩小范围", cell="switch", d=False,
-             note="只允许已添加的 App 走浮窗激活，避免全局接管。"),
-        dict(k="SICMI", cn="摄像头", cell="switch", d=False,
-             note="允许浮窗内的 App 使用摄像头。"),
+    ("Ring", "圆盘", [
+        dict(k="!ring.desktop", cn="在桌面显示", cell="switch", d=True,
+             note="开着时，手指贴屏幕右缘、在下部 35% 之内向左划，圆盘从固定点展开。"
+                  "关掉只是不显示，不影响浮窗。"),
+        dict(k="@ring.host", cn="桌面状态", cell="title", d="—",
+             note="桌面进程回报的当前状态。显示「未加载」表示 Aevon 没有在桌面里跑，"
+                  "多半是安全闸门开着，或刚改完还没重载。"),
+        dict(k="@ring.apps", cn="已选应用", cell="title", d="自动",
+             note="圆盘里装哪些 App。留空时自动挑最近使用的 12 个。"),
     ]),
 ]
 
-# 母本 81 个键里剩下的纯文案键。它们不是设置项，但必须记账，
-# 否则「81 项全复刻」这句话就无法核对。
-TEXT_KEYS = [
-    ("YES", "是"), ("NO", "否"), ("Dismiss", "关闭"), ("Modify", "修改"),
-    ("Replace", "替换"), ("Copy", "拷贝"), ("Inject", "注入"), ("Error", "错误"),
-    ("Warning", "警告"), ("Window", "窗口"), ("Gesture", "手势"),
-    ("Introduction", "简介"), ("System", "系统"), ("Other", "其它"),
-    ("User", "用户"), ("Preference", "自定义"), ("GestureIntroduction", "手势简介长文案"),
-]
-
-# 应用与全局：不是普通开关，单独处理
-APPS_ITEMS = [
-    dict(k="GlobalPreference", cn="全局设置", cell="switch", d=False,
-         note="对所有 App 生效的默认值。"),
-    dict(k="AutoRemoveAppSettings", cn="自整理自定义", cell="switch", d=False,
-         note="自动删除与全局值一致的单 App 设置，保持列表干净。"),
-    dict(k="UserList", cn="用户列表", cell="title", d="0 个 App",
-         note="已添加的 App 列表，P4 接入。"),
-    dict(k="SystemList", cn="系统列表", cell="title", d="0 个 App",
-         note="系统 App 列表，P4 接入。"),
-    dict(k="ActivateCode", cn="激活码", cell="title", d="未启用（不复刻授权体系）",
-         note="母本的商业授权位。保留键位与位置，功能不实现。"),
-    dict(k="RespringYourselfToActivate", cn="自行注销激活", cell="title", d="不适用",
-         note="母本用于授权后自注销；本项目无授权，故保留占位。"),
-]
+PANEL_BUTTONS = [("Window", "浮窗尺寸与名单", "高度、以及哪些 App 不走浮窗"),
+                 ("Ring", "圆盘", "桌面开关、应用清单与预览")]
 
 
 # ---------------------------------------------------------------------------
-# plist 生成
+# 单元构造
 # ---------------------------------------------------------------------------
 
-def spec_switch(it):
-    return {
-        "cell": "PSSwitchCell",
-        "label": it["cn"],
-        "key": it["k"],
-        "default": bool(it["d"]),
-        "defaults": DOMAIN,
-    }
+def spec_switch(key, cn, default):
+    return {"cell": "PSSwitchCell", "label": cn, "key": key,
+            "default": bool(default), "defaults": DOMAIN}
 
 
-def spec_slider(it):
-    lo, hi = it["rng"]
-    return {
-        "cell": "PSSliderCell",
-        "label": it["cn"],
-        "key": it["k"],
-        "default": float(it["d"]),
-        "min": float(lo),
-        "max": float(hi),
-        "showValue": True,
-        "defaults": DOMAIN,
-    }
+def spec_slider(key, cn, default, rng):
+    lo, hi = rng
+    return {"cell": "PSSliderCell", "label": cn, "key": key,
+            "default": float(default), "min": float(lo), "max": float(hi),
+            "showValue": True, "defaults": DOMAIN}
 
 
-def spec_title(it):
-    return {
-        "cell": "PSTitleValueCell",
-        "label": it["cn"],
-        "key": it["k"],
-        "default": str(it["d"]),
-        "defaults": DOMAIN,
-    }
+def spec_title(key, cn, default):
+    return {"cell": "PSTitleValueCell", "label": cn, "key": key,
+            "default": str(default), "defaults": DOMAIN}
 
 
-BUILDERS = {"switch": spec_switch, "slider": spec_slider, "title": spec_title}
+def spec_text(key, cn, default, placeholder=""):
+    item = {"cell": "PSTextFieldSpecifier", "label": cn, "key": key,
+            "default": str(default), "defaults": DOMAIN}
+    if placeholder:
+        item["placeholder"] = placeholder
+    return item
 
 
-def build_panel(panel_id, title, intro, items):
+def spec_of(it):
+    if it["cell"] == "slider":
+        return spec_slider(it["k"], it["cn"], it["d"], it["rng"])
+    if it["cell"] == "switch":
+        return spec_switch(it["k"], it["cn"], it["d"])
+    if it["cell"] == "text":
+        return spec_text(it["k"], it["cn"], it["d"], it.get("placeholder", ""))
+    return spec_title(it["k"], it["cn"], it["d"])
+
+
+def build_panel(panel_id, title, items):
     specs = []
-    if panel_id == "Apps":
-        # 应用面板原本只有 7 行母本键，没有一处能真正改东西。托盘入口放在
-        # 最上面：它的数据是活的（@ring.apps 现读 apps.plist），按钮直达
-        # 添加/删除/排序页，和「承载形状」面板里那个是同一个入口。
-        specs.append({"cell": "PSGroupCell", "label": "托盘",
-                      "footerText": "托盘装哪些 App 由这里决定，改动立刻作用到桌面上的环。"
-                                    "不指定时退回系统自动挑选的前 12 个。"})
-        specs.append({"cell": "PSTitleValueCell", "label": "已选应用",
-                      "key": "@ring.apps", "default": "自动", "defaults": DOMAIN})
-        specs.append({"cell": "PSButtonCell", "label": "编辑应用（添加 / 删除 / 排序）",
-                      "action": "editApps:", "defaults": DOMAIN})
-    if panel_id == "Window":
-        # 探针放在这一页最上面：这一页的 15 个键都是浮窗参数，但浮窗本身
-        # 还没做 —— 先能用同一个入口把「这台设备上到底有什么场景」测出来，
-        # 后面写承载层才不是猜。转储在 SpringBoard 里跑，不在这里。
-        specs.append({"cell": "PSGroupCell", "label": "探针",
-                      "footerText": "浮窗不是塞进桌面的视图，而是自建 UIScene，"
-                                    "需要先知道这台 iOS 上场景接口长什么样。"
-                                    "四个按钮都把结果写进 /var/mobile/Aevon.log："
-                                    "第一个以 scene: 开头，是当前场景与窗口清单；"
-                                    "第二个以 scene2: 开头，是承载层的真实方法表（已退役，只剩一行）；"
-                                    "第三个以 calls: 开头，把母本用到的每一条调用"
-                                    "核对到这台 iOS 上真正定义它的类与签名；"
-                                    "第四个以 win: 开头：先装母本那套停用管理钩子（带自检），6 秒后记住你切到的那个 App，"
-                                    "你上滑回桌面时卡片才出现。前三个只读；第四个会装钩子，"
-                                    "失败时 SpringBoard 可能注销一次。"
-                                    "各只执行一次，不会在开机时重放。"})
-        specs.append({"cell": "PSButtonCell", "label": "转储场景与窗口（写 Aevon.log）",
-                      "action": "sceneProbe:", "defaults": DOMAIN})
-        specs.append({"cell": "PSButtonCell", "label": "转储承载接口面（方法表）",
-                      "action": "sceneSurface:", "defaults": DOMAIN})
-        specs.append({"cell": "PSButtonCell", "label": "核对调用点（母本 123 条调用）",
-                      "action": "sceneCalls:", "defaults": DOMAIN})
-        specs.append({"cell": "PSButtonCell", "label": "装钩子并建浮窗（切到目标 App，再上滑回桌面）",
-                      "action": "sceneWindow:", "defaults": DOMAIN})
-
-    if panel_id == "Ring":
-        # 预览放在最上面：预览里跑的就是桌面那一份 AevonRingMenu（旧版 1:1），
-        # 展开动画、划过跳跃、阻尼旋转全部是本体，只有「开 App」被拦下弹提示。
-        specs.append({"cell": "PSGroupCell", "label": "预览",
-                      "footerText": "预览跑的就是桌面那份圆盘（旧版实现 1:1）。"
-                                    "动画全是真的，只有开 App 被拦成提示。"})
-        specs.append({"cell": "PSTitleValueCell", "label": "当前承载",
-                      "key": "@ring.summary", "default": "—", "defaults": DOMAIN})
-        specs.append({"cell": "PSButtonCell", "label": "预览承载形状（全屏）",
-                      "action": "previewRing:", "defaults": DOMAIN})
-
-        # 桌面承载：0.0.6 起 RingHost 把同一个 RingView 挂到桌面右下角。
-        # 这个 key 不属于母本 81 键，所以加 "!" 前缀单独记账。
-        #
-        # 0.1.24 — 竖条整体下线（用户 Aevon(107)：「既然现在改为依赖右缘左滑
-        # 触发圆盘，干脆直接移除触发条」）。这一组只剩「装不装」这一个开关了，
-        # 文案也不再提竖条。
-        specs.append({"cell": "PSGroupCell", "label": "桌面",
-                      "footerText": "开启后圆盘挂在桌面上，靠屏幕右缘的左滑手势呼出：" 
-                                    "手指贴着右边框、在屏幕**下部 35%**之内向左划，"
-                                    "圆盘就从固定点展开。点图标启动 App，按住圆心 1 秒旋转，"
-                                    "抬手落在盘外或图标间隙收起。"})
-        specs.append({"cell": "PSSwitchCell", "label": "桌面显示圆盘",
-                      "key": "!ring.desktop", "default": True, "defaults": DOMAIN})
-        specs.append({"cell": "PSTitleValueCell", "label": "桌面状态",
-                      "key": "@ring.host", "default": "—", "defaults": DOMAIN})
-
-        # 0.1.24 — 呼盘手势的说明（没有开关了）。
-        #
-        # 0.1.19 加的「热区覆盖整条右缘」开关在这一版删掉：Aevon(107) 证明整条
-        # 右缘能呼出，但用户随即指出「依旧是右侧全部能触发」，要求改回底部 35%
-        # 以避免与左滑返回插件冲突。既然只有一个正确答案，就不再给用户一个
-        # 会让他自己踩坑的开关。
-        specs.append({"cell": "PSGroupCell", "label": "呼盘手势",
-                      "footerText": "手指贴着右边框、在屏幕**底部往上 35%** 之内"
-                                    "（约 y ≥ 屏幕高度 65% 的位置）向左划，圆盘就展开。"
-                                    "上半段整条让给系统与应用自己的返回手势，互不干扰。"
-                                    "触发条已移除，屏上不再显示任何常驻标记；"
-                                    "键盘弹出时这 35% 也一起让路。"})
-
-        # App 侧激活态桥：浮窗里的内容能不能点，取决于 App 自己是否认为
-        # 自己在前台。这一项装在一个独立注入点里（只注入 UIKit，不碰桌面），
-        # 关掉即等于回到 0.0.43 的行为，不需要卸载。
-        specs.append({"cell": "PSGroupCell", "label": "内容交互",
-                      "footerText": "浮窗里的 App 是被另一个进程显示出来的，"
-                                    "它自己会认为「我在后台」，UIKit 于是丢掉转发进来的触摸——"
-                                    "画面在动、声音在放，就是点不动，这就是原因。"
-                                    "开启后，只有当 App 自己的场景设置说「前台」而它自己说「后台」时，"
-                                    "才把这个矛盾按前台解释；正常前后台切换不受影响。"
-                                    "关掉它立刻回到旧行为，改动对之后打开的 App 生效。"})
-        specs.append({"cell": "PSSwitchCell", "label": "内容可点击（App 侧桥接）",
-                      "key": "!ring.appHook", "default": True, "defaults": DOMAIN})
-
-        # 应用：这一版起这份清单由操作者自己决定，顺序就是托盘顺序。
-        specs.append({"cell": "PSGroupCell", "label": "应用",
-                      "footerText": "托盘里放哪些 App、按什么顺序，全部由编辑器决定"
-                                    "（上限 36 个，含「截图 / 录屏」两个动作槽）。"
-                                    "顺序就是落位顺序：内圈装不下的向外扩圈，"
-                                    "圈数由数量自己决定。改动立刻生效，不需要重载。"})
-        specs.append({"cell": "PSTitleValueCell", "label": "已选应用",
-                      "key": "@ring.apps", "default": "自动", "defaults": DOMAIN})
-        specs.append({"cell": "PSButtonCell", "label": "编辑应用（添加 / 删除 / 排序）",
-                      "action": "editApps:", "defaults": DOMAIN})
-
-        # 0.1.24 — 「竖条位置」「竖条大小」两组全部删除。
-        #
-        # 它们控制的东西（`!ring.barY` / `!ring.barLength` / `!ring.barWidth`）
-        # 只喂 `RingHost.metrics()`，而那个函数这一版整个下线了。留一组调不出
-        # 任何反应的滑块比没有更糟：用户会以为「竖条还在，只是调不出来」。
-        #
-        # 呼盘几何现在只有一个来源（`stripRect`：贴右缘 18 pt × 底部 35%），
-        # 没有可调项，也就不需要任何控件。
-
-        # 0.1.18 — 热区可见层撤除（Aevon(104) 第 3 条：「移除屏幕右侧的手势热区
-        # 可见性…它不会占用大部分屏幕右侧的内容，不需要修改了」）。
-        # 设置项、`!ring.hotzone` 键、`RingConfig.hotZone`、绘制层一起下线。
-        #
-        # 0.1.21 — 这一段说明也撤掉：它写的「贴右缘 12 pt 宽、底部 35% 高」已经
-        # 和 0.1.20 的实测几何（贴边 18 pt、整条右缘）对不上，留着只会让用户
-        # 按错的边界去划。热区本身唯一的说明现在在「呼盘手势」那一组里。
-
-
-        # 手势：母本把这些写进 GestureIntroduction 原文，圆盘这边没有独立设置项，
-        # 但功能必须能被发现 —— 一个只有作者知道的长按，等于没有做。
-        specs.append({"cell": "PSGroupCell", "label": "手势",
-                      "footerText": "手指划过图标：图标跳起并停住，离开后沉下（GIF 量出的关键帧）。"
-                                    "按住圆心 1 秒进入旋转模式（圆心变青绿），再按 1 秒退出。"
-                                    "抬手落在图标上=打开，落在圆心=打开本面板，"
-                                    "落在盘外或图标间隙=收起。删除 App 只走编辑器。"})
-    specs.append({"cell": "PSGroupCell", "label": title, "footerText": intro})
     for it in items:
-        specs.append(BUILDERS[it["cell"]](it))
+        specs.append({"cell": "PSGroupCell", "label": it["cn"], "footerText": it["note"]})
+        specs.append(spec_of(it))
+    # 圆盘的三个动作：编辑器与预览是这一页唯一的「能改东西」的入口。
+    if panel_id == "Ring":
+        specs.append({"cell": "PSGroupCell", "label": "应用",
+                      "footerText": "增删与排序决定图标落在哪一圈；改动立刻生效，"
+                                    "不需要重载桌面。上限 36 个（含截图 / 录屏两个动作槽）。"})
+        specs.append({"cell": "PSButtonCell", "label": "编辑应用",
+                      "action": "editApps:", "defaults": DOMAIN})
+        specs.append({"cell": "PSButtonCell", "label": "预览圆盘（全屏）",
+                      "action": "previewRing:", "defaults": DOMAIN})
     return {"title": title, "items": specs}
 
 
-def write_plist(path, obj, text=False):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as fh:
-        # 用二进制格式：和系统一致，也避免中文 XML 转义问题
-        #
-        # 0.0.50 — 根面板例外，写成 XML 文本。它里面唯一会随版本变的东西是
-        # 「版本」那一行的占位值（`@status.version` 运行时由 Gate 的状态文件
-        # 供给，这里的值只在这一行还没加载时显示），可是二进制 plist 每升一次
-        # 版本就整体换一份不可 diff 的字节：git 认不出、审阅看不见、推送工具
-        # 也只能整块覆盖。XML 之后这一处改动就是一行文本。
-        fmt = plistlib.FMT_XML if text else plistlib.FMT_BINARY
-        plistlib.dump(obj, fh, fmt=fmt)
-
-
 # ---------------------------------------------------------------------------
-# 根面板：状态 / 安全闸门 / 诊断 都是真功能，其余是入口
+# 根页
 # ---------------------------------------------------------------------------
 
-def build_root(panel_items, wired):
-    total = panel_items + len(APPS_ITEMS)
+def build_root():
     items = []
 
     items.append({"cell": "PSGroupCell", "label": "状态",
-                  "footerText": "本页数据直接读自注入进程写下的记录，不是缓存。"})
-    for label, key, default in [
-        ("注入状态", "@status.state", "—"),
-        ("版本", "@status.version", "—"),
-        ("启动次数", "@status.loads", "—"),
-        ("最近一次加载", "@status.last", "—"),
-        ("日志文件", "@status.log", "/var/mobile/Aevon.log"),
-    ]:
-        items.append({"cell": "PSTitleValueCell", "label": label,
-                      "key": key, "default": default, "defaults": DOMAIN})
+                  "footerText": "读数来自桌面进程写下的记录，不是这里的缓存。"})
+    items.append(spec_title("@status.version", "版本", "—"))
+    items.append(spec_title("@status.state", "注入", "—"))
+    items.append(spec_title("@status.last", "最近一次加载", "—"))
 
-    # 0.2.19 — 手机端反馈现场的唯一入口。不是面板：没有 plist、没有开关，
-    # 只是把 /var/mobile/Aevon.log 的尾巴渲染出来，可截图、可一键复制。
+    items.append({"cell": "PSGroupCell", "label": "浮窗与圆盘",
+                  "footerText": "点进去改尺寸、名单和圆盘。"})
+    for pid, label, _sub in PANEL_BUTTONS:
+        items.append({"cell": "PSButtonCell", "label": label,
+                      "action": "openPanel:", "panel": pid})
+
+    items.append({"cell": "PSGroupCell", "label": "接管范围",
+                  "footerText": "关掉的那一类请求按系统原生方式打开，Aevon 一个字节都不改。"
+                                "关掉之后立刻生效，不需要重载。"})
+    items.append({"cell": "PSSwitchCell", "label": "通知点开进浮窗",
+                  "key": "!gate.notify", "default": True, "defaults": DOMAIN})
+    items.append({"cell": "PSSwitchCell", "label": "分享进浮窗",
+                  "key": "!gate.share", "default": True, "defaults": DOMAIN})
+
     items.append({"cell": "PSGroupCell", "label": "诊断",
-                  "footerText": "日志页只读不写：显示 /var/mobile/Aevon.log 最近 600 行。"
-                                "右上角「复制」可整段粘贴到反馈里，不需要导出文件。"})
-    items.append({"cell": "PSButtonCell", "label": "查看日志（最近 600 行）",
+                  "footerText": "日志页显示最近 600 行，右上角可整段复制，"
+                                "手机上就能把现场发出来，不用导出文件。"})
+    items.append({"cell": "PSButtonCell", "label": "查看日志",
                   "action": "openLog:", "defaults": DOMAIN})
 
-    items.append({"cell": "PSGroupCell", "label": "安全闸门",
-                  "footerText": "这两个开关是应急用的。任一开启后，桌面重载时 Aevon 不安装任何 hook。"
-                                "关闭 G0/G1 不会自动恢复，需要重载桌面。"})
+    items.append({"cell": "PSGroupCell", "label": "安全",
+                  "footerText": "两个闸门任一开启，重载桌面后 Aevon 不装任何 hook。"
+                                "关掉它们不会自动恢复，需要再重载一次。"})
+    items.append({"cell": "PSSwitchCell", "label": "停用（重载后生效）",
+                  "key": "!gate.disabled", "default": False, "defaults": DOMAIN})
     items.append({"cell": "PSSwitchCell", "label": "紧急停止（G0）",
                   "key": "!gate.panic", "default": False, "defaults": DOMAIN})
-    items.append({"cell": "PSSwitchCell", "label": "暂停注入（G1）",
-                  "key": "!gate.disabled", "default": False, "defaults": DOMAIN})
     items.append({"cell": "PSButtonCell", "label": "清除崩溃计数",
                   "action": "clearAttempts:", "defaults": DOMAIN})
-    items.append({"cell": "PSButtonCell", "label": "重载桌面（应用闸门变更）",
+    items.append({"cell": "PSButtonCell", "label": "重载桌面",
                   "action": "respring:", "defaults": DOMAIN})
 
-    # 0.2.4 — 浮窗黑名单。母版与四家同行都带这张名单（TrollOpen 的
-    # TOBJJumpSplitExcludedApplications、Mango 的 urlOpenInSplit、Myrtle 的
-    # URLJUMPBLACKLIST），它是「某个 App 在浮窗里用不了」时唯一的自救手段。
-    # 在这一版之前，Aevon 一个走不通的 App 只能表现为「点了没反应」。
-    items.append({"cell": "PSGroupCell", "label": "浮窗黑名单",
-                  "footerText": "填 bundle id，用逗号、空格或换行分隔（例：com.autonavi.amap）。"
-                                "名单里的 App 不进浮窗，也不拦它的打开请求——一切按系统原生走。"
-                                "改名后无需重载桌面，下一次点通知/分享就生效。"
-                                "写 com.autonavi 这样的前缀也会盖住它名下所有 App。"})
-    items.append({"cell": "PSTextFieldSpecifier", "label": "黑名单",
-                  "key": "windowBlacklistText", "default": "",
-                  "defaults": DOMAIN,
-                  "placeholder": "com.autonavi.amap, com.example.app"})
-
-    items.append({"cell": "PSGroupCell", "label": "功能设置",
-                  "footerText": f"下面 8 个面板共 {total} 项，母本键与母本一一对应"
-                                f"（母本 81 键中有 {len(DROPPED)} 项已明确放弃，"
-                                f"名单见交付说明）。点任一项进入该面板；"
-                                f"承载形状已整体换成旧版实现，"
-                                f"其余面板的开关会写入 com.aevon 域，等对应功能落地后即生效。"})
-    for pid, title, _intro in [(p[0], p[1], p[2]) for p in PANELS]:
-        # PSButtonCell + 显式 action：0.0.5 用 PSChildPaneSpecifier，这一版 iOS
-        # 不给它选中态，8 行全是死的。按钮是唯一不会随框架改版失效的写法，
-        # 由 RootListController 自己 push。
-        items.append({"cell": "PSButtonCell", "label": title,
-                      "action": "openPanel:", "panel": pid})
-    items.append({"cell": "PSButtonCell", "label": "应用与全局",
-                  "action": "openPanel:", "panel": "Apps"})
-
-    # 快捷入口：不经过面板，直接作用于桌面上的环。面板页的装载一旦在某个
-    # iOS 版本上失败，这两个按钮仍然可达 —— 它们是这一版新功能的唯一保证。
-    items.append({"cell": "PSGroupCell", "label": "快捷操作",
-                  "footerText": "这两个动作不经过面板，直接作用于桌面上的环："
-                                "预览用当前参数全屏画一次；应用与排序改的是托盘装哪些 App。"})
-    items.append({"cell": "PSButtonCell", "label": "预览承载形状（全屏）",
-                  "action": "previewRing:", "defaults": DOMAIN})
-    items.append({"cell": "PSButtonCell", "label": "应用与排序（托盘）",
-                  "action": "editApps:", "defaults": DOMAIN})
-
-    items.append({"cell": "PSGroupCell", "label": "关于",
-                  "footerText": f"Aevon {VERSION} · Swift · arm64e · 8 个面板全部可进入。"
-                                f"承载形状：旧版圆盘 1:1 移入——右缘左滑呼出，划过跳跃、"
-                                f"阻尼旋转、逐点展开全是本体；应用在编辑器里增删排序"
-                                f"（上限 36，含截图 / 录屏动作槽）。"
-                                "0.2.18 起：**分享那条的抢跑点找到了 —— 是 0 毫秒**。"
-                                "① 0.2.17 的「等投递结论」一秒都没等过：`AevonForwardHoldWatch(1.6)` 是同步调用的，而它第一句就是「投递不忙 ⇒ 立刻 flush」；卡片要 100 毫秒之后才把 scene 贴上、才调 `AevonForwardDeliver`，所以这一拍永远读到「不忙」。Aevon(189) 现场：`notify: forward held slot=1 form=@` 紧跟 `notify: forward flush why=timeout after=0ms`，接着 `notify: forward pass b=com.tencent.mqq op=user` —— 交回系统那一下 SpringBoard 把 QQ 的 scene 抢去整屏；卡片自己是好的（`win: scene frame after=430x717`），黑的是它背后。这一版首拍排到 1.0 秒之后，之后每 0.5 秒续拍。"
-                                "② 两种「等」分开算：投递**已经发起** ⇒ 等它的结论（6 秒硬上限）；**一次都没发起** ⇒ 3 秒宽限，还是不发就地销毁（`notify: share lost b=… why=no deliver`）。**任何一条路都不再交回 SpringBoard**，所以背景永远停在分享发起页，不会再有全屏黑底。"
-                                "③ 回执加了 `wins`（App 有几个窗口）与 `state`（应用状态），宿主原样打进主日志 —— Aevon(188) 那条 `ok=0 via=noscene` 是「没有 scene」还是「有窗口没 scene」，这一版才分得清。抖音那条已按 Aevon(189) 验收（`win: own staged 430x932 -> 430x717` + `app: geom early peers6 n=1 UIView:0,0,430x717`），本版不再动它。"
-                                "停掉整个通知与分享接管：在 /var/mobile/Library/Logs/Aevon/ 下建空文件 notify.off 再重启；只想停分享就建 share.off。"
-                                "0.2.19 起：设置 → 诊断 → 查看日志（最近 600 行），可截图或一键复制，手机端不再需要导出文件。"
-                                "0.2.39 起：**分享改成「先真激活、再收进卡片」**。实测证伪了「先建卡再交回」这条路："
-                                "App 一跑起来，挂起位就被系统无视，卡片和全屏抢同一份 scene；"
-                                "现在请求原样放行到原生全屏，等它真的把内容接到手、再把前台 App 收回卡片。"
-                                "微信同时移出分享黑名单（`shareBlacklist` 整块删除），它的文件分享也进卡片了。"
-                                "0.2.40 起：**尺寸与圆角对齐参考演示视频（逐像素量的）**。"
-                                "① 卡片高度系数 62 % → 63 %（视频里的卡片占屏高 63.0 %）。"
-                                "卡片形状是钉死的 5:3，所以宽度被推成 81.9 %（视频 79.8 %，差 2.1 个点）；"
-                                "想按宽度对齐就把这个滑条调到 61 %，得到 343×572。"
-                                "② 圆角不再是固定 38 pt，改成「卡宽 × 12.73 %」—— 视频里卡宽 707 px、圆角 90 px 就是这个比例。"
-                                "旧写法在 347 宽上是 10.95 %（偏方）、拖到 168 宽变 22.6 %（偏圆），"
-                                "这就是「越小越圆、越大越方」的成因；现在只有一个比例，缩放不再改变观感。"
-                                "主窗与小窗共用这一条比例，停靠时也不会跳。"
-                                "③ 顺带修掉默认位置：算 x 时用的宽度占比还是旧口径（62 %），"
-                                "而实际卡宽是 80.6 %，于是默认卡片其实被夹在右边缘、右边环带一点不剩；现在居中了。"
-                                "判据：日志 `win: corner w=352 r=45 pct=12.7`，卡片 352×587 居中，左右各留 39 pt。"
-                                "④ 位置与尺寸的记忆也统一了。以前开窗、点小窗升回、长按复位各读各的："
-                                "「上一个主窗」是一帧内存缓存（`lastMainFrame`），键盘一起来就被写成 430×717，"
-                                "多窗时又被别的卡覆盖，所以升回来时大时小；缩放上限 916 比 `plan` 的上限 717 高，"
-                                "拖大之后重开必小一圈；窄卡片开窗时横向还要让出 66 pt 环带，位置也被夹走一截。"
-                                "现在唯一的一份记忆是存盘：拖动/缩放结束写、开窗/升窗/复位读，"
-                                "高度区间「屏高 30 % … min(画布高, 屏高 − 96)」三处共用；"
-                                "停靠小窗只留一个 `docked` 布尔，不再兼记几何。"
-                                "判据：`win: plan card=352x587 at 39,172 f=0.6300 range=280..717 src=memory`，"
-                                "同一串「点小窗升回」里这一行每次相同，且与 `win: card remembered … f=0.6300` 互相对得上。"
-                                "0.2.42 起：**关键盘后的还原快了，浮窗里也不再透出桌面**。"
-                                "① 收起前那段挂起从 0.60 s 缩到 0.10 s。0.1.83 压 0.60 s 的理由是当年 App 侧一次误判就报「收了」，"
-                                "只能靠「等一秒里还有没有下一条心跳」来否决；0.1.84 起 App 侧已经是三态轮询"
-                                "（量到键盘还在走 `kb: settle keep`、连续两次 GONE 才发 `kb.off`），桌面这一侧再压 0.60 s "
-                                "等于把同一个确认做两遍。整条链从约 1.7 s 降到约 0.5 s，卡片开始缩的那一拍"
-                                "（0.10 挂起 + 0.15 场景落地）正好是键盘自己的收起动画。"
-                                "判据：`win: keyboard unfill armed hold=100ms` 后面紧跟 `win: keyboard fill off card=… kb-to-card=250ms`；"
-                                "`kb-to-card` 超过 500 ms 说明中间被一次「又开了」作废重排过。"
-                                "② 卡片里加了一层不透明底板（系统底色），App 的画面在它上面。"
-                                "Safari 起始页整页是一块 `SCSafariPageLightEffectView`（壁纸模糊那种半透明材质），"
-                                "而卡片三层（窗口 / 卡片 / 承载视图）的背景都是透明的 —— 那层材质下面什么都没有，"
-                                "桌面就直接透上来，用户看到的就是「浮窗变成透明背景」。现在空的地方露系统底色，"
-                                "App 正常画满时这层完全看不见；画布留边仍然是黑的（黑也写在这一层上）。"
-                                "0.2.43 起：**打开/关闭键盘那一段动画换成弹簧，放大时那一下闪修掉了**。"
-                                "① 卡片张开/缩回改走 `AevonMotion.fill`（母本那套过阻尼弹簧，时长仍钉在 0.24 s 与系统键盘同速）。"
-                                "以前是裸 `UIView.animate(.curveEaseOut)`，它不抬 AevonMotion 的「正在过渡」标记，"
-                                "于是 `applyCorner` 里「过渡中补一条同时长的圆角动画」那个闸等于不存在 —— "
-                                "卡片 352→430 时圆角从 44.8 硬跳到 54.7，框在长、角先到位，这就是放大过程里那一下跳。"
-                                "现在圆角补间读的是这一次过渡的真时长，与框同时落地。"
-                                "② 光晕原来在动画块外调用，读到的 `card.frame` 已经是终点值 —— 整圈阴影比卡片早 0.24 s 搬到终点，"
-                                "肉眼就是一片光先闪出来。现在它跟卡片同一条曲线，收尾才重建一次阴影路径。"
-                                "③ 场景帧当拍写不了时（`AevonPushSceneFrame` 在被钩的系统回调里会拒绝，键盘弹起常撞上）补推 4 次、每次 40 ms，"
-                                "把原来等守护循环的 200 ms 空档压掉，App 侧拿到的原点不再是旧值。"
-                                "判据：`win: kb spring t=0.24 zeta=1.00 v=0.35` 只出现一次；"
-                                "`win: keyboard fill on … push=` 后面若紧跟 `win: kb push late gave up why=`"
-                                "（0.2.56 及更早是 `gave up door=0`），说明补推到最后一次都没推成。"
-                                "另看 `win: placement put back 1.000 was=1.000 dC=0,215 org=215`："
-                                "修正前后缩放比相同、只有中心偏了，说明卡片的承载面被系统按 scene 原点重设过 —— 这一行是那一下闪的物证。"
-                                "0.2.52 起：**让抖音真正按浮窗大小重排 —— 改的是「它以为自己的屏幕有多大」，不是再补一次画面位置**。"
-                                "对照三份逆向数据后确认：Mango / TrollOpen / Myrtle 都不往 App 进程里注入，"
-                                "它们让 App 自己排对；我们一直是唯一在 App 里挪画面的人，而那条路正是抖音那次 "
-                                "10 秒 scene-create 看门狗（FRONTBOARD 0x8BADF00D）主线程栈上的最后一环（`[CATransaction commit]`）。"
-                                "① 显示配置的覆盖路线换了：以前是「拷一份真机配置、再问副本有没有 setBounds:」，"
-                                "真机上有一半时候副本没有这个方法，App 拿到的仍是 430x932（日志 `own display keep … (no setBounds)`），"
-                                "于是它按整屏排版；现在先走 `copyWithOverrideBounds:`（不要求副本可变），失败才回落老路。"
-                                "② 建 scene 时把「内容参考尺寸」一起定成画布大小（`setContentReferenceSize:withContentOrientation:"
-                                "andContainerOrientation:`），App 的第一帧就有正确的参考坐标系。"
-                                "③ 推 scene 尺寸时把屏幕一起推 —— 以前只改 frame，屏幕永远停在出生时的那个数；"
-                                "键盘态 717→932 时这就是又一种错位。只在尺寸真的变了才写，另带 0.20 s 节流。"
-                                "④ 场景更新改成带回执：系统收下这次更新就回调（`win: scene ack slot=`），"
-                                "四拍盲推改成「有回执就停」—— 少推一次就少一次 App 重排。"
-                                "判据：`win: own display 430x932 -> 430x717 via=override`（不再是 via=mutable / keep）、"
-                                "`win: own ref 430x717 via=settings`、`win: display follow 430x932 -> 430x717 slot=0`、"
-                                "`win: scene ack slot=0` 四条都出现；然后看 `video band` 的 `gap` 是否掉到 8 以下、"
-                                "`via=tick` 的写入次数是否归零 —— 归零就说明视频居中补丁可以删了。"
-                                "0.2.53 起：**网页链接一步到 Safari；微信 / QQ 登录不再先整屏**。"
-                                "① 通用链接会先被系统解析到声明了 Associated Domains 的 App（点 GitHub 链接先去 GitHub App），"
-                                "0.2.52 把这类请求当普通 App 打开放行，所以中间多弹一下；现在识别 "
-                                "`__UserActivity4LS.activityType = NSUserActivityTypeBrowsingWeb`（且没有 paste token、不是分享），"
-                                "把目标直接改写成 Safari 再建卡 —— 判据 `notify: link retarget from=… to=safari scheme=https`。"
-                                "② 链接 / 登录那一支原来排在 `__PasteSharingToken` 早退之后，微信 / QQ 授权一捎带 token 就连判据都进不去，"
-                                "只能走「先全屏激活、再收回卡片」；现在整支提到 paste 之前，并用 `file://` / `data:` 把 QQ 的文件分享排掉"
-                                "（登录是网页或 SDK 深链，分享是文件 URL）。判据 `notify: link b=com.tencent.xin kind=oauth scheme=…`；"
-                                "若仍看到 `notify: link skip … url=none keys=…`，说明这次登录只带 paste token，没有 URL 可投递。"
-                                "0.2.54 起：**冷启动不再被当成「掉画」**。`contentState` 在开卡这一路上是爬着上来的"
-                                "（0 还没准备好 → 1 已连接、还没出首帧 → 2 有画），旧判据只排掉 2，等于把 `cs=1` 也算成黑。"
-                                "于是那半秒里每拍都在喊 `picture dropped cs=1`，还连着两次 `AevonWakeScene`（`wake=1`、`wake=2`）"
-                                "往一个**还没画过第一帧**的 scene 推 settings —— Aevon(197) 里那两次提交正好夹在 "
-                                "`scene deactivation #3/#4/#5` 与 `first frame shown 527ms` 中间。"
-                                "① 掉画判据只排掉「还没出过首帧、读数停在 `cs=1`」这一种过渡态 —— `cs=0` 那条兜底原样留着，"
-                                "不跟着一起关掉；② `deadBeats`（连续两拍零层 ⇒ 关卡重开）的门从 `dropped != 0` 换成同一格记忆，"
-                                "不再依赖「画面回来」那一行有没有跑到；"
-                                "③ `scene deactivation` 与 `picture dropped` 各补两个现场数（`cs= sub= wake=`）——"
-                                "「是不是我自己刚写的那一笔把它推下去的」从此能直接从行里读，不用对时间戳。"
-                                "判据：开卡时**不该再出现** `picture dropped cs=1`；`scene deactivation` 行尾的 `wake=0` "
-                                "说明那几次 deactivate 与我们的写入无关。"
-                                "0.2.55 起：**微信登录先闪一下全屏 —— 判据与投递用的不是同一套 URL 查找**。"
-                                "0.2.53 起分流判据会用 `AevonOpenScanURL` 到别的层里找登录深链，可投递这一侧"
-                                "（`AevonForwardHeldURL`）仍然只读 `__PayloadURL` 与 payload 里的 URL 键："
-                                "判据认出来了、卡片也建好了，投递却答「没有 URL」，于是 "
-                                "`forward flush why=appurl no url` 把请求交回系统，微信就被整屏拉一下再收回来。"
-                                "QQ 的深链恰好在 `__PayloadURL`（所以 0.2.54 里它已经全程悬浮），微信这一条不在，"
-                                "正好只闪它。现在两边共用 `AevonOpenURLOf`。"
-                                "判据：微信登录应有 `notify: link b=com.tencent.xin kind=oauth scheme=weixin`、"
-                                "`notify: appurl send b=com.tencent.xin …`、`notify: appurl ack … ok=1` 与 "
-                                "`notify: forward drop why=appurl ok`，**不该再出现** `why=appurl no url`。"
-                                "同一版给微信 / QQ 的每次打开加一行 `notify: sso b=… pay=… cont=… share=… sys=… "
-                                "front=… src=… act=…#… url=… board=… keys=…`（独立预算 40 行，只读）。"
-                                "若微信仍是 `pay=paste` + `url=none`，`board=` 会给出粘贴板里那个值的 scheme / 长度"
-                                "（内容不落日志）—— 下一版能不能在本地投递，就看这一格。"
-                                "0.2.56 起：**微信登录那一下全屏：先把「系统必须激活它」这一段压到最短，"
-                                "同时把下一版要用的两个读数补进日志**。"
-                                "0.2.55 的日志第一次照全了这条请求：`pay=paste` + `cont=1` + 顶层没有任何 URL"
-                                "（`url=- len=0`），`board=-` 说明 SpringBoard 这边也读不到粘贴板内容 —— "
-                                "没有 URL 可投递，而 paste token 只能随系统真正激活过 XPC（0.2.37 的"
-                                "「先建卡再交回」已被真机证伪：卡片和全屏抢同一份 scene，卡片黑）。"
-                                "所以这一版不再假装能绕开它，只压缩可见时间：`AevonPastePromoteSchedule` "
-                                "首拍 0.20 s → 0.02 s，轮询 0.125 s → 0.06 s（总窗口仍是 3 s）。"
-                                "`AevonPastePromoteTick` 原本就用 `sceneFG / front` 判「目标是不是真的已经上前台」，"
-                                "提前来问不会抢跑 —— 目标一翻前台就收卡，不再多等一个固定节拍。"
-                                "判据：`notify: paste promote schedule` 与 `notify: paste promote … tick=0` 几乎同一拍，"
-                                "紧随其后的 `notify: share swap card b=com.tencent.xin after=60ms` 前面不再空 0.2 s。"
-                                "① 另把 `__AppLink4LS`（`LSAppLink`）补进 URL 查找：它是对象，"
-                                "`AevonOpenScanURL` 那套按形状扫进不到内部，0.2.55 的 `url=-` 可能漏在这里。"
-                                "② `notify: sso` 行新增 `link=`（类名:scheme/长度）、`ua=`（activityType）与 "
-                                "`ptk=`（`__PasteSharingToken` 的 ivar 名字，最多 6 个，只记名字不读值）。"
-                                "若 `link=` 真给出一条深链、或 `ptk=` 里有粘贴板名字，下一版就能改成本地投递，"
-                                "把这一下全屏彻底去掉。"
-                                "0.2.57 起：**补推学会按「为什么没写成」收手**。"
-                                "0.2.54 的日志里键盘张开 5 次全部 `keyboard fill on … push=0`，"
-                                "补推 4 × 40 ms = 160 ms 盖不住 0.24 s 的张开动画，撞出 `kb push late gave up door=0`，"
-                                "只能等下一拍 `frame drift` 用门 3 补上 —— 那 ≤200 ms 里画面原点还是旧的。"
-                                "病根是 `AevonPushSceneFrame` 五种失败都返回同一个 `0`，调用方分不清"
-                                "「可以继续等」和「等也没用」。现在每个返回点落一格原因码："
-                                "1 nil / 2 非主线程 / 3 在钩子里 / 4 重入 / 5 未登记 / 6 无 settings / "
-                                "7 已等值（门里那笔要写的跟当前一模一样）/ 8 写了没门。"
-                                "`AevonPushSceneFrameWhy()` 读它；`pushSceneLater` 按码分岔："
-                                "`7` 立刻收手（顺带消掉「drift 刚修好、补推又写一次」的重复提交）、"
-                                "`1/2/6` 立刻放弃、`3/4/5/8` 续试，次数 4 → 9（≈360 ms，盖住整段动画）。"
-                                "判据：`keyboard fill on` 之后应看到 `kb push late stop ack` 或 `stop why=7`，"
-                                "`gave up` 变成罕见且行尾带 why。"
-                                "另把 `scene deactivation #N` 的计数从「钩子被调了几次」（`deact_set`）"
-                                "改成「真的被清零了几次」（`stripped`）—— 0.2.54 的日志里 `deact_set=21` 而 "
-                                "`stripped=6`，那个涨到 #26 的数是噪声，还因为两张卡读同一个全局计数而在同一秒印两遍。"
-                                "行里同时补 `reasons=`（系统这一次给的原因位）与 `b=`（哪张卡）。"
-                                "0.2.58 起：**授权回调不再把卡里的 App 拽成全屏**。"
-                                "微信 / QQ 处理完 SSO 会回到发起登录的那个 App，这条请求里带着 "
-                                "`<app>://oauth?code=…`。分流层原来有一句「目标已经整屏在屏上就放行」，"
-                                "判的是 SpringBoard 的 `isFrontmost`；而卡片里的 App 在我们自己的 scene 里"
-                                "本来就被设成 foreground，`isFrontmost` 对它同样答 1 —— 两种完全不同的处境"
-                                "被当成了同一件事，于是这条请求整条交回系统，系统就把那个 App 从卡片里"
-                                "拽成全屏。用户看到的就是「授权时跳一下全屏，然后才回到浮窗」。"
-                                "现在这两件事分开判：`front=1` 且 `card=0`（真的整屏在前台）才放行；"
-                                "`front=1` 且 `card=1`（它就在我们卡里）继续往下走，落到 `oauth` 分支 → "
-                                "`openCard`。`openCard` 对「已是主窗」「在停靠小窗」都有判重，认出来之后"
-                                "调 `AevonForwardDeliver` 把 URL 投进同一张卡，不重建 scene。"
-                                "判据：`notify: link b=… front=1 card=1` 出现 ⇒ 旧版正是在这里放行；"
-                                "紧随其后应是 `notify: link card b=…` 而**不是**整屏。"
-                                "`notify: link` / `notify: link skip` 两行都补了 `front=` 与 `card=`，"
-                                "以后不用再猜「卡里算不算前台」。"
-
-                                "0.2.59 起：**Aevon(200) 的五件事一次修完**（抖音打开慢 / QQ 授权成功但 App 没登录 / "
-                                "微信授权两处乱跳 / 键盘弹起中下发黑 / 文件分享到 QQ 先跳全屏）。"
-                                "① **抖音打开慢（>1 s）**：时间线是 `own start … t=1ms wait=2ms` → **749 ms** 之后才有 "
-                                "`own scene up`，再 577 ms 才首帧；那 749 ms 全在等 App 进程起来（`app: boot pid=…` 就落在中间），"
-                                "不是我们的开销，可用户量的是「点了到看见」。这一版把它挪到手指还停在图标上时去付："
-                                "圆盘里悬停**同一个图标满 0.18 s** ⇒ 宿主用 `launchIntent=4` 先把进程拉起来"
-                                "（只起进程、**不建 scene、不上屏**，刻意不碰自行建卡那套状态机，免得留下孤儿 scene），"
-                                "日志 `win: warm start b=…` / `win: warm done b=… at=…ms pid=…`；"
-                                "快速划过整排不会热任何一个 —— 换图标就把令牌作废，那时用户还没决定。"
-                                "判据：选中之后 `own start` 到 `own scene up` 的间隔应明显短于 749 ms，且出现 `warm done`。"
-                                "② **QQ 授权成功但全屏 App 没登录 / 微信与全屏 App 互相乱跳**：同一个毛病 —— 这两条回跳在 options 上"
-                                "和「分享」长得一模一样（带 payload、带 paste token），于是整条走了 `paste` 那一支：**先放行给系统**"
-                                "（目标 App 被推成全屏），60 ms 之后再收进卡片。那 60 ms 里 App 被激活两次，SDK 回调断在半路，"
-                                "所以 QQ 显示成功而 App 停在上一步；微信那条更明显，`link skip` 紧跟 `pass … why=paste`，"
-                                "屏幕上来回跳的就是这两拍。新判据只有一条：**回跳没有续接动作**（回跳 `ac=-`，分享带 "
-                                "`ac=#UIActivityContinuationAction`），且送信方是微信 / QQ —— 目标整屏开着就原样放行且**不再排 promote**"
-                                "（`notify: pass b=… why=callback`），App 就在全屏里把登录做完；目标在卡里就本地投递（`why=incard`）。"
-                                "微信登录另有一条：它的 URL 路径里带 `/auth/`（`https://help.wechat.com/app/<appid>/auth/`），"
-                                "这一版**按 URL 语义认授权**，认出来就不受续接动作约束，直接建卡本地投递，系统一次都不激活。"
-                                "**授权完成后自动收卡**：`appurl ack ok=1` 且 URL 带 `oauth`/`code=` 且送信方是微信 / QQ ⇒ "
-                                "0.45 s 后把那张卡正常关掉（`notify: auth card close b=…` → `win: card closed after auth b=…`）；"
-                                "这不是「让路」（让路是把 scene 交给系统接管），是拆卡把画面还给全屏那个 App。"
-                                "判据：微信登录不该再出现 `pass … why=paste` 紧跟 `share swap card`；QQ 回跳后应看到 `why=callback`；"
-                                "授权完成 0.5 s 内微信卡消失。"
-                                "③ **文件分享到 QQ 先跳一下全屏**：文件必须经系统那一次激活才进得了目标 App 的 Inbox，所以「不激活」做不到；"
-                                "能做的是别再多跳一次 App。旧版在 promote 第一拍去 `launchApplicationWithIdentifier:` 把**来源**顶回前台，"
-                                "而来源是分享浮层（`com.apple.UIKit.OverlayUI.<uuid>`）时这一下必然被拒，于是白等 20 拍（1.2 s）才认输，"
-                                "那 1.2 s 里目标一直整屏在屏上。这一版门只认 `door=1`，不是 1 就**当拍**走原来那条兜底"
-                                "（`notify: share swap nogate b=… door=2`），同一段代码提前 1.2 s 执行。"
-                                "判据：`share swap nogate` 之后应立刻出现 `share restore` 与建卡，不再有 20 拍空转。"
-                                "④ **键盘弹起画面往上跳、中下一条发黑**：根子是宿主在 6 秒里做了三轮「收起 → 又张开」"
-                                "（`keyboard fill on card=430x717 at 0,215` 与 `fill off card=352x587 at 43,162` 交替出现），"
-                                "每轮卡片都在两个几何之间飞一次、场景跟着 `frame drift` 追一次，那几帧卡片与场景不同源，露出来的就是黑。"
-                                "`AevonMotion.unfillHold` 0.10 s → **0.35 s**：假收起会被紧随其后的 `kb.up` 在这段时间里否决，一个几何都不写；"
-                                "真收起时卡片是等键盘落下去之后再缩回的，看起来仍是一次收。"
-                                "判据：打字期间 `keyboard fill on/off` 不再成对刷，日志 `unfill armed hold=350ms`。"
-                                "⑤ **关于母版与另外两家**：拆了 Stheno（母版）、Myrtle、Mango、TrollOpen 四份二进制 —— 前三家主库里"
-                                "**根本没有** `_openURLCore` / `_handleOpenApplicationRequest` / `PasteSharingToken` 这些符号，"
-                                "它们不接管启动、只缩放宿主窗口，所以天生不会有上面这几件事；只有 TrollOpen 碰 URL 层"
-                                "（钩 `SpringBoard -_openURLCore:display:animating:activationSettings:origin:withResult:`），"
-                                "而那条编码里 `B32` 紧跟 `@36`（不是 8 的倍数），按猜的签名写函数指针一错位就毁掉整条激活链 —— "
-                                "所以这一版仍不接它，改在自己的分流层把判据补对。"
-                                "❗装完必须**重启**（不是 respring）。"})
-
-
+    items.append({"cell": "PSGroupCell", "label": "",
+                  "footerText": f"Aevon {VERSION} · 装完或改完闸门需要重启桌面。"})
     return {"title": "Aevon", "items": items}
 
 
 # ---------------------------------------------------------------------------
-# 文档表格
+# 写盘
 # ---------------------------------------------------------------------------
 
-CELL_CN = {"switch": "开关", "slider": "滑杆", "title": "只读"}
+def write_plist(path, obj, text=False):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        plistlib.dump(obj, fh, fmt=plistlib.FMT_XML if text else plistlib.FMT_BINARY)
+
+
+CELL_CN = {"switch": "开关", "slider": "滑杆", "text": "文本", "title": "只读"}
 
 
 def esc(s):
@@ -717,10 +208,8 @@ def esc(s):
 
 
 def html_rows():
-    rows = []
-    n = 0
-    for pid, title, _intro, items in [(p[0], p[1], p[2], p[3]) for p in PANELS] + \
-                                     [("Apps", "应用与全局", "", APPS_ITEMS)]:
+    rows, n = [], 0
+    for pid, title, items in PANELS:
         for it in items:
             n += 1
             if it["cell"] == "slider":
@@ -728,20 +217,15 @@ def html_rows():
                 rng = f"{lo:g} ~ {hi:g}　默认 {it['d']:g}"
             elif it["cell"] == "switch":
                 rng = "开 / 关　默认" + ("开" if it["d"] else "关")
+            elif it["cell"] == "text":
+                rng = "文本"
             else:
                 rng = "—"
-            # 只有真正写进运行参数并被桌面读取的键才标「已接通」，
-            # 其余只是写域、功能尚未落地，不能标成一样的状态。
-            wired = it["k"] in WIRED_KEYS
-            tag = ("<span class='tag tD'>已接通</span>" if wired
-                   else "<span class='tag tW'>待接通</span>")
             rows.append(
                 f"<tr><td class='num'>{n:02d}</td><td>{esc(title)}</td>"
                 f"<td class='mono'>{esc(it['k'])}</td><td>{esc(it['cn'])}</td>"
                 f"<td class='ctr'>{CELL_CN[it['cell']]}</td><td class='mono sm'>{esc(rng)}</td>"
-                f"<td>{esc(it['note'])}</td>"
-                f"<td class='ctr'>{tag}</td></tr>"
-            )
+                f"<td>{esc(it['note'])}</td></tr>")
     return "\n".join(rows), n
 
 
@@ -749,65 +233,39 @@ def main():
     os.makedirs(OUTDIR, exist_ok=True)
     written = []
 
-    for pid, title, intro, items in PANELS:
-        write_plist(os.path.join(BUNDLE, pid + ".plist"),
-                    build_panel(pid, title, intro, items))
+    # 旧版的 8 个母本面板文件不再被引用，留着只会让 layout 里多出死页面。
+    for stale in ["Apps", "Gesture", "Keyboard", "Notify", "Jump", "Listen", "Window", "Ring"]:
+        path = os.path.join(BUNDLE, stale + ".plist")
+        if os.path.exists(path):
+            os.remove(path)
+
+    for pid, title, items in PANELS:
+        write_plist(os.path.join(BUNDLE, pid + ".plist"), build_panel(pid, title, items))
         written.append(pid + ".plist")
 
-    write_plist(os.path.join(BUNDLE, "Apps.plist"),
-                build_panel("Apps", "应用与全局",
-                            "全局默认值与单 App 覆盖的关系；本期为占位。", APPS_ITEMS))
-    written.append("Apps.plist")
-
-    panel_items = sum(len(p[3]) for p in PANELS)
-    wired = len({it["k"] for p in PANELS for it in p[3]} & WIRED_KEYS)
-    write_plist(os.path.join(BUNDLE, "Root.plist"), build_root(panel_items, wired), text=True)
+    write_plist(os.path.join(BUNDLE, "Root.plist"), build_root(), text=True)
     written.append("Root.plist")
 
     rows, n = html_rows()
     with open(os.path.join(OUTDIR, "settings-tbody.html"), "w", encoding="utf-8") as fh:
         fh.write(rows)
 
-    ring_keys = [it["k"] for p in PANELS if p[0] == "Ring" for it in p[3]]
-    wired = set(ring_keys) & WIRED_KEYS
-
     manifest = {
         "package": "com.aevon",
         "version": VERSION,
         "domain": DOMAIN,
-        "total_母本键": 81,
         "设置项": n,
-        "文案键": len(TEXT_KEYS),
-        "已接通": len(wired),
-        "面板": [
-            {"id": p[0], "title": p[1], "count": len(p[3])} for p in PANELS
-        ] + [{"id": "Apps", "title": "应用与全局", "count": len(APPS_ITEMS)}],
-        "文案键清单": [{"key": k, "cn": c} for k, c in TEXT_KEYS],
-        "明确放弃": [{"key": k, "cn": c, "why": w} for k, c, w in DROPPED],
-        # 不属于母本 81 键的 Aevon 自有开关，单独记账，避免它们混进复刻进度。
-        "自有项": [
-            {"key": "!ring.desktop", "cn": "桌面显示圆盘", "cell": "switch",
-             "default": True, "wired": True},
-            {"key": "@ring.host", "cn": "桌面状态", "cell": "title", "wired": True},
-            {"key": "@ring.summary", "cn": "当前承载", "cell": "title", "wired": True},
-        ],
+        "面板": [{"id": p[0], "title": p[1], "count": len(p[2])} for p in PANELS],
         "items": [
-            {"panel": p[0], "key": it["k"], "cn": it["cn"],
-             "cell": it["cell"], "wired": it["k"] in wired}
-            for p in PANELS for it in p[3]
-        ] + [
-            {"panel": "Apps", "key": it["k"], "cn": it["cn"],
-             "cell": it["cell"], "wired": False} for it in APPS_ITEMS
+            {"panel": p[0], "key": it["k"], "cn": it["cn"], "cell": it["cell"],
+             "wired": it["k"] in WIRED}
+            for p in PANELS for it in p[2]
         ],
     }
     with open(os.path.join(OUTDIR, "settings-manifest.json"), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, ensure_ascii=False, indent=2)
 
-    own = len(OWN_KEYS & {it["k"] for p in PANELS for it in p[3]})
-    print("设置项:", n, "（其中自有键:", own, "）| 文案键:", len(TEXT_KEYS),
-          "| 明确放弃:", len(DROPPED),
-          "| 母本口径合计:", n - own + len(TEXT_KEYS) + len(DROPPED))
-    assert n - own + len(TEXT_KEYS) + len(DROPPED) == 81, "与母本 81 键对不上"
+    print("设置项:", n, "| 面板:", len(PANELS))
     print("plist:", ", ".join(written))
 
 

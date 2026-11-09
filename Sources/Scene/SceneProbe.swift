@@ -1846,6 +1846,15 @@ zStackParticipantDidChange:
             // 0.0.98 — 按名字拆自己那一块。多窗之后「拆唯一那个宿主」会让关掉
             // 主窗时连带干掉停靠小窗。
             FloatHost.hide(bundle: closingBundle)
+            // 0.2.60 — 卡片没了，这块区域立刻还给 App。
+            //
+            // `reportBand` 在 `card` 还在时会把旧几何再报一遍（关窗这一拍
+            // `card` 尚未置空），Aevon(201) 里 `app: band prefs on=1
+            // band=430x707` 在关卡之后还继续出现就是它。这里显式清一次：
+            // App 收到 `none` 会把窗口还回场景高，全屏那一页才不会只剩上半截。
+            if !closingBundle.isEmpty {
+                _ = AevonAppBandSet(closingBundle, CGRect.null, .zero)
+            }
             // 0.2.24 — 借前台 scene 时藏掉的那一页要还回去。放在拆完 presenter
             // 之后、交还后台之前：此刻 scene 还在我们手里，页面还空着，先还原
             // 才不会让系统在中间那一瞬去画一张空页。

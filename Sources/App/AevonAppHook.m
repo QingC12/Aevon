@@ -6253,8 +6253,19 @@ static void AevonBandReload(void) {
         snprintf(text, sizeof(text), "%s", body.UTF8String);
     }
     if (text[0] == 0 || strcmp(text, "none") == 0) {
+        // 0.2.60 — 卡片走了 ⇒ 这个 App 不再是「被托管的一块」，窗口要还回场景高。
+        //
+        // Aevon(201) 的「全屏中下黑」就是漏了这一拍：让路之后宿主清了 band 目标，
+        // 可 App 这边只是把 `AevonBandOn` 放下，窗口还是按卡片那 707 排的；
+        // 系统把 scene 扩到 932 之后，下面 225 pt 没有窗口在画，只能填黑。
+        // `AevonKbUnfitWindow` 只写高度、不碰 `UIScreen.bounds`（那四次黑屏的来源），
+        // 而且目标与当前一致时自己返回，所以这条路径是幂等的。
+        BOOL wasHosted = AevonBandOn != 0;
         AevonBandOn = 0;
         AevonBandLock = 0;
+        if (wasHosted) {
+            dispatch_async(dispatch_get_main_queue(), ^{ AevonKbUnfitWindow(); });
+        }
         return;
     }
     // 9 个数直接扫，不建数组：`sendEvent:` 每次手势都要走这条判定，回调里也

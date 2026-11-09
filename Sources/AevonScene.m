@@ -5191,6 +5191,19 @@ static int AevonOpenSourceIsSso(id request, id options) {
     return 0;
 }
 
+/// 0.2.60 — **目标**是不是微信 / QQ 本身（含它们的扩展）。
+///
+/// 与上一条正好相反：上一条问「谁递来的」，这一条问「要打开谁」。
+/// 分享给 QQ 的现场是 `b=com.tencent.mqq` + `src=com.tencent.mqq.ShareExtension`
+/// —— 送信方与收信方是同一家，那是**分享**；SSO 回跳的收信方永远是第三方 App。
+/// 0.2.59 只看了送信方与续接动作，于是所有「分享到 QQ / 微信」都被当成回跳放行，
+/// 屏幕上只剩全屏，一张卡都没有（Aevon(201) 的 18:49:06 与 18:50:20 两条）。
+static int AevonOpenTargetIsSso(const char *bundle) {
+    if (bundle == NULL) return 0;
+    return (strncmp(bundle, "com.tencent.xin", 15) == 0 ||
+            strncmp(bundle, "com.tencent.mqq", 15) == 0) ? 1 : 0;
+}
+
 /// 0.2.50 — 这一次是不是「分享面板递过来的」（`UIActivityContinuationAction`）。
 ///
 /// 真机日志里两类请求长得几乎一样（都带来源 App、都可能带 paste token 和 URL）：
@@ -6089,6 +6102,50 @@ static int AevonOpenDecide(id request, id options,
                          AevonOpenIsContinuation(request, options) == 0 &&
                          !AevonOpenIsShareSource(request, options));
         if (isSafari || isOAuth || isWebLink) {
+            // 0.2.60 — **授权一律交回系统，一张卡都不建。**
+            //
+            // 0.2.55~0.2.59 试过「认出来 ⇒ 建卡 + 本地投递」。Aevon(201) 判它
+            // 不成立，两种失败各有各的机制，而且都不可绕：
+            //
+            //   · 微信：登录走的是**通用链接**（`https://help.wechat.com/app/…`），
+            //     系统把通用链接交给 App 走的是 `NSUserActivity`，不是
+            //     `openURLContexts:`。我们只能投 URL，微信收到后不认，于是只
+            //     打开主页（用户报的「没有授权选项」）。日志里 `ack ok=1 via=scene`
+            //     同时出现，正说明「投递成功」与「微信照做」是两件事。
+            //   · QQ：SSO 是 `mqqOpensdkSSoLogin://SSoLogin/<appid>/`，需要 QQ 真的
+            //     被系统激活为前台，回跳才有 XPC 通道把 code 交回去。卡片里的 QQ
+            //     拿到的是「被显示」而不是「被激活」，回跳握手断在半路 ——
+            //     QQ 显示授权成功、全屏 App 停在授权失败。
+            //
+            // 这两条都不是我们能在 SpringBoard 里补出来的东西。所以授权这一族
+            // 回到「装插件之前」的行为：原样放行、系统自己拉起微信 / QQ、用户
+            // 授权完再回到那个 App。代价是授权那一下是全屏，收益是登录真的能成。
+            //
+            // 判据只用「来源不是分享链路」：分享到微信 / QQ 也带 `weixin://`，
+            // 那种必须进卡片（下面那几条分支管），不能被这里截走。
+            if (isOAuth && !AevonOpenIsShareSource(request, options)) {
+                char shape[40];
+                AevonURLShape(linkURL, shape, sizeof(shape));
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"notify: oauth pass b=%s scheme=%s card=%d",
+                              bundle, shape,
+                              (AevonCardIsUpFor(bundle) == 1 ||
+                               AevonCardIsComingFor(bundle) == 1) ? 1 : 0]
+                             UTF8String]);
+                // 微信 / QQ 如果已经在我们某张卡里，先让路（handover）。
+                // 不在这一栈里 destroy：`AevonOpenDecide` 跑在
+                // `_handleOpenApplicationRequest` 的钩子内，FrontBoard 正持着
+                // scene 更新那把锁，0.0.31 的死锁纪律同样适用于 destroy。
+                // 「全屏中下黑」的另一半（App 仍按卡片高度排）在 App 侧修：
+                // band 被清成 none 的那一刻把窗口还回场景高。
+                if (AevonCardIsUpFor(bundle) == 1) {
+                    AevonCardYieldForFullscreen(bundle);
+                }
+                *why = "oauthpass";
+                AevonDivertAt = now;
+                snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
+                return 0;
+            }
             if (linkURL.length == 0) {
                 // 登录也可能整条装在 paste token 里（没有 URL）。留一行，下一轮
                 // 就能看出「微信登录到底是 url 还是 paste」，不用再靠猜。
@@ -6261,7 +6318,18 @@ static int AevonOpenDecide(id request, id options,
     //     后把它从全屏拽进卡片，登录也就不会断在半路。
     if (kind != NULL && strcmp(kind, "share") == 0 &&
         AevonOpenSourceIsSso(request, options) == 1 &&
-        AevonOpenIsContinuation(request, options) == 0) {
+        AevonOpenIsContinuation(request, options) == 0 &&
+        // 0.2.60 — 收信方必须是**第三方 App**。
+        //
+        // Aevon(201) 的两条现场（18:49:06 分享给 QQ、18:50:20 分享给微信）：
+        //   notify: sso b=com.tencent.mqq … share=1 src=com.tencent.mqq.ShareExtension
+        //   notify: link skip b=com.tencent.mqq scheme=mqqapi://share/to_fri?…
+        //   notify: auth card close b=com.tencent.mqq.ShareExtension why=callback
+        //   notify: pass b=com.tencent.mqq op=user why=callback
+        // 送信方和收信方是同一家，这明明是「分享」，却被上一条判成「授权回跳」，
+        // 于是整条放行、屏幕只剩全屏 —— 用户报的第 4 条正是它。
+        AevonOpenTargetIsSso(bundle) == 0 &&
+        !AevonOpenIsShareSource(request, options)) {
         int inCard = (AevonCardIsUpFor(bundle) == 1 ||
                       AevonCardIsComingFor(bundle) == 1) ? 1 : 0;
         // 两条路都要收那一方：授权已经交接完，微信 / QQ 那张卡留着没用。
@@ -6359,6 +6427,14 @@ static int AevonOpenDecide(id request, id options,
                 *why = "incard";
                 return 1;
             }
+            // 0.2.60 — Aevon(201) 的现场：从桌面点卡片里的抖音图标，日志是
+            //   win: card yield seen b=com.ss.iphone.ugc.Aweme now=430x932 want=430x717
+            //   win: card yielded to fullscreen b=…
+            //   win: background after teardown door=0 handover=1
+            // 之后 app 侧一直读到 `scene=717`，而屏幕是 932 —— 中下 215 pt 黑。
+            // 真因不在让路本身，而在**让路之后 App 还按 430x707 的洞排窗口**：
+            // band 没被清掉。所以让路仍是 handover（这一栈里 destroy 会撞锁），
+            // 修的是下面 `AevonAppBandSet(.null)` 那一句 + App 侧的对齐。
             int yielded = AevonCardYieldForFullscreen(bundle);
             *why = yielded == 1 ? "yield" : "plain";
             return 0;

@@ -300,11 +300,12 @@ def main():
                 broken.append(f"{panel}: plist not packaged")
         if broken:
             bad("panes: " + "; ".join(broken))
-        elif len(panes) != 8:
-            bad(f"panes: {len(panes)} openable panels, expected 8")
+        # 0.2.60 — 设置按功能重写，只剩两个二级页。
+        elif len(panes) != 2:
+            bad(f"panes: {len(panes)} openable panels, expected 2")
         else:
             ok(f"panes: {len(panes)} child panes open via openPanel:, root has {len(items)} items")
-        if len(items) < 20:
+        if len(items) < 14:
             bad(f"root: only {len(items)} items — the page would render almost empty")
 
     # -- 5b. the controller must fill its own specifiers ivar ---------------
@@ -337,8 +338,7 @@ def main():
     # switches. The cause (an early return before the plist was read) is fixed,
     # but a generator edit could make the plists genuinely identical, which
     # looks exactly the same on a phone. Compare their contents.
-    panel_names = ["Window", "Ring", "Gesture", "Keyboard",
-                   "Notify", "Jump", "Listen", "Apps"]
+    panel_names = ["Window", "Ring"]
     signatures = {}
     for name in panel_names:
         # Deliberately NOT `blob`: that name holds the .deb itself and is used
@@ -638,12 +638,11 @@ def main():
                   # `win: keyboard fill on` 刷了 60 多条、`fill off` 零条，
                   # 卡片永远停在 430x717@0,215，三边贴屏、环带按不到。
                   # 两条都断言，缺一条就是这条路又断了半边。
-                  b"win: keyboard fill on card=",
-                  b"win: keyboard fill off card=",
-                  # 0.2.42 — 收起计时的两头都在：`armed hold=` 是「决定要收」的那一拍，
-                  # `kb-to-card=` 是「卡片真的开始缩」时回填的整段耗时。两条一起才回答
-                  # 「关键盘后等了多久」，只有前者等于又回到「靠肉眼量」。
-                  b"win: keyboard unfill armed hold=",
+                  # 0.2.60 — 键盘不再改几何：`fill on/off` 与 `armed hold` 三条
+                  # 一起下线，只剩这一行「键盘来了 / 走了，卡片没动」。这一行
+                  # 出现却看不到卡片几何变化，才是这一版要的行为。
+                  b"win: keyboard %@ card kept %.0fx%.0f at %.0f,%.0f scene=%.0f",
+                  # `kb-to-card=` 仍由 `finishKeyboardUnfill` 保留（迁移路径）。
                   b" kb-to-card=%.0fms",
                   # 0.2.43 — 键盘让位那一段的曲线与补推。
                   #   `kb spring t=` = 张开/缩回走的是 `AevonMotion.fill`（过阻尼弹簧、
@@ -670,6 +669,12 @@ def main():
                   b"notify: auth card close b=%@ why=%s",
                   b"notify: share swap nogate b=%s door=%d",
                   b"win: card closed after auth b=",
+                  # 0.2.60 — 授权一律交回系统（`oauth pass`）。它出现 ⇒ 微信 / QQ
+                  # 的登录由系统原生打开；同一份日志里**不该**再有
+                  # `notify: link b=… kind=oauth` 紧跟 `appurl send`。
+                  b"notify: oauth pass b=%s scheme=%s card=%d",
+                  # 0.2.60 — 卡片走了、App 窗口还回场景高（「全屏中下黑」的另一半）。
+                  b"kb: win unfit h=%.0f scene=%.0f",
                   # 0.2.46 — 「让抖音真重排」这一版的四条：显示覆盖 / 参考尺寸 /
                   # 屏幕跟随 / 回执。逐条都要能在产物里 grep 到，缺哪条就等于那一步
                   # 没有证词：
@@ -1783,31 +1788,22 @@ def main():
     # there" and knowing what it actually answers on this iOS. If it silently
     # falls out of either binary the next phase gets built on a guess, so its
     # rows and its markers are checked like any other shipped feature.
+    # 0.2.60 — 设置按「已经做出来的功能」重写：探针按钮不再出现在界面上，
+    # 这一页只剩两个真的会被桌面读取的键。页面本身仍要检查 —— 少一行就等于
+    # 「手机上那个滑条 / 文本框没了」。
     window_plist = files.get(f"{BUNDLE_DIR}/Window.plist")
     if window_plist is None:
-        bad("probe: Window.plist missing")
+        bad("prefs: Window.plist missing")
     else:
         window_items = plistlib.loads(window_plist).get("items", [])
-        window_actions = [item.get("action") for item in window_items]
-        window_labels = [item.get("label") for item in window_items
-                         if item.get("cell") == "PSGroupCell"]
-        if "sceneProbe:" not in window_actions:
-            bad("probe: no sceneProbe: row on 窗口与场景 — the scene tree cannot be measured")
-        elif "探针" not in window_labels:
-            bad("probe: the 探针 group lost its label")
-        elif "sceneSurface:" not in window_actions:
-            bad("probe: no sceneSurface: row — the carrier call surface stays a guess")
-        elif "sceneCalls:" not in window_actions:
-            bad("probe: no sceneCalls: row — the master's calls never get resolved to a class")
-        elif "sceneWindow:" not in window_actions:
-            bad("probe: no sceneWindow: row — the window build has no way in")
+        window_keys = [item.get("key") for item in window_items
+                       if item.get("cell") in ("PSSliderCell", "PSTextFieldSpecifier")]
+        if "HeightFraction" not in window_keys:
+            bad("prefs: 浮窗页没有 HeightFraction 滑条 — 尺寸没法在手机上改")
+        elif "windowBlacklistText" not in window_keys:
+            bad("prefs: 浮窗页没有黑名单文本框 — 走不通的 App 没有自救手段")
         else:
-            ok("probe: 窗口与场景 has the 探针 group and all four of its buttons")
-
-    for token in (b"sceneProbe:", b"sceneSurface:", b"sceneCalls:", b"sceneWindow:",
-                  b"prefs: scene probe requested"):
-        if token not in prefs:
-            bad(f"probe: {token.decode()} missing from the bundle binary")
+            ok("prefs: 浮窗页 " + str(len(window_items)) + " 行，高度与黑名单都在")
 
     # 0.0.23 answers the one question 0.0.22 could not: the card was on screen
     # and was empty. Three things changed, and each one has a marker here.

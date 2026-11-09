@@ -3672,6 +3672,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     /// 键盘在屏时卡片是不是已经让过位。
     private var kbFilled = false
+    /// 0.2.60 — 上一条键盘通知是「来」还是「走」。只用来把重复心跳压成一行日志。
+    private var kbNoticeOn = false
     /// 0.1.80 — 这一次张开是什么时候、张开到哪里。
     ///
     /// 键盘弹出的同一秒里，App 会连发 3~4 条通知（WillChangeFrame / WillShow /
@@ -3920,175 +3922,34 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     }
 
     func setKeyboardFill(_ on: Bool) {
-        guard let card = card, let window = window, visible.height > 16 else { return }
-        if on {
-            // 0.1.83 — 「起来了」这一拍作废一切待定的收起（见下面的挂起逻辑）。
-            kbUnfillToken &+= 1
-            let screen = window.bounds.size
-            var y = screen.height - visible.height
-            if y < 0 { y = 0 }
-            // 0.1.59 — **场景一个像素都不缩**。
-            //
-            // 0.1.56~0.1.58 走的是「键盘不进窗口」：把承载场景收到键盘顶边。
-            // Aevon(131) 把这条路封死了 —— 键盘是**挂在场景上**的，底边跟着场景
-            // 底边走：场景收成 358 之后 `kb: lead h=74` 说明 UIKit 认为键盘顶在
-            // 场景 358−74=284（屏幕 499），而场景只画到 573，于是只有最上面 74 pt
-            // 落在画面里，用户看到的就是「键盘只显示工具栏」。同一个错数还解释了
-            // 另两句：卡片 573 → 358 连改两遍（乱跳）、场景晚一拍（两边黑条）。
-            //
-            // 所以回到 0.1.55 的形状：卡片铺满屏底，场景恒 430×717@215。
-            // 「让 App 重排到键盘上方」改由 App 进程自己做 —— 收的是**它自己的窗口**
-            // （`AevonKbFitWindow`）。窗口不是场景，收它不会带动键盘。
-            let height = visible.height
-            let target = CGRect(x: 0, y: y, width: visible.width, height: height)
-            // 0.1.80 — **同一次张开只跑一次。**
-            //
-            // 判据是「已经填过 + 目标一模一样 + 距上次开跑不到 0.5 s」。0.5 s 比
-            // 动画（0.24 s）长一倍，够覆盖那一串连发通知；真要有第二次张开，
-            // 目标一定不同（用户换了位置/尺寸），不会被它误挡。
-            let fillNow = CFAbsoluteTimeGetCurrent()
-            if kbFilled, kbFillTarget == target, fillNow - kbFillAt < 0.5 { return }
-            // 0.1.61 — **进来先存，出去才还得回去**。
-            //
-            // 0.1.60 重写这一段时把 `kbFilled = true` 与四个 `kbSaved*` 一起删掉了，
-            // 而收起分支的头一行就是 `guard kbFilled else { return }` —— 于是
-            // Aevon(132) 里 `win: keyboard fill on` 刷了 60 多条、`win: keyboard
-            // fill off` **一条都没有**：卡片永远停在 430×717@0,215，左右下三边贴死
-            // 屏幕，环带手势再也按不到，用户看到的就是「键盘关了也不回小窗」。
-            //
-            // 存的是**弹性收起那一刻的卡片几何**，不是常数：用户可能已经把窗挪到
-            // 别处、或改过尺寸，收起时必须原样还回去，不能按「默认小窗」硬编。
-            if kbFilled {
-                // 心跳每拍都会走到这里（`keyboardBeat` → `keyboardFill(true)`）。
-                // 目标几何与当前一致就一个字节都不写，也不打日志 —— 0.1.60 的日志里
-                // 一秒能刷八条 `fill on`，既是噪声也是每拍一次 `reportBand` 的开销。
-                if card.frame == target, canvasOriginY == y, canvasHeight == 0 { return }
-            } else if kbSettleUntil > 0 {
-                // 0.1.66 — 收起还没落完（卡片仍是键盘态几何）时又起来了。
-                // 这时**不能**把当前几何当成「收起时几何」再存一遍，否则下一次
-                // 收起会把 430×717@215 还回去，小窗永远回不来。沿用上一份存档。
-                kbSettleUntil = 0
-                kbFilled = true
-            } else {
-                kbSavedFrame = card.frame
-                kbSavedCrop = kbTopCrop
-                kbSavedOriginY = canvasOriginY
-                kbSavedHeight = canvasHeight
-                kbFilled = true
-            }
-            kbTopCrop = 0
-            canvasOriginY = y
-            canvasHeight = 0
-            // 0.1.80 — 记下这一次张开的时刻与目标（判重用的就是这两个）。
-            kbFillAt = fillNow
-            kbFillTarget = target
-            // 场景跟着卡片走。目标登记在 C 侧，这里**当拍就推一次**。
-            //
-            // 0.1.55 — 原来是只登记、等 SceneProbe 守护循环下一拍才写。Aevon(127)
-            // 的日志里那一条 `win: frame drift now=430x717@0 want=430x717@215`
-            // 就是这段空档：卡片已经铺到 215..932，场景还停在 0..717 —— 于是这一拍
-            // 画面是「按旧几何画的」，下一拍才补成新几何。用户快速开关时看到的
-            // 「内容先跳一下、跳完才完成重排」正是它。
-            //
-            // 卡片 frame 与 settings.frame 必须在**同一拍**里落地，屏幕才只画一次。
-            // `AevonPushSceneFrame` 是同步的，且自己判重（尺寸与原点都没变就返回 0）。
-            AevonSceneFrameSet(bundle, 0, Double(y),
-                               Double(visible.width), Double(height))
-            var door: Int = 0
-            if let sc = window.windowScene {
-                door = Int(AevonPushSceneFrame(sc))
-                // 0.2.43 — 写不了就补推（见 `pushSceneLater`）。原来这里只等
-                // 守护循环那 200 ms，而 `fill on … push=0` 后面紧接着就是一条
-                // `frame drift`，错位正好落在放大动画的前半段。
-                if door == 0 { self.pushSceneLater(sc, bundle: bundle, tries: 9) }
-            }
-            // 0.2.43 — 场景原点一变，系统那一次「把承载视图 frame 重设成 scene
-            // frame」就会把画面推走 215 pt（见 `reapplySoon`）。连对四次，别等
-            // 守卫循环那 200 ms。
-            self.reapplySoon("kb-up")
-            // 0.1.80 — **撤掉 0.1.78 的「等两拍再动卡片」。**
-            //
-            // 0.1.78 看到 `fill on … push=0` 紧跟一条 `frame drift now=@0
-            // want=@215`，判断「场景还没落地」，于是把动卡片延后两拍。Aevon(150)
-            // 把代价拍出来了：那两拍里场景已经按 215 在画，卡片还停在 189..578，
-            // 露出来的是内容中间的一条横带 —— 两帧（约 32 ms）的错位正好是一
-            // 次「闪」。这一版真正要修的是**同一次张开被跑了 2~3 遍**（见
-            // `kbFillAt` 那段），重复那一刻既推了场景又重起了动画；延后只是把
-            // 同一个错位换个时间点发生。
-            //
-            // 所以回到「同一拍里推场景 + 动卡片」：`AevonSceneFrameSet` 先把目标
-            // 登记进 C 侧，`AevonPushSceneFrame` 当拍就写一次，动画从第一帧起
-            // 就朝目标走。`push=0` 只说明这一拍没写（目标已登记或已等于目标），
-            // 不再当成「没落地」。
-            let grow = { [weak self] in
-                guard let self = self, self.kbFilled else { return }
-                // 0.1.76 — **卡片用 ease-out 张开**（0.1.77 起 0.24 s，与系统键盘
-                // 同速；0.36 s 会留下「键盘已到位、窗口还在长」的拖尾）。
-                // `followContent` 必须放在块里：内容的 center / transform 要跟卡片
-                // 一起插值，否则卡片在长、内容不动，中途会露出一圈黑。
-                //
-                // 0.2.43 — 两条改动，都是为了那一下「闪」：
-                //   ① 走 `AevonMotion.fill`（会抬 `depth`）。裸 `UIView.animate`
-                //      不抬，`applyCorner` 里「正在过渡就补一条圆角动画」那个闸
-                //      形同不存在 —— 352→430 时圆角从 44.8 硬跳到 54.7，框在长、
-                //      角先到位，这就是放大过程里那一下跳。
-                //   ② 光晕**跟着一起走**：`applyGlow` 读的是 `card.frame` 的
-                //      model 值（赋值后立刻是终点），放在块外调用等于把整圈阴影
-                //      瞬间搬到 430×717@0,215 —— 比卡片早 0.24 s 到位，肉眼就是
-                //      一片光先闪出来。块内给 `glow.frame` 同一条曲线，收尾再让
-                //      `applyGlow` 重建一次 `shadowPath`（逐帧重建才是 0.1.29
-                //      避开的那个开销，收尾一次没有代价）。
-                kbAnimUntil = CFAbsoluteTimeGetCurrent() + AevonMotion.fillDuration
-                AevonMotion.fill({
-                    card.frame = target
-                    self.glow?.frame = target
-                    self.followContent()
-                }, completion: { [weak self] done in
-                    // `done == false` 表示这次动画被下一条 `fill on` 接管了
-                    // （`beginFromCurrentState`）—— 那种时候卡片还在半路，现在把
-                    // 光晕贴到终点等于又造一次闪。等真正落地的那一次再来。
-                    guard let self = self, done else { return }
-                    self.applyGlow()
-                })
-                Log.write("win: keyboard fill on card=" + self.size(card.frame.size)
-                          + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
-                          + " scene=" + String(format: "%.0f", self.canvasOriginY)
-                          + " crop=" + String(format: "%.0f", self.kbTopCrop)
-                          + " push=" + String(format: "%d", door)
-                          + " saved=" + (self.kbSavedFrame.isNull ? "null" : self.size(self.kbSavedFrame.size)
-                                         + " at " + String(format: "%.0f,%.0f",
-                                                           self.kbSavedFrame.minX, self.kbSavedFrame.minY)))
-                // 0.1.50 — App 侧要按「卡片底边」算键盘该不该搬，所以卡片一换位置
-                // 就得立刻把新几何推过去（`reportBand` 自己判重，没变不会重复发）。
-                self.reportBand()
-            }
-            grow()
-        } else {
-            guard kbFilled else { return }
-            // 0.1.83 — **先挂起一小段，再决定要不要真收。**
-            //
-            // Aevon(151) 的循环是：App 报「键盘收了」→ 这里当场把卡片收回小窗
-            // （0.24 s 动画）→ 一两拍之后 App 又报「键盘起来了」→ 再张开。用户
-            // 看到的就是「打开键盘后先向下缩一下再放大」和「键盘自动收起」。
-            // 那 30 多次假收起都是**同一个键盘窗量到 0** 引起的，App 侧已经修
-            // （见 `AevonKbVisualTop` 的换窗与双证据），这里再加一层：收起不是
-            // 落地动作，而是一个可以被下一拍否决的意向。
-            //
-            // 代价：真收起时卡片晚 `unfillHold` 缩回。这与「键盘已经消失、窗口还撑满
-            // 屏」是同一件事，比来回抖一次好得多。
-            //
-            // 0.2.42 — 那个代价从 0.60 s 降到 0.10 s：App 侧 0.1.84 起已经是三态轮询
-            // （`kb: settle keep` 吃掉假收起、连续两次 `GONE` 才发 `kb.off`），这一层
-            // 的长时间挂起等于把同一个确认做两遍。见 `AevonMotion.unfillHold`。
-            kbUnfillToken &+= 1
-            let token = kbUnfillToken
-            kbUnfillAt = CFAbsoluteTimeGetCurrent()
-            Log.write(String(format: "win: keyboard unfill armed hold=%.0fms",
-                             AevonMotion.unfillHold * 1000))
-            DispatchQueue.main.asyncAfter(deadline: .now() + AevonMotion.unfillHold) { [weak self] in
-                guard let self = self, self.kbUnfillToken == token, self.kbFilled else { return }
-                self.performKeyboardUnfill()
-            }
+        guard let card = card, window != nil, visible.height > 16 else { return }
+        // 0.2.60 — 键盘**不再改变卡片与场景的任何几何**。
+        //
+        // Aevon(201) 的三条投诉是同一条链，日志里一行一行都在：
+        //
+        //   win: keyboard fill on  card=430x717 at 0,215 scene=215 crop=0 push=0
+        //   win: keyboard fill off card=344x573 at 74,186  land=1 kb-to-card=506ms
+        //   win: frame drift now=430x717@215 want=430x717@0 door=3 wrote=16 armed=1
+        //
+        // 抖音评论区每弹一次键盘，卡片就在「小窗」与「铺满下半屏」之间飞一次，
+        // 场景原点 0↔215 跟着翻。App 按 717 的高低排版、系统按 932 的真屏出图，
+        // 中间那条带子没有窗口在画，只能填黑 —— 用户看到的就是
+        // 「键盘一弹画面先上移、屏幕中下黑一块、键盘还上下抖一下」。
+        //
+        // 键盘本来就挂在**场景**上（0.1.59 的结论：缩场景等于裁键盘），场景不动
+        // 时 App 会像在普通窗口里那样自己让位；宿主再搬一次，两个让位量叠加成
+        // 错位。所以这一版把「搬几何」整段关掉：卡片、场景原点、圆角、环带都
+        // 不动，只留一行日志证明键盘来了而宿主没动。
+        //
+        // 旧实现在备份里（build/_FloatHost.0.2.59.swift 的 `setKeyboardFill` 与
+        // `performKeyboardUnfill`），要回退原样拷回即可。
+        if kbFilled { performKeyboardUnfill() }   // 只处理同进程内遗留的键盘态
+        if on != kbNoticeOn {
+            kbNoticeOn = on
+            Log.write(String(format: "win: keyboard %@ card kept %.0fx%.0f at %.0f,%.0f scene=%.0f",
+                             on ? "up" : "down",
+                             card.frame.size.width, card.frame.size.height,
+                             card.frame.minX, card.frame.minY, canvasOriginY))
         }
     }
 
