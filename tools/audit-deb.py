@@ -855,6 +855,10 @@ def main():
                   b"win: own handed over %@",
                   # 0.2.38 — 粘贴板分享的诊断行：下一版要靠它决定 token 能不能本地投递。
                   b"notify: paste token b=%s cls=%s desc=%@",
+                  # 0.2.39 — 粘贴板/微信分享「先放行、再把前台 App 收回卡片」。
+                  # 少了这两条，分享要么停在原生全屏，要么根本没人去收卡。
+                  b"notify: paste promote schedule b=%s",
+                  b"notify: paste promote b=%s",
                   # 0.2.15 —— 尺寸 + 分享两件：
                   #   own display       scene 的 displayConfiguration 被改成画布大小
                   #                     （不改就是「UIScreen 932 / 窗口 717」，按屏幕

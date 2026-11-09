@@ -4520,12 +4520,14 @@ static void AevonBlacklistDrain(const char *bundle) {
     AevonBlacklistDrainAt(bundle, 7.0);
 }
 
+/// 0.2.39 — 名单清空：微信的文件分享现在也走我们的卡片路（用户要求）。
+///
+/// 0.2.10 把微信写进来，是因为当时它在**别人的 scene** 里会崩在 `MBPublicService`；
+/// 现在这条路已经换成自建 scene / token 直通，崩溃的现场条件不在了。函数与调用点
+/// 都留着（`AevonBlacklistDrain` 还在它后面）：再遇到同形状的崩溃，把 bundle
+/// 加回声明数组就是一次恢复，不用重构。
 static BOOL AevonShareNativeListed(const char *bundle) {
-    static const char *names[] = { "com.tencent.xin" };
     if (bundle == NULL || bundle[0] == '\0') return NO;
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        if (strstr(bundle, names[i]) != NULL) return YES;
-    }
     return NO;
 }
 
@@ -4752,6 +4754,79 @@ static void AevonPasteTokenProbe(id request, id options, const char *bundle) {
     }
 }
 
+/// 0.2.39 — 「先让系统把这次打开真正做完，再把前台那个 App 收进卡片」。
+///
+/// 粘贴板分享（`__PasteSharingToken`）和微信那条没有 payload 键的分享都绕不开
+/// 一次真正的系统激活：文件是随那次激活过 XPC / 写进接收方容器的。0.2.37 试过
+/// 「先建卡、再把原请求交回原实现」，真机把它证伪了（卡片和全屏抢同一份 scene，
+/// 卡片黑）。所以反过来：请求原样放行，等目标 App 真的成了前台，再走圆盘同一条
+/// 「先回桌面、再贴卡片」。
+///
+/// 3 秒收手：超时说明这次分享根本没把 App 拉起来（取消 / 失败 / 被系统吞了），
+/// 这时开卡只会凭空弹一个窗口，那不是用户要的。
+///
+/// 这个文件是 MRC：跨 `dispatch_after` 的东西一律拿 `strdup` 的 C 串走，
+/// 所有权随块走、块里 `free` —— 与 `AevonBlacklistDrainAt` 同一套写法。
+static char AevonPastePromoteBundle[128];
+static CFAbsoluteTime AevonPastePromoteAt = 0;
+
+static void AevonPastePromoteTick(char *copy, int tick) {
+    if (copy == NULL) return;
+    if (copy[0] == '\0') { free(copy); return; }
+    if (AevonCardIsUpFor(copy) == 1 || AevonCardIsComingFor(copy) == 1) {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: paste promote b=%s skip=card tick=%d",
+                      copy, tick] UTF8String]);
+        free(copy);
+        return;
+    }
+    NSString *target = [NSString stringWithUTF8String:copy];
+    if (target.length == 0) { free(copy); return; }
+    int front = AevonAppFrontmost(target);
+    int board = AevonSpringboardActive();
+    int live = AevonAppPid(target) > 0 ? 1 : 0;
+    // `front=-1` 是「读不到前台位」（`SBApplicationController` 对某些 App 返回 nil），
+    // 不是「不在前台」。这时用「桌面已经退场 + 进程活着」代替，但多等 0.5 秒，
+    // 免得抢在系统摆动画之前把卡贴上去。
+    //
+    // `board != 1` 是 `openCard` 那条 home-first 的门：桌面在屏时它不会先回桌面，
+    // 而「全屏 App 直接贴卡」正是 0.2.30 修掉的那次黑屏。这里提前按同一条门等。
+    if (board != 1 && (front == 1 || (front == -1 && live == 1 && tick >= 4))) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: paste promote b=%s front=%d board=%d live=%d tick=%d",
+                      copy, front, board, live, tick] UTF8String]);
+        AevonOpenFromNotification(copy);
+        free(copy);
+        return;
+    }
+    if (tick >= 24) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: paste promote b=%s giveup front=%d board=%d live=%d tick=%d",
+                      copy, front, board, live, tick] UTF8String]);
+        free(copy);
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.125 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonPastePromoteTick(copy, tick + 1);
+    });
+}
+
+/// 同一次分享会连来两条（op=untrusted / op=user），只许排一条等待链。
+static void AevonPastePromoteSchedule(const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (strcmp(AevonPastePromoteBundle, bundle) == 0 && now - AevonPastePromoteAt < 6.0) return;
+    snprintf(AevonPastePromoteBundle, sizeof(AevonPastePromoteBundle), "%s", bundle);
+    AevonPastePromoteAt = now;
+    char *copy = strdup(bundle);
+    if (copy == NULL) return;
+    AevonLogRaw([[NSString stringWithFormat:@"notify: paste promote schedule b=%s", copy] UTF8String]);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonPastePromoteTick(copy, 0);
+    });
+}
+
 /// 分流决定。
 ///   返回 1 → 吞掉，开卡片；
 ///   返回 2 → 吞掉，不再开（同一次点击的后续链）；
@@ -4821,6 +4896,27 @@ static int AevonOpenDecide(id request, id options,
         AevonDivertAt = CFAbsoluteTimeGetCurrent();
         snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
         AevonPasteTokenProbe(request, options, bundle);
+        // 0.2.39 — 放行代表「文件靠系统这一拍送出去」；这一行代表「等它送到之后，
+        // 再把目标 App 从全屏收回卡片」。两条互不阻塞。
+        AevonPastePromoteSchedule(bundle);
+        return 0;
+    }
+
+    // 0.2.39 — 微信（`com.tencent.xin.sharetimeline`）那条分享在上一条判据里
+    // 拦不到：Aevon(163) 记下来的形状是 `keys=` 空 —— 它没有 token、也没有 URL，
+    // 交接发生在系统那次激活里。0.2.10 的处置是把它整条放行走原生（当时宿主里
+    // 会崩在 `MBPublicService`），用户现在要求它也进卡片。
+    //
+    // 所以按 token 同一条路处理：**原样放行**（保证文件真到），再等前台把它收卡。
+    // 只有 `pay=none` 才走这里；带 payload 的分享仍走下面那条「先建卡再交回」，
+    // 那条已经能直接把卡建起来。
+    if (kind != NULL && strcmp(kind, "share") == 0 &&
+        strncmp(bundle, "com.tencent.xin", 15) == 0 &&
+        strcmp(AevonOpenPayloadKind(request, options), "none") == 0) {
+        *why = "wx";
+        AevonDivertAt = CFAbsoluteTimeGetCurrent();
+        snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
+        AevonPastePromoteSchedule(bundle);
         return 0;
     }
 
