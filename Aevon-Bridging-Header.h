@@ -385,6 +385,11 @@ NSInteger AevonOwnIsOwned(NSString *_Nullable bundleID);
 /// 销毁自建 scene。返回 1 表示这一句发出去了。
 NSInteger AevonOwnDestroy(NSString *_Nullable bundleID);
 
+/// 0.2.38 — 让路时把自建 scene **原样交给系统**（不销毁）。返回 1 = 账清了。
+/// 0.2.37 在让路时调 `AevonOwnDestroy`，系统正要把这张 scene 拉成全屏，
+/// 设置 App 就是这样闪退的；其它 App 则是「全屏底部黑」。
+NSInteger AevonOwnHandOver(NSString *_Nullable bundleID);
+
 /// 0.2.25 — 回桌面的三级阶梯，一次只调用一级（1 = 硬件 home 键那条、
 /// 2 = 收起主切换器、3 = 切换器 controller 的 home 处理）。`page` 只有第 3 级
 /// 用到（沿响应链找 controller）。返回实际调用了谁，或没接上的原因。

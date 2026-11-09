@@ -1270,6 +1270,26 @@ int AevonSpringboardActive(void) {
     }
 }
 
+/// 0.2.38 — 「把自建 scene 原样交给系统」，**不销毁**。
+///
+/// 0.2.37 的真机把这条路拍死了：用户从卡片里点桌面图标全屏打开**系统设置**时，
+/// 卡片让路 → `AevonOwnDestroy` 在系统正要把这张 scene 拉成全屏的那一拍把它
+/// destroy 掉，设置直接闪退；其它 App 没那么脆，但也常常要重新建 scene，中间
+/// 那一段就是「全屏底部黑」。
+/// 让路的语义是**松手**，不是**拆掉**：清掉我们这边的账（`AevonOwnHeld`），
+/// scene 留给系统接着用 —— 它的 identity 就是 `sceneID:<bundle>-default`，
+/// 正是系统要的那一张。
+NSInteger AevonOwnHandOver(NSString *bundleID) {
+    if (!AevonOwnHeld) return 0;
+    if (bundleID.length == 0) return 0;
+    if (![bundleID isEqualToString:AevonOwnBundle]) return 0;
+    AevonOwnPhase = 0;
+    AevonOwnScene = nil;
+    AevonOwnHeld = 0;
+    AevonOwnLog(@"win: own handed over %@", AevonOwnIdentity != nil ? AevonOwnIdentity : @"-");
+    return 1;
+}
+
 /// 销毁自建 scene。返回 1 表示这一句发出去了。
 NSInteger AevonOwnDestroy(NSString *bundleID) {
     if (bundleID.length == 0 || AevonOwnIdentity == nil) return 0;
@@ -1863,7 +1883,10 @@ static BOOL AevonWriteFrame(id settings, int slot) {
         // 三个前提缺一不可：
         //   · `AevonInPush == 0`：只认系统的更新。我们自己推 717 时 now 就是
         //     整屏（刚建卡那一拍），那一趟绝不能触发；
-        //   · 年龄 > 0.9 s：建卡那两百毫秒里系统本来就会先给整屏再被我们改小；
+        //   · 年龄 > 0.40 s：建卡那两百毫秒里系统本来就会先给整屏再被我们改小；
+        //     0.2.37 用的 0.9 s 太大 —— 用户「开卡 → 马上点桌面图标」时那一拍
+        //     会被挡住，表现就是这次让路「有概率」不生效、双黑照旧。
+        //     `AevonInPush` 已经排除了我们自己的推帧，0.40 s 只是给首帧留的余量。
         //   · 目标高度 < 800 且新 frame > 850：卡片最大也就 719，整屏 932。
         //
         // 命中之后先撤掉 frame 目标（不再抢），再异步拆卡 —— 这里在 settings
@@ -1871,7 +1894,7 @@ static BOOL AevonWriteFrame(id settings, int slot) {
         if (AevonInPush == 0
             && now.size.height > 850
             && target.size.height < 800
-            && (CFAbsoluteTimeGetCurrent() - AevonArmedAt[slot]) > 0.9) {
+            && (CFAbsoluteTimeGetCurrent() - AevonArmedAt[slot]) > 0.40) {
             __sync_fetch_and_and(&AevonFrameMask, ~(1 << slot));
             AevonArmedAt[slot] = 0;
             AevonLogRaw([[NSString stringWithFormat:
@@ -4703,6 +4726,32 @@ static BOOL AevonOpenHasKey(id options, NSString *key) {
     return [(NSDictionary *)dict objectForKey:key] != nil;
 }
 
+/// 0.2.38 — 把 `__PasteSharingToken` 的形状打一行出来。
+///
+/// 这一版它只是诊断：token 类分享仍然整条放行给系统（文件能发，代价是目标 App
+/// 全屏）。要把它做成「悬浮窗 + 文件发出」，下一版必须知道这东西能不能字符串化
+/// —— 能，就写进我们自己的投递文件、完全绕开系统那次激活。
+/// 只读、只打一行、异常一律吞掉：这段跑在 SpringBoard 主线程。
+static void AevonPasteTokenProbe(id request, id options, const char *bundle) {
+    static int notes = 0;
+    if (notes >= 8) return;
+    notes += 1;
+    @try {
+        id token = AevonOpenAnyValue(request, options, @"__PasteSharingToken");
+        const char *cls = token != nil ? object_getClassName(token) : "nil";
+        NSString *desc = nil;
+        if (token != nil && [token respondsToSelector:@selector(description)]) {
+            desc = [token description];
+            if (desc.length > 120) desc = [desc substringToIndex:120];
+        }
+        AevonLogRaw([[NSString stringWithFormat:@"notify: paste token b=%s cls=%s desc=%@",
+                      bundle != NULL ? bundle : "-", cls,
+                      desc != nil ? desc : @"-"] UTF8String]);
+    } @catch (__unused NSException *exception) {
+        AevonLogRaw("notify: paste token threw");
+    }
+}
+
 /// 分流决定。
 ///   返回 1 → 吞掉，开卡片；
 ///   返回 2 → 吞掉，不再开（同一次点击的后续链）；
@@ -4757,20 +4806,22 @@ static int AevonOpenDecide(id request, id options,
         kind = "share";
     }
 
-    // 0.2.36 — 粘贴板分享（`__PasteSharingToken`）**仍然进卡片**，只是投递方式换一条。
+    // 0.2.38 — 粘贴板分享（`__PasteSharingToken`）**不建卡**，整条放行。
     //
-    // 0.2.36 第一版把这类分享整条放行给系统：文件能发（token 随激活请求过 XPC），
-    // 代价是目标 App 全屏 —— 用户回的原话是「全屏状态下文件可以正常发送，但是我要
-    // 的悬浮窗打开目标 app，而不是全屏」。所以 0.2.37 改成：照常分流建卡，卡片的
-    // scene 起来之后由 `AevonForwardDeliver` 把**原请求原样**交给原实现（不写 plist、
-    // 不序列化），token 就跟着系统那条真正的激活请求进 App。
-    // 这与 file:// 分享已经在真机上跑通的那条路（Sileo 卡片里弹文件面板）同一条。
+    // 0.2.36 放行：文件真的发得出去（token 随系统激活过 XPC），但目标 App 全屏。
+    // 0.2.37 改成「先建卡、再把原请求交回原实现」，真机结果是**卡片和全屏一起出现、
+    // 卡片黑**：`__ActivateSuspended` 只对冷启动成立，而卡片一建，App 就已经在跑了，
+    // 挂起位被系统无视 ⇒ 原实现照常把它拉成全屏，和卡片抢同一份 scene。
+    // 也就是说：token 这条路**绕不开一次真正的激活**。这一版先把它恢复成 0.2.36
+    // 的行为（文件能发、画面干净），并把 token 的形状打出来 —— 下一版尝试把它
+    // 转成本地投递，才可能真的做到「悬浮窗 + 文件发出」同时成立。
     if (kind != NULL && strcmp(kind, "share") == 0 &&
-        AevonOpenHasKey(options, @"__PasteSharingToken")) {
+        AevonOpenAnyValue(request, options, @"__PasteSharingToken") != nil) {
         *why = "paste";
         AevonDivertAt = CFAbsoluteTimeGetCurrent();
         snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
-        return 1;
+        AevonPasteTokenProbe(request, options, bundle);
+        return 0;
     }
 
     // 0.2.10 — 分享黑名单：只对「这次是分享」生效，命中就**整条放行**。
@@ -7240,21 +7291,9 @@ void AevonForwardDeliver(const char *why) {
         });
         return;
     }
-    // 0.2.37 — 粘贴板分享不能走「App 内投递」。
-    //
-    // 0.2.35 的 `appurl send … opt=2/2` 已经证明：`__PasteSharingToken` 是私有
-    // 对象，`AevonAppOpenSafe` 装不进 plist，文件根本没过去 —— 扩展报成功、
-    // 主 App 报失败，文件也确实没发出去。
-    //
-    // 这条请求现在就攥在我们手里（对象、token 都在），卡片的 scene 也已经起来
-    // 了（`AevonForwardDeliver` 只在卡片之后被调用），把**原请求原样**交给原
-    // 实现即可：token 随系统那条真正的激活请求进 App，卡片继续承载它。
-    // 真机先例是 file:// 分享给 Sileo —— `forward flush why=appurl no file` 之后
-    // 原实现照样把文件面板弹在卡片里。
-    if (AevonOpenHasKey(AevonFwdHoldOptions, @"__PasteSharingToken")) {
-        AevonForwardFlushNow("paste token");
-        return;
-    }
+    // 0.2.38 — 粘贴板分享不再走这条投递链：`AevonOpenDecide` 已经把它整条放行
+    // （见那一支的注释：token 只能随系统激活过 XPC，而 App 一旦在跑，挂起位就被
+    // 无视，必然全屏）。这里不再需要特判。
     NSString *url = AevonForwardHeldURL();
     NSString *bundle = AevonFwdHoldBundle;
     if (url.length == 0 || bundle.length == 0) {
@@ -7420,15 +7459,8 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             // 先交回系统就丢了 launch options。现在自建 scene 自己起进程
             // （launchIntent=4），payload 晚到变成「运行中的 App 收到一次 open URL」，
             // 而那正是 Aevon(183) 里成功的两次。
-            // 0.2.37 — `paste` 也是分享的一种（QQ 分享文件走 `__PasteSharingToken`）。
-            // 0.2.36 把它整条放行了，文件能发但目标 App 是全屏；这一版它照常进卡片，
-            // 只是投递方式改成「卡片就绪后把原请求原样交回原实现」—— 所以它必须
-            // 和 `share` 一样走 hold，否则 `AevonForwardDeliver` 里那条 paste 判据
-            // 永远读不到 `AevonFwdHoldOptions`。它同样不是通知，不能掉进 else 里
-            // 去收面板、清通知。
-            const int isShare = (strcmp(why, "share") == 0 || strcmp(why, "paste") == 0);
             int forwarded = 0;
-            if (isShare && AevonOpenCarriesPayload(request, options)) {
+            if (strcmp(why, "share") == 0 && AevonOpenCarriesPayload(request, options)) {
                 // 不在这里发。先让 `AevonOpenFromNotification` 把卡片的 process +
                 // scene 建起来，再把这个请求投回去。超时 1.6 秒兜底。
                 forwarded = AevonForwardHold(slot, self, _cmd, request, options,
@@ -7470,7 +7502,7 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             //
             // 0.1.95：`fwd=1` 表示这条请求已经带着 payload 交回系统（挂起启动），
             // 文件应该会到；`fwd=0` 表示没能交回去，目标 App 只会拿到一张空卡。
-            if (isShare) {
+            if (strcmp(why, "share") == 0) {
                 const char *srcRaw = [AevonOpenSourceApp(request, options) UTF8String];
                 AevonLogRaw([[NSString stringWithFormat:@"notify: share b=%@ src=%s pay=%s fwd=%d n=%d",
                               target, srcRaw != NULL ? srcRaw : "-",

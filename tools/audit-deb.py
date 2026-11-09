@@ -850,6 +850,11 @@ def main():
                   # 少任意一条 = 这条反应式让路没有编进产物。
                   b"win: card yield seen b=%s now=%.0fx%.0f want=%.0fx%.0f",
                   b"win: card yielded to fullscreen b=",
+                  # 0.2.38 — 让路改成「松手」：自建 scene 交给系统，不销毁。
+                  # 少了这一条，设置 App 在「卡片 → 全屏」那一拍会闪退。
+                  b"win: own handed over %@",
+                  # 0.2.38 — 粘贴板分享的诊断行：下一版要靠它决定 token 能不能本地投递。
+                  b"notify: paste token b=%s cls=%s desc=%@",
                   # 0.2.15 —— 尺寸 + 分享两件：
                   #   own display       scene 的 displayConfiguration 被改成画布大小
                   #                     （不改就是「UIScreen 932 / 窗口 717」，按屏幕

@@ -1810,12 +1810,18 @@ zStackParticipantDidChange:
             // scene 撞同一个 identity。反过来对自建 scene 推后台也是错的：
             // `AevonPushBackground` 会把一个「本不该存在」的 scene 交给系统去管理。
             let owned = !closingBundle.isEmpty && AevonOwnIsOwned(closingBundle) == 1
+            // 0.2.38 — 「让路」= 松手，不是拆掉。自建 scene 也不再销毁：
+            // 0.2.37 在系统正要把这张 scene 拉成全屏的那一拍 destroy 它，
+            // 设置 App 直接闪退，其它 App 常常变成「全屏底部黑」。
+            let handover = yielding
             let screenSize = UIScreen.main.bounds.size
-            if !closingBundle.isEmpty && !owned {
+            if !closingBundle.isEmpty && (!owned || handover) {
                 AevonSceneFrameSet(closingBundle, 0, 0,
                                    Double(screenSize.width), Double(screenSize.height))
             }
-            let restoreDoor = owned ? -1 : AevonPushSceneFrame(scene)
+            // 0.2.38 — 让路时自建 scene 也要真的写一次整屏：系统接下来要的
+            // 就是这张 932，提前给它，接管那一拍就不会出现「717 摆在 932 窗口里」。
+            let restoreDoor = (owned && !handover) ? -1 : AevonPushSceneFrame(scene)
             if closingBundle.isEmpty {
                 AevonSceneFrameClear()
             } else {
@@ -1850,9 +1856,11 @@ zStackParticipantDidChange:
             // 下面那条 0.35 s 的补写留着，万一这一次也没落地。
             // 0.2.13 — 自建 scene 的关卡动作只有一个：销毁。`destroyScene:` 只解绑
             // scene，进程留着（母本已知的这个行为对我们正好：下次打开省一次冷启动）。
-            let door = owned ? AevonOwnDestroy(closingBundle) : AevonPushBackground(scene)
+            let door = handover
+                ? (owned ? AevonOwnHandOver(closingBundle) : 0)
+                : (owned ? AevonOwnDestroy(closingBundle) : AevonPushBackground(scene))
             Log.write("win: background after teardown door=" + String(door)
-                      + (owned ? " own=1" : ""))
+                      + (owned ? " own=1" : "") + (handover ? " handover=1" : ""))
             // 0.0.70 — 关卡这一拍把 App 写的读数取回来。必须在 `clearHosted()`
             // 之前：那个函数会把 `hostedBundle` 清空，之后就不知道去哪个容器里取了。
             drainAppLog("on close")
