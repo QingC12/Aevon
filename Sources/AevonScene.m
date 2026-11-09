@@ -4731,9 +4731,9 @@ static void AevonShareSourceCapture(const char *target) {
     if (target == NULL || target[0] == '\0') return;
     id manager = AevonSceneManager();
     if (manager == nil) return;
-    __block char picked[128] = {0};
+    __block NSString *picked = nil;
     AevonEnumerateScenes(manager, ^(id scene) {
-        if (scene == nil || picked[0] != '\0') return;
+        if (scene == nil || picked != nil) return;
         if (AevonSceneForeground(scene) != 1) return;
         SEL idSel = sel_registerName("identifier");
         if (![scene respondsToSelector:idSel]) return;
@@ -4747,17 +4747,17 @@ static void AevonShareSourceCapture(const char *target) {
         const char *name = text.UTF8String;
         if (AevonShareSourceSkip(name)) return;
         if (strcmp(name, target) == 0) return;
-        snprintf(picked, sizeof(picked), "%s", name);
+        picked = text;
     });
-    if (picked[0] == '\0') {
+    if (picked.length == 0) {
         AevonLogRaw([[NSString stringWithFormat:@"notify: share source none target=%s",
                       target] UTF8String]);
         return;
     }
-    snprintf(AevonShareSource, sizeof(AevonShareSource), "%s", picked);
+    snprintf(AevonShareSource, sizeof(AevonShareSource), "%s", picked.UTF8String);
     AevonShareSourceAt = CFAbsoluteTimeGetCurrent();
     AevonLogRaw([[NSString stringWithFormat:@"notify: share source b=%s target=%s",
-                  picked, target] UTF8String]);
+                  picked.UTF8String, target] UTF8String]);
 }
 
 /// 「把来源 App 请回全屏」。
