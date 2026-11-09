@@ -4191,6 +4191,109 @@ static BOOL AevonWorthInjecting(void) {
     return YES;
 }
 
+// MARK: - 0.2.31 「回桌面」那一拍不黑
+
+// 落盘函数定义在下面（0.0.91 那段）。这里先声明一行：C 不再允许隐式声明，
+// 而 `AevonDeactInstall` 要用它写「装上没装上」。
+static void AevonRawNote(const char *line);
+
+/// 宿主侧那只 deactivation 钩子（`AevonScene.m`）装在 SpringBoard 上，整套日志
+/// `deact_set=0`：这个系统不从 SpringBoard 发这一声。真正发它的是**每个 App
+/// 自己的 UIKit** —— `UIApplicationSceneDeactivationManager` 收下原因位掩码，
+/// UIKit 据此把这个 scene 标成「可以睡」，画面从那一拍起停住；等宿主再把
+/// `isForeground` 写回来、App 重新排一遍版，0.2.30 日志里那条
+/// `picture dropped cs=0 … picture back after 185ms` 就是这 185 ms 的黑。
+///
+/// 所以钩子要装进卡里的那个进程：原因清零，UIKit 就继续画。判据用**租约**而
+/// 不是当下的 settings —— 回桌面那一拍 settings 正从「前台」翻成「后台」，
+/// 钩子进来时可能已经是后台。最近 3 秒里见过一次「我在卡里且是前台」，就把
+/// 这段过渡也算在卡里；3 秒够走完一次回桌面动画，又不会让关卡之后的后台 App
+/// 一直画下去。
+///
+/// 只在主线程动手：这个管理器不在主线程上被调用时，UIKit 的读写都不安全；
+/// 那种情况原样放行。
+static double AevonHostedSeenAt = 0;
+static double AevonHostedCheckedAt = 0;
+static long AevonDeactCalls = 0;
+static long AevonDeactStrips = 0;
+static void (*AevonOriginalDeactSet)(id, SEL, unsigned long long, id, id, id) = NULL;
+
+/// 窗口比屏幕矮 40pt 以上 —— 只有被托管（主卡 / 停靠小窗）时才是这样。
+///
+/// 不能拿 `AevonHosted()` 当租约判据：那个判据为「scene 说自己在前后台」，
+/// 对**任何**前台 App 都成立。用它续租约，等于让每个 App 退到后台之后还多画
+/// 三秒；而这里要认的只有一件事 —— 这个进程正被装在一块比屏幕小的画布里。
+static BOOL AevonShrunk(void) {
+    CGFloat height = AevonWindowHeight();
+    UIScreen *screen = [UIScreen mainScreen];
+    CGFloat full = screen != nil ? [screen bounds].size.height : 0.0;
+    return height >= 200.0 && full >= 200.0 && height <= full - 40.0;
+}
+
+static void AevonDeactSet(id self, SEL _cmd, unsigned long long reasons,
+                          id scene, id settings, id reason) {
+    unsigned long long use = reasons;
+    if (reasons != 0 && [NSThread isMainThread]) {
+        double now = CFAbsoluteTimeGetCurrent();
+        if (now - AevonHostedCheckedAt > 0.2) {
+            AevonHostedCheckedAt = now;
+            if (AevonShrunk()) AevonHostedSeenAt = now;
+        }
+        if (AevonHostedSeenAt > 0 && now - AevonHostedSeenAt < 3.0) {
+            use = 0;
+            long strip = __sync_fetch_and_add(&AevonDeactStrips, 1);
+            if (strip < 4) {
+                char line[160];
+                snprintf(line, sizeof(line), "app: deact strip reasons=%llu\n", reasons);
+                AevonAppLogWrite(line);
+            }
+        }
+    }
+    long call = __sync_fetch_and_add(&AevonDeactCalls, 1);
+    if (call < 4) {
+        char line[160];
+        snprintf(line, sizeof(line), "app: deact call reasons=%llu keep=%llu\n",
+                 reasons, use);
+        AevonAppLogWrite(line);
+    }
+    if (AevonOriginalDeactSet != NULL) {
+        AevonOriginalDeactSet(self, _cmd, use, scene, settings, reason);
+    }
+}
+
+/// 类、选择子、编码三样都对上才装。这个方法是 UIKit 的私有的；版本一换，
+/// 名字或编码就可能变，拿错编码去 `method_setImplementation` 是崩溃。
+/// 装不上不算错：行为退回 0.2.30（回桌面时会黑 185 ms），日志里没有
+/// `app: deact hook=1` 就说明这条路没通。
+static void AevonDeactInstall(void) {
+    Class cls = NSClassFromString(@"UIApplicationSceneDeactivationManager");
+    SEL sel = sel_registerName("_setDeactivationReasons:onScene:withSettings:reason:");
+    Method method = cls != Nil ? class_getInstanceMethod(cls, sel) : NULL;
+    BOOL owns = NO;
+    if (cls != Nil && method != NULL) {
+        unsigned int count = 0;
+        Method *list = class_copyMethodList(cls, &count);
+        for (unsigned int i = 0; list != NULL && i < count; i++) {
+            if (method_getName(list[i]) == sel) {
+                owns = YES;
+                break;
+            }
+        }
+        if (list != NULL) free(list);
+    }
+    const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
+    if (method != NULL && encoding != NULL && strcmp(encoding, "v48@0:8Q16@24@32@40") == 0) {
+        AevonOriginalDeactSet = (void *)method_getImplementation(method);
+        method_setImplementation(method, (IMP)AevonDeactSet);
+        AevonRawNote(owns ? "app: deact hook=1\n" : "app: deact hook=1 inherited\n");
+    } else {
+        char line[200];
+        snprintf(line, sizeof(line), "app: deact hook=0 cls=%d own=%d enc=%s\n",
+                 cls != Nil ? 1 : 0, owns ? 1 : 0, encoding != NULL ? encoding : "-");
+        AevonRawNote(line);
+    }
+}
+
 // MARK: - 0.0.91 进程死亡的证词
 
 /// 落盘用的路径，构造函数里定一次。之后崩溃时只走 open/write/close：
@@ -4333,6 +4436,12 @@ static void AevonAliveTick(void *context) {
     if (height < 200.0 || full < 200.0) return;
     if (height > full - 40.0) return;
     AevonEverHosted = 1;
+    // 0.2.31 — 卡里的 App 每秒续一次租约（见 `AevonDeactSet`）。
+    // 回桌面那一拍 settings 已经翻成后台，只有这个租约还能证明「我刚刚在卡里」；
+    // 只靠 deact 钩子自己刷新不行 —— 一直没被 deactivate 过的 App 永远见不到
+    // 非零 reasons，等到真被 deactivate 时反而没有租约可用。上面那两道早退已经
+    // 证明窗口比屏幕矮，这里不再重复判一次。
+    AevonHostedSeenAt = CFAbsoluteTimeGetCurrent();
     if (AevonAliveLines < 3600) {
         AevonAliveLines += 1;
         char beatLine[64];
@@ -8398,6 +8507,9 @@ static void AevonAppBoot(void) {
     // 都装，钩子体内用 `AevonKbHostGate`（卡片承载中 + 外框小于屏幕）决定动不动；
     // 不承载时逐字节返回系统原值。0.1.42 那两条写几何的钩子已撤（黑屏）。
     AevonKbNativeInstall();
+    // 0.2.31 — 回桌面那一拍的黑（见 `AevonDeactSet`）：原因清零，卡里的 App
+    // 在宿主把 `isForeground` 写回来之前也不会停画。
+    AevonDeactInstall();
 
     // Both getters, both chained: a process that is not hosted keeps the
     // system's answers byte for byte.
