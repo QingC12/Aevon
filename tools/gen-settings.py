@@ -57,11 +57,12 @@ WIRED = {
 
 PANELS = [
     ("Window", "浮窗", [
-        dict(k="HeightFraction", cn="高度", cell="slider", d=0.63, rng=(0.30, 0.80),
+        dict(grp="尺寸", k="HeightFraction", cn="高度", cell="slider", d=0.63,
+             rng=(0.30, 0.80),
              note="浮窗第一次打开时占屏幕高度的比例。宽度按 5:3 跟随，"
                   "所以只要调这一个数。拖动或缩放过之后，以那张卡自己的记忆为准；"
                   "长按卡片底角可以复位到这里。"),
-        dict(k="windowBlacklistText", cn="不走浮窗的 App", cell="text",
+        dict(grp="名单", k="windowBlacklistText", cn="不走浮窗的 App", cell="text",
              d="", note="填 bundle id，用逗号或空格分隔。名单里的 App 不进浮窗："
                         "通知、分享、链接都按系统原生方式打开，是某个 App 在浮窗里"
                         "用不了时唯一的自救手段。写前缀会盖住它名下所有 App，"
@@ -69,21 +70,21 @@ PANELS = [
     ]),
 
     ("Ring", "圆盘", [
-        dict(k="!ring.desktop", cn="在桌面显示", cell="switch", d=True,
+        dict(grp="显示", k="!ring.desktop", cn="在桌面显示", cell="switch", d=True,
              note="开着时，手指贴屏幕右缘、在下部 35% 之内向左划，圆盘从固定点展开。"
                   "关掉只是不显示，不影响浮窗。"),
-        dict(k="!ring.appHook", cn="浮窗内容可点击", cell="switch", d=True,
+        dict(grp="触摸", k="!ring.appHook", cn="浮窗内容可点击", cell="switch", d=True,
              note="浮窗里的 App 由另一个进程显示，它自己会以为「我在后台」，"
                   "UIKit 于是把转发进来的触摸丢掉 —— 画面在动、声音在放，就是点不动。"
                   "开启后只在「场景说前台、App 说后台」这一种矛盾下按前台解释，"
                   "正常前后台切换不受影响。关掉立刻回到旧行为，是这类问题唯一的退路。"),
-        dict(k="@ring.host", cn="桌面状态", cell="title", d="—",
+        dict(grp="桌面进程", k="@ring.host", cn="桌面状态", cell="title", d="—",
              note="桌面进程回报的当前状态。显示「未加载」表示 Aevon 没有在桌面里跑，"
                   "多半是安全闸门开着，或刚改完还没重载。"),
-        dict(k="@ring.summary", cn="当前承载", cell="title", d="—",
+        dict(grp="圆盘几何", k="@ring.summary", cn="当前承载", cell="title", d="—",
              note="圆盘现在用的几何（圈数与每圈容量）。它随你在编辑器里的增删"
                   "自动变化，不用手调。"),
-        dict(k="@ring.apps", cn="已选应用", cell="title", d="自动",
+        dict(grp="应用清单", k="@ring.apps", cn="已选应用", cell="title", d="自动",
              note="圆盘里装哪些 App。留空时自动挑最近使用的 12 个。"),
     ]),
 ]
@@ -134,7 +135,10 @@ def spec_of(it):
 def build_panel(panel_id, title, items):
     specs = []
     for it in items:
-        specs.append({"cell": "PSGroupCell", "label": it["cn"], "footerText": it["note"]})
+        # 分组标题给「这一类是什么」，行标题给「这一项是什么」。
+        # 两处写同一个字会在设置里读成「高度 / 高度 ——⚪——」，像半成品。
+        specs.append({"cell": "PSGroupCell", "label": it["grp"],
+                      "footerText": it["note"]})
         specs.append(spec_of(it))
     # 圆盘的三个动作：编辑器与预览是这一页唯一的「能改东西」的入口。
     if panel_id == "Ring":
@@ -182,11 +186,15 @@ def build_root():
                   "action": "openLog:", "defaults": DOMAIN})
 
     items.append({"cell": "PSGroupCell", "label": "安全",
-                  "footerText": "两个闸门任一开启，重载桌面后 Aevon 不装任何 hook。"
-                                "关掉它们不会自动恢复，需要再重载一次。"})
+                  "footerText": "任一闸门开着，重载桌面后 Aevon 不装任何 hook；"
+                                "关掉也不会自己恢复，同样要再重载一次。停用是常规退路；"
+                                "紧急停止留给崩溃循环 —— 连崩被降级之后先开它再重载，"
+                                "Aevon 就完全不加载。清除崩溃计数用于恢复被降级的注入。"
+                                "重载桌面只重启 SpringBoard，不重启手机、不丢数据；"
+                                "装完包也需要重载一次（重启更彻底）。"})
     items.append({"cell": "PSSwitchCell", "label": "停用（重载后生效）",
                   "key": "!gate.disabled", "default": False, "defaults": DOMAIN})
-    items.append({"cell": "PSSwitchCell", "label": "紧急停止（G0）",
+    items.append({"cell": "PSSwitchCell", "label": "紧急停止（崩溃循环）",
                   "key": "!gate.panic", "default": False, "defaults": DOMAIN})
     items.append({"cell": "PSButtonCell", "label": "清除崩溃计数",
                   "action": "clearAttempts:", "defaults": DOMAIN})

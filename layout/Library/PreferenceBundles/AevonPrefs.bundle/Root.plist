@@ -130,7 +130,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>两个闸门任一开启，重载桌面后 Aevon 不装任何 hook。关掉它们不会自动恢复，需要再重载一次。</string>
+			<string>任一闸门开着，重载桌面后 Aevon 不装任何 hook；关掉也不会自己恢复，同样要再重载一次。停用是常规退路；紧急停止留给崩溃循环 —— 连崩被降级之后先开它再重载，Aevon 就完全不加载。清除崩溃计数用于恢复被降级的注入。重载桌面只重启 SpringBoard，不重启手机、不丢数据；装完包也需要重载一次（重启更彻底）。</string>
 			<key>label</key>
 			<string>安全</string>
 		</dict>
@@ -156,7 +156,7 @@
 			<key>key</key>
 			<string>!gate.panic</string>
 			<key>label</key>
-			<string>紧急停止（G0）</string>
+			<string>紧急停止（崩溃循环）</string>
 		</dict>
 		<dict>
 			<key>action</key>
@@ -182,7 +182,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>Aevon 0.2.60 · 装完或改完闸门需要重启桌面。</string>
+			<string>Aevon 0.2.61 · 装完或改完闸门需要重启桌面。</string>
 			<key>label</key>
 			<string></string>
 		</dict>
