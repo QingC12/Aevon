@@ -4734,6 +4734,9 @@ static NSString *AevonOpenURLPath(NSString *leaf) {
 @property (nonatomic, copy) id annotation;
 @property (nonatomic, assign) BOOL openInPlace;
 @property (nonatomic, assign) BOOL universalLinksOnly;
+// 0.2.50 — Safari 的 `BrowserController` 会读这一项；0.2.49 的替身只实现了前四个，
+// 真机日志因此是 `ok=0 via=scene-throw`（每次点击链接都抛，重试 14 次后回落全屏）。
+@property (nonatomic, assign) id eventAttribution;
 @end
 
 @implementation AevonOpenURLOptions
@@ -4954,6 +4957,14 @@ static void AevonOpenURLApply(void) {
                 } @catch (NSException *exception) {
                     ok = NO;
                     via = "scene-throw";
+                    // 0.2.50 — 之前只记了 `scene-throw`，看不出是哪个选择子。
+                    // `reason` 里通常直接带着 App 读的那一项（Aevon(0.2.49) 的
+                    // Safari 就缺在 options 上）。
+                    NSString *line = [NSString stringWithFormat:
+                                      @"app: openurl throw %@ | %@\n",
+                                      exception.name != nil ? exception.name : @"-",
+                                      exception.reason != nil ? exception.reason : @"-"];
+                    AevonAppLogWrite(line.UTF8String);
                 }
                 [context release];
             }

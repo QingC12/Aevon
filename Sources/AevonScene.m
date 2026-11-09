@@ -4632,6 +4632,20 @@ static BOOL AevonOpenCarriesPayload(id request, id options) {
     return strcmp(AevonOpenPayloadKind(request, options), "none") != 0;
 }
 
+/// 0.2.50 — 这一次是不是「分享面板递过来的」（`UIActivityContinuationAction`）。
+///
+/// 真机日志里两类请求长得几乎一样（都带来源 App、都可能带 paste token 和 URL）：
+///   · 分享：`act=#UIActivityContinuationAction n=1`（0.2.48/0.2.49 每一次）；
+///   · 登录：`act=- n=0`（14:42:31 / 14:55:22 两次微信、QQ 授权）。
+/// 只差这一位，0.2.49 用它把 https 通用链接的登录和 https 链接的分享分开：
+/// 后者必须原样交给系统（分享内容在系统那次激活里），前者才能本地投递。
+static int AevonOpenIsContinuation(id request, id options) {
+    id act = AevonOpenFirstAction(request, options);
+    if (act == nil) return 0;
+    const char *name = object_getClassName(act);
+    return (name != NULL && strstr(name, "UIActivityContinuationAction") != NULL) ? 1 : 0;
+}
+
 /// 0.2.48 — 这次打开带的那个 URL。`__PayloadURL` 优先，其次
 /// `__PayloadOptions[UIApplicationLaunchOptionsURLKey]`（分享那条路已经证明
 /// 两种形状都在真机上出现过，见 `AevonForwardHeldURL`）。
@@ -4645,6 +4659,21 @@ static NSString *AevonOpenURLOf(id request, id options) {
         if (payload != nil) {
             value = AevonActRead(payload, @"UIApplicationLaunchOptionsURLKey");
         }
+    }
+    if (value == nil) {
+        // 0.2.50 — 通用链接（微信 / QQ 登录最常见的那一种）不在 `__PayloadURL`
+        // 里：它装成 `__UserActivity4LS`，真 URL 是 `webpageURL`。0.2.49 的 QQ
+        // 授权日志 `pay=url` 却没有 `notify: link`，就是漏在这一步。
+        id activity = AevonOpenAnyValue(request, options, @"__UserActivity4LS");
+        if (activity == nil) {
+            id payload = AevonOpenPayload(request, options);
+            if (payload != nil) {
+                activity = AevonActRead(payload, @"UIApplicationLaunchOptionsUserActivityKey");
+            }
+        }
+        value = AevonActRead(activity, @"webpageURL");
+        if (value == nil) value = AevonActRead(activity, @"URL");
+        if (value == nil) value = AevonActRead(activity, @"_webpageURL");
     }
     if ([value isKindOfClass:[NSURL class]]) return [(NSURL *)value absoluteString];
     if ([value isKindOfClass:[NSString class]]) return (NSString *)value;
@@ -5224,19 +5253,33 @@ static int AevonOpenDecide(id request, id options,
     // 清通知，顺序不能动。
     if (!notifyKind) {
         NSString *linkURL = AevonOpenURLOf(request, options);
-        if (linkURL.length > 0) {
-            int isSafari = strncmp(bundle, "com.apple.mobilesafari", 22) == 0;
-            int isOAuth = !isSafari &&
-                (strncmp(bundle, "com.tencent.xin", 15) == 0 ||
-                 strncmp(bundle, "com.tencent.mqq", 15) == 0);
-            if (isSafari || isOAuth) {
+        int isSafari = strncmp(bundle, "com.apple.mobilesafari", 22) == 0;
+        int isOAuth = !isSafari &&
+            (strncmp(bundle, "com.tencent.xin", 15) == 0 ||
+             strncmp(bundle, "com.tencent.mqq", 15) == 0);
+        if (isSafari || isOAuth) {
+            if (linkURL.length == 0) {
+                // 登录也可能整条装在 paste token 里（没有 URL）。留一行，下一轮
+                // 就能看出「微信登录到底是 url 还是 paste」，不用再靠猜。
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"notify: link skip b=%s scheme=- pay=%s cont=%d url=none",
+                              bundle, AevonOpenPayloadKind(request, options),
+                              AevonOpenIsContinuation(request, options)]
+                             UTF8String]);
+            } else {
                 NSString *low = [linkURL lowercaseString];
                 const char *scheme = low.UTF8String;
+                int web = (strncmp(scheme, "http://", 7) == 0 ||
+                           strncmp(scheme, "https://", 8) == 0);
                 int wanted = 0;
                 if (isSafari) {
-                    wanted = (strncmp(scheme, "http://", 7) == 0 ||
-                              strncmp(scheme, "https://", 8) == 0);
+                    wanted = web;
                 } else {
+                    // 0.2.50 — 微信 / QQ 登录现在多半走通用链接（https），
+                    // 0.2.49 只认自定义 scheme，于是又落回 paste 全屏。
+                    // 用「有没有 `UIActivityContinuationAction`」把登录和分享分开：
+                    // 分享必须原样交给系统（内容在系统那次激活里），不能被本地投递
+                    // 顶掉；登录没有这个 action，可以建卡本地投递。
                     wanted = (strncmp(scheme, "weixin://", 9) == 0 ||
                               strncmp(scheme, "weixinapp://", 12) == 0 ||
                               strncmp(scheme, "mqq://", 6) == 0 ||
@@ -5244,7 +5287,8 @@ static int AevonOpenDecide(id request, id options,
                               strncmp(scheme, "mqqopensdkapi://", 16) == 0 ||
                               strncmp(scheme, "mqqopensdkapiv2://", 18) == 0 ||
                               strncmp(scheme, "mqqopensdkapiv3://", 18) == 0 ||
-                              strncmp(scheme, "mqqwpa://", 9) == 0);
+                              strncmp(scheme, "mqqwpa://", 9) == 0 ||
+                              (web && AevonOpenIsContinuation(request, options) == 0));
                 }
                 if (wanted) {
                     // 目标已经整屏在屏上（例如 Safari 正开着，后台某个 App 又发了
@@ -5279,6 +5323,15 @@ static int AevonOpenDecide(id request, id options,
                                  UTF8String]);
                     return 1;
                 }
+                // 0.2.50 — 没认出来的那一次也留一份形状，下一轮不用再猜：
+                // `pay` 是 none / url / paste / payload，`cont` 是分享 action 位。
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"notify: link skip b=%s scheme=%s pay=%s cont=%d",
+                              bundle,
+                              scheme != NULL && scheme[0] != '\0' ? scheme : "-",
+                              AevonOpenPayloadKind(request, options),
+                              AevonOpenIsContinuation(request, options)]
+                             UTF8String]);
             }
         }
     }
