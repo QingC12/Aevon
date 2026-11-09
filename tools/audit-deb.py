@@ -683,26 +683,20 @@ def main():
                   # `giveup` = 收不进来时把登记彻底撤掉（否则整屏只画上半截）。
                   b"notify: auth swap card b=%s after=%dms fg=%d live=%d board=%d",
                   b"notify: auth swap giveup b=%s fg=%d live=%d tick=%d build=%d",
-                  # 0.2.69 — 授权那一支也压掉全屏帧：在这一次请求的
-                  # `SBActivationSettings` 上置挂起位（请求照常交回系统，SSO /
-                  # NSUserActivity 仍由系统投递），置完读回。`none` = 名字表里
-                  # 没有这一位，本版行为等同 0.2.68（只留证词，不改行为）。
-                  b"notify: oauth susp b=%s idx=%d flag=%d read=%d",
-                  b"notify: oauth susp b=%s none",
+                  # 0.2.70 — 授权那一支**不再**改激活设置（0.2.69 的挂起位已撤：
+                  # 挂起的进程不跑，SSO 没人接；而且「激活一个不上屏的目标」正是
+                  # 0.2.69 分享死局的形状）。
                   # 0.2.67 — 授权结果回到第三方 App：放行，不按进小窗。
                   b"notify: auth return b=%s src=%@ recent=%d in=%d",
                   # 0.2.63/0.2.66 — 落点（对比报告的方案 A）：系统的 URL 打开入口带一个
                   # `display` 参数（真机编码 `v60@0:8@16@24B32@36@44@?52` ⇒ 它是对象）。
-                  # 0.2.69 起 `display` 又在落点这条路上传 nil（0.2.68 原样下发会起
-                  # 全屏帧，用户报「分享到 QQ 先跳全屏再回落」；0.2.63-0.2.67 的 nil
-                  # 会撤下主屏前台 App、手势失效）。这一版补上 `landing: repair`：
-                  # 请求提交后把来源 App 重新激活一次，主屏前台位还回去。
+                  # 0.2.70 — **display 原样下发**（0.2.69 的 nil + 补台已撤：nil 让目标
+                  # 不上屏、建卡等不到 scene，主屏又没有前台 App ⇒ 手势失效、无法注销）。
                   #   `owners=` / `cls=… types=` = 这个选择子在这台系统上存不存在、
                   #      形状对不对（对不上就不装，只留一行 shape skip）；
                   #   `hooked` = 真装上了；
-                  #   `url … land=1` = 那一次会接手落点（display 传 nil）；
-                  #   `url card` = 随后把那份 scene 收进了卡片；
-                  #   `repair src=… front=… door=…` = nil 之后的补台有没有真的执行。
+                  #   `url … land=1` = 那一次会接手落点（display 原样交给系统）；
+                  #   `url card` = 随后把那份 scene 收进了卡片。
                   # 另两条 `landing: %s cls=` 是 Stheno 的激活口与 TrollOpen 的
                   # 实体口的普查，只记录、不改变行为 —— 它们的答案决定下一版要不要
                   # 换入口。
@@ -715,10 +709,6 @@ def main():
                   b"landing: url %s b=%s d=%s a=%d run=%d land=%d n=%ld",
                   b"landing: url build b=%s after=%dms",
                   b"landing: url offmain b=%s",
-                  b"landing: repair src=%s front=%d door=%ld",
-                  b"landing: repair skip carded src=%s",
-                  b"landing: repair fallback src=%s",
-                  b"landing: repair none",
                   b"landing: %s cls=%@ types=%s",
                   # 0.2.60 — 卡片走了、App 窗口还回场景高（「全屏中下黑」的另一半）。
                   # 0.2.46 — 「让抖音真重排」这一版的四条：显示覆盖 / 参考尺寸 /
