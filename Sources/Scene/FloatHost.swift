@@ -1122,7 +1122,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 会互相蚕食（112 宽的小窗上 4 × 20 只剩 32 给中格）。
     private var cellSide: CGFloat {
         let width = card?.bounds.width ?? 0
-        guard width > 16 else { return bandMin }
+        guard width > 16 else { return FloatHost.bandMin }
         return Swift.min(band, width / 5)
     }
     /// 快速上滑: a flick, not a drag. 900 pt/s is above a deliberate slow drag and
@@ -1571,9 +1571,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // `nominalHeightRange`）。缩放已经按同一个区间夹过，这里是第二道：
         // 旧存盘、设置滑条、旋转后的新屏高都可能把 f 送出去，而「写进去的
         // 值还原不回来」正是下次开窗时尺寸跳一下的原因。
+        //
+        // `nominalHeightRange` 的量纲是**点**，`heightFraction` 是**比例** ——
+        // 夹之前先除屏高，否则 `Swift.max(280, 0.63)` 会得到 280，存盘直接爆。
         let race = nominalHeightRange(in: bounds, source: natural)
+        let floorF = race.lowerBound / bounds.height
+        let ceilF = race.upperBound / bounds.height
         let wanted = card.frame.height / bounds.height
-        placement.heightFraction = Swift.min(race.upperBound, Swift.max(race.lowerBound, wanted))
+        placement.heightFraction = Swift.min(ceilF, Swift.max(floorF, wanted))
 
         let ok = CardLayout.save(placement)
         let side = placement.edge == .left ? "left" : "right"
