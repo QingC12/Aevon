@@ -681,8 +681,10 @@ def main():
                   # 0.2.62 — 放行之后 100 ms 内收进卡片（Aevon(203) 第 1 条：授权
                   # 不能停在整屏）。两行一起断言：`card` = 真的收进来了，
                   # `giveup` = 收不进来时把登记彻底撤掉（否则整屏只画上半截）。
-                  b"notify: auth swap card b=%s after=%dms fg=%d board=%d",
-                  b"notify: auth swap giveup b=%s fg=%d live=%d tick=%d",
+                  b"notify: auth swap card b=%s after=%dms fg=%d live=%d board=%d",
+                  b"notify: auth swap giveup b=%s fg=%d live=%d tick=%d build=%d",
+                  # 0.2.67 — 授权结果回到第三方 App：放行，不按进小窗。
+                  b"notify: auth return b=%s src=%@ recent=%d in=%d",
                   # 0.2.63/0.2.66 — 落点（对比报告的方案 A）：系统的 URL 打开入口带一个
                   # `display` 参数（真机编码 `v60@0:8@16@24B32@36@44@?52` ⇒ 它是对象），
                   # 要进卡片的那个 App 传 nil ⇒ **没有全屏帧**，URL 仍由系统原生投递。
@@ -701,8 +703,7 @@ def main():
                   b"landing: url shape ok (sig=%s)",
                   b"landing: url shape skip (sig=%s args=%d)",
                   b"landing: url %s b=%s d=%s a=%d run=%d cut=%d n=%ld",
-                  b"landing: url card b=%s",
-                  b"landing: url card skip b=%s",
+                  b"landing: url build b=%s after=%dms",
                   b"landing: url offmain b=%s",
                   b"landing: %s cls=%@ types=%s",
                   # 0.2.60 — 卡片走了、App 窗口还回场景高（「全屏中下黑」的另一半）。

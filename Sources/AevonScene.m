@@ -2961,11 +2961,15 @@ static NSInteger AevonProbeSelfTest(void) {
 //    · 系统不把它摆到屏幕上 ⇒ 没有全屏帧，也就没有「下半黑」；
 //    · 我们再把那份已经存在的 scene 收进卡片（`AevonOpenCardDirect` 认活 scene）。
 //
-//  两道闸，都是为了「宁可退回旧行为，也不许点了没反应」：
-//    1. 目标 App 的进程必须已经在（`AevonAppPid > 0`）。冷启动那种「进程还没起」
-//       不切 display —— 那时 scene 也不存在，切了没人接管，就是黑屏一分钟。
-//    2. 形状不对就不装。私有方法的调用约定是猜不得的：这一版只认真机读回来的那一份
-//       编码（参数序列 `@@B@@@?`），别的一律只记一行、不装钩子。
+//  0.2.67 — 那道「进程必须已经在」的闸拆了。Aevon(205) 两次 QQ 文件分享都是
+//  `landing: url mqqapi://share/to_fri … run=0 cut=0`：分享时 QQ 还没起进程，
+//  于是唯一要修的那一次被这道闸整条放走 —— 系统照常整屏激活、60 ms 后
+//  `share swap` 再收卡，用户看到的就是「先全屏、再回落」。
+//  现在只剩两条真条件：**主队列 + display 不是 nil**。冷启动没有 scene 的那一
+//  种由 `AevonLandCardSchedule` 兜：等 scene 登记，1.5 s 还没等到就自己建一份。
+//
+//  另一道闸不变：形状不对就不装。私有方法的调用约定猜不得 —— 这一版只认真机
+//  读回来的那一份编码（参数序列 `@@B@@@?`），别的一律只记一行、不装钩子。
 //
 //  0.2.66 — 0.2.65 的闸写的是「两个 BOOL」（`@ B B @ @ @?`），因为按名字以为
 //  `display:` 是 BOOL。Aevon(204) 把真机的答案打了出来：
@@ -3042,6 +3046,8 @@ static int AevonLandingEncodingOK(const char *encoding) {
     return strcmp(sig, "v@:@@B@@@?") == 0 ? 1 : 0;
 }
 
+static void AevonLandCardSchedule(const char *target);
+
 static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
                                     BOOL animating, id settings, id origin, id result) {
     long seen = __sync_fetch_and_add(&AevonURLCalls, 1);
@@ -3059,9 +3065,12 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
         // 主队列才切：`AevonOpenCardDirect` 与窗口状态都是主线程的东西，在系统
         // 的工作区队列上读它们会撞上正在拆窗的那一拍。不在主队列就只记录。
         //
+        // 不看进程在不在（0.2.67）：分享那一刻微 / QQ 经常还没起进程，而它正是
+        // 我们要接的那一次。`running` 只进日志，不再进判断。
+        //
         // 不为「卡已经在」留例外：卡在的时候更应该切 —— 那时系统把它摆成全屏
         // 只会把卡片盖掉，而我们要的是那条 URL 落进已经开着的那张卡。
-        if (running) {
+        if (display != nil) {
             if ([NSThread isMainThread]) {
                 cut = 1;
             } else if (seen < 2) {
@@ -3097,24 +3106,10 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
     }
     if (!cut) return;
 
-    // 收卡放在下一拍：这一栈在系统的工作区事务里，事务没提交之前建窗会和
-    // FrontBoard 抢同一份 scene（0.0.31 的死锁纪律）。
-    char *copy = strdup(target);
-    if (copy == NULL) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        // 与 `auth swap` / `paste promote` 那两条定时器共用同一个判据：卡已经
-        // 在了、或者已经在建了，就不再建第二张。三者都跑在主队列上，检查与建卡
-        // 之间不会被另一个插进来。
-        if (AevonCardIsUpFor(copy) == 1 || AevonCardIsComingFor(copy) == 1) {
-            AevonLogRaw([[NSString stringWithFormat:@"landing: url card skip b=%s", copy] UTF8String]);
-            free(copy);
-            return;
-        }
-        AevonLogRaw([[NSString stringWithFormat:@"landing: url card b=%s", copy] UTF8String]);
-        AevonOpenCardDirect(copy);
-        free(copy);
-    });
+    // 收卡交给同一条「等 scene」的链：这一栈在系统的工作区事务里，事务没提交
+    // 之前建窗会和 FrontBoard 抢同一份 scene（0.0.31 的死锁纪律）。60 ms 的固定
+    // 延时在冷启动那一次不够用（QQ 首次起来要一秒多），所以按 scene 登记来。
+    AevonLandCardSchedule(target);
 }
 
 /// 装落点钩子，并把两个「还没用上」的入口记进日志（只记，不钩）。
@@ -6025,7 +6020,12 @@ static void AevonShareSwapSchedule(const char *target) {
 /// 与 `AevonShareSwapTick` 的区别只有一条：**不去顶来源 App**。那条是给分享用
 /// 的（分享面板开在来源 App 里，要先把它顶回来才能看见下一屏）；授权时来源 App
 /// 正在等 QQ 的 code，把它顶上来只会把 QQ 挤下去。
-static void AevonAuthSwapTick(char *target, int tick) {
+/// `build` = 0：授权那一族（系统已经放行、激活之后收卡）。等不到 scene 就彻底
+///              松手，让系统自己全屏 —— 那时我们连 scene 都没有，建卡也没内容。
+/// `build` = 1：落点那一族（`display` 已经被切掉，系统不会摆屏）。等不到 scene
+///              说明这次激活根本没造出 scene，必须自己建一份，否则就是「点了
+///              没反应」。
+static void AevonAuthSwapTick(char *target, int tick, int build) {
     if (target == NULL) return;
     if (target[0] == '\0') { free(target); return; }
     if (AevonCardIsUpFor(target) == 1 || AevonCardIsComingFor(target) == 1) {
@@ -6039,25 +6039,41 @@ static void AevonAuthSwapTick(char *target, int tick) {
     int live = AevonAppPid(targetID) > 0 ? 1 : 0;
     id scene = AevonSeenSceneForBundle(targetID);
     int fg = (scene != nil) ? AevonSceneForeground(scene) : -1;
-    // 收卡的门：进程起来 + scene 已经登记。`tick >= 2`（约 100 ms）是为了让
-    // 系统那次激活先落地 —— 抢在它前面建卡会和 SpringBoard 抢同一份 scene，
-    // 那正是「卡片黑 + 全屏底部黑」的老路。
+    // 收卡的门：scene 已经登记。`tick >= 1`（约 50 ms）是为了让系统那次激活
+    // 先落地 —— 抢在它前面建卡会和 SpringBoard 抢同一份 scene，那正是
+    // 「卡片黑 + 全屏底部黑」的老路。
     //
-    // 不等 `fg == 1`：QQ 的 scene 在激活过程中会短暂报 0，等它反而会多停在
-    // 全屏几百毫秒。`live` 与 `scene` 两条同时成立，就说明这一份 scene 已经
-    // 可以被我们接管了。
-    if (tick >= 2 && live == 1 && scene != nil) {
+    // 0.2.67 — **不再要求 `live`**。Aevon(205) 的两次授权都是
+    //   `notify: auth swap giveup b=com.tencent.mqq fg=1 live=0 tick=60`
+    // scene 已经在屏上（fg=1），进程号那一位却答 0（`SBApplicationController`
+    // 对微 / QQ 常常拿不到 pid）。旧闸把 `live` 当必要条件，于是每一次授权都
+    // 在 3 秒后放弃收卡 —— 用户看到的永远是整屏，一次都没被收进来过。
+    // scene 自己登记了，就说明这一份已经可以被接管。
+    //
+    // 也不等 `fg == 1`：QQ 的 scene 在激活过程中会短暂报 0，等它反而会多停在
+    // 全屏几百毫秒。
+    if (tick >= 1 && scene != nil) {
         AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: auth swap card b=%s after=%dms fg=%d board=%d",
-                      target, tick * 50, fg, AevonSpringboardActive()] UTF8String]);
+                      @"notify: auth swap card b=%s after=%dms fg=%d live=%d board=%d",
+                      target, tick * 50, fg, live, AevonSpringboardActive()] UTF8String]);
         AevonOpenCardDirect(target);
         free(target);
         return;
     }
-    if (tick >= 60) {
+    int deadline = build ? 30 : 60;
+    if (tick >= deadline) {
         AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: auth swap giveup b=%s fg=%d live=%d tick=%d",
-                      target, fg, live, tick] UTF8String]);
+                      @"notify: auth swap giveup b=%s fg=%d live=%d tick=%d build=%d",
+                      target, fg, live, tick, build] UTF8String]);
+        if (build) {
+            // 系统没摆屏、也没给 scene：自己建一份。慢一点，但「点了有反应」。
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"landing: url build b=%s after=%dms",
+                          target, tick * 50] UTF8String]);
+            AevonOpenCardDirect(target);
+            free(target);
+            return;
+        }
         // 收不进卡就彻底松手：留着登记会让这个 App 的整屏只画上半截。
         AevonSceneFrameClearBundle(targetID);
         AevonHookDisarm(targetID);
@@ -6066,26 +6082,65 @@ static void AevonAuthSwapTick(char *target, int tick) {
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        AevonAuthSwapTick(target, tick + 1);
+        AevonAuthSwapTick(target, tick + 1, build);
     });
 }
 
 static char AevonAuthSwapTarget[128];
 static CFAbsoluteTime AevonAuthSwapAt = 0;
+static int AevonAuthSwapBuild = -1;
 
-/// 同一次授权会连来两条（untrusted / user），只排一条等待链。
-static void AevonAuthSwapSchedule(const char *target) {
+/// 最近一次「放行给系统去激活」的授权目标（微 / QQ）与时刻。
+static char AevonAuthSeen[128];
+static CFAbsoluteTime AevonAuthSeenAt = 0;
+
+/// 这一次「微 / QQ → 第三方 App」是不是刚发生过授权。
+/// 30 秒窗口：用户点完授权、在微信里等页面刷完再回来，通常都在这个量级以内。
+static int AevonAuthReturnMatched(id source) {
+    if (![source isKindOfClass:[NSString class]]) return 0;
+    const char *raw = [(NSString *)source UTF8String];
+    if (raw == NULL || AevonAuthSeen[0] == '\0') return 0;
+    if (CFAbsoluteTimeGetCurrent() - AevonAuthSeenAt > 30.0) return 0;
+    return strcmp(raw, AevonAuthSeen) == 0 ? 1 : 0;
+}
+
+/// 同一个 App 在 3 秒内连来两条（untrusted / user）只排一条等待链。
+/// `build` 取 1 的那一条（落点）优先：它背后是「系统不会摆屏」，等不到就得自己建。
+static void AevonAuthSwapScheduleMode(const char *target, int build) {
     if (target == NULL || target[0] == '\0') return;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (strcmp(AevonAuthSwapTarget, target) == 0 && now - AevonAuthSwapAt < 3.0) return;
+    // 同一条请求会先排 `build=0`（授权放行），再排 `build=1`（落点切了 display）。
+    // 后者更强：它背后是「系统不会摆屏」，等不到 scene 必须自己建。所以同一
+    // 个 App 在 3 秒内已经从 0 升到 1 时，允许再排一条，反过来则忽略。
+    if (strcmp(AevonAuthSwapTarget, target) == 0 && now - AevonAuthSwapAt < 3.0 &&
+        build <= AevonAuthSwapBuild) return;
     snprintf(AevonAuthSwapTarget, sizeof(AevonAuthSwapTarget), "%s", target);
     AevonAuthSwapAt = now;
+    AevonAuthSwapBuild = build;
     char *copy = strdup(target);
     if (copy == NULL) return;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.02 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        AevonAuthSwapTick(copy, 0);
+        AevonAuthSwapTick(copy, 0, build);
     });
+}
+
+static void AevonAuthSwapSchedule(const char *target) {
+    // 0.2.67 — 记下「刚刚真的发生了一次授权」。授权结果回到第三方 App 时，
+    // 那一方的那张卡用完就该收（见 `AevonOpenDecide` 的 `authreturn` 分支）；
+    // 而「微信里点了一个分享链接」也会走同一条形状，只看形状分不出来，只能
+    // 靠这几秒内的授权记录。
+    if (target != NULL && target[0] != '\0') {
+        snprintf(AevonAuthSeen, sizeof(AevonAuthSeen), "%s", target);
+        AevonAuthSeenAt = CFAbsoluteTimeGetCurrent();
+    }
+    AevonAuthSwapScheduleMode(target, 0);
+}
+
+/// 0.2.67 — 落点专用：`display` 已经被切掉，系统不会把 App 摆到屏幕上。
+/// 剩下的唯一一件事就是把它的 scene 挂进卡片；没有 scene 就自己建一份。
+static void AevonLandCardSchedule(const char *target) {
+    AevonAuthSwapScheduleMode(target, 1);
 }
 
 static void AevonPastePromoteTick(char *copy, int tick) {
@@ -6682,6 +6737,42 @@ static int AevonOpenDecide(id request, id options,
             }
         }
     }
+    // 0.2.67 — 微 / QQ 把「授权结果」送回发起方，**通用链接那一版带续接动作**。
+    //
+    // Aevon(205) 的现场（21:40:05 / 21:40:24）：
+    //   notify: sso b=com.midea.msmart.appstore pay=payload cont=1 share=0 …
+    //           src=com.tencent.xin act=#UIActivityContinuationAction url=https len=670
+    // 微信正开在屏上（授权页），它把用户送回发起登录的 App，走的是 `https`
+    // 通用链接 + `UIActivityContinuationAction`。旧判据把「续接动作」一律当分享
+    // 面板，于是这条被收进卡片 —— 屏幕上是「微信整屏 + 美的悬浮窗」，用户报的
+    // 「悬浮窗会和全屏应用混乱小窗」就是这一下。
+    //
+    // 分界不看续接动作，看**收信方**：微 / QQ → 第三方 App 只有两种，
+    // 授权回跳与「从微信里把东西分享给某个 App」。两者都该由系统原样交付：
+    // 用户点的就是那个 App，把它按进小窗只会让人一愣。真的在传文件的那一种
+    // 仍带 `__PasteSharingToken`，继续走下面的 share 路。
+    if (kind != NULL && strcmp(kind, "share") == 0 &&
+        AevonOpenSourceIsSso(request, options) == 1 &&
+        AevonOpenTargetIsSso(bundle) == 0 &&
+        AevonOpenAnyValue(request, options, @"__PasteSharingToken") == nil) {
+        int inCard = (AevonCardIsUpFor(bundle) == 1 ||
+                      AevonCardIsComingFor(bundle) == 1) ? 1 : 0;
+        // 只有「刚发生过授权」才收递结果那一方的卡；用户只是从微信里点了个
+        // 分享链接时，他还在用微信，那张卡不能动。
+        int recent = AevonAuthReturnMatched(AevonOpenSourceApp(request, options));
+        if (recent) {
+            AevonAuthCardCloseSoon(AevonOpenSourceApp(request, options), "return");
+        }
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: auth return b=%s src=%@ recent=%d in=%d",
+                      bundle,
+                      AevonOpenSourceApp(request, options) != nil
+                          ? (NSString *)AevonOpenSourceApp(request, options) : @"-",
+                      recent, inCard] UTF8String]);
+        *why = "authreturn";
+        return inCard == 1 ? 1 : 0;
+    }
+
     // 0.2.59 — SSO 回跳：微信 / QQ 处理完授权，把结果送回**发起登录的那个 App**。
     //
     // 它和「分享」在 options 上长得一模一样（`kind=share` + 带 payload + 带 paste
