@@ -5633,7 +5633,7 @@ static void AevonSsoProbe(id request, id options, const char *bundle) {
                       [src isKindOfClass:[NSString class]] ? (NSString *)src : @"-",
                       action != nil ? object_getClassName(action) : "-",
                       scheme, (int)url.length, board,
-                      keys[0] != '\0' ? keys : @"-"]
+                      keys[0] != '\0' ? keys : "-"]
                      UTF8String]);
     } @catch (__unused NSException *exception) {
         AevonLogRaw([[NSString stringWithFormat:@"notify: sso b=%s probe=threw",
