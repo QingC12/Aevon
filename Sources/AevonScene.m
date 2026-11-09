@@ -2986,6 +2986,105 @@ static AevonURLCoreProc AevonURLCoreOriginal = NULL;
 static long AevonURLCalls = 0;
 static long AevonURLCuts = 0;
 
+/// 0.2.69 — 真身在文件后面（分享恢复那条也在用）。落点这一栈要用它把主屏的
+/// 前台 App 还给系统，所以先写一行声明。
+static NSInteger AevonLaunchForeground(NSString *bundleID);
+
+/// 0.2.69 — 授权那一支的挂起位。真身在 `AevonActSettingNames` 之后（那里才
+/// 知道表里哪一位是 suspend），这里先写一行声明。
+static void AevonOAuthSuspendApply(id settings, const char *bundle);
+
+/// 0.2.69 — `origin` 是 URL 打开请求的来源进程（`BSProcessHandle`）。取它的
+/// bundle 标识；取不到返回 nil。**只问 getter，不猜类**。
+static NSString *AevonOriginBundle(id origin) {
+    if (origin == nil) return nil;
+    for (NSString *name in @[@"bundleIdentifier", @"name"]) {
+        SEL sel = NSSelectorFromString(name);
+        if (![origin respondsToSelector:sel]) continue;
+        @try {
+            id got = ((id (*)(id, SEL))objc_msgSend)(origin, sel);
+            if ([got isKindOfClass:[NSString class]] && [(NSString *)got length] > 0) {
+                return (NSString *)got;
+            }
+        } @catch (__unused NSException *exception) { }
+    }
+    return nil;
+}
+
+// 0.2.69 — 分享来源的记（真身在文件后半段，`AevonShareSourceCapture` 那里）。
+// 分享面板 / 系统浮层不是 App，`origin` 常常认不出一个可激活的 bundle；
+// 那一份是从 live scene 里挑出来的真 App，补台要退到它。
+static char AevonShareSource[128];
+static CFAbsoluteTime AevonShareSourceAt;
+static int AevonShareSourceSkip(const char *name);
+
+/// 0.2.69 — **nil display 之后的补台**。
+///
+/// 0.2.63-0.2.67 把 `display` 换成 nil 之后，系统把主屏当前 App 撤下、又不在
+/// 任何屏上立起新的 —— 用户报的「上滑回桌面 / 上滑停顿进后台卡片失效」就是
+/// 这个状态，respring 之前不恢复。0.2.68 把 display 还回去，手势好了，代价是
+/// 全屏帧又回来了（用户 0.2.68 的三条里两条都是它）。
+///
+/// 这一版换一条路：**仍然传 nil**（不起全屏），但在请求提交之后把来源 App
+/// 重新激活一次。来源 App 在授权场景里本来就是全屏那个，重新激活它屏幕上看
+/// 不出任何变化，却给工作区重新立起一个真实的主屏前台 App —— 手势栈要的就是
+/// 这个对象。分享场景里来源是分享面板（不是 App），退到 `AevonShareSource`
+/// 记下的那个真 App；两样都没有就只留一行 `landing: repair none`。
+///
+/// 闸：
+///   · 来源就是目标自己 ⇒ 不碰；
+///   · `notify.off` ⇒ 一个字节都不改；
+///   · 来源已经有卡 ⇒ 不拉全屏（那会把用户正在用的浮窗顶掉）；
+///   · 延时之后 `front == 1` ⇒ 工作区已经好好的，不再多推一次转场。
+static void AevonLandingRepair(id origin, const char *target, double delay) {
+    NSString *source = [AevonOriginBundle(origin) copy];
+    const char *raw = source != nil ? [source UTF8String] : NULL;
+    // 0.2.69 — 浮层 / 桌面 / 灵动岛不是能重新激活的对象（真机日志里分享来源
+    // 被抓成 `com.apple.UIKit.OverlayUI…` 的那几次，`launchApplication…` 只会
+    // 答 door=2）。退到 `AevonShareSource`，仍然只认真 App。
+    if (raw == NULL || AevonShareSourceSkip(raw)) {
+        [source release];
+        source = nil;
+        if (AevonShareSource[0] != '\0' &&
+            CFAbsoluteTimeGetCurrent() - AevonShareSourceAt < 30.0) {
+            NSString *fallback = [NSString stringWithUTF8String:AevonShareSource];
+            const char *name = fallback != nil ? [fallback UTF8String] : NULL;
+            if (name != NULL && !AevonShareSourceSkip(name)) {
+                source = [fallback copy];
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"landing: repair fallback src=%s", name] UTF8String]);
+            }
+        }
+    }
+    if (source == nil || source.length == 0) {
+        AevonLogRaw("landing: repair none");
+        [source release];
+        return;
+    }
+    if (target != NULL && strcmp([source UTF8String], target) == 0) {
+        [source release];
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        const char *raw = [source UTF8String];
+        if (raw == NULL) { [source release]; return; }
+        if (AevonActivateSwitchOff()) { [source release]; return; }
+        if (AevonCardIsUpFor(raw)) {
+            AevonLogRaw([[NSString stringWithFormat:@"landing: repair skip carded src=%s",
+                          raw] UTF8String]);
+            [source release];
+            return;
+        }
+        int front = AevonAppFrontmost(source);
+        if (front == 1) { [source release]; return; }
+        NSInteger door = AevonLaunchForeground(source);
+        AevonLogRaw([[NSString stringWithFormat:@"landing: repair src=%s front=%d door=%ld",
+                      raw, front, (long)door] UTF8String]);
+        [source release];
+    });
+}
+
 /// 这条 URL 指向哪个 App。只认微信 / QQ 两族的 scheme —— 别的 App 的 URL
 /// 一条都不动，`display` 原样传下去。
 static const char *AevonLandingBundleForURL(const char *url) {
@@ -3097,19 +3196,25 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
                       animating ? 1 : 0, running, land, seen + 1] UTF8String]);
     }
 
+    if (land) {
+        // 0.2.69 — 先把「从哪来」记下来。nil display 提交之后主屏会失去前台
+        // App，手势栈跟着失效；0.35 s 后把来源 App 重新激活一次（见
+        // `AevonLandingRepair`），授权场景里来源本来就在全屏，屏幕上看不出变化。
+        AevonLandingRepair(origin, target, 0.35);
+    }
     if (AevonURLCoreOriginal != NULL) {
-        // 0.2.68 — display 原样下去。
+        // 0.2.69 — **仍旧传 nil**（0.2.68 曾原样下发，结果全屏帧回来了）。
         //
-        // 0.2.63-0.2.67 曾把 display 换成 nil（「打开，但不摆到任何屏幕上」）来
-        // 抹掉全屏那一帧。代价是系统的工作区状态被改坏：`_openURLCore` 会把主屏
-        // 当前的 App 撤下、又不在任何屏上立起新的，主屏从此没有可操作的前台 App，
-        // 手势栈（上滑回桌面 / 上滑停顿进后台卡片）找不到对象 —— 用户看到的就是
-        // 「手势失效」，而且 respring 之前不会自己恢复。
+        // nil 的语义是「打开，但不摆到任何屏幕上」：URL 由系统原生投递
+        // （微信的 NSUserActivity、QQ 的 SSO 回跳都在），但没有全屏帧，
+        // 下面 `AevonLandCardSchedule` 再把已经存在的 scene 收进卡片。
         //
-        // 这一版把 display 还回去：全屏只闪一拍，随后由 `AevonLandCardSchedule`
-        // （分享那条还有 60 ms 的 share swap）收进卡片。宁可留一帧全屏，也不能
-        // 把 SpringBoard 的显示状态改坏 —— 手势是整台手机的入口，优先级最高。
-        AevonURLCoreOriginal(self, _cmd, url, display, animating,
+        // 0.2.63-0.2.67 用同一条路时坏掉的是主屏状态：当前 App 被撤下、
+        // 新的又不上屏，主屏没有前台 App ⇒ 上滑回桌面 / 上滑停顿进后台卡片
+        // 失效，直到 respring。0.2.69 用 `AevonLandingRepair` 把来源 App
+        // 重新立回主屏，把那个前台位补上 —— 这是与 0.2.67 唯一的区别。
+        id forwarded = land ? nil : display;
+        AevonURLCoreOriginal(self, _cmd, url, forwarded, animating,
                              settings, origin, result);
     }
     if (!land) return;
@@ -6432,7 +6537,7 @@ static void AevonAuthCardCloseSoon(NSString *who, const char *why) {
 ///   返回 0 → 原样转发，行为与 0.1.87 一致。
 /// `why` 只用于日志：它把「没分流」的四种原因分开，否则下一份日志里
 /// 「一个 notify: divert 都没有」与「分流了但没生效」长得一样。
-static int AevonOpenDecide(id request, id options,
+static int AevonOpenDecide(id request, id options, id settings,
                            char *bundle, size_t size, const char **why) {
     if (bundle == NULL || size == 0) return 0;
     bundle[0] = '\0';
@@ -6585,6 +6690,18 @@ static int AevonOpenDecide(id request, id options,
                 //   · 激活之后立刻收卡 ⇒ 用户看到的是浮窗，不是全屏。
                 // 判据在日志里成对出现：`notify: oauth pass …` 紧跟
                 // `notify: auth swap card b=… after=100ms`。
+                //
+                // 0.2.69 — 「一百毫秒」在真机上从来没有兑现过。0.2.68 的日志：
+                //   notify: oauth pass b=com.tencent.mqq …
+                //   notify: auth swap card b=com.tencent.mqq after=50ms fg=1 live=0
+                //   win: first frame shown after 419ms        ← QQ
+                //   win: first frame shown after 1668ms       ← 微信
+                // 卡片建得再快，这段窗口也要等 scene 的第一帧；在它之前屏上是系统
+                // 自己摆的全屏，所以用户看到的仍是「先全屏、再回落」。这一支没有
+                // `display` 参数可传 nil，唯一能压住「系统这次呈现」的是同一份
+                // `SBActivationSettings` 上的挂起位：请求照常交回（SSO 依赖它），
+                // 但不摆到屏上。位找不到就什么都不做，与 0.2.68 完全一致。
+                AevonOAuthSuspendApply(settings, bundle);
                 AevonAuthSwapSchedule(bundle);
                 *why = "oauthpass";
                 AevonDivertAt = now;
@@ -7199,6 +7316,61 @@ static void AevonActSettingNames(id settings) {
                       AevonActSuspIndex, AevonActSuspFlag, named, AevonActSetEnc] UTF8String]);
     } @catch (NSException *exception) {
         AevonLogRaw("win: act key threw");
+    }
+}
+
+/// 0.2.69 — 授权请求的「照常激活、但不摆到屏上」。
+///
+/// 为什么只写这一位：`_handleOpenApplicationRequest` 没有 `display` 参数可传 nil
+/// （分享走的 `_openURLCore` 有，0.2.69 第 1 条修的就是那条），而请求又必须原样
+/// 交给系统 —— QQ 的 SSO 回跳是 XPC，微信的登录是 NSUserActivity，两者都只能由
+/// 系统在真正的激活里投递（0.2.55~0.2.59 的本地投递已经证伪）。
+///
+/// 所以这里只做一件事：在**这一条请求**的 settings 上置挂起位。位名由
+/// `AevonActSettingNames` 从系统自己的名字表里挑（`suspend` / `background`），
+/// 挑不到就一个字节都不写 —— 这一条只许加分，不许把登录弄坏。置完读回，
+/// 日志里成对出现：
+///   notify: oauth susp b=com.tencent.mqq idx=… flag=… read=…
+///   notify: oauth susp b=… none        ← 名字表里没有这一位（本版即等同 0.2.68）
+static void AevonOAuthSuspendApply(id settings, const char *bundle) {
+    static int notes = 0;
+    if (settings == nil) return;
+    AevonActSettingNames(settings);
+    if (AevonActSuspIndex < 0) {
+        if (notes < 8) {
+            notes += 1;
+            AevonLogRaw([[NSString stringWithFormat:@"notify: oauth susp b=%s none",
+                          bundle != NULL ? bundle : "-"] UTF8String]);
+        }
+        return;
+    }
+    SEL setter = sel_registerName("setFlag:forActivationSetting:");
+    SEL getter = sel_registerName("flagForActivationSetting:");
+    if (![settings respondsToSelector:setter]) {
+        if (notes < 8) {
+            notes += 1;
+            AevonLogRaw("notify: oauth susp setter absent");
+        }
+        return;
+    }
+    @try {
+        ((void (*)(id, SEL, unsigned long, unsigned long))objc_msgSend)
+            (settings, setter, (unsigned long)AevonActSuspFlag,
+             (unsigned long)AevonActSuspIndex);
+        int read = -1;
+        if ([settings respondsToSelector:getter]) {
+            read = (int)((unsigned long (*)(id, SEL, unsigned long))objc_msgSend)
+                (settings, getter, (unsigned long)AevonActSuspIndex);
+        }
+        if (notes < 8) {
+            notes += 1;
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"notify: oauth susp b=%s idx=%d flag=%d read=%d",
+                          bundle != NULL ? bundle : "-",
+                          AevonActSuspIndex, AevonActSuspFlag, read] UTF8String]);
+        }
+    } @catch (NSException *exception) {
+        AevonLogRaw("notify: oauth susp threw");
     }
 }
 
@@ -9502,7 +9674,8 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
         line[0] = '\0';
     } else if (slot >= 0 && AevonOpenOrig[slot] != NULL) {
         @try {
-            verdict = AevonOpenDecide(request, options, bundle, sizeof(bundle), &why);
+            verdict = AevonOpenDecide(request, options, settings,
+                                      bundle, sizeof(bundle), &why);
         } @catch (NSException *exception) {
             verdict = 0;
             why = "threw";

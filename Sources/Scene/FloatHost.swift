@@ -3845,6 +3845,33 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
+    /// 0.2.69 — **场景回执到了再动卡片**。
+    ///
+    /// 0.2.68 的现场（用户日志 23:21:29）：
+    ///
+    ///     win: keyboard native on card=430x717 at 0,215 …
+    ///     win: frame drift now=430x717@0 want=430x717@215 door=3 wrote=4
+    ///
+    /// 卡片已经铺到 215..932，场景还停在 0..717 —— 这一拍卡片下半段没有任何
+    /// 内容，用户看到的就是「打开键盘时屏幕底部一块黑」。0.1.80 当时把「等
+    /// 两拍」撤掉，理由是重复张开更糟；真正该等的是**回执**（`0.2.46` 就有
+    /// `updateSettings:withTransitionContext:completion:` 的回执口），不是瞎等。
+    ///
+    /// 最多等 6 × 20 ms＝120 ms；拿不到回执照样往下走，绝不因为回执不可用把
+    /// 键盘态卡死。
+    private func afterSceneAck(_ bundle: String, tries: Int, limit: Int,
+                               _ body: @escaping () -> Void) {
+        let acked = bundle.withCString { AevonSceneFrameAcked($0) } != 0
+        if acked || tries >= limit {
+            body()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            guard let self = self, self.kbFilled else { return }
+            self.afterSceneAck(bundle, tries: tries + 1, limit: limit, body)
+        }
+    }
+
     func setKeyboardFill(_ on: Bool) {
         guard let card = card, let window = window, visible.height > 16 else { return }
         // 0.2.62 — 「键盘保持浮窗尺寸」把这个开关关掉才生效。
@@ -4006,7 +4033,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 // 就得立刻把新几何推过去（`reportBand` 自己判重，没变不会重复发）。
                 self.reportBand()
             }
-            grow()
+            // 0.2.69 — 等回执再张开（见 `afterSceneAck`）：卡片与场景必须
+            // **同一次上屏**，否则卡片先铺满底边、场景还在 0..717，底部露出
+            // 一块黑。回执最多等 120 ms，等不到也照常张开。
+            self.afterSceneAck(bundle, tries: 0, limit: 6) { grow() }
         } else {
             guard kbFilled else { return }
             // 0.1.83 — **先挂起一小段，再决定要不要真收。**
