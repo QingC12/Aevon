@@ -602,7 +602,10 @@ static void AevonOwnDisplayLog(NSString *format, ...) {
     // 0.2.17 — 12 → 36。Aevon(188) 里抖音那一段**一行都没有**：前 3 个 App
     // （设置 / Filza / 电池）每个 3 行就把 12 条用完了，于是最该看的那个 App
     // 什么都没留下。这一族只在自建 scene 时写，36 条够 6~8 个 App。
-    if (AevonOwnDisplayNotes >= 36) return;
+    // 0.2.46 — 36 → 48。这一版每个 App 多两条（`display cap` 一次 + `own ref`
+    // 每 App 一条 + 尺寸变化时的 `display follow`），36 会从「8 个 App」缩到
+    // 「5 个 App」。尺寸这条路是本版唯一的主题，不能让它被自己的预算吃掉。
+    if (AevonOwnDisplayNotes >= 48) return;
     AevonOwnDisplayNotes += 1;
     va_list args;
     va_start(args, format);
@@ -610,6 +613,131 @@ static void AevonOwnDisplayLog(NSString *format, ...) {
     va_end(args);
     AevonLogRaw([line UTF8String]);
     [line release];
+}
+
+/// 0.2.46 — 显示覆盖的**第一条路**：`copyWithOverrideBounds:`。
+///
+/// 为什么换路（这一版的主题）：
+///
+///   `AevonOwnDisplay` 从 0.2.15 起走的是「`mutableCopy` 一份真机配置，再问副本
+///   有没有 `setBounds:`」。真机上两种日志都出现过 ——
+///     `win: own display 430x932 -> 430x717`          ← 成了
+///     `win: own display keep 430x932 (no setBounds)` ← 没成
+///   覆盖没成的那一半，App 里 `UIScreen` 仍然是 932，于是按 `UIScreen` 排版的
+///   App（抖音的 feed / 高德的地图）继续按 932 摆内容，画面带着 215 pt 的偏差
+///   塞进 717 的窗口 —— 这就是「部分视频不在浮窗正中心」的病根，也是后来那条
+///   视频居中补丁存在的原因（补丁治的是症状）。
+///
+///   TrollOpen 的二进制里有 `copyWithOverrideBounds:`（见
+///   `dist/对比-抖音浮窗重排与视频居中-三家逆向-2026-11-09.html` 第五节）。它是
+///   `FBSDisplayConfiguration` 家族的**派生**入口：不要求副本可变，直接拿一份
+///   改了 bounds 的新配置回来。成功率和语义都比「拷一份再赌它可变」稳。
+///
+/// 形状闸照旧先问后调：选择子在、参数个数 3、编码里带 `CGRect` —— 三条缺一条
+/// 就返回 nil，由调用方走老路。**不猜 ABI**。
+///
+/// 返回值是 +1 的对象（`copy` 前缀），调用方负责 `autorelease`/`release`。
+static id AevonOwnDisplayOverride(id base, CGRect frame) {
+    if (base == nil) return nil;
+    SEL sel = sel_registerName("copyWithOverrideBounds:");
+    if (![base respondsToSelector:sel]) return nil;
+    Method method = class_getInstanceMethod(object_getClass(base), sel);
+    const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
+    unsigned int arguments = method != NULL ? method_getNumberOfArguments(method) : 0;
+    if (method == NULL || encoding == NULL || arguments != 3 ||
+        strstr(encoding, "CGRect") == NULL) {
+        AevonOwnDisplayLog(@"win: own display override skip enc=%s n=%u",
+                           encoding != NULL ? encoding : "-", arguments);
+        return nil;
+    }
+    id copy = nil;
+    @try {
+        copy = ((id (*)(id, SEL, CGRect))objc_msgSend)(base, sel, frame);
+    } @catch (NSException *exception) {
+        copy = nil;
+        AevonOwnDisplayLog(@"win: own display override threw %s",
+                           exception.reason != nil ? [exception.reason UTF8String] : "-");
+    }
+    return copy;
+}
+
+/// 0.2.46 — 「这台机器上显示覆盖做不做得成」，建 scene 之前就能问出来。
+///
+/// 只问不调：`respondsToSelector:` 与 `class_getInstanceMethod` 不执行任何东西。
+/// 唯一一次实际开销是兜底那一路的 `mutableCopy`（要真拷一份才知道副本可不可变），
+/// 结果缓存 —— 一台机器一辈子问一次。
+///
+/// 这一位现在的用途只有一个：日志里回答「为什么这台机器上 App 还是按 932 排」。
+/// 决策仍然由 `AevonOwnDisplay` 的实际返回值决定（能力 ≠ 结果）。
+static int AevonOwnDisplayCap = -1;
+static BOOL AevonOwnDisplayCapable(void) {
+    if (AevonOwnDisplayCap >= 0) return AevonOwnDisplayCap != 0;
+    AevonOwnDisplayCap = 0;
+    id screen = [UIScreen mainScreen];
+    SEL getter = sel_registerName("displayConfiguration");
+    if (screen != nil && [screen respondsToSelector:getter]) {
+        id base = ((id (*)(id, SEL))objc_msgSend)(screen, getter);
+        if (base != nil) {
+            SEL over = sel_registerName("copyWithOverrideBounds:");
+            if ([base respondsToSelector:over]) {
+                Method method = class_getInstanceMethod(object_getClass(base), over);
+                const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
+                if (method != NULL && encoding != NULL &&
+                    method_getNumberOfArguments(method) == 3 &&
+                    strstr(encoding, "CGRect") != NULL) {
+                    AevonOwnDisplayCap = 1;
+                }
+            }
+            if (AevonOwnDisplayCap == 0) {
+                id probe = nil;
+                @try {
+                    probe = [[base mutableCopy] autorelease];
+                } @catch (NSException *exception) {
+                    probe = nil;
+                }
+                if (probe != nil &&
+                    [probe respondsToSelector:sel_registerName("setBounds:")]) {
+                    AevonOwnDisplayCap = 1;
+                }
+            }
+        }
+    }
+    AevonOwnDisplayLog(@"win: own display cap=%d", AevonOwnDisplayCap);
+    return AevonOwnDisplayCap != 0;
+}
+
+/// 0.2.46 — 只问不调：`FBUpdateSceneTransaction` 在这台机器上到底长什么样。
+///
+/// 对比报告第六节第 3 条建议「改尺寸走 `FBUpdateSceneTransaction`」。这一版先用
+/// **回执**落地同一个目的（见 `AevonCallSettingsAck` 上面那段为什么不另造事务），
+/// 但「这个类在不在、叫什么」是下一版要不要真用的唯一前提，而问一次是免费的。
+///
+/// 三行日志，一台机器一次：`class=yes/nil` + 三个候选初始化器的 `meta/inst/enc`。
+/// 全是 `respondsToSelector:` 与 `method_getTypeEncoding`，没有任何一次调用。
+static void AevonOwnTxnProbe(void) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    Class cls = NSClassFromString(@"FBUpdateSceneTransaction");
+    if (cls == Nil) {
+        AevonOwnDisplayLog(@"win: own txn class=nil");
+        return;
+    }
+    AevonOwnDisplayLog(@"win: own txn class=yes");
+    static const char *names[] = {
+        "transactionWithSceneID:settings:transitionContext:",
+        "initWithSceneID:settings:transitionContext:",
+        "transactionWithScene:settings:transitionContext:",
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        SEL sel = sel_registerName(names[i]);
+        BOOL meta = [cls respondsToSelector:sel];
+        Method inst = class_getInstanceMethod(cls, sel);
+        const char *encoding = inst != NULL ? method_getTypeEncoding(inst) : NULL;
+        AevonOwnDisplayLog(@"win: own txn %s meta=%d inst=%d enc=%s", names[i],
+                           meta ? 1 : 0, inst != NULL ? 1 : 0,
+                           encoding != NULL ? encoding : "-");
+    }
 }
 
 /// 0.2.15 — 「这块屏幕」必须和 frame 一样大。
@@ -633,7 +761,29 @@ static id AevonOwnDisplay(CGRect frame) {
     SEL boundsSel = sel_registerName("bounds");
     if (![base respondsToSelector:boundsSel]) return base;
     CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(base, boundsSel);
-    if (CGRectEqualToRect(now, frame)) return base;
+    if (CGRectEqualToRect(now, frame)) {
+        AevonOwnDisplayLog(@"win: own display same %.0fx%.0f",
+                           now.size.width, now.size.height);
+        return base;
+    }
+
+    // 0.2.46 — 主路：派生一份改了 bounds 的配置。
+    //
+    // 这一条放在最前面，不是为了少写几行，是因为它**不依赖副本可变**：
+    //   · 老路赌 `mutableCopy` 出来的对象有 `setBounds:`，真机上赌输过一半；
+    //   · 这条路由配置自己派生，成功就有，失败返回 nil，没有「改了一半」的中间态。
+    //
+    // `copyWithOverrideBounds:` 的语义里 bounds 是**屏幕**的 bounds（原点恒 0），
+    // 所以这里剥掉原点：传 215 进去不会把屏幕挪 215，只会把宽高比搞错。
+    CGRect screenBounds = CGRectMake(0, 0, frame.size.width, frame.size.height);
+    id over = AevonOwnDisplayOverride(base, screenBounds);
+    if (over != nil) {
+        AevonOwnDisplayLog(@"win: own display %.0fx%.0f -> %.0fx%.0f via=override",
+                           now.size.width, now.size.height,
+                           frame.size.width, frame.size.height);
+        return [over autorelease];
+    }
+
     SEL setBounds = sel_registerName("setBounds:");
     id mutable = nil;
     @try {
@@ -654,8 +804,8 @@ static id AevonOwnDisplay(CGRect frame) {
                            [mutable respondsToSelector:sel_registerName("setScale:")] ? 1 : 0);
         return base;
     }
-    ((void (*)(id, SEL, CGRect))objc_msgSend)(mutable, setBounds, frame);
-    AevonOwnDisplayLog(@"win: own display %.0fx%.0f -> %.0fx%.0f",
+    ((void (*)(id, SEL, CGRect))objc_msgSend)(mutable, setBounds, screenBounds);
+    AevonOwnDisplayLog(@"win: own display %.0fx%.0f -> %.0fx%.0f via=mutable",
                        now.size.width, now.size.height,
                        frame.size.width, frame.size.height);
     return mutable;
@@ -714,6 +864,50 @@ static UIEdgeInsets AevonOwnSafeInsets(void) {
     return UIEdgeInsetsZero;
 }
 
+/// 0.2.46 — 建 scene 时一次定型「内容参考尺寸」（对比报告第六节第 2 条）。
+///
+/// 抖音那种 App 的排版入口不是 `UIScreen` 一处：`UIWindowScene` 上还有一份
+/// `contentReferenceSize`，是「内容坐标系的参考大小」。0.2.13 起我们建 scene 时
+/// 只写了 `setFrame:` + `setDisplayConfiguration:`，这一格一直没写 —— App 拿到的
+/// 是默认值，然后自己按最保险的那个数（整屏 932）排，右边那列工具栏就落到 717
+/// 之外（Aevon(188) `peers7 … UIView:0,0,430x932`）。
+///
+/// TrollOpen 的二进制里有这个选择子（`setContentReferenceSize:withContentOrientation:
+/// andContainerOrientation:`，同样来自第五节那张表）。这里做的是**和显示配置同一个
+/// 数**：display bounds 多大，参考尺寸就多大 —— 两个数一旦不相等，App 内部就会出现
+/// 「坐标系 717、屏幕 932」的错位，那比不设更糟。所以调用方传的就是 `frame.size`。
+///
+/// 形状闸：选择子在、参数 5 个（self/_cmd + 3）、编码里带 `CGSize`。缺一条就跳过 ——
+/// 私有的选择子同名不同参是常事，宁可少设一项也不发一个错的结构体进去。
+/// 方向两个参数都传 1（竖屏），与 `setInterfaceOrientation:` 同一个约定。
+///
+/// 返回 1 = 写了；0 = 这个宿主没有这一格（记为事实，不重试）。
+static int AevonOwnRefSet(id host, CGSize size, const char *tag) {
+    if (host == nil) return 0;
+    SEL sel = sel_registerName(
+        "setContentReferenceSize:withContentOrientation:andContainerOrientation:");
+    if (![host respondsToSelector:sel]) return 0;
+    Method method = class_getInstanceMethod(object_getClass(host), sel);
+    const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
+    unsigned int arguments = method != NULL ? method_getNumberOfArguments(method) : 0;
+    if (method == NULL || encoding == NULL || arguments != 5 ||
+        strstr(encoding, "CGSize") == NULL) {
+        AevonOwnDisplayLog(@"win: own ref skip %s enc=%s n=%u", tag,
+                           encoding != NULL ? encoding : "-", arguments);
+        return 0;
+    }
+    @try {
+        ((void (*)(id, SEL, CGSize, NSInteger, NSInteger))objc_msgSend)(
+            host, sel, size, (NSInteger)1, (NSInteger)1);
+    } @catch (NSException *exception) {
+        AevonOwnDisplayLog(@"win: own ref threw %s",
+                           exception.reason != nil ? [exception.reason UTF8String] : "-");
+        return 0;
+    }
+    AevonOwnDisplayLog(@"win: own ref %.0fx%.0f via=%s", size.width, size.height, tag);
+    return 1;
+}
+
 static id AevonOwnSettings(CGRect frame) {
     Class cls = NSClassFromString(@"UIMutableApplicationSceneSettings");
     if (cls == Nil) return nil;
@@ -731,6 +925,10 @@ static id AevonOwnSettings(CGRect frame) {
         settings, sel_registerName("setForeground:"), YES);
     ((void (*)(id, SEL, CGRect))objc_msgSend)(
         settings, sel_registerName("setFrame:"), frame);
+    // 0.2.46 — 参考尺寸（见 `AevonOwnRefSet`）。**必须等于 display bounds**，
+    // 也就是这里传 `frame.size` 而不是任何「卡片大小」：卡片只是把这块画布等比
+    // 缩小画出来，App 的坐标系永远是画布。
+    AevonOwnRefSet(settings, frame.size, "settings");
     // level 1 = 普通 App 场景层级。0 是桌面自己的，不要。
     ((void (*)(id, SEL, NSInteger))objc_msgSend)(
         settings, sel_registerName("setLevel:"), (NSInteger)1);
@@ -900,6 +1098,11 @@ NSInteger AevonOwnStart(NSString *bundleID, CGRect frame, const char *from) {
     AevonOwnFrame = frame;
     AevonOwnLog(@"win: own begin b=%@ from=%s frame=%.0fx%.0f", bundleID,
                 from != NULL ? from : "-", frame.size.width, frame.size.height);
+    // 0.2.46 — 建 scene 之前先回答「这台机器上显示覆盖做不做得成」，只问不调，
+    // 一台机器一次。这一行是这一版所有判断的前提：覆盖做不成，App 迟早还会
+    // 按 `UIScreen`(932) 排版，那时日志里 `cap=0` 就是第一个该看的字。
+    AevonOwnDisplayCapable();
+    AevonOwnTxnProbe();
 
     // 0.2.17 — 「先整屏建、再推到画布」。
     //
@@ -1645,6 +1848,9 @@ static volatile int AevonInPush = 0;
 /// 存，写入前先按 scene 找到它自己那一格。
 static volatile int AevonFrameMask = 0;             ///< 位 i = 槽 i 有目标
 static CGRect AevonFrameTargets[AEVON_ARMED_MAX];
+/// 0.2.46 — 槽 i 上一次拿到回执的时刻（0 = 没有回执）。定义必须在这一格：
+/// `AevonSceneFrameSet` 会在登记新目标时把它清掉，而那一段在 ack 那一族之前。
+static CFAbsoluteTime AevonAckAt[AEVON_ARMED_MAX];
 static long AevonFrameWrites = 0;
 static long AevonFrameOrphans = 0;                  ///< 没登记就来设尺寸的次数
 
@@ -1678,6 +1884,9 @@ void AevonSceneFrameSet(NSString *bundle, double x, double y, double width, doub
     }
     AevonFrameTargets[slot] = CGRectMake((CGFloat)x, (CGFloat)y,
                                          (CGFloat)width, (CGFloat)height);
+    // 0.2.46 — 新目标作废上一张回执：回执证的是「旧目标被收下」，
+    // 拿它去停「新目标」的补推就会有一拍没人推。
+    AevonAckAt[slot] = 0;
     __sync_fetch_and_or(&AevonFrameMask, 1 << slot);
 }
 
@@ -1854,6 +2063,130 @@ static NSInteger AevonCallSettingsTransition(id target, id settings) {
     return 0;
 }
 
+/// 0.2.46 — 回执：这次 settings 更新系统**收下了**，不用再赌四拍重推
+/// （对比报告第六节第 3 条）。
+///
+/// 报告原话是「改尺寸走 `FBUpdateSceneTransaction`，拿到客户端回执」。这里没有
+/// 另造一个 `FBUpdateSceneTransaction` 实例，理由写在下面这段之后 —— 拿回执这件事
+/// 本身不需要新事务类，`updateSettings:withTransitionContext:completion:` 的
+/// 第五个参数就是回执口。
+///
+/// 为什么不去手工构造 `FBUpdateSceneTransaction`：
+///   · 它是一个**事务**，正常由 `FBScene` 自己在 settings 提交时创建；我们绕过
+///     scene 自己造一个，等于同一个 scene 上跑两条更新链，谁赢按提交顺序，没有
+///     任何文档能保证 —— 这个工程里「猜私有初始化器」的账（0.2.13）已经付过一次；
+///   · 我们要的东西只是「送没送到」，而它恰好就是这个 completion block。
+/// 所以：**用回执，不造事务**。日志里认 `win: scene ack slot=`。
+///
+/// block 写成无参（`void(^)(void)`）：系统回调时带了什么参数都落不到我们的签名上，
+/// ARM64 下多余参数只是没人读；写成 `^(NSError *)` 才是在猜回调形状。
+///
+/// `AevonAckAt` 的定义在 `AevonFrameTargets` 旁边（`AevonSceneFrameSet` 要清它）。
+static long AevonAckCount = 0;
+static long AevonAckNotes = 0;
+
+static NSInteger AevonCallSettingsAck(id target, id settings, int slot) {
+    if (target == nil || settings == nil) return 0;
+    if (slot < 0 || slot >= AEVON_ARMED_MAX) return 0;
+    SEL three = sel_registerName("updateSettings:withTransitionContext:completion:");
+    if (![target respondsToSelector:three]) return 0;
+    Method method = class_getInstanceMethod(object_getClass(target), three);
+    const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
+    if (method == NULL || encoding == NULL || encoding[0] != 'v' ||
+        method_getNumberOfArguments(method) != 5) return 0;
+    void (^ack)(void) = ^{
+        AevonAckAt[slot] = CFAbsoluteTimeGetCurrent();
+        __sync_fetch_and_add(&AevonAckCount, 1);
+        // 自己的预算：前 24 条写现场，之后只计数。这条不是「每拍都要看」的行，
+        // 它的用途是证明「门后面真的有人接」。
+        if (__sync_fetch_and_add(&AevonAckNotes, 1) < 24) {
+            NSString *line = [[NSString alloc] initWithFormat:
+                              @"win: scene ack slot=%d", slot];
+            AevonLogRaw([line UTF8String]);
+            [line release];
+        }
+    };
+    // MRC：block 被系统 retain 起之前必须在堆上，否则回调时栈帧早没了。
+    // 故意不 release —— 每一拍漏几十字节，换「不会因为一个不知道谁 retain 的
+    // completion 而崩」。
+    ((void (*)(id, SEL, id, id, id))objc_msgSend)(target, three, settings, nil,
+                                                  [ack copy]);
+    return 3;
+}
+
+/// 某个 App 的 scene 更新拿到过回执没有。Swift 侧用它决定还要不要补推。
+int AevonSceneFrameAcked(const char *bundle) {
+    if (bundle == NULL) return 0;
+    NSString *name = [NSString stringWithUTF8String:bundle];
+    int slot = AevonSlotOfBundle(name);
+    if (slot < 0) return 0;
+    return AevonAckAt[slot] > 0 ? 1 : 0;
+}
+
+long AevonSceneAckCount(void) { return AevonAckCount; }
+
+/// 0.2.46 — 推 frame 的时候，把 `displayConfiguration` 一起推上去。
+///
+/// 这一条是「真重排」的核心，也是对比报告第一节那条病因的正解：
+///
+///   建 scene 时我们把 display 改成了画布（430x717），可**之后每次推 frame 都只写
+///   `setFrame:`，display 再没跟上过**。键盘态把 scene 推到 430x932 时，App 的
+///   `UIScreen` 仍是 717 —— 于是「窗口 932、屏幕 717」的错位又反过来了；而从
+///   整屏建（staged）的那条路进来的 App 更是从头到尾都拿着 932 的 `UIScreen`。
+///   按 `UIScreen` 排版的 App（抖音 feed / 高德地图）因此永远按那个错的数摆内容，
+///   剩下的偏差只能靠 App 进程里的补丁一点点挪回来 —— 补丁是症状。
+///
+/// 只在**尺寸真的变了**的时候写：
+///   · 键盘态是「尺寸不变、原点变 215」，那一次不换屏幕（换一次 display 就是一次
+///     全量重排，比省下的偏差贵得多）；
+///   · 交给我们托管的 scene frame 只有两档（画布 717 / 键盘态 932），卡片缩放
+///     不改 scene frame，所以这条路上不会出现「拖一下写几十次」。
+/// 再叠一道 0.20 s 的节流：两个档位来回切时，0.2 s 内的第二次不再换屏幕。
+///
+/// 返回 1 = 这次真的换了屏幕。
+static CFAbsoluteTime AevonDisplayAt[AEVON_ARMED_MAX];
+static BOOL AevonWriteDisplay(id settings, int slot) {
+    if (settings == nil) return NO;
+    if (slot < 0 || slot >= AEVON_ARMED_MAX) return NO;
+    if (!(AevonFrameMask & (1 << slot))) return NO;
+    CGRect target = AevonFrameTargets[slot];
+    SEL getter = sel_registerName("displayConfiguration");
+    SEL setter = sel_registerName("setDisplayConfiguration:");
+    if (![settings respondsToSelector:getter] ||
+        ![settings respondsToSelector:setter]) return NO;
+    id now = ((id (*)(id, SEL))objc_msgSend)(settings, getter);
+    if (now == nil) return NO;
+    SEL boundsSel = sel_registerName("bounds");
+    if (![now respondsToSelector:boundsSel]) return NO;
+    CGRect current = ((CGRect (*)(id, SEL))objc_msgSend)(now, boundsSel);
+    if (fabs(current.size.width - target.size.width) < 0.5 &&
+        fabs(current.size.height - target.size.height) < 0.5) return NO;
+    CFAbsoluteTime at = CFAbsoluteTimeGetCurrent();
+    if (AevonDisplayAt[slot] > 0 && at - AevonDisplayAt[slot] < 0.20) {
+        AevonOwnDisplayLog(@"win: display follow skip slot=%d dt=%.0fms",
+                           slot, (at - AevonDisplayAt[slot]) * 1000.0);
+        return NO;
+    }
+    id copy = AevonOwnDisplayOverride(
+        now, CGRectMake(0, 0, target.size.width, target.size.height));
+    if (copy == nil) {
+        AevonOwnDisplayLog(@"win: display follow no door %.0fx%.0f slot=%d",
+                           target.size.width, target.size.height, slot);
+        return NO;
+    }
+    ((void (*)(id, SEL, id))objc_msgSend)(settings, setter, copy);
+    [copy release];
+    // 参考尺寸跟着一起走（0.2.46）：建 scene 时写的那一份是「出生尺寸」，
+    // 之后 frame 变了它不会自己跟 —— 三个数（frame / display / 参考尺寸）必须
+    // 一直是同一个，否则 App 内部就有一处按旧尺寸排版。
+    AevonOwnRefSet(settings, target.size, "follow");
+    AevonDisplayAt[slot] = at;
+    AevonOwnDisplayLog(@"win: display follow %.0fx%.0f -> %.0fx%.0f slot=%d",
+                       current.size.width, current.size.height,
+                       target.size.width, target.size.height, slot);
+    return YES;
+}
+
 /// 把目标尺寸写进一份 settings。返回「这一次真的写了」。
 ///
 /// 先读再比：已经是目标值就不写。这是 0.0.34 定下的 delta-first —— 一次什么都没
@@ -1954,13 +2287,28 @@ NSInteger AevonPushSceneFrame(id scene) {
     if (candidate == nil) candidate = current;
     AevonInPush = 1;
     BOOL wrote = AevonWriteFrame(candidate, slot);
+    // 0.2.46 — 屏幕跟着窗口走（见 `AevonWriteDisplay`）。**放在写门之前**：
+    // 一次 `updateSettings:withTransitionContext:` 提交的是这一份 candidate，
+    // display 这一格必须在提交之前就在里面，否则 App 收到的是「新 frame + 旧屏幕」，
+    // 又要多一次重排来纠正。
+    //
+    // 这里**不**跟着 `wrote` 走：`wrote=0` 只说明 frame 已经等于目标，而 display
+    // 可能还停在旧尺寸（staged 建出来的 scene 就是这种状态 —— frame 被系统改对
+    // 了、屏幕没跟上）。`AevonWriteDisplay` 自己判重，尺寸一样就返回 0，稳态下
+    // 一个字节都不花。
+    BOOL screen = AevonWriteDisplay(candidate, slot);
     NSInteger path = 0;
-    if (wrote) {
-        path = AevonCallSettingsTransition(scene, candidate);
+    if (wrote || screen) {
+        // 0.2.46 — 先走带回执的那条门（第 5 个参数不再传 nil），失败再退回
+        // 0.0.43 那条同签名的无回执门。两条门的形状闸一样，差别只有回执。
+        path = AevonCallSettingsAck(scene, candidate, slot);
+        if (path == 0) path = AevonCallSettingsTransition(scene, candidate);
         if (path == 0 && AevonCallSettings(scene, candidate)) path = 1;
     }
     AevonInPush = 0;
-    return wrote ? path : 0;
+    // 只有屏幕、没有 frame 的那一次也算「写成了」：它是 staged 之后的那一次
+    // display 纠正，调用方（`pushSceneLater` / 守护循环）要看见它真的落了地。
+    return (wrote || screen) ? path : 0;
 }
 
 /// One attempt at "you are in front". Answers the door it used so the log can
@@ -2244,6 +2592,14 @@ static int AevonAmendSettings(id settings, int slot) {
     // 里 `intercept=6/22`、`mine=1 amend=1`，说明系统每次更新 settings 都把它
     // 交到我们手上，而我们在系统用之前就改完了它。母本用的是同一个方法。
     if (AevonWriteFrame(settings, slot)) wrote |= 8;
+    // 0.2.46 — 位 16：这一次顺手把「屏幕」也对上了（见 `AevonWriteDisplay`）。
+    //
+    // 挂在同一个地方的理由和位 8 完全一样：这条门已经证明会响（`intercept=6/22`），
+    // 而且它改的是**系统马上要用的那一份** settings，不需要我们再发一次更新。
+    // 系统自己把 frame 写成整屏时（0.2.37 的让路场景），`AevonWriteFrame` 会退让，
+    // 但 display 这里只在尺寸真的不同时才写，且带 0.20 s 节流 —— 让路那一拍
+    // 最多多一次屏幕纠正，不会变成每帧一条更新。
+    if (AevonWriteDisplay(settings, slot)) wrote |= 16;
     return wrote;
 }
 

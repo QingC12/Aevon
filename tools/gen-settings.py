@@ -552,7 +552,24 @@ def build_root(panel_items, wired):
                                 "判据：`win: kb spring t=0.24 zeta=1.00 v=0.35` 只出现一次；"
                                 "`win: keyboard fill on … push=` 后面若紧跟 `win: kb push late gave up door=0`，说明 4 次都没推成。"
                                 "另看 `win: placement put back 1.000 was=1.000 dC=0,215 org=215`："
-                                "修正前后缩放比相同、只有中心偏了，说明卡片的承载面被系统按 scene 原点重设过 —— 这一行是那一下闪的物证。"})
+                                "修正前后缩放比相同、只有中心偏了，说明卡片的承载面被系统按 scene 原点重设过 —— 这一行是那一下闪的物证。"
+                                "0.2.52 起：**让抖音真正按浮窗大小重排 —— 改的是「它以为自己的屏幕有多大」，不是再补一次画面位置**。"
+                                "对照三份逆向数据后确认：Mango / TrollOpen / Myrtle 都不往 App 进程里注入，"
+                                "它们让 App 自己排对；我们一直是唯一在 App 里挪画面的人，而那条路正是抖音那次 "
+                                "10 秒 scene-create 看门狗（FRONTBOARD 0x8BADF00D）主线程栈上的最后一环（`[CATransaction commit]`）。"
+                                "① 显示配置的覆盖路线换了：以前是「拷一份真机配置、再问副本有没有 setBounds:」，"
+                                "真机上有一半时候副本没有这个方法，App 拿到的仍是 430x932（日志 `own display keep … (no setBounds)`），"
+                                "于是它按整屏排版；现在先走 `copyWithOverrideBounds:`（不要求副本可变），失败才回落老路。"
+                                "② 建 scene 时把「内容参考尺寸」一起定成画布大小（`setContentReferenceSize:withContentOrientation:"
+                                "andContainerOrientation:`），App 的第一帧就有正确的参考坐标系。"
+                                "③ 推 scene 尺寸时把屏幕一起推 —— 以前只改 frame，屏幕永远停在出生时的那个数；"
+                                "键盘态 717→932 时这就是又一种错位。只在尺寸真的变了才写，另带 0.20 s 节流。"
+                                "④ 场景更新改成带回执：系统收下这次更新就回调（`win: scene ack slot=`），"
+                                "四拍盲推改成「有回执就停」—— 少推一次就少一次 App 重排。"
+                                "判据：`win: own display 430x932 -> 430x717 via=override`（不再是 via=mutable / keep）、"
+                                "`win: own ref 430x717 via=settings`、`win: display follow 430x932 -> 430x717 slot=0`、"
+                                "`win: scene ack slot=0` 四条都出现；然后看 `video band` 的 `gap` 是否掉到 8 以下、"
+                                "`via=tick` 的写入次数是否归零 —— 归零就说明视频居中补丁可以删了。"})
 
 
     return {"title": "Aevon", "items": items}

@@ -129,7 +129,17 @@ long AevonFrameOrphanCount(void);
 
 /// 主动推一次。返回门编号：3 = transition，1 = 普通，0 = 没写成或没有门。
 /// 主线程、且不能从钩子里面调（与 push foreground 同一条纪律）。
+///
+/// 0.2.46 — 门 3 现在**带回执**：`updateSettings:withTransitionContext:completion:`
+/// 的第五个参数不再传 nil，系统收下这次更新时会回调，日志写
+/// `win: scene ack slot=N`。`AevonSceneFrameAcked` 就是读这个回执 —— 拿到了
+/// 就别再用「四拍定时重推」去赌它到底送到没有。
 NSInteger AevonPushSceneFrame(id _Nullable scene);
+/// 这个 bundle 的目标尺寸有没有拿到过回执（1 = 拿到）。`AevonSceneFrameSet`
+/// 登记新目标时会把回执作废，所以「拿到」永远指的是当前这个目标。
+int AevonSceneFrameAcked(const char *_Nullable bundle);
+/// 回执总次数（判据：长时间为 0 = 门后面没人接，应该退回无回执门）。
+long AevonSceneAckCount(void);
 
 /// 真写进 settings 的次数。系统每次把 frame 写成整屏、我们每次又写回小胖屏，
 /// 这个数就会一直涨；它停在 1 说明系统认了，没有再覆盖。

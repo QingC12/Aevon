@@ -3820,15 +3820,29 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     ///
     /// 重试跑在主队列的下一拍（`asyncAfter`），**不在 hook 栈内**，所以不会撞
     /// 同一条纪律。4 × 40 ms 盖住守护循环那 200 ms，够了就停。
-    private func pushSceneLater(_ scene: UIScene, tries: Int) {
+    ///
+    /// 0.2.46 — 从「定时盲推」改成「有回执就停」。
+    ///
+    /// 盲推的代价不是四次调用，是**四次 settings 更新 = 四次 App 重排**。而抖音
+    /// 那次 10 s watchdog（`0x8BADF00D` scene-create）的主线程栈上，我们这一侧
+    /// 正好在 `[CATransaction commit]` 里替它决定「现在排版」。少推一次就少一次
+    /// 这样的机会，所以这里先问回执（`AevonSceneFrameAcked`，读的是
+    /// `updateSettings:withTransitionContext:completion:` 的回调）：系统已经收下
+    /// 这个目标就不再推，只有真没送到才继续。
+    private func pushSceneLater(_ scene: UIScene, bundle: String, tries: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self, weak scene] in
             guard let self = self, let scene = scene else { return }
+            if AevonSceneFrameAcked(bundle) != 0 {
+                Log.write(String(format: "win: kb push late stop ack b=%@ left=%ld",
+                                 bundle, tries))
+                return
+            }
             if AevonPushSceneFrame(scene) != 0 { return }
             if tries <= 1 {
                 Log.write("win: kb push late gave up door=0")
                 return
             }
-            self.pushSceneLater(scene, tries: tries - 1)
+            self.pushSceneLater(scene, bundle: bundle, tries: tries - 1)
         }
     }
 
@@ -3951,7 +3965,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 // 0.2.43 — 写不了就补推（见 `pushSceneLater`）。原来这里只等
                 // 守护循环那 200 ms，而 `fill on … push=0` 后面紧接着就是一条
                 // `frame drift`，错位正好落在放大动画的前半段。
-                if door == 0 { self.pushSceneLater(sc, tries: 4) }
+                if door == 0 { self.pushSceneLater(sc, bundle: bundle, tries: 4) }
             }
             // 0.2.43 — 场景原点一变，系统那一次「把承载视图 frame 重设成 scene
             // frame」就会把画面推走 215 pt（见 `reapplySoon`）。连对四次，别等

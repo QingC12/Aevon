@@ -655,6 +655,31 @@ def main():
                   #     hook 里被拒，得回头看那条死锁纪律的边界。
                   b"win: kb spring t=%.2f zeta=%.2f v=%.2f",
                   b"win: kb push late gave up door=0",
+                  # 0.2.46 — 「让抖音真重排」这一版的四条：显示覆盖 / 参考尺寸 /
+                  # 屏幕跟随 / 回执。逐条都要能在产物里 grep 到，缺哪条就等于那一步
+                  # 没有证词：
+                  #   `via=override` = 走的是 `copyWithOverrideBounds:`（不是可变副本），
+                  #     这是「覆盖必成」的判据。真机上如果只有 `via=mutable` 或
+                  #     `keep … (no setBounds)`，说明这条路没打开，抖音仍会按 932 排。
+                  #   `own ref` = 建 scene 时把内容参考尺寸定成了画布大小。
+                  #   `display follow` = 推 frame 时屏幕跟着变（尺寸真的不同才会出现）。
+                  #   `scene ack` = transition 门的回执，证明「门后面真的有人接」。
+                  b"win: own display %.0fx%.0f -> %.0fx%.0f via=override",
+                  b"win: own display override skip enc=%s n=%u",
+                  b"win: own display cap=%d",
+                  b"win: own ref %.0fx%.0f via=%s",
+                  b"win: own ref skip %s enc=%s n=%u",
+                  b"win: display follow %.0fx%.0f -> %.0fx%.0f slot=%d",
+                  b"win: display follow skip slot=%d dt=%.0fms",
+                  b"win: scene ack slot=%d",
+                  b"win: kb push late stop ack b=%@ left=%ld",
+                  # 两个私有选择子名必须真的进二进制：它们同时是「这条路走的是哪个
+                  # 入口」和下一版要不要换路的依据。名字来自对比报告第五节那张表。
+                  b"copyWithOverrideBounds:",
+                  b"setContentReferenceSize:withContentOrientation:andContainerOrientation:",
+                  # 只问不调的探针：`FBUpdateSceneTransaction` 在真机上叫什么、在不在。
+                  # 这一版**没有**用它（用回执），所以它出现在产物里不代表被调用过。
+                  b"win: own txn %s meta=%d inst=%d enc=%s",
                   # 0.1.87 — 激活入口观察器。名字不是猜的：0.1.86 的普查在真机上
                   # 把四条同形状的方法列了出来（`surf: SBMainWorkspace~activ
                   # n=16/170`），这一版按真名装，闸二改成**逐字节比对参数编码**。
