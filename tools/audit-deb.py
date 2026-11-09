@@ -777,10 +777,8 @@ def main():
                   b'win: act key %d "%.30s"%@',
                   b"win: act key pick=%d flag=%d n=%d enc=%s",
                   b"notify: forward suspbit idx=%d flag=%d read=%d enc=%s n=%d",
-                  # 0.2.12 —— 黑名单放行之后去目标 App 自己的容器里看一眼。
-                  # 微信「第一次分享就闪退」查了三轮没答案，根因是我们从来没读过
-                  # 它的日志（原来只在托管开卡/关卡时取）。
-                  b"notify: blacklist drain b=%@ when=%.0fs file=%d lines=%d",
+                  # 0.2.39 —— 分享黑名单（`shareBlacklist` / `notify: blacklist drain`）
+                  # 已随微信移出整块删除，这里不再断言旧证词。
                   # 一次开机一遍：这一族到底有哪些手段。真 API 名靠 census 不靠 strings。
                   b"win: act api set=SBActivationSettings n=%u %@",
                   b"win: act api set=absent",
@@ -789,16 +787,10 @@ def main():
                   b"win: ability deact2 sbws=%d fbmgr=%d fluid=%d coord=%d",
                   # 因果读数：转发前/后目标 App 在系统眼里是不是前台。
                   b"win: pose b=%@ phase=%s front=%d bg=%d run=%d pid=%d",
-                  # 0.2.10 —— 两件事，各自的证词分开。
-                  #
-                  #   shareBlacklist  微信分享走原生（本版唯一的行为改动）。它是
-                  #                   `why` 的值，只出现在 `notify: pass … why=%s`
-                  #                   与分流行里 —— 产物里没有它，就说明那条闸根本没编进去。
-                  #   surf: scn …     自建 scene 的三问：类在不在 / 名字叫什么 /
+                  # 0.2.10 —— 自建 scene 的三问：类在不在 / 名字叫什么 /
                   #                   关键选择子落在哪个类、什么形状。全部 class_copyMethodList
                   #                   + method_getTypeEncoding，一个对象都不建、一次 msgSend
                   #                   都不发 —— 这条线的历史是两次安全模式，所以本版只问。
-                  b"shareBlacklist",
                   b"surf: scn exists a",
                   b"surf: scn exists b",
                   b"surf: scn names total=%d",

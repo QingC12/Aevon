@@ -4447,89 +4447,19 @@ static BOOL AevonWindowBlacklisted(const char *bundle) {
     return NO;
 }
 
-/// 0.2.10 — 分享黑名单（临时逃生门）。
+/// 0.2.39 — 分享黑名单整块删除（用户要求：微信的文件分享也进卡片）。
 ///
-/// 与上面那张 `windowBlacklistText` 的区别只有一条，但很关键：**这张只放分享**。
-/// 上面那张在 `AevonOpenDecide` 里站在判据之前，命中连通知一起放过；微信的通知
-/// → 浮窗一直好用，把微信写进那张表会把它一起关掉。所以这里另起一张，只在
-/// `kind == "share"` 时问。
+/// 0.2.10 加这张表，是因为 Aevon(179) 里微信分享进卡片后两次崩在
+/// `-[MBPublicService provideFileSystem]: unrecognized selector`（`step=5` 落在
+/// 我们 App 侧 sheet 钩子所在的函数）。当时它还托管在**别人的 scene** 上；现在
+/// 承载已换成自建 scene，崩溃的现场条件不在了，名单的临时使命结束。
 ///
-/// 为什么要有这张表：Aevon(179) 里微信分享进卡片后**两次**崩在同一处
-/// （`-[MBPublicService provideFileSystem]: unrecognized selector`，`step=5`
-/// 落在我们 App 侧 sheet 钩子所在的函数），随后 `scene dead` → `revive` → 再崩
-/// （pid 9423 → 9428 → 9434）。成因未定，而在自建 scene 那条线落地之前，代价最小
-/// 的处置就是——让它走原生：分享能用、App 不崩，微信的通知与图标仍走浮窗。
+/// 一并删掉的还有 `AevonBlacklistDrain`（2s / 7s 去目标容器捞 `aevon-app.log`）：
+/// 它唯一的调用点就是下面那条黑名单分支。微信的日志现在和别的 App 一样，在
+/// 开卡 / 关卡时随 `applog[com.tencent.xin]` 进主日志。
 ///
-/// 名单写死在源码里、不上面板：这是一次**作业**，自建 scene 完成后整块删掉；
-/// 放进面板要跟着改九份 plist 与 81 键口径，为一段临时逻辑不值。
-///
-/// 匹配用 `strstr`（同上面那张的理由）：`com.tencent.xin` 也该盖住
-/// `com.tencent.xin.sharetimeline` 这类扩展 bundle。
-/// 0.2.12 — 黑名单放行之后，去**目标 App 自己的容器**里看一眼它写了什么。
-///
-/// 这是「微信第一次分享就闪退」查了三轮查不出原因的真正原因：宿主原来只在
-/// 「开卡 / 关卡」时去取被托管 App 的 `tmp/aevon-app.log`，而黑名单这条路上微信
-/// **根本没被托管**，所以它的日志从来没被读过。Aevon(179) 之所以能看到
-/// `-[MBPublicService provideFileSystem] step=5`，是因为那一次微信恰好被托管了；
-/// Aevon(181) 微信走原生、零托管，整份日志里连一行 `applog[com.tencent.xin]` 都没有 ——
-/// 不是没崩，是我们没去看。
-///
-/// 两次取样（2 秒 / 7 秒）：崩溃现场落在哪一拍不确定，一次取样可能正好在它前面。
-/// 只在后台队列上做，主线程那一拍只排两个定时器 —— 触摸路径上不许有任何跨进程写盘，
-/// 这条在这个工程里是硬禁令。
-static int AevonBlacklistDrainNotes = 0;
-
-static void AevonBlacklistDrainAt(const char *bundle, double delay) {
-    // 用 strdup 而不是「局部数组 + 块捕获」：数组捕获在 clang 上虽然合法，但这一版
-    // 没有本地编译器可验证（本地无 Theos，CI 一次就是一次 run），所以选一条绝不会
-    // 有歧义的写法。所有权随块走：块里 free，不跨线程共享可变状态。
-    char *copy = strdup(bundle);
-    if (copy == NULL) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
-                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-        NSString *target = [NSString stringWithUTF8String:copy];
-        if (target.length == 0) {
-            free(copy);
-            return;
-        }
-        NSString *path = AevonAppLogPathOf(target);
-        BOOL exists = (path != nil);
-        if (exists) {
-            exists = [[NSFileManager defaultManager] fileExistsAtPath:path];
-        }
-        // 取回来的原文会以 `applog[<bundle>]: ` 前缀直接写进主日志，并把源文件清空 ——
-        // 与开卡/关卡那条路完全同一个口径，读日志的人不必分辨两份来源。
-        NSString *text = AevonDrainAppLogText(target, 40);
-        int lines = 0;
-        if (text.length > 0) {
-            lines = (int)[[text componentsSeparatedByString:@"\n"] count] - 1;
-            if (lines < 0) lines = 0;
-        }
-        AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: blacklist drain b=%@ when=%.0fs file=%d lines=%d",
-                      target, delay, exists ? 1 : 0, lines] UTF8String]);
-        free(copy);
-    });
-}
-
-static void AevonBlacklistDrain(const char *bundle) {
-    if (bundle == NULL || bundle[0] == '\0') return;
-    if (AevonBlacklistDrainNotes >= 12) return;
-    AevonBlacklistDrainNotes += 1;
-    AevonBlacklistDrainAt(bundle, 2.0);
-    AevonBlacklistDrainAt(bundle, 7.0);
-}
-
-/// 0.2.39 — 名单清空：微信的文件分享现在也走我们的卡片路（用户要求）。
-///
-/// 0.2.10 把微信写进来，是因为当时它在**别人的 scene** 里会崩在 `MBPublicService`；
-/// 现在这条路已经换成自建 scene / token 直通，崩溃的现场条件不在了。函数与调用点
-/// 都留着（`AevonBlacklistDrain` 还在它后面）：再遇到同形状的崩溃，把 bundle
-/// 加回声明数组就是一次恢复，不用重构。
-static BOOL AevonShareNativeListed(const char *bundle) {
-    if (bundle == NULL || bundle[0] == '\0') return NO;
-    return NO;
-}
+/// 若同形状的崩溃再次出现：把 `com.tencent.xin` 的判断加回 `AevonOpenDecide`
+///（`kind == "share"` 之后的 `return 0`）即可，不需要恢复这张表。
 
 /// Swift 侧的同一张名单。圆盘点图标那条路不经过 `AevonOpenDecide`（它没有
 /// 「打开请求」可判），所以名单必须能单独问一次；否则名单里的 App 从圆盘点
@@ -4920,19 +4850,8 @@ static int AevonOpenDecide(id request, id options,
         return 0;
     }
 
-    // 0.2.10 — 分享黑名单：只对「这次是分享」生效，命中就**整条放行**。
-    //
-    // 放在判据之后、`sameChain` 之前：`sameChain` 会把同一 App 的第二条吞成
-    // `chain`（返回 2，连原实现都不跑）。黑名单的语义是「这个 App 的分享别碰我的
-    // 路」，那一条也必须原样交给系统 —— 顺序反了，微信的第二条请求会被我们吞掉，
-    // 原生分享反而少一环。
-    if (kind != NULL && strcmp(kind, "share") == 0 && AevonShareNativeListed(bundle)) {
-        *why = "shareBlacklist";
-        // 0.2.12 — 放行之后去它家看一眼（见 `AevonBlacklistDrain` 上方那段）：
-        // 只排两个后台定时器，主线程上不多一次读盘。
-        AevonBlacklistDrain(bundle);
-        return 0;
-    }
+    // 0.2.39 — 这里原来有一条「分享黑名单：命中整条放行」。微信移出后名单为空，
+    // 整块随 `AevonShareNativeListed` 一起删掉（见该函数位置上的说明）。
 
     // 判据先于「同一次点击的第二条」：先确认这是要接管的那两种之一，再谈它是不是
     // 上一次的后续。顺序反过来，用户在 1.5 秒内点桌面图标也会被当成链条吞掉 ——
