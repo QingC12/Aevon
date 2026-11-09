@@ -3058,28 +3058,28 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
     const char *target = AevonLandingBundleForURL(raw);
 
     int running = 0;
-    int cut = 0;
+    int land = 0;
     if (target != NULL) {
         NSString *bundleID = [NSString stringWithUTF8String:target];
         running = AevonAppPid(bundleID) > 0 ? 1 : 0;
-        // 主队列才切：`AevonOpenCardDirect` 与窗口状态都是主线程的东西，在系统
+        // 主队列才接手：`AevonOpenCardDirect` 与窗口状态都是主线程的东西，在系统
         // 的工作区队列上读它们会撞上正在拆窗的那一拍。不在主队列就只记录。
         //
         // 不看进程在不在（0.2.67）：分享那一刻微 / QQ 经常还没起进程，而它正是
         // 我们要接的那一次。`running` 只进日志，不再进判断。
         //
-        // 不为「卡已经在」留例外：卡在的时候更应该切 —— 那时系统把它摆成全屏
+        // 不为「卡已经在」留例外：卡在的时候更应该接 —— 那时系统把它摆成全屏
         // 只会把卡片盖掉，而我们要的是那条 URL 落进已经开着的那张卡。
         if (display != nil) {
             if ([NSThread isMainThread]) {
-                cut = 1;
+                land = 1;
             } else if (seen < 2) {
                 AevonLogRaw([[NSString stringWithFormat:@"landing: url offmain b=%s", target] UTF8String]);
             }
         }
     }
-    if (cut) __sync_fetch_and_add(&AevonURLCuts, 1);
-    if (seen < 6 || cut) {
+    if (land) __sync_fetch_and_add(&AevonURLCuts, 1);
+    if (seen < 6 || land) {
         char shape[48];
         AevonLandingShape(raw, shape, sizeof(shape));
         // display 是对象，可能本来就是 nil（系统自己也会传 nil）。只读类名。
@@ -3092,19 +3092,27 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
             dcls = "scalar";
         }
         AevonLogRaw([[NSString stringWithFormat:
-                      @"landing: url %s b=%s d=%s a=%d run=%d cut=%d n=%ld",
+                      @"landing: url %s b=%s d=%s a=%d run=%d land=%d n=%ld",
                       shape, target != NULL ? target : "-", dcls,
-                      animating ? 1 : 0, running, cut, seen + 1] UTF8String]);
+                      animating ? 1 : 0, running, land, seen + 1] UTF8String]);
     }
 
     if (AevonURLCoreOriginal != NULL) {
-        // 切口只有一处：把 display 换成 nil ——「打开，但不摆到任何屏幕上」。
-        // 别的参数原样下去：URL 仍由系统投递，微信的 NSUserActivity、QQ 的
-        // SSO 回跳都还在。
-        AevonURLCoreOriginal(self, _cmd, url, cut ? nil : display, animating,
+        // 0.2.68 — display 原样下去。
+        //
+        // 0.2.63-0.2.67 曾把 display 换成 nil（「打开，但不摆到任何屏幕上」）来
+        // 抹掉全屏那一帧。代价是系统的工作区状态被改坏：`_openURLCore` 会把主屏
+        // 当前的 App 撤下、又不在任何屏上立起新的，主屏从此没有可操作的前台 App，
+        // 手势栈（上滑回桌面 / 上滑停顿进后台卡片）找不到对象 —— 用户看到的就是
+        // 「手势失效」，而且 respring 之前不会自己恢复。
+        //
+        // 这一版把 display 还回去：全屏只闪一拍，随后由 `AevonLandCardSchedule`
+        // （分享那条还有 60 ms 的 share swap）收进卡片。宁可留一帧全屏，也不能
+        // 把 SpringBoard 的显示状态改坏 —— 手势是整台手机的入口，优先级最高。
+        AevonURLCoreOriginal(self, _cmd, url, display, animating,
                              settings, origin, result);
     }
-    if (!cut) return;
+    if (!land) return;
 
     // 收卡交给同一条「等 scene」的链：这一栈在系统的工作区事务里，事务没提交
     // 之前建窗会和 FrontBoard 抢同一份 scene（0.0.31 的死锁纪律）。60 ms 的固定

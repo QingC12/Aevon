@@ -686,12 +686,15 @@ def main():
                   # 0.2.67 — 授权结果回到第三方 App：放行，不按进小窗。
                   b"notify: auth return b=%s src=%@ recent=%d in=%d",
                   # 0.2.63/0.2.66 — 落点（对比报告的方案 A）：系统的 URL 打开入口带一个
-                  # `display` 参数（真机编码 `v60@0:8@16@24B32@36@44@?52` ⇒ 它是对象），
-                  # 要进卡片的那个 App 传 nil ⇒ **没有全屏帧**，URL 仍由系统原生投递。
+                  # `display` 参数（真机编码 `v60@0:8@16@24B32@36@44@?52` ⇒ 它是对象）。
+                  # 0.2.68 起 `display` 原样下发（0.2.63-0.2.67 曾换成 nil，会撤下主屏
+                  # 前台 App、让上滑回桌面 / 后台卡片手势失效），落点仍由
+                  # `AevonLandCardSchedule` 在 scene 登记后收卡。
                   #   `owners=` / `cls=… types=` = 这个选择子在这台系统上存不存在、
                   #      形状对不对（对不上就不装，只留一行 shape skip）；
                   #   `hooked` = 真装上了；
-                  #   `url … cut=1` = 那一次真的把 display 换成了 nil；
+                  #   `url … land=1` = 那一次会接手落点（display 原样下发，0.2.68 起
+                  #     不再换成 nil —— 换 nil 会撤下主屏前台 App，手势失效）；
                   #   `url card` = 随后把那份 scene 收进了卡片。
                   # 另两条 `landing: %s cls=` 是 Stheno 的激活口与 TrollOpen 的
                   # 实体口的普查，只记录、不改变行为 —— 它们的答案决定下一版要不要
@@ -702,7 +705,7 @@ def main():
                   b"landing: url hooked",
                   b"landing: url shape ok (sig=%s)",
                   b"landing: url shape skip (sig=%s args=%d)",
-                  b"landing: url %s b=%s d=%s a=%d run=%d cut=%d n=%ld",
+                  b"landing: url %s b=%s d=%s a=%d run=%d land=%d n=%ld",
                   b"landing: url build b=%s after=%dms",
                   b"landing: url offmain b=%s",
                   b"landing: %s cls=%@ types=%s",
