@@ -4632,6 +4632,25 @@ static BOOL AevonOpenCarriesPayload(id request, id options) {
     return strcmp(AevonOpenPayloadKind(request, options), "none") != 0;
 }
 
+/// 0.2.48 — 这次打开带的那个 URL。`__PayloadURL` 优先，其次
+/// `__PayloadOptions[UIApplicationLaunchOptionsURLKey]`（分享那条路已经证明
+/// 两种形状都在真机上出现过，见 `AevonForwardHeldURL`）。
+///
+/// 只读：两个键都经 `AevonOpenAnyValue` / `AevonActRead` 的 `@try` 包着，
+/// 取不到就返回 nil，调用方按「不是干路」处理。
+static NSString *AevonOpenURLOf(id request, id options) {
+    id value = AevonOpenAnyValue(request, options, @"__PayloadURL");
+    if (value == nil) {
+        id payload = AevonOpenPayload(request, options);
+        if (payload != nil) {
+            value = AevonActRead(payload, @"UIApplicationLaunchOptionsURLKey");
+        }
+    }
+    if ([value isKindOfClass:[NSURL class]]) return [(NSURL *)value absoluteString];
+    if ([value isKindOfClass:[NSString class]]) return (NSString *)value;
+    return nil;
+}
+
 /// 0.2.5 — 「这是一次通知点击」的第二个判据：`options[@"__LaunchOrigin"]`。
 ///
 /// 老判据只看 `__Actions.firstObject` 的类名。它在**横幅**与**长按/下滑通知**这两条
@@ -5185,6 +5204,74 @@ static int AevonOpenDecide(id request, id options,
                      strcmp(bundle, AevonDivertBundle) == 0);
 
     if (kind == NULL) {
+        // 0.2.48 — 应用内链接与登录授权也进卡片。
+        //
+        // 这两类今天都落在这个 `kind == NULL` 分支里：既不是通知，也不是分享，
+        // 于是走 `plain` → 返回 0 → 原实现把目标 App 整屏拉起。用户要的是
+        // 「应用里点链接 → 卡片里的 Safari 打开那条链接」以及「微信 / QQ 登录
+        // 授权页在卡片里出现，并且授权能走完」。
+        //
+        // 判据只看「带 URL」：从桌面点图标没有 URL，相册里的文件也没有 URL，
+        // 误吞它们等于「点了没反应」。Safari 只认 http(s)；微信 / QQ 认它们的
+        // SDK 深链族（登录授权、支付、分享回跳）。
+        NSString *linkURL = AevonOpenURLOf(request, options);
+        if (linkURL.length > 0) {
+            int isSafari = strncmp(bundle, "com.apple.mobilesafari", 22) == 0;
+            int isOAuth = !isSafari &&
+                (strncmp(bundle, "com.tencent.xin", 15) == 0 ||
+                 strncmp(bundle, "com.tencent.mqq", 15) == 0);
+            if (isSafari || isOAuth) {
+                NSString *low = [linkURL lowercaseString];
+                const char *scheme = low.UTF8String;
+                int wanted = 0;
+                if (isSafari) {
+                    wanted = (strncmp(scheme, "http://", 7) == 0 ||
+                              strncmp(scheme, "https://", 8) == 0);
+                } else {
+                    wanted = (strncmp(scheme, "weixin://", 9) == 0 ||
+                              strncmp(scheme, "weixinapp://", 12) == 0 ||
+                              strncmp(scheme, "mqq://", 6) == 0 ||
+                              strncmp(scheme, "mqqapi://", 9) == 0 ||
+                              strncmp(scheme, "mqqopensdkapi://", 16) == 0 ||
+                              strncmp(scheme, "mqqopensdkapiv2://", 18) == 0 ||
+                              strncmp(scheme, "mqqopensdkapiv3://", 18) == 0 ||
+                              strncmp(scheme, "mqqwpa://", 9) == 0);
+                }
+                if (wanted) {
+                    // 目标已经整屏在屏上（例如 Safari 正开着，后台某个 App 又发了
+                    // 一条链接）：这条请求放它照常走，别为了建卡把用户按回桌面。
+                    // `isFrontmost` 只对 SpringBoard 的 `SBApplication` 有效，读不到
+                    // 时是 0 / -1，仍然走卡片，不影响正常场景。
+                    if (AevonAppFrontmost([NSString stringWithUTF8String:bundle]) == 1) {
+                        *why = "plain";
+                        return 0;
+                    }
+                    // 同一次点击派生出来的第二条：第一条已经把卡和 URL 接过去了，
+                    // 这条再吞一次，绝不能让它落回原实现把 App 拉成整屏。
+                    if (sameChain) {
+                        *why = "linkchain";
+                        return 2;
+                    }
+                    *why = isSafari ? "safari" : "oauth";
+                    AevonDivertAt = now;
+                    snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
+                    // 只记 scheme，不记整条 URL：授权链接里带 ticket / code，
+                    // 不该落进日志。
+                    char schemeText[16] = {0};
+                    size_t slen = 0;
+                    while (scheme != NULL && scheme[slen] != '\0' &&
+                           scheme[slen] != ':' && slen < sizeof(schemeText) - 1) {
+                        schemeText[slen] = scheme[slen];
+                        slen += 1;
+                    }
+                    AevonLogRaw([[NSString stringWithFormat:
+                                  @"notify: link b=%s kind=%s scheme=%s",
+                                  bundle, *why, schemeText[0] != '\0' ? schemeText : "-"]
+                                 UTF8String]);
+                    return 1;
+                }
+            }
+        }
         // 0.2.1 — 系统自己接着那条链发来的、带东西的请求：不建卡，但也不许放它
         // 过去。放过去就是「全屏把 App 拉起来」，而那正是用户 0.1.98 报的那一幕。
         // 只在紧跟在我们自己那次分流（1.5 秒）之内才这么判，免得把解锁回主屏之类
@@ -7143,6 +7230,13 @@ void AevonForwardDeliver(const char *why);
 ///
 /// 兜底：1.6 秒还没等到卡片就照原样发出去 —— 慢的 App 不许把分享弄丢。
 static int AevonFwdHoldOn = 0;
+/// 0.2.48 — 卡片这条路失败时要不要交回系统。
+///
+/// 分享那条路是 0：Aevon(189) 证明交回 SpringBoard 的代价是「背景全屏变黑」，
+/// 用户宁可卡片空着也不要黑屏。链接 / 登录授权这条是 1：它们的功能就是
+/// 「把 URL 交给目标 App」，卡片起不来时退回全屏至少还能用（Safari 打开链接、
+/// 微信弹出授权页），否则用户点一下「什么都没发生」比全屏严重得多。
+static int AevonFwdHoldFallback = 0;
 static int AevonFwdHoldSlot = -1;
 static char AevonFwdHoldForm = 0;
 static id AevonFwdHoldSelf = nil;
@@ -7165,10 +7259,12 @@ static int AevonAppOpenBusy(void);
 /// 只留一条。第二条分享进来时先把上一条发出去：丢掉一条 = 用户点的那次分享
 /// 什么都没发生，比晚一点严重得多。
 static int AevonForwardHold(int slot, id self, SEL _cmd, id request, id options,
-                            id settings, id origin, char form, NSString *bundle) {
+                            id settings, id origin, char form, NSString *bundle,
+                            int fallback) {
     if (slot < 0 || _cmd == NULL || request == nil) return 0;
     if (AevonFwdHoldOn) AevonForwardFlushNow("replaced");
     AevonFwdHoldOn = 1;
+    AevonFwdHoldFallback = fallback;
     AevonFwdHoldSlot = slot;
     AevonFwdHoldForm = form;
     AevonFwdHoldCmd = _cmd;
@@ -7201,6 +7297,7 @@ static void AevonForwardFlushNow(const char *why) {
     // 先清标志再调用：原实现会重入本文件的替身，状态必须先回到「没有待发」，
     // 否则那次重入会以为自己还有一条要发。
     AevonFwdHoldOn = 0;
+    AevonFwdHoldFallback = 0;
     AevonFwdHoldSlot = -1;
     AevonFwdHoldCmd = NULL;
     AevonFwdHoldSelf = nil;
@@ -7241,6 +7338,7 @@ static void AevonForwardDrop(const char *why) {
     id settings = AevonFwdHoldSettings;
     id origin = AevonFwdHoldOrigin;
     AevonFwdHoldOn = 0;
+    AevonFwdHoldFallback = 0;
     AevonFwdHoldSlot = -1;
     AevonFwdHoldCmd = NULL;
     AevonFwdHoldSelf = nil;
@@ -7287,6 +7385,16 @@ static void AevonForwardLost(const char *why) {
     AevonLogRaw([[NSString stringWithFormat:@"notify: share lost b=%@ why=%s at=%.0fms",
                   AevonFwdHoldBundle != nil ? AevonFwdHoldBundle : @"-",
                   why != NULL ? why : "-", ms] UTF8String]);
+    // 0.2.48 — 链接 / 登录授权卡不住时退回系统全屏：它们的功能是「把 URL 交给
+    // 目标 App」，没有卡片也得让 Safari 打开链接、微信弹出授权页。分享那条
+    // 仍然是就地销毁（见 `AevonFwdHoldFallback` 上面的说明）。
+    if (AevonFwdHoldFallback) {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: link fallback b=%@ why=%s",
+                      AevonFwdHoldBundle != nil ? AevonFwdHoldBundle : @"-",
+                      why != NULL ? why : "-"] UTF8String]);
+        AevonForwardFlushNow(why != NULL ? why : "lost");
+        return;
+    }
     AevonForwardDrop(why != NULL ? why : "lost");
 }
 
@@ -7517,6 +7625,15 @@ static void AevonAppOpenGiveUp(const char *why) {
     AevonLogRaw([[NSString stringWithFormat:@"notify: share lost b=%@ why=%s",
                   AevonFwdHoldBundle != nil ? AevonFwdHoldBundle : @"-",
                   why != NULL ? why : "-"] UTF8String]);
+    // 0.2.48 — 链接 / 登录授权：App 侧投递失败也要把 URL 交出去（全屏兜底），
+    // 否则用户点登录只会得到一张空卡。分享那条保持 0.2.18 的就地销毁。
+    if (AevonFwdHoldFallback) {
+        AevonLogRaw([[NSString stringWithFormat:@"notify: link fallback b=%@ why=%s",
+                      AevonFwdHoldBundle != nil ? AevonFwdHoldBundle : @"-",
+                      why != NULL ? why : "-"] UTF8String]);
+        AevonForwardFlushNow("appurl fail");
+        return;
+    }
     AevonForwardDrop("appurl fail");
 }
 
@@ -7796,12 +7913,17 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             // （launchIntent=4），payload 晚到变成「运行中的 App 收到一次 open URL」，
             // 而那正是 Aevon(183) 里成功的两次。
             int forwarded = 0;
-            if (strcmp(why, "share") == 0 && AevonOpenCarriesPayload(request, options)) {
+            // 0.2.48 — 链接 / 登录授权与分享共用「先建卡、再把 URL 投进 App」这条
+            // 链；区别只在失败时的收尾：分享就地销毁，链接退回系统全屏。
+            int linkKind = (strcmp(why, "safari") == 0 || strcmp(why, "oauth") == 0);
+            if ((strcmp(why, "share") == 0 || linkKind) &&
+                AevonOpenCarriesPayload(request, options)) {
                 // 不在这里发。先让 `AevonOpenFromNotification` 把卡片的 process +
                 // scene 建起来，再把这个请求投回去。超时 1.6 秒兜底。
                 forwarded = AevonForwardHold(slot, self, _cmd, request, options,
                                              settings, origin, form,
-                                             [NSString stringWithUTF8String:bundle]);
+                                             [NSString stringWithUTF8String:bundle],
+                                             linkKind ? 1 : 0);
                 size_t at = strlen(line);
                 if (at + 12 < sizeof(line)) {
                     snprintf(line + at, sizeof(line) - at, " fwd=%d", forwarded);
@@ -7847,6 +7969,12 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                              UTF8String]);
                 // 0.2.7 — 分享现场行（独立配额 12，不受快照那 32 拍影响）。
                 AevonOpenShareNote(request, options, settings, form, forwarded);
+            } else if (linkKind) {
+                // 0.2.48 — 链接 / 登录授权没有面板要收、没有横幅要撤、也没有
+                // 「这一条已读」；走通知那套收尾只会去碰不相干的对象。
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"notify: link card b=%@ kind=%s fwd=%d n=%d",
+                              target, why, forwarded, AevonDivertCount] UTF8String]);
             } else {
                 // 0.1.99 — 先取证结构（哪一跳断），再按老路取标识。两件事都只读。
                 AevonClearProbe(request, options);

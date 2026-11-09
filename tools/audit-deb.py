@@ -883,6 +883,13 @@ def main():
                   b"notify: share swap giveup b=%s target_fg=%d src_fg=%d tick=%d",
                   b"notify: share swap skip b=%s tick=%d",
                   b"win: direct card declined (",
+                  # 0.2.48 — 应用内链接跳 Safari / 微信 QQ 登录授权不再整屏：
+                  # 认出带 URL 的打开请求、建卡、把 URL 投进卡片里的 App。
+                  # 少任意一条，这两类请求就又回到 `plain` 全屏那条老路。
+                  b"notify: link b=%s kind=%s scheme=%s",
+                  b"notify: link card b=%@ kind=%s fwd=%d n=%d",
+                  b"notify: link fallback b=%@ why=%s",
+                  b"linkchain",
                   # 0.2.15 —— 尺寸 + 分享两件：
                   #   own display       scene 的 displayConfiguration 被改成画布大小
                   #                     （不改就是「UIScreen 932 / 窗口 717」，按屏幕

@@ -953,6 +953,10 @@ zStackParticipantDidChange:
         if let docked = FloatHost.dockedHost(of: bundleID) {
             Log.write("win: icon " + bundleID + " is docked, promoting it")
             docked.promoteFromRing()
+            // 0.2.48 — 卡已经在（停靠小窗升主窗）：这条打开请求带的 URL 现在
+            // 有地方可投了。不补这一句，「Safari 卡片开着时再点一个链接」会
+            // 一路等到 hold 超时，最后退回全屏。
+            AevonForwardDeliver("card docked")
             return
         }
         // 0.0.98 — 已经有主窗时，先把它降级成停靠小窗，再开新的。
@@ -968,6 +972,9 @@ zStackParticipantDidChange:
             // 同一个 App 再选一次：不降级也不重开。否则点两下就把它自己挤成小窗。
             if hostedBundle == bundleID || FloatHost.mainBundle == bundleID {
                 Log.write("win: icon " + bundleID + " is already the main card, ignored")
+                // 0.2.48 — 同上：卡片已经在承载这个 App，把这条请求的 URL 投进去
+                // （Safari 开新标签 / 微信弹授权页），不要让它等到超时退回全屏。
+                AevonForwardDeliver("card already up")
                 return
             }
             // 0.0.99 — **先问有没有槽，再决定降不降级**。
