@@ -394,6 +394,11 @@ NSString *_Nullable AevonHomeStep(int step, id _Nullable page);
 /// 调用方按「不是 1」决定要不要走藏空页的兜底 —— 不信返回值，信读数。
 int AevonSpringboardActive(void);
 
+/// 0.2.34 — 「这个 App 现在是不是屏上那个全屏 App」。1 = 是 / 0 = 不是 /
+/// -1 = 读不到。`openCard` 的「先回桌面」只用它当判据：0.2.33 用的 scene
+/// 可见位对后台 scene 也答 1，真机上把桌面在屏的那一次也带进了 home 分支。
+int AevonAppFrontmost(NSString *_Nullable bundleID);
+
 // 0.0.65 的 `AevonColdStartReady` 已随该功能一起删除（0.0.66）：它靠「名片文件
 // 写上 pid」判断进程新旧，而名片写不进去时（沙箱、目录权限、装包顺序）判据就永远
 // 不成立 —— 于是每次开窗都先结束那个 App 再拉起来。一次写失败换来「App 打不开」，

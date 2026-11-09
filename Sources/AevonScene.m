@@ -172,6 +172,26 @@ int AevonAppPid(NSString *bundleID) {
     }
 }
 
+/// 0.2.34 — 「这个 App 现在是不是屏上那个全屏 App」。只读 `SBApplication.isFrontmost`。
+///
+/// 0.2.33 用的是 scene 的 `accessibilitySceneIsForegroundVisible`，真机日志把它
+/// 证伪了：桌面在屏时点圆盘里的 QQ（11:14:04），它照样答 1 → 进了 home 分支 →
+/// home 又发不出去 → 白等 1.4 秒才建卡。用户看到的就是「又不会回桌面 + 黑屏」。
+/// `isFrontmost` 是 SpringBoard 自己的前台位，问它才是问「谁在屏上」。
+/// 返回 1 = 是 / 0 = 不是（含进程不在）/ -1 = 读不到。
+int AevonAppFrontmost(NSString *bundleID) {
+    if (bundleID.length == 0) return -1;
+    @try {
+        id app = AevonAppObject(bundleID);
+        if (app == nil) return 0;
+        SEL sel = NSSelectorFromString(@"isFrontmost");
+        if (![app respondsToSelector:sel]) return -1;
+        return ((BOOL (*)(id, SEL))objc_msgSend)(app, sel) ? 1 : 0;
+    } @catch (__unused NSException *exception) {
+        return -1;
+    }
+}
+
 // MARK: - Notes
 
 /// Notes are collected here and drained by Swift in one go, so the log gets
@@ -1064,17 +1084,49 @@ NSInteger AevonOwnIsOwned(NSString *bundleID) {
 ///      响应链上把那个 controller 找出来，让它自己处理。
 /// 谁生效由 Swift 侧回读 `isSpringBoardActive` 判定；三级都不行才动页面。
 
-/// SpringBoard 自己的 window scene。走 `connectedScenes`（`windows` 在
+/// 0.2.34 — 这个 window scene 是不是「主屏那张」以外的辅助 scene。
+///
+/// 0.2.33 的真机日志把这一步拍死了：
+///   `win: home first open step1 threw -[SBSystemApertureWindowScene
+///    isExternalDisplayWindowScene]: unrecognized selector sent to instance …`
+/// `connectedScenes` 里第一个 window scene 是 **灵动岛** 那个
+/// `SBSystemApertureWindowScene`，把它交给
+/// `handleHomeButtonSinglePressUpForWindowScene:` 会在这条内部链上抛异常；
+/// `@try` 把异常吞成一句日志，home 一次都没真的发出去
+/// （`home first open ready waited=1400ms springboard=0`）。
+static BOOL AevonSceneIsAuxiliary(UIScene *scene) {
+    if (scene == nil) return YES;
+    NSString *name = NSStringFromClass([scene class]);
+    if (name.length == 0) return YES;
+    if ([name rangeOfString:@"SystemAperture"].location != NSNotFound) return YES;
+    if ([name rangeOfString:@"External"].location != NSNotFound) return YES;
+    if ([name rangeOfString:@"Wallpaper"].location != NSNotFound) return YES;
+    return NO;
+}
+
+/// SpringBoard 主屏的 window scene。走 `connectedScenes`（`windows` 在
 /// iOS 15 起被标成 deprecated，而本工程的 ObjC 把 deprecated 当错误）。
+///
+/// 0.2.34 — 先剔掉辅助 scene（灵动岛 / 外接屏 / 壁纸），再按 `UIScreen.mainScreen`
+/// 认主屏；main 那个且前台活跃的最优先。`AevonHomeStep` 的日志会打出最后挑中
+/// 的类名，真机上一眼就能确认它是不是 `SBWindowScene`。
 static id AevonSBWindowScene(void) {
     @try {
-        id first = nil;
+        id fallback = nil;
+        id mainIdle = nil;
+        UIScreen *mainScreen = [UIScreen mainScreen];
         for (UIScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            if (first == nil) first = scene;
-            if (scene.activationState == UISceneActivationStateForegroundActive) return scene;
+            if (AevonSceneIsAuxiliary(scene)) continue;
+            UIWindowScene *window = (UIWindowScene *)scene;
+            BOOL onMain = (mainScreen != nil && window.screen == mainScreen);
+            if (onMain && scene.activationState == UISceneActivationStateForegroundActive) {
+                return scene;
+            }
+            if (onMain && mainIdle == nil) mainIdle = scene;
+            if (fallback == nil) fallback = scene;
         }
-        return first;
+        return mainIdle != nil ? mainIdle : fallback;
     } @catch (__unused NSException *e) {
         return nil;
     }
@@ -1093,28 +1145,56 @@ static id AevonHomeShared(NSString *className) {
     }
 }
 
+/// 0.2.34 — 第 2 级单独抽出来：第 1 级抛异常或挑不到主屏 scene 时要能当场回落。
+///
+/// `SBMainSwitcherControllerCoordinator -dismissMainSwitcherNoninteractivelyAnimated:`
+/// 是「不经过手势把主切换器/全屏页收起」；这个类在新版被改名时，再退到
+/// `SBUIController` 那条第 0 级都不带 scene 的 home 键（老系统上一直在）。
+static NSString *AevonHomeRunStep2(void) {
+    id coordinator = AevonHomeShared(@"SBMainSwitcherControllerCoordinator");
+    SEL sel = NSSelectorFromString(@"dismissMainSwitcherNoninteractivelyAnimated:");
+    if (coordinator != nil && [coordinator respondsToSelector:sel]) {
+        ((BOOL (*)(id, SEL, BOOL))objc_msgSend)(coordinator, sel, YES);
+        return @"step2 dismiss-main-switcher YES";
+    }
+    id ctl = AevonHomeShared(@"SBUIController");
+    SEL plain = NSSelectorFromString(@"handleHomeButtonSinglePressUp");
+    if (ctl != nil && [ctl respondsToSelector:plain]) {
+        ((void (*)(id, SEL))objc_msgSend)(ctl, plain);
+        return @"step2 SBUIController single-press-up";
+    }
+    return @"step2 nosel";
+}
+
 /// 0.2.25 — 第 `step` 级回桌面。`page` 只有第 3 级用到（往上走响应链）。
 /// 返回一句日志；`nil` = step 不认识。没接上的那一级返回原因，不算失败。
+///
+/// 0.2.34 — 第 1 级再也不是「抛异常就到此为止」：异常 / 没有主屏 scene 时
+/// 当场执行第 2 级，并把两级都写进返回串。0.2.33 的 `step1 threw …` 之后
+/// Swift 侧还在原地等 1.4 秒（`springboard=0`），用户看到的就是「不回桌面」。
 NSString *AevonHomeStep(int step, id page) {
     @try {
         if (step == 1) {
             id ctl = AevonHomeShared(@"SBUIController");
             SEL sel = NSSelectorFromString(@"handleHomeButtonSinglePressUpForWindowScene:");
-            if (ctl == nil || ![ctl respondsToSelector:sel]) return @"step1 SBUIController nosel";
             id scene = AevonSBWindowScene();
-            if (scene == nil) return @"step1 scene nil";
-            ((void (*)(id, SEL, id))objc_msgSend)(ctl, sel, scene);
-            return [NSString stringWithFormat:@"step1 SBUIController single-press-up scene=%@",
-                    NSStringFromClass([scene class])];
+            if (ctl != nil && [ctl respondsToSelector:sel] && scene != nil) {
+                @try {
+                    ((void (*)(id, SEL, id))objc_msgSend)(ctl, sel, scene);
+                    return [NSString stringWithFormat:
+                            @"step1 SBUIController single-press-up scene=%@",
+                            NSStringFromClass([scene class])];
+                } @catch (NSException *e) {
+                    return [NSString stringWithFormat:@"step1 threw %@ -> %@",
+                            e.reason != nil ? e.reason : @"-", AevonHomeRunStep2()];
+                }
+            }
+            NSString *why = @"step1 nosel";
+            if (ctl != nil && [ctl respondsToSelector:sel]) why = @"step1 scene nil";
+            return [NSString stringWithFormat:@"%@ -> %@", why, AevonHomeRunStep2()];
         }
         if (step == 2) {
-            id coordinator = AevonHomeShared(@"SBMainSwitcherControllerCoordinator");
-            SEL sel = NSSelectorFromString(@"dismissMainSwitcherNoninteractivelyAnimated:");
-            if (coordinator == nil || ![coordinator respondsToSelector:sel]) {
-                return @"step2 coordinator nosel";
-            }
-            ((BOOL (*)(id, SEL, BOOL))objc_msgSend)(coordinator, sel, YES);
-            return @"step2 coordinator dismiss-main-switcher YES";
+            return AevonHomeRunStep2();
         }
         if (step == 3) {
             id node = page;

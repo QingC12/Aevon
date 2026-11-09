@@ -956,26 +956,38 @@ zStackParticipantDidChange:
         // 卡片会把全屏页抽空（黑）并让这个 scene 掉画。目标 App 不是屏上那个时，
         // 它要么在后台、要么没起进程，建卡借的是另一份 scene，不需要动当前全屏页。
         //
-        // 判据与 `pollForScene` 那道门同一口径：目标自己的 scene 现在是不是
-        // 「前台可见」。不是 → 一个 home 都不发，原流程直接往下走。
+        // 判据与 `pollForScene` 那道门同一口径：目标 App 此刻**是不是屏上那个
+        // 全屏 App**。不是 → 一个 home 都不发，原流程直接往下走。
+        //
+        // 0.2.34 — 判据从 scene 的 `accessibilitySceneIsForegroundVisible` 换成
+        // SpringBoard 的 `SBApplication.isFrontmost`。0.2.33 的真机日志把它证伪了：
+        // 桌面在屏时点圆盘里的 QQ（11:14:04），那个 scene 可见位照样答 1，于是
+        // 进了 home 分支；而 home 又因为灵动岛 scene 抛异常没发出去，白等 1.4 秒
+        // 才建卡 —— 用户看到的就是「又不会回桌面 + 黑屏 + 分享全屏」。
+        // 读不到（-1）也按「不是」处理：0.2.32 的「不同 App 也先回桌面」不能回来。
         // `homed` 只用来防止这条路自己递归；`pollForScene` 里那道老门保留，
         // 它管的是「启动之后才变成全屏」的另一种情形。
         if !homed, AevonSpringboardActive() != 1 {
-            let onScreen = sceneFor(bundleID).map {
-                AevonBoolOf($0, "accessibilitySceneIsForegroundVisible") == 1
-            } ?? false
-            if !onScreen {
+            let frontmost = AevonAppFrontmost(bundleID)
+            if frontmost != 1 {
                 Log.write("win: home first skip b=" + bundleID
-                          + " (target is not the full-screen app)")
+                          + " (target is not the frontmost app)")
             } else {
                 let step = AevonHomeStep(1, nil)
                 Log.write("win: home first open " + (step ?? "step nil") + " b=" + bundleID)
                 var waited = 0
                 func afterHome() {
                     let active = AevonSpringboardActive()
-                    if (active == 1 && waited >= 10) || waited >= 28 {
-                        Log.write(String(format: "win: home first open ready waited=%ldms springboard=%ld",
-                                         waited * 50, Int(active)))
+                    let front = AevonAppFrontmost(bundleID)
+                    // 0.2.34 — 两个读数任一成立就算「已经离开全屏」：桌面在屏，
+                    // 或者目标 App 不再是前台。0.2.33 的日志里桌面明明在屏，
+                    // `isSpringboardActive` 仍然答 0（卡片窗口存在时它不一定回 1），
+                    // 只看它就会把每次 home 都拖满 1.4 秒。
+                    // 前 0.5 秒不建卡：home 过渡本身要走完，0.2.30 的「先回桌面
+                    // 再挂卡」正是靠这段间隔才不黑。
+                    if ((active == 1 || front != 1) && waited >= 10) || waited >= 28 {
+                        Log.write(String(format: "win: home first open ready waited=%ldms springboard=%ld front=%ld",
+                                         waited * 50, Int(active), Int(front)))
                         openCard(bundleID, homed: true, fallback: fallback)
                         return
                     }
@@ -1103,7 +1115,10 @@ zStackParticipantDidChange:
                              Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
             mark("OWN-live")
             markHosted(bundleID)
-            pollForScene(bundleID, ticks: 0, start: Date(), fallback: fallback)
+            // 0.2.34 — `homed` 必须一路带下去。0.2.33 在这里丢了它：`openCard`
+            // 已经等过一次 home，`pollForScene` 的老门又判一次 scene 可见、
+            // 再等 1.4 秒 —— 真机日志里 QQ 那次就是连着两组 `home first …`。
+            pollForScene(bundleID, ticks: 0, start: Date(), homed: homed, fallback: fallback)
             return
         }
         let canvas = FloatHost.fatRender(in: UIScreen.main.bounds.size)
@@ -1115,7 +1130,7 @@ zStackParticipantDidChange:
         if started == 1 {
             mark("OWN-build")
             markHosted(bundleID)
-            pollForScene(bundleID, ticks: 0, start: Date(), fallback: fallback)
+            pollForScene(bundleID, ticks: 0, start: Date(), homed: homed, fallback: fallback)
             return
         }
         // 走到这里只剩两种情形：`AevonOwnGate` 说这套私有面在这台机器上不齐
@@ -1147,7 +1162,7 @@ zStackParticipantDidChange:
         // reach a window. This is the one signal that does not depend on the
         // scene settings crossing into the app's own copy.
         markHosted(bundleID)
-        pollForScene(bundleID, ticks: 0, start: Date(), fallback: fallback)
+        pollForScene(bundleID, ticks: 0, start: Date(), homed: homed, fallback: fallback)
     }
 
     // MARK: - 0.0.44 hosted mark
@@ -1419,19 +1434,26 @@ zStackParticipantDidChange:
             //   之后才回到这条等待链，建卡时 App 已经在后台 —— 那正是
             //   「后台 App → 浮窗」这条一直在用、从没黑过的路。
             // 所以这里不拍快照、不盖任何视图，只是把时序放到正确的位置。
+            // 0.2.34 — 判据与 `openCard` 那道门同一口径：`SBApplication.isFrontmost`。
+            // scene 可见位对后台 scene 也答 1（0.2.33 真机日志里桌面在屏时它仍然
+            // 答 1），拿它判「目标是不是屏上那个」会把每一次都带进 home 分支。
             if !homed, AevonOwnIsOwned(bundleID) == 0,
                AevonSpringboardActive() != 1,
-               AevonBoolOf(scene, "accessibilitySceneIsForegroundVisible") == 1 {
+               AevonAppFrontmost(bundleID) == 1 {
                 unmark()
                 let step = AevonHomeStep(1, nil)
                 Log.write("win: home first " + (step ?? "step nil") + " b=" + bundleID)
                 var waited = 0
                 func afterHome() {
                     let active = AevonSpringboardActive()
+                    let front = AevonAppFrontmost(bundleID)
                     // 0.5 s = home 过渡本身走完；1.4 s = 「系统没接这一下」的上限。
-                    if (active == 1 && waited >= 10) || waited >= 28 {
-                        Log.write(String(format: "win: home first ready waited=%ldms springboard=%ld",
-                                         waited * 50, Int(active)))
+                    // 0.2.34 — `front != 1` 也算走完：桌面在屏时 `isSpringboardActive`
+                    // 不一定会回 1（卡片窗口存在时它就是 0），只看它每次都要等满。
+                    // 前 0.5 秒照样不建卡 —— 那正是 0.2.30 修掉黑屏的间隔。
+                    if ((active == 1 || front != 1) && waited >= 10) || waited >= 28 {
+                        Log.write(String(format: "win: home first ready waited=%ldms springboard=%ld front=%ld",
+                                         waited * 50, Int(active), Int(front)))
                         pollForScene(bundleID, ticks: 0, start: start, probed: probed,
                                      retried: retried, fell: fellOver, homed: true,
                                      fallback: fallback)
