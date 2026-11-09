@@ -683,6 +683,25 @@ def main():
                   # `giveup` = 收不进来时把登记彻底撤掉（否则整屏只画上半截）。
                   b"notify: auth swap card b=%s after=%dms fg=%d board=%d",
                   b"notify: auth swap giveup b=%s fg=%d live=%d tick=%d",
+                  # 0.2.63 — 落点（对比报告的方案 A）：系统的 URL 打开入口带一个
+                  # `display` 参数，要进卡片的那个 App 传 NO ⇒ **没有全屏帧**，
+                  # URL 仍由系统原生投递。这六条是判据：
+                  #   `owners=` / `cls=… types=` = 这个选择子在这台系统上存不存在、
+                  #      形状对不对（对不上就不装，只留一行 shape skip）；
+                  #   `hooked` = 真装上了；
+                  #   `url … cut=1` = 那一次真的把 display 切成了 NO；
+                  #   `url card` = 随后把那份 scene 收进了卡片。
+                  # 另两条 `landing: %s cls=` 是 Stheno 的激活口与 TrollOpen 的
+                  # 实体口的普查，只记录、不改变行为 —— 它们的答案决定下一版要不要
+                  # 换入口。
+                  b"_openURLCore:display:animating:activationSettings:origin:withResult:",
+                  b"landing: url owners=%d",
+                  b"landing: url cls=%@ types=%s",
+                  b"landing: url hooked",
+                  b"landing: url %s b=%s display=%d run=%d cut=%d n=%ld",
+                  b"landing: url card b=%s",
+                  b"landing: url card skip b=%s",
+                  b"landing: %s cls=%@ types=%s",
                   # 0.2.60 — 卡片走了、App 窗口还回场景高（「全屏中下黑」的另一半）。
                   # 0.2.46 — 「让抖音真重排」这一版的四条：显示覆盖 / 参考尺寸 /
                   # 屏幕跟随 / 回执。逐条都要能在产物里 grep 到，缺哪条就等于那一步

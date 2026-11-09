@@ -2943,6 +2943,192 @@ static NSInteger AevonProbeSelfTest(void) {
     return got;
 }
 
+// MARK: - 0.2.63 落点（landing）
+//
+//  Aevon(203) 之后的那份对比报告把话说清楚了：Stheno / TrollOpen 从来没有
+//  「先全屏、再收进浮窗」这一帧，因为它们**不跟系统抢**——系统照常把 App 拉起来
+//  并把 URL 交给它，它们只改「摆在哪」。Aevon 这五版一直在做的是反过来的事：
+//  拦下请求、自己建 scene、自己投 URL，投不通就退回全屏，然后再用定时器去追
+//  一个已经画出来的全屏帧。
+//
+//  这一版把那条链砍回一根：**`_openURLCore:display:…` 是系统唯一的 URL 打开
+//  入口，它带着一个 `display` 参数**。TrollOpen 就是钩这一个（它的 `URLJump`
+//  开关），Aevon 从来没有这个钩子（11-08 的报告里写着「Aevon 没有 URL 钩子」）。
+//
+//  做法只有一句：要进卡片的那个 App，`display` 传 NO。
+//    · URL 仍由系统原生投递 ⇒ 微信的 `NSUserActivity`、QQ 的 SSO 回跳都在；
+//    · 系统不把它摆到屏幕上 ⇒ 没有全屏帧，也就没有「下半黑」；
+//    · 我们再把那份已经存在的 scene 收进卡片（`AevonOpenCardDirect` 认活 scene）。
+//
+//  两道闸，都是为了「宁可退回旧行为，也不许点了没反应」：
+//    1. 目标 App 的进程必须已经在（`AevonAppPid > 0`）。冷启动那种「进程还没起」
+//       不切 display —— 那时 scene 也不存在，切了没人接管，就是黑屏一分钟。
+//    2. 形状不对就不装。私有方法的调用约定是猜不得的：编码里必须正好两个 BOOL、
+//       五个对象参数、返回 void，少一条就只记一行、不装钩子。
+
+typedef void (*AevonURLCoreProc)(id, SEL, id, BOOL, BOOL, id, id, id);
+
+static AevonURLCoreProc AevonURLCoreOriginal = NULL;
+static long AevonURLCalls = 0;
+static long AevonURLCuts = 0;
+
+/// 这条 URL 指向哪个 App。只认微信 / QQ 两族的 scheme —— 别的 App 的 URL
+/// 一条都不动，`display` 原样传下去。
+static const char *AevonLandingBundleForURL(const char *url) {
+    if (url == NULL) return NULL;
+    if (strncasecmp(url, "weixin://", 9) == 0) return "com.tencent.xin";
+    if (strncasecmp(url, "mqq", 3) == 0) return "com.tencent.mqq";
+    return NULL;
+}
+
+static void AevonLandingShape(const char *url, char *out, size_t size) {
+    if (out == NULL || size == 0) return;
+    out[0] = '\0';
+    if (url == NULL) { snprintf(out, size, "-"); return; }
+    size_t i = 0;
+    while (url[i] != '\0' && url[i] != ':' && i + 1 < size) {
+        out[i] = url[i];
+        i += 1;
+    }
+    out[i] = '\0';
+}
+
+/// 只认这一种形状：`v|@ @ : @ B B @ @ @`（返回可有可无，第三、四个参数是 BOOL）。
+///
+/// 私有方法的调用约定猜不得：如果第二个参数其实是对象、第三个才是 BOOL，装上去
+/// 就是把一个指针当 BOOL 读，而且发生在系统每一次打开 URL 的路径上。宁可这一版
+/// 只记一行 `shape skip`，也不许装一个位置可能错的钩子。
+static int AevonLandingEncodingOK(const char *encoding) {
+    if (encoding == NULL) return 0;
+    char t[24];
+    int n = 0;
+    for (const char *p = encoding; *p != '\0' && n < 23; p++) {
+        char c = *p;
+        if ((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '"' || c == '[' ||
+            c == ']' || c == '{' || c == '}' || c == '(' || c == ')' || c == '^' ||
+            c == '?' || c == '<' || c == '>' || c == '=' || c == 'b' || c == 'n' ||
+            c == 'r' || c == 'N' || c == 'o' || c == 'O' || c == 'R' || c == 'V') {
+            continue;
+        }
+        t[n++] = c;
+    }
+    t[n] = '\0';
+    if (n < 6) return 0;
+    if (t[0] != 'v' && t[0] != '@') return 0;
+    if (t[1] != '@' || t[2] != ':' || t[3] != '@') return 0;
+    if ((t[4] != 'B' && t[4] != 'c') || (t[5] != 'B' && t[5] != 'c')) return 0;
+    return 1;
+}
+
+static void AevonURLCoreReplacement(id self, SEL _cmd, id url, BOOL display,
+                                    BOOL animating, id settings, id origin, id result) {
+    long seen = __sync_fetch_and_add(&AevonURLCalls, 1);
+    NSString *text = nil;
+    if ([url isKindOfClass:[NSURL class]]) text = [(NSURL *)url absoluteString];
+    else if ([url isKindOfClass:[NSString class]]) text = (NSString *)url;
+    const char *raw = text.length > 0 ? text.UTF8String : NULL;
+    const char *target = AevonLandingBundleForURL(raw);
+
+    int running = 0;
+    int cut = 0;
+    if (target != NULL) {
+        NSString *bundleID = [NSString stringWithUTF8String:target];
+        running = AevonAppPid(bundleID) > 0 ? 1 : 0;
+        if (running && display && AevonCardIsUpFor(target) == 0) cut = 1;
+    }
+    if (cut) __sync_fetch_and_add(&AevonURLCuts, 1);
+    if (seen < 6 || cut) {
+        char shape[40];
+        AevonLandingShape(raw, shape, sizeof(shape));
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"landing: url %s b=%s display=%d run=%d cut=%d n=%ld",
+                      shape, target != NULL ? target : "-",
+                      display ? 1 : 0, running, cut, seen + 1] UTF8String]);
+    }
+
+    if (AevonURLCoreOriginal != NULL) {
+        AevonURLCoreOriginal(self, _cmd, url, cut ? NO : display, animating,
+                             settings, origin, result);
+    }
+    if (!cut) return;
+
+    // 收卡放在下一拍：这一栈在系统的工作区事务里，事务没提交之前建窗会和
+    // FrontBoard 抢同一份 scene（0.0.31 的死锁纪律）。
+    char *copy = strdup(target);
+    if (copy == NULL) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        // 与 `auth swap` / `paste promote` 那两条定时器共用同一个判据：卡已经
+        // 在了、或者已经在建了，就不再建第二张。三者都跑在主队列上，检查与建卡
+        // 之间不会被另一个插进来。
+        if (AevonCardIsUpFor(copy) == 1 || AevonCardIsComingFor(copy) == 1) {
+            AevonLogRaw([[NSString stringWithFormat:@"landing: url card skip b=%s", copy] UTF8String]);
+            free(copy);
+            return;
+        }
+        AevonLogRaw([[NSString stringWithFormat:@"landing: url card b=%s", copy] UTF8String]);
+        AevonOpenCardDirect(copy);
+        free(copy);
+    });
+}
+
+/// 装落点钩子，并把两个「还没用上」的入口记进日志（只记，不钩）。
+static void AevonLandingInstall(NSMutableString *out) {
+    SEL urlSel = NSSelectorFromString(
+        @"_openURLCore:display:animating:activationSettings:origin:withResult:");
+    Class owners[4] = { Nil, Nil, Nil, Nil };
+    int count = AevonOwnersOf(urlSel, owners, 4);
+    [out appendFormat:@"landing: url owners=%d\n", count];
+    for (int i = 0; i < count; i++) {
+        Method method = class_getInstanceMethod(owners[i], urlSel);
+        const char *encoding = method != NULL ? method_getTypeEncoding(method) : NULL;
+        [out appendFormat:@"landing: url cls=%@ types=%s\n",
+         NSStringFromClass(owners[i]), encoding != NULL ? encoding : "?"];
+        if (encoding == NULL || !AevonLandingEncodingOK(encoding)) {
+            [out appendFormat:@"landing: url shape skip (args=%d)\n",
+             encoding != NULL ? AevonObjectArgs(encoding) : -1];
+            continue;
+        }
+        AevonHookSlot *slot = AevonReserve("landing-url");
+        if (slot == NULL) { [out appendString:@"landing: url no slot\n"]; break; }
+        AevonHookSlot *mine = slot;
+        id block = ^(id host, id target, BOOL display, BOOL animating,
+                     id settings, id origin, id result) {
+            AevonURLCoreReplacement(host, mine->sel, target, display,
+                                    animating, settings, origin, result);
+        };
+        if (AevonAttach(out, slot, owners[i],
+                        @"_openURLCore:display:animating:activationSettings:origin:withResult:",
+                        block)) {
+            AevonURLCoreOriginal = (AevonURLCoreProc)slot->original;
+            [out appendString:@"landing: url hooked\n"];
+        }
+    }
+
+    // 只记录：Stheno 的激活口、TrollOpen 的实体口在这台系统上到底存不存在。
+    // 这两行是下一版要用的证据，不是装饰 —— 报告第 7 节把它们列为「能不能做」
+    // 的第一条，而它们的答案只能从运行中的进程里问出来。
+    struct { const char *sel; const char *label; } probes[2] = {
+        { "_activateBundleID:requestID:isTrusted:options:source:originalSource:withResult:", "activate" },
+        { "overrideAppSceneEntityForLaunchingApplication:", "entity" },
+    };
+    for (int i = 0; i < 2; i++) {
+        SEL sel = NSSelectorFromString([NSString stringWithUTF8String:probes[i].sel]);
+        Class found[4] = { Nil, Nil, Nil, Nil };
+        int n = sel != NULL ? AevonOwnersOf(sel, found, 4) : 0;
+        if (n == 0) {
+            [out appendFormat:@"landing: %s owners=0\n", probes[i].label];
+            continue;
+        }
+        for (int k = 0; k < n; k++) {
+            Method m = class_getInstanceMethod(found[k], sel);
+            const char *enc = m != NULL ? method_getTypeEncoding(m) : NULL;
+            [out appendFormat:@"landing: %s cls=%@ types=%s\n",
+             probes[i].label, NSStringFromClass(found[k]), enc != NULL ? enc : "?"];
+        }
+    }
+}
+
 /// Installs every hook the mother ship's route needs and returns the notes.
 /// Idempotent: a second tap in the same process reports the first install rather
 /// than stacking a replacement on top of a replacement.
@@ -3109,6 +3295,9 @@ NSString *AevonHookInstall(void) {
         AevonAttachShaped(out, slot, owner, @"_scene:interceptUpdateWithNewSettings:", 2, block);
     }
 
+    // 3. 落点（0.2.63）—— 报告里的方案 A：不跟系统抢，只改它摆在哪。
+    AevonLandingInstall(out);
+
     return out;
 }
 
@@ -3119,11 +3308,11 @@ NSString *AevonHookSummary(void) {
     NSMutableString *out = [NSMutableString string];
     [out appendFormat:@"hook: live=%d deact_set=%ld stripped=%ld"
      " intercept=%ld/%ld"
-     " push=%ld/%ld door=%ld armed=%@\n",
+     " push=%ld/%ld door=%ld armed=%@ landing=%ld/%ld\n",
      AevonSlotCount, AevonDeactSetCalls, AevonDeactStripped,
      AevonInterceptRewrote, AevonInterceptCalls,
      AevonPushWrote, AevonPushTried, AevonPushPath,
-     AevonHookArmedList()];
+     AevonHookArmedList(), AevonURLCuts, AevonURLCalls];
     long total = AevonTraceCount;
     long limit = (long)(sizeof(AevonTrace) / sizeof(AevonTrace[0]));
     if (total > limit) total = limit;
