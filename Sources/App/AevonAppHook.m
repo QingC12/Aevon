@@ -4876,6 +4876,12 @@ static BOOL AevonOpenURLUniversal(UIApplication *app, NSURL *url) {
     NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
     if (![bundle hasPrefix:@"com.tencent.xin"] &&
         ![bundle hasPrefix:@"com.tencent.mqq"]) return NO;
+    // 只认登录 / 授权形状的 https。分享到微信 / QQ 的普通链接也走这条投递链，
+    // 把它们当成 universal link 递进去会让「分享一个网页」变成「打开网页」——
+    // 那不是这一版要动的东西。
+    NSString *low = url.absoluteString.lowercaseString;
+    if ([low rangeOfString:@"/auth"].location == NSNotFound &&
+        [low rangeOfString:@"oauth"].location == NSNotFound) return NO;
 
     NSUserActivity *activity = [[NSUserActivity alloc]
         initWithActivityType:@"NSUserActivityTypeBrowsingWeb"];
