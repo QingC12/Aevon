@@ -845,9 +845,25 @@ def main():
                   #   `id=` / `idc=` → scene 的身份在建 scene **之前**就拿得到吗 ——
                   #                  这是第②段能不能先建 presenter 的唯一前提；
                   #   `blk=1`      → completion 在第 7 位上，还是空。
-                  b"act: activate n=%ld t=%lld trusted=%d b=%s opt=%s keys=%ld payload=%d res=%s",
-                  b"act: scene n=%ld t=%lld gap=%ld def=%s idc=%s id=%s rem=%s prov=%s blk=%d",
-                  b"act: hits activate=%ld scene=%ld boot=%d",
+                  #
+                  # 0.2.90 — 第①段回来后改的口径：`res=` 删了（那是在读一个 void
+                  # 方法的返回值，读到栈上垃圾）；options 改走 `dictionary`/`payload`
+                  # 两级取字典（`via=` 说明走的是哪一级）；`sl=`/`susp=` 是「让系统
+                  # 别摆屏」的两个候选键；`set=`/`frame=`/`resize=`/`tctx=`/`act=`
+                  # /`icl=` 是 createScene 六个参数的形状，`csig=`/`rsig=` 是两个块
+                  # 的真实签名；`fw=`/`fs=` 是那一刀几何写了几次、被挡几次。
+                  b"act: activate n=%ld t=%lld trusted=%d b=%s opt=%s via=%d "
+                  b"keys=%ld payload=%d sl=%d susp=%d k=%s rsig=%s",
+                  b"act: scene n=%ld t=%lld gap=%ld def=%s idc=%s id=%s rem=%s prov=%s "
+                  b"blk=%d set=%s frame=%d resize=%d tctx=%s act=%d icl=%s csig=%s",
+                  b"act: hits activate=%ld scene=%ld boot=%d fw=%ld fs=%ld card=%s",
+                  b"act: frame birth wrote=1 b=%s before=%.0fx%.0f after=%.0fx%.0f",
+                  b"act: frame birth blocked why=%s b=%s set=%s",
+                  # `_Block_signature` 用 dlsym 取，所以这串必须进二进制；取不到就
+                  # 是这一格空着，不是这条断言该消失。
+                  b"_Block_signature",
+                  b"__LaunchSceneless",
+                  b"/var/mobile/Library/Logs/Aevon/act.step",
                   # 0.2.75 — 安全闸的**运行期**复查。Aevon(207) 里用户把 G0 与 G1
                   # 都打开，`win: touch in=17 eat=3` 照样在吞 —— 原因是设置侧只写
                   # 文件/偏好不发通知，而闸本身只在加载时判定一次。这五条就是

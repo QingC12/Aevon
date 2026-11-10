@@ -3665,20 +3665,27 @@ static void AevonLandingInstall(NSMutableString *out) {
     }
 }
 
-// MARK: - 0.2.89 — 起点迁移第①段：激活那一拍，只读
+// MARK: - 0.2.89 起点迁移第①段（只读）· 0.2.90 加上唯一一刀几何
 //
 // 0.2.87 只并了母版的一半（「不吞」），承载时序一行没动。结果是最坏的组合：
 // 整屏照系统的意走完，我们 15~30 ms 后才建卡，366~1972 ms 才有首帧，中间那段黑
 // （Aevon(220) 三次实测）。根因不是收得慢，是**站位**：母版这条路上有三个插入点
 // —— 激活请求（不带呈现）、建 scene（还没上屏）、绑 presenter —— 我们一个都没有。
 //
-// 这一版只装第①段：两个方法都挂上、都原样尾调、**一个字的行为都不改**，只写读数。
+// 第①段（0.2.89）两个方法都挂上、都原样尾调，只写读数。Aevon(222) 的读数给了三件
+// 事：createScene 中段**全是对象**（`@72@0:8@16@24@32@40@48@56@?64`）；App 场景走
+// 异步那条（`blk=1` + `prov=FBWorkspace`）；scene 身份在建 scene 之前就有。同一份
+// 日志也否掉了两样：`eventOnly`（写入成功、读回 1、整屏照旧）和 `res=` 那处读数
+// （读 void 方法的返回值，读到的是栈上垃圾）。
 //
-// 为什么必须只读：presenter 绑的是 scene，而「激活那一拍」scene 还不存在。能同时
-// 拿到 scene、又还没上屏的那一格是 `_createSceneWithDefinition:…completion:`。
-// 但两件事静态读不出来 —— `createPresenterWithIdentifier:` 的 identifier 是不是
-// `scene.identifier`、completion 能不能延后回调。这两条是第②段能否成立的全部依据，
-// 只能在真机上问；问的代价必须为零，否则就是拿开机赌。
+// 0.2.90 因此把口径改成「先能读，再动一刀」：options 走 `FBSOpenApplicationOptions`
+// 的 dictionary/payload 两级取字典（0.2.89 拿它当 NSDictionary 判，永远为假），
+// createScene 六个参数各报一次形状，两个块各报一次真实签名；**唯一一处写行为**是把
+// 卡目标的 scene 初始帧直接写成画布（430×(屏高−215)），写在调用原函数之前。
+//
+// 为什么写在前：presenter 绑的是 scene，「激活那一拍」scene 还不存在。能同时拿到
+// scene、又还没上屏的那一格只有 createScene —— 在它**之前**写是「提交之前」，
+// 在它之后写就是又一笔撤销，正是要停的那件事。
 
 static volatile int64_t AevonActHitAt = 0;
 static long AevonActHits = 0;
@@ -3686,6 +3693,18 @@ static long AevonActSceneHits = 0;
 static long AevonActPayloadLines = 0;
 static long AevonActNearLines = 0;
 static int AevonActBooted = 0;
+
+// 0.2.90 — 「出生即卡尺寸」那一道的闸。
+//
+// 这一版唯一一处写行为：把 scene 的初始帧从整屏改成画布。它只对**刚决定要落卡的
+// 那个 bundle** 生效 —— 三路并轨处每次放行都会经 `AevonAuthSwapSchedule` 报一次
+// 目标，这里只留最近一次、10 s 内有效。排队是错的：连击时最近那一次才是要落的，
+// 把上一笔的帧写给下一次，等于把白名单里的 App 也压成卡片。
+static char AevonActCardBundle[160] = {0};
+static volatile int64_t AevonActCardAt = 0;
+static long AevonActFrameWrote = 0;
+static long AevonActFrameSkip = 0;
+static long AevonActSigTried = 0;
 
 /// 毫秒时钟。与 `AevonLinkPendingAt` 同源，两行读数才能相减。
 static int64_t AevonActMs(void) {
@@ -3759,6 +3778,87 @@ static NSString *AevonActIdentifierOf(id definition, NSString **clsOut) {
     return [got isKindOfClass:[NSString class]] ? got : nil;
 }
 
+/// 落盘一行动作标记。**只给可能踩空指针的调用用**（这一版只有 `_Block_signature`）：
+/// 万一死在里头，日志最后一行是它，下次开机能直接读出来，不必再从「日志停在哪」猜。
+static void AevonActStep(const char *what) {
+    NSString *path = @"/var/mobile/Library/Logs/Aevon/act.step";
+    NSString *body = what != NULL ? [NSString stringWithUTF8String:what] : @"";
+    [body writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+}
+
+/// 只读：问运行时这个块的真实参数编码。
+///
+/// `_Block_signature` 是 libSystem 的私有符号，用 `dlsym` 取 —— **不静态链接**：
+/// 静态链接一个系统不导出的符号，代价是 dyld 在加载这个库时直接拒载，那就是开机
+/// 卡死，不是一个读数丢失。取不到就返回 nil，这一格空着，别的读数照常。
+///
+/// 拿到签名串之后还要过一道字符闸：签名只由类型字符、数字和引号组成。出现别的
+/// 字符说明这一格不是签名串（或者结构布局变了），宁可空着也不把野指针当 C 串读。
+static NSString *AevonActBlockSig(id block) {
+    if (block == nil) return nil;
+    typedef struct { void *reserved; const char *signature; } AevonActSig;
+    static AevonActSig *(*lookup)(void *) = NULL;
+    if (AevonActSigTried == 0) {
+        AevonActSigTried = 1;
+        lookup = (AevonActSig *(*)(void *))dlsym(RTLD_DEFAULT, "_Block_signature");
+    }
+    if (lookup == NULL) return nil;
+    AevonActStep("blocksig");
+    AevonActSig *sig = lookup((void *)block);
+    AevonActStep("");
+    if (sig == NULL || sig->signature == NULL) return nil;
+    const char *s = sig->signature;
+    size_t n = strnlen(s, 96);
+    if (n < 3) return nil;
+    static const char kSigChars[] = "@vVqQibBcCsSfdlL*#:^?{}()[]<>\"";
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (c >= '0' && c <= '9') continue;
+        if (strchr(kSigChars, c) == NULL) return nil;
+    }
+    return [[[NSString alloc] initWithBytes:s length:n encoding:NSUTF8StringEncoding] autorelease];
+}
+
+/// 出生即卡尺寸。三条同时成立才写，任一不成立就一个字节都不碰：
+///   ① `settings` 真的有 `frame` / `setFrame:`（问，不调）；
+///   ② 这次建 scene 的 identity 里含「刚决定落卡的那个 bundle」，且那次决定在 10 s 内；
+///   ③ 当下的帧认得出是整块屏幕（宽 ≥ 400、高 ≥ 900）。横屏、外接屏、分屏全在这里挡掉。
+/// 写的是「宽 × (高 − 215)」—— 215 就是画布让给键盘的那一段，717 = 932 − 215 的同一个数。
+/// 写完立刻读回，读回值原样进日志：**这条读数是这一版唯一的行为证据**。
+static int AevonActFrameBirth(id settings, NSString *ident,
+                              CGRect *beforeOut, CGRect *afterOut,
+                              const char **whyOut) {
+    if (whyOut != NULL) *whyOut = "no-target";
+    if (settings == nil || ident == nil || AevonActCardBundle[0] == 0) return 0;
+    // 总闸优先：`notify.off` 在的时候一个字节都不许改行为，这一刀也不例外。
+    if (AevonActivateSwitchOff()) {
+        if (whyOut != NULL) *whyOut = "switch-off";
+        return 2;
+    }
+    int64_t now = AevonActMs();
+    if (AevonActCardAt <= 0 || now - AevonActCardAt > 10000) return 0;
+    NSString *want = [NSString stringWithUTF8String:AevonActCardBundle];
+    if (want.length == 0 || ![ident containsString:want]) return 0;
+    // 到这里就确认「这次建 scene 是为卡目标造的」，再挡就是真挡住了 —— 后面每一条
+    // 都要在日志里说清是哪一条挡的，否则下一轮又只能猜。
+    if (whyOut != NULL) *whyOut = "no-frame";
+    SEL fSel = NSSelectorFromString(@"frame");
+    SEL sSel = NSSelectorFromString(@"setFrame:");
+    if (![settings respondsToSelector:fSel]) return 2;
+    if (whyOut != NULL) *whyOut = "no-setframe";
+    if (![settings respondsToSelector:sSel]) return 2;
+    if (whyOut != NULL) *whyOut = "screen-shape";
+    CGRect cur = ((CGRect (*)(id, SEL))objc_msgSend)(settings, fSel);
+    if (cur.size.width < 400.0 || cur.size.height < 900.0) return 2;
+    CGRect next = CGRectMake(0.0, 0.0, cur.size.width, cur.size.height - 215.0);
+    ((void (*)(id, SEL, CGRect))objc_msgSend)(settings, sSel, next);
+    CGRect back = ((CGRect (*)(id, SEL))objc_msgSend)(settings, fSel);
+    if (beforeOut != NULL) *beforeOut = cur;
+    if (afterOut != NULL) *afterOut = back;
+    if (whyOut != NULL) *whyOut = "wrote";
+    return 1;
+}
+
 /// 先按已知真名找，找不到才全类扫。
 ///
 /// 全类扫要遍历近十万个类的自有方法表，开机时跑一次就是几百毫秒的代价；而这两个
@@ -3809,13 +3909,48 @@ static void AevonActInstall(NSMutableString *out) {
             const char *optCls = "nil";
             long keys = -1;
             int payload = -1;
+            int sceneless = -1;
+            int susp = -1;
+            int via = 0;
+            NSString *keyList = nil;
             if (options != nil) {
                 optCls = object_getClassName(options);
-                // 只读：不是字典就只报类名，`count` 一个字节都不碰。
-                if ([options isKindOfClass:[NSDictionary class]]) {
-                    NSDictionary *dict = (NSDictionary *)options;
+                // 0.2.89 在这里栽过一次：`options` 在激活层是 `FBSOpenApplicationOptions`，
+                // **不是字典**，`isKindOfClass:[NSDictionary class]` 永远为假，于是
+                // `keys=-1 payload=-1` 被念成「没有 payload」—— 但那一行真正的意思是
+                // 「没读到」。这里先问 `dictionary`、再问 `payload`，两个都是返回对象的
+                // 选择子（perform 安全）；拿到之后仍不是字典就一个字节都不碰。
+                id box = options;
+                if (![box isKindOfClass:[NSDictionary class]]) {
+                    SEL dsel = NSSelectorFromString(@"dictionary");
+                    if ([box respondsToSelector:dsel]) {
+                        id inner = [box performSelector:dsel];
+                        if (inner != nil) { box = inner; via = 1; }
+                    }
+                    if (![box isKindOfClass:[NSDictionary class]]) {
+                        SEL psel = NSSelectorFromString(@"payload");
+                        if ([box respondsToSelector:psel]) {
+                            id inner = [box performSelector:psel];
+                            if (inner != nil) { box = inner; via = 2; }
+                        }
+                    }
+                }
+                if ([box isKindOfClass:[NSDictionary class]]) {
+                    NSDictionary *dict = (NSDictionary *)box;
                     keys = (long)[dict count];
                     payload = [dict objectForKey:@"__PayloadURL"] != nil ? 1 : 0;
+                    // 这两格是「让系统别摆屏」的候选开关，母版在激活那一格能动的就是
+                    // 这份字典。记 0/1/2（2 = 键在但不是 NSNumber），三种要分开读。
+                    id sl = [dict objectForKey:@"__LaunchSceneless"];
+                    if (sl != nil) sceneless = [sl isKindOfClass:[NSNumber class]]
+                        ? [(NSNumber *)sl intValue] : 2;
+                    id su = [dict objectForKey:@"__ActivateSuspended"];
+                    if (su != nil) susp = [su isKindOfClass:[NSNumber class]]
+                        ? [(NSNumber *)su intValue] : 2;
+                    keyList = [[dict allKeys] componentsJoinedByString:@"|"];
+                    if (keyList.length > 220) {
+                        keyList = [[keyList substringToIndex:220] stringByAppendingString:@"…"];
+                    }
                 }
             }
             // 两条口径：前 6 条无条件记（普通启动这一版正好当对照组），带 payload
@@ -3831,11 +3966,20 @@ static void AevonActInstall(NSMutableString *out) {
                 if ([bundleID isKindOfClass:[NSString class]]) {
                     bundle = [(NSString *)bundleID UTF8String];
                 }
+                // `res=` 那一格在 0.2.89 读过一次，读到 `__NSStackBlock__` —— 那不是在读
+                // 返回值，是在读一个 `v`（void）方法返回后栈上剩下的东西。这一版删掉，
+                // 不换成别的猜想：想知道 `withResult:` 的块形状，看下面 act: scene 那行的
+                // `sig=`，那一格才是可以用签名串验证的。
+                // 只在前三条上问块签名：`_Block_signature` 每问一次要落两行步骤标记，
+                // 十二条全问就是二十四次写盘，收益为零 —— 同一个选择子的块形状不会变。
+                NSString *rsig = seen < 3 ? AevonActBlockSig(result) : nil;
                 AevonLogRaw([[NSString stringWithFormat:
-                              @"act: activate n=%ld t=%lld trusted=%d b=%s opt=%s keys=%ld payload=%d res=%s",
+                              @"act: activate n=%ld t=%lld trusted=%d b=%s opt=%s via=%d "
+                              @"keys=%ld payload=%d sl=%d susp=%d k=%s rsig=%s",
                               seen + 1, (long long)(now % 1000000), trusted ? 1 : 0,
-                              bundle, optCls, keys, payload,
-                              result != nil ? object_getClassName(result) : "nil"]
+                              bundle, optCls, via, keys, payload, sceneless, susp,
+                              keyList != nil ? [keyList UTF8String] : "-",
+                              rsig != nil ? [rsig UTF8String] : "-"]
                              UTF8String]);
             }
             // 原样尾调。参数一个不改、返回值不改，这一版的全部行为就是「没有行为」。
@@ -3876,18 +4020,58 @@ static void AevonActInstall(NSMutableString *out) {
             BOOL near = gap >= 0 && gap < 5000;
             BOOL take = near ? (__sync_fetch_and_add(&AevonActNearLines, 1) < 10)
                              : (seen < 2);
+            NSString *identCls = nil;
+            NSString *ident = AevonActIdentifierOf(definition, &identCls);
             if (take) {
-                NSString *identCls = nil;
-                NSString *ident = AevonActIdentifierOf(definition, &identCls);
+                // 0.2.90 — 四个形状读数。它们同时是「第②段能不能动手」的依据，和
+                // 这一版那一刀几何的资格证：`set=` 必须真的应 `frame` / `setFrame:`。
+                int canFrame = (settings != nil &&
+                                [settings respondsToSelector:NSSelectorFromString(@"setFrame:")]) ? 1 : 0;
+                int canResize = (settings != nil &&
+                                 [settings respondsToSelector:
+                                  NSSelectorFromString(@"setResizesHostedContext:")]) ? 1 : 0;
+                int canActions = (context != nil &&
+                                  [context respondsToSelector:
+                                   NSSelectorFromString(@"setActions:")]) ? 1 : 0;
+                NSString *csig = AevonActBlockSig(completion);
                 AevonLogRaw([[NSString stringWithFormat:
-                              @"act: scene n=%ld t=%lld gap=%ld def=%s idc=%s id=%s rem=%s prov=%s blk=%d",
+                              @"act: scene n=%ld t=%lld gap=%ld def=%s idc=%s id=%s rem=%s prov=%s "
+                              @"blk=%d set=%s frame=%d resize=%d tctx=%s act=%d icl=%s csig=%s",
                               seen + 1, (long long)(now % 1000000), gap,
                               definition != nil ? object_getClassName(definition) : "nil",
                               identCls != nil ? [identCls UTF8String] : "-",
                               ident != nil ? [ident UTF8String] : "-",
                               remnant != nil ? object_getClassName(remnant) : "nil",
                               provider != nil ? object_getClassName(provider) : "nil",
-                              completion != nil ? 1 : 0] UTF8String]);
+                              completion != nil ? 1 : 0,
+                              settings != nil ? object_getClassName(settings) : "nil",
+                              canFrame, canResize,
+                              context != nil ? object_getClassName(context) : "nil",
+                              canActions,
+                              clientSettings != nil ? object_getClassName(clientSettings) : "nil",
+                              csig != nil ? [csig UTF8String] : "-"] UTF8String]);
+            }
+            // 出生即卡尺寸 —— 这一版唯一一处写行为，并且只写一次（在第一笔提交之前）。
+            // 写在**调用原函数之前**是全部要点：之后写就成了又一笔撤销，正是要停的事。
+            CGRect birthBefore = CGRectZero;
+            CGRect birthAfter = CGRectZero;
+            const char *birthWhy = "no-target";
+            int born = AevonActFrameBirth(settings, ident, &birthBefore, &birthAfter, &birthWhy);
+            if (born == 1) {
+                if (__sync_fetch_and_add(&AevonActFrameWrote, 1) < 6) {
+                    AevonLogRaw([[NSString stringWithFormat:
+                                  @"act: frame birth wrote=1 b=%s before=%.0fx%.0f after=%.0fx%.0f",
+                                  AevonActCardBundle,
+                                  birthBefore.size.width, birthBefore.size.height,
+                                  birthAfter.size.width, birthAfter.size.height] UTF8String]);
+                }
+            } else if (born == 2) {
+                if (__sync_fetch_and_add(&AevonActFrameSkip, 1) < 6) {
+                    AevonLogRaw([[NSString stringWithFormat:
+                                  @"act: frame birth blocked why=%s b=%s set=%s",
+                                  birthWhy, AevonActCardBundle,
+                                  settings != nil ? object_getClassName(settings) : "nil"] UTF8String]);
+                }
             }
             id (*original)(id, SEL, id, id, id, id, id, id, id) =
                 (id (*)(id, SEL, id, id, id, id, id, id, id))mine->original;
@@ -3895,7 +4079,10 @@ static void AevonActInstall(NSMutableString *out) {
             return original(manager, mine->sel, definition, settings, clientSettings,
                             context, remnant, provider, completion);
         };
-        // 中间参数只透传、不解引用，所以头尾 + 总长足够；总长不对就不挂。
+        // 0.2.90 起这一格不再「只透传」：`settings` 会被解引用（问 `frame`/
+        // `setFrame:`、按形状写一次帧）。所以形状闸的判定范围要跟着扩大 —— 头部
+        // `@72`、尾部 `@?64`、总长 29 仍然成立，而中间七格全是对象这一点已经由
+        // Aevon(222) 的整串编码 `@72@0:8@16@24@32@40@48@56@?64` 证实。
         AevonAttachShape(out, slot, sceneOwners[i], sceneName,
                          "@72@0:8", "@?64", 29, NULL, block);
     }
@@ -4105,8 +4292,11 @@ NSString *AevonHookSummary(void) {
     // 0.2.89 — 第①段的两个计数单独一行。`boot=0` 表示这一版根本没跑安装函数
     // （日志被截断或 SpringBoard 没起来），`activate=0` 表示这两个方法在这台
     // 系统上不走 —— 三种情况要分开读，不能都念成「没生效」。
-    [out appendFormat:@"act: hits activate=%ld scene=%ld boot=%d\n",
-     AevonActHits, AevonActSceneHits, AevonActBooted];
+    // 0.2.90 加 `fw=`/`fs=`/`card=`：写了多少次、被挡了多少次、挡的时候闸上记的是谁。
+    [out appendFormat:@"act: hits activate=%ld scene=%ld boot=%d fw=%ld fs=%ld card=%s\n",
+     AevonActHits, AevonActSceneHits, AevonActBooted,
+     AevonActFrameWrote, AevonActFrameSkip,
+     AevonActCardBundle[0] != 0 ? AevonActCardBundle : "-"];
     long total = AevonTraceCount;
     long limit = (long)(sizeof(AevonTrace) / sizeof(AevonTrace[0]));
     if (total > limit) total = limit;
@@ -7093,6 +7283,16 @@ static void AevonAuthSeenNote(const char *target) {
 }
 
 static void AevonAuthSwapSchedule(const char *target) {
+    // 0.2.90 — 这里是「决定要落卡」的唯一汇合点：三路并轨之后，分享、授权/支付、
+    // 普通深链的放行全从这一行过。把目标记成「最近一次」，好让建 scene 那一格知道
+    // 这一刀该不该挥。只留一个、不排队 —— 连击时最近那一次才是要落的。
+    if (target != NULL) {
+        size_t n = strlen(target);
+        if (n > 0 && n < sizeof(AevonActCardBundle)) {
+            memcpy(AevonActCardBundle, target, n + 1);
+            AevonActCardAt = AevonActMs();
+        }
+    }
     AevonAuthSeenNote(target);
     AevonAuthSwapScheduleMode(target, 0);
 }
