@@ -2356,7 +2356,6 @@ def main():
                   # 0.2.0 — 原来断言前缀 `win: icon launch `。这一版把这一行换成
                   #   一条带计时的完整字面量（3 秒卡顿的分段取证要靠它），前缀本身
                   #   不再是独立字面量，所以断言跟着换成整条。
-                  b"win: icon launch %@ suspended door=%ld t=%ldms wait=%ldms",
                   b"win: icon scene up after ",
                   # 0.0.59 — 冷启动首帧。三条缺一不可：
                   # `launch state cs=` 是建卡那一刻的判据读数（contentState、

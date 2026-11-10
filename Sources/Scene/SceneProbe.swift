@@ -1773,37 +1773,6 @@ zStackParticipantDidChange:
         mark("OWN-retired")
         markHosted(bundleID)
         pollForScene(bundleID, ticks: 0, start: Date(), homed: homed, fallback: fallback)
-        return
-        // 走到这里只剩两种情形：`AevonOwnGate` 说这套私有面在这台机器上不齐
-        // （连试都不试），或者已经有一次在跑（不重入）。这一张卡的 scene 将来是
-        // 系统的那个，关卡时**不能**销毁 —— 见 `AevonOwnHeld`。
-        AevonOwnClear()
-
-        // 老路一格没动。走到这里只有两种情形：`AevonOwnGate` 说这套私有面在
-        // 这台机器上不齐（于是我们连试都不试），或者已经有一次在跑（不重入）。
-        let launchAt = CFAbsoluteTimeGetCurrent()
-        let door = AevonLaunchSuspended(sharedApplication(), bundleID)
-        Log.write(String(format: "win: icon launch %@ suspended door=%ld t=%ldms wait=%ldms",
-                         bundleID, door,
-                         Int((CFAbsoluteTimeGetCurrent() - launchAt) * 1000),
-                         Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
-        guard door == 1 else {
-            AevonHookDisarm(bundleID)
-            fallback("suspended door=" + String(door))
-            return
-        }
-
-        mark("ICON-launch")
-        // Armed before the wait, not after it: a scene that appears and is
-        // allowed to sleep in the same half second is a scene found already cold.
-        // (0.0.50 arms one line earlier, before the launch, for the same reason
-        // one step further out.)
-        // 0.0.44 — tell the app itself. The card can forward touches all day;
-        // an app that believes it is in the background drops them before they
-        // reach a window. This is the one signal that does not depend on the
-        // scene settings crossing into the app's own copy.
-        markHosted(bundleID)
-        pollForScene(bundleID, ticks: 0, start: Date(), homed: homed, fallback: fallback)
     }
 
     // MARK: - 0.0.44 hosted mark
