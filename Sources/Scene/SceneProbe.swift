@@ -1112,7 +1112,7 @@ zStackParticipantDidChange:
     /// （`class_copyMethodList`，不含继承），命中的记下类名与编码。母本六步
     /// 里的每一步名字都会因此落到一个具体的类上。
     ///
-    /// 只读、分批、每批前落盘：`objc_copyClassList` 一次拿全量类表，每 800 个
+    /// 只读、分批、每批前落盘：`allClasses()` 一次拿全量类表，每 800 个
     /// 类让出一次 runloop（开机那一拍不许出现一整段长阻塞），批前把进度写进
     /// `presenter.step`，崩了下次启动由 `reportPresenterDeath` 点名到批。
     private static let carrierSelectors: [String] = [
@@ -1158,7 +1158,11 @@ zStackParticipantDidChange:
     private static var carrierHits: [String: [String]] = [:]
     private static var carrierScanFrom = 0
     private static var carrierTotal = 0
-    private static var carrierList: UnsafeMutablePointer<AnyClass>? = nil
+    private static var carrierBusy = false
+    /// 类表用文件里已有的 `allClasses()`：它已经把
+    /// 「`objc_copyClassList` 交回一个 autoreleasing 指针、Swift 不给转、因而
+    /// 释放不掉」这个坑填过了（第一次 CI 就是栽在这里，三处报错全在指针上）。
+    private static var carrierClasses: [AnyClass] = []
 
     /// 选择子的名字指针做键：同一套运行时里选择子是唯一的，指针就是身份。
     /// 用 `Set<Selector>` 也行，但字符串名字在 Swift 覆盖层里的可哈希性属于
@@ -1167,9 +1171,8 @@ zStackParticipantDidChange:
         var set = Set<UInt>()
         for name in carrierSelectors {
             let sel = sel_registerName(name)
-            if let text = sel_getName(sel) {
-                set.insert(UInt(bitPattern: UnsafeRawPointer(text)))
-            }
+            let text = sel_getName(sel)
+            set.insert(UInt(bitPattern: UnsafeRawPointer(text)))
         }
         return set
     }()
@@ -1177,7 +1180,7 @@ zStackParticipantDidChange:
     static func runCarrierCensus(why: String) {
         // 设置页按钮可能在上一轮扫描还没走完时被再点一下。类表是静态的，两轮
         // 并排跑只会把同一条账写两遍、把批游标搅乱 —— 直接不接。
-        if carrierList != nil {
+        if carrierBusy {
             censusNote("carrier: pass busy, ignored why=" + why)
             return
         }
@@ -1193,22 +1196,18 @@ zStackParticipantDidChange:
         try? FileManager.default.removeItem(atPath: Aevon.presenterStepPath)
         carrierHits = [:]
         carrierScanFrom = 0
-        var total: UInt32 = 0
-        guard let list = objc_copyClassList(&total) else {
+        carrierClasses = allClasses()
+        carrierTotal = carrierClasses.count
+        guard carrierTotal > 0 else {
             censusNote("carrier: pass aborted, no class list")
             return
         }
-        carrierList = list
-        carrierTotal = Int(total)
+        carrierBusy = true
         censusNote("carrier: pass begin why=" + why + " classes=" + String(carrierTotal))
         DispatchQueue.main.async { carrierStep() }
     }
 
     private static func carrierStep() {
-        guard let list = carrierList else { return }
-        // 800 个类一批：`class_copyMethodList` 会把这个类的元数据摊开（Swift 类
-        // 还要先实例化 metadata），一个批次的耗时不是常数。批小一点，开机那一拍
-        // 就不会出现一整段几百毫秒的主线程阻塞。
         let end = min(carrierScanFrom + 800, carrierTotal)
         let from = carrierScanFrom
         try? ("carrier+" + String(from)).write(toFile: Aevon.presenterStepPath,
@@ -1217,16 +1216,16 @@ zStackParticipantDidChange:
             censusNote("carrier: scan at=" + String(from) + "/" + String(carrierTotal))
         }
         for index in from..<end {
-            let cls: AnyClass = list[index]
+            let cls = carrierClasses[index]
             var count: UInt32 = 0
             guard let methods = class_copyMethodList(cls, &count) else { continue }
             var slot = 0
             while slot < Int(count) {
                 let sel = method_getName(methods[slot])
                 defer { slot += 1 }
-                guard let text = sel_getName(sel),
-                      carrierSelectorKeys.contains(UInt(bitPattern: UnsafeRawPointer(text)))
-                else { continue }
+                let cname = sel_getName(sel)
+                let key = UInt(bitPattern: UnsafeRawPointer(cname))
+                guard carrierSelectorKeys.contains(key) else { continue }
                 let name = NSStringFromSelector(sel)
                 let enc = method_getTypeEncoding(methods[slot]).map { String(cString: $0) } ?? "?"
                 carrierHits[name, default: []].append(NSStringFromClass(cls) + " " + enc)
@@ -1238,8 +1237,8 @@ zStackParticipantDidChange:
             DispatchQueue.main.async { carrierStep() }
             return
         }
-        free(list)
-        carrierList = nil
+        carrierClasses = []
+        carrierBusy = false
         try? FileManager.default.removeItem(atPath: Aevon.presenterStepPath)
         emitCarrierHits()
     }
