@@ -1862,6 +1862,8 @@ static int AevonSeenCount = 0;
 /// 0.3.1 — 三条取证线的前向声明。`AevonSeenNote` 在文件很靠前的位置，
 /// 而线 C 的实现跟着 `AevonActFrameBirth` 一起放（那里才有 scene 相关的上下文）。
 static void AevonProbePresenterBirth(id scene);
+static void AevonProbeActOptions(id options);
+static void AevonProbeTransitionContext(id context, id settings);
 
 static void AevonSeenNote(id scene) {
     if (scene == nil) return;
@@ -4014,6 +4016,11 @@ static NSString *AevonActBlockSig(id block) {
 ///
 /// 只读：只问 `uiPresentationManager` 拿不拿得到、`respondsToSelector` 有没有，
 /// 一次 `createPresenterWithIdentifier:` 都不调（那是写行为，要下一版才动）。
+/// 0.3.1 — 三条只读取证线的日志预算（一次装机能答完）。
+static long AevonProbeAOpt = 0;
+static long AevonProbeTctx = 0;
+static long AevonProbePres = 0;
+
 static void AevonProbePresenterBirth(id scene) {
     if (scene == nil) return;
     if (__sync_fetch_and_add(&AevonProbePres, 1) >= 4) return;
@@ -4035,7 +4042,8 @@ static void AevonProbePresenterBirth(id scene) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"probe: pres scene=%s id=%s pm=%d create=%d pmcls=%s",
                       object_getClassName(scene),
-                      [ident isKindOfClass:[NSString class]] ? [(NSString *)ident UTF8String] : "-",
+                      ([ident isKindOfClass:[NSString class]]
+                           ? [(NSString *)ident UTF8String] : "-"),
                       hasPM, hasCreate,
                       pm != nil ? object_getClassName(pm) : "nil"] UTF8String]);
     } @catch (NSException *e) {
