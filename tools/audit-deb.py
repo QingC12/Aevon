@@ -1227,6 +1227,9 @@ def main():
                   # 0.3.6 — 线 B 扩展：`setActions:` 的真实编码、有没有 getter、
                   # 现状是什么。三条读数把方向收敛到这一条之后，先问清楚再动手。
                   b"probe: tctx cls=%s actions=%d enc=%s getter=%d now=%s n=%ld frame=%d %s | set cls=%s %s",
+                  # 0.3.7 — payload 的每个键值。线 A 已确认 options 只有
+                  # `setDictionary:` 一个写入口，要改就必须先看清里面有什么。
+                  b"probe: payload n=%ld via=%d |%s",
                   b"presenter: birth fail b=%s why=nil id=%s",
                   b"presenter: birth skip b=%s why=nopm",
                   b"presenter: birth threw b=%s why=%s",

@@ -4030,6 +4030,7 @@ static NSString *AevonActBlockSig(id block) {
 /// 0.3.1 — 三条只读取证线的日志预算（一次装机能答完）。
 static long AevonProbeAOpt = 0;
 static long AevonProbeTctx = 0;
+static long AevonProbePayloadDump = 0;
 
 /// 0.3.1 — 一个对象的**可写方法名 + 编码**，最多 `limit` 条，写进一行。
 ///
@@ -4555,6 +4556,40 @@ static void AevonActInstall(NSMutableString *out) {
                     keyList = [[dict allKeys] componentsJoinedByString:@"|"];
                     if (keyList.length > 220) {
                         keyList = [[keyList substringToIndex:220] stringByAppendingString:@"…"];
+                    }
+                    // 0.3.7 — **把 payload 每个键的值照出来。**
+                    //
+                    // 0.3.6 已经确认 `FBSOpenApplicationOptions` 只有 `_payload`
+                    // 一个 ivar、只有 `setDictionary:` 一个写入口。要动它就必须
+                    // 先看清里面有什么 —— 盲改一个键等于赌。
+                    //
+                    // 只读：`objectForKey:` + `class_getName`，不改字典。
+                    // 值与值的类型都记（`#` 前缀是类型），因为「键在但值是 NSNull」
+                    // 与「键不在」在改写入时是两件不同的事。
+                    if (__sync_fetch_and_add(&AevonProbePayloadDump, 1) < 4) {
+                        NSMutableString *pairs = [NSMutableString string];
+                        for (id k in dict) {
+                            if (![k isKindOfClass:[NSString class]]) continue;
+                            id v = [dict objectForKey:k];
+                            NSString *vs = nil;
+                            if ([v isKindOfClass:[NSString class]]) {
+                                vs = (NSString *)v;
+                                if (vs.length > 60) {
+                                    vs = [[vs substringToIndex:60] stringByAppendingString:@"…"];
+                                }
+                            } else if ([v isKindOfClass:[NSNumber class]]) {
+                                vs = [(NSNumber *)v stringValue];
+                            } else if (v == nil) {
+                                vs = @"(nil)";
+                            } else {
+                                vs = [NSString stringWithFormat:@"#%s", object_getClassName(v)];
+                            }
+                            [pairs appendFormat:@" %@=%@;", (NSString *)k, vs];
+                        }
+                        AevonLogRaw([[NSString stringWithFormat:
+                                      @"probe: payload n=%ld via=%d |%s",
+                                      (long)[dict count], via, [pairs UTF8String]]
+                                     UTF8String]);
                     }
                 }
             }
