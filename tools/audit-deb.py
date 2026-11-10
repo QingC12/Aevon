@@ -1213,6 +1213,14 @@ def main():
                   b"win: own scene up after ",
                   b"win: own gave up door=%ld b=%@ after %ldms",
                   b"win: own destroyed %@",
+                  # 0.3.2 — presenter 只建造原型（A/B 两条读数把范围收敛到这一条）。
+                  # 0.3.3 — identifier 与生产链错开：0.3.2 用 `com.aevon.float`
+                  # 真机撞了 7 次 `already in use`，只有卡片拆掉之后才成功 1 次。
+                  b"presenter: birth ok=1 b=%s why=%s cls=%s view=%s",
+                  b"presenter: birth fail b=%s why=busy(%s) id=%s",
+                  b"presenter: birth fail b=%s why=nil id=%s",
+                  b"presenter: birth skip b=%s why=nopm",
+                  b"presenter: birth threw b=%s why=%s",
                   # 0.2.14 —— 两处修根因：
                   #   own live attach   已经有活 scene ⇒ 直接贴，一个启动请求都不发
                   #                     （0.2.13 这里还会落下去走挂起启动，等于自己

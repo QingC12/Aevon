@@ -4188,13 +4188,38 @@ static id AevonPresenterBuild(id scene, const char *why) {
                           @"presenter: birth skip b=%s why=nocreate", want] UTF8String]);
             return nil;
         }
-        // identifier 用固定的那一支：与 `FloatHost` 生产环境用的同名，
-        // 这样「原型建的」与「卡片建的」在日志里可以对上号。
-        id presenter = ((id (*)(id, SEL, id, NSInteger))objc_msgSend)(
-            pm, makeSel, @"com.aevon.float", (NSInteger)0);
+        // ⛔ 0.3.3 — **identifier 必须与生产链错开。**
+        //
+        // 0.3.2 用的是 `com.aevon.float`（想让它和卡片那张对上号），真机结果：
+        //   presenter: birth threw … why=Cannot create a presenter with this
+        //   identifier as it's already in use.      ← 7 次
+        //   presenter: birth ok=1 …                   ← 只有 1 次
+        // 那唯一一次成功是在 `win: scene frame restored`（卡片已拆、FloatHost
+        // 的 presenter 已释放）之后 —— 名字空出来了才建得成。
+        //
+        // 这条异常本身就是答案：同一个 `UIScenePresentationManager` 上，
+        // identifier 唯一。所以探针要用一个**只属于自查**的名字，且带一个
+        // 自增序号 —— 同一 scene 会被反复看见（线 C 每次 `AevonSeenNote` 都来），
+        // 固定名字第二次就会撞自己。
+        static long AevonProbePresSeq = 0;
+        long seq = __sync_fetch_and_add(&AevonProbePresSeq, 1);
+        NSString *probeIdent = [NSString stringWithFormat:@"com.aevon.probe.%ld", seq];
+        id presenter = nil;
+        @try {
+            presenter = ((id (*)(id, SEL, id, NSInteger))objc_msgSend)(
+                pm, makeSel, probeIdent, (NSInteger)0);
+        } @catch (NSException *inner) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"presenter: birth fail b=%s why=busy(%s) id=%s",
+                          want,
+                          inner.reason != nil ? [inner.reason UTF8String] : "-",
+                          [probeIdent UTF8String]] UTF8String]);
+            return nil;
+        }
         if (presenter == nil) {
             AevonLogRaw([[NSString stringWithFormat:
-                          @"presenter: birth fail b=%s why=nil", want] UTF8String]);
+                          @"presenter: birth fail b=%s why=nil id=%s",
+                          want, [probeIdent UTF8String]] UTF8String]);
             return nil;
         }
         // `presentationView` 是只读属性：拿它只为了确认这个 presenter 真的可用
