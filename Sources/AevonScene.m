@@ -4039,13 +4039,16 @@ static void AevonProbePresenterBirth(id scene) {
         if ([scene respondsToSelector:idSel]) {
             ident = ((id (*)(id, SEL))objc_msgSend)(scene, idSel);
         }
+        const char *identText = "-";
+        if ([ident isKindOfClass:[NSString class]]) {
+            const char *raw = [(NSString *)ident UTF8String];
+            if (raw != NULL) identText = raw;
+        }
+        const char *pmText = pm != nil ? object_getClassName(pm) : "nil";
         AevonLogRaw([[NSString stringWithFormat:
                       @"probe: pres scene=%s id=%s pm=%d create=%d pmcls=%s",
-                      object_getClassName(scene),
-                      ([ident isKindOfClass:[NSString class]]
-                           ? [(NSString *)ident UTF8String] : "-"),
-                      hasPM, hasCreate,
-                      pm != nil ? object_getClassName(pm) : "nil"] UTF8String]);
+                      object_getClassName(scene), identText,
+                      hasPM, hasCreate, pmText] UTF8String]);
     } @catch (NSException *e) {
         AevonLogRaw(@"probe: pres threw");
     }
