@@ -10326,10 +10326,30 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                 // 用户要的「全程保持发起方全屏、不回桌面」就是被这一句破坏的。
                 // `AevonOpenCardDirect` 跳过 home-first，卡片自建 scene；发起方
                 // 的 scene 我们一个字节都不碰，它继续占着整屏。
-                AevonLogRaw([[NSString stringWithFormat:
-                              @"notify: oauth card b=%s fwd=%d", bundle, forwarded]
-                             UTF8String]);
-                AevonOpenCardDirect(bundle);
+                //
+                // 0.2.77 — **卡在路上就别再建一次。**
+                //
+                // Aevon(211) 11:58:28 同一条授权来了两拍（`pay=payload` 与
+                // `pay=url`），两拍都走到这里，于是同一个 scene 上建了两次
+                // presenter：
+                //
+                //   win: presenter threw Cannot create a presenter with this
+                //        identifier as it's already in use. on com.aevon.float
+                //   win: no presenter
+                //
+                // 第二张卡既没窗也不收尾，而那一下是在 SpringBoard 主线程上抛的
+                // 异常。「已经在路上」这件事 `AevonCardIsComingFor` 答得出来，
+                // 它本来就是为这一格加的（0.1.91）。
+                if (AevonCardIsComingFor(bundle) == 1) {
+                    AevonLogRaw([[NSString stringWithFormat:
+                                  @"notify: oauth card skip b=%s why=coming", bundle]
+                                 UTF8String]);
+                } else {
+                    AevonLogRaw([[NSString stringWithFormat:
+                                  @"notify: oauth card b=%s fwd=%d", bundle, forwarded]
+                                 UTF8String]);
+                    AevonOpenCardDirect(bundle);
+                }
             } else {
                 AevonOpenFromNotification(bundle);
             }

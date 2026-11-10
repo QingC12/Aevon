@@ -830,6 +830,10 @@ def main():
                   b"landing: url pending b=- n=%ld",
                   b"landing: url ls miss step=%s",
                   b"notify: link late b=%s age=%dms",
+                  # 0.2.77 — 同一条授权来两拍（payload / url）时，第二拍不再
+                  # 建第二个 presenter（Aevon(211) 11:58:28 的
+                  # `presenter threw … already in use`）。
+                  b"notify: oauth card skip b=%s why=coming",
                   # 0.2.1 — 判据收紧以后的新结局：带 payload、但来源是 SpringBoard 的
                   # 那种打开，只在紧跟我们自己那次分流时才被吞（`why=syschain` 会出现在
                   # 上面那行 chain 日志里 —— 短串会被编成立即数，所以断言只认这条长的）。
