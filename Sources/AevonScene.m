@@ -4021,6 +4021,113 @@ static long AevonProbeAOpt = 0;
 static long AevonProbeTctx = 0;
 static long AevonProbePres = 0;
 
+/// 0.3.1 — 一个对象的**可写方法名 + 编码**，最多 `limit` 条，写进一行。
+///
+/// 为什么不用 `respondsToSelector` 逐个试：那只能回答「有没有这一条」，回答不了
+/// 「还有没有别的」。0.2.84 在 `carrier:` 那一轮已经吃过这个亏 —— 猜的四个名字
+/// 全是零，看起来像「这个类什么都没有」，实际是名字猜错了。
+///
+/// 只读：`class_copyMethodList` + `method_getTypeEncoding`，一次 `objc_msgSend`
+/// 都不发。
+static NSString *AevonProbeMethodList(id object, int limit) {
+    if (object == nil) return @"-";
+    Class cls = object_getClass(object);
+    if (cls == Nil) return @"-";
+    unsigned int count = 0;
+    Method *list = class_copyMethodList(cls, &count);
+    if (list == NULL) return @"-";
+    NSMutableString *out = [NSMutableString stringWithFormat:@"n=%u", count];
+    int shown = 0;
+    for (unsigned int i = 0; i < count && shown < limit; i++) {
+        const char *name = sel_getName(method_getName(list[i]));
+        const char *enc = method_getTypeEncoding(list[i]);
+        // 只留「可以写」的那一族：`set` 开头。读方法对本次判断没有用，
+        // 而全量方法表会把一行撑到几千字节，日志预算直接烧穿。
+        if (name == NULL || strncmp(name, "set", 3) != 0) continue;
+        [out appendFormat:@" |%s %s", name, enc != NULL ? enc : "?"];
+        shown += 1;
+    }
+    free(list);
+    if (shown == 0) [out appendString:@" |(no setter)"];
+    return out;
+}
+
+/// 0.3.1 — 一个对象的 ivar 名（只记名字，一个值都不读）。
+static NSString *AevonProbeIvars(id object, int limit) {
+    if (object == nil) return @"-";
+    Class cls = object_getClass(object);
+    if (cls == Nil) return @"-";
+    unsigned int count = 0;
+    Ivar *list = class_copyIvarList(cls, &count);
+    if (list == NULL) return @"-";
+    NSMutableString *out = [NSMutableString stringWithFormat:@"n=%u", count];
+    int shown = 0;
+    for (unsigned int i = 0; i < count && shown < limit; i++) {
+        const char *name = ivar_getName(list[i]);
+        if (name == NULL) continue;
+        [out appendFormat:@" %s", name];
+        shown += 1;
+    }
+    free(list);
+    return out;
+}
+
+/// 0.3.1 — 线 A：`_activateBundleID:` 的 `options` 里有没有「落点」位。
+///
+/// 0.2.90 已经量到 `options` 是 `FBSOpenApplicationOptions`（不是字典），
+/// `dictionary` → `payload` 两级能取到 `__PayloadURL` / `__PayloadOptions`。
+/// 但**除了 payload 还有什么**，从来没问过 —— 而 Stheno 正是只在这一格动手
+/// （`_activateBundleID` 命中 2 次，`_openURLCore` / `_handleOpenApplicationRequest`
+/// 都是 0）。所以这一格是「它到底改了什么」的唯一入口。
+///
+/// 只读：方法表 + ivar 表，一次写操作都没有。
+static void AevonProbeActOptions(id options) {
+    if (options == nil) return;
+    if (__sync_fetch_and_add(&AevonProbeAOpt, 1) >= 3) return;
+    AevonActStep("probe:actopt");
+    @try {
+        NSString *list = AevonProbeMethodList(options, 24);
+        NSString *ivars = AevonProbeIvars(options, 16);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: actopt cls=%s ivars=%s %s",
+                      object_getClassName(options),
+                      [ivars UTF8String], [list UTF8String]] UTF8String]);
+    } @catch (NSException *e) {
+        AevonLogRaw("probe: actopt threw");
+    }
+}
+
+/// 0.3.1 — 线 B：`_createSceneWithDefinition:` 的 `transitionContext` 能不能装路由。
+///
+/// 背景：0.2.86 的全类扫描证明 `FBSSceneParameters`（21 方法 / 3 ivar）装不下
+/// transitionContext，URL 的正确容器是 **transitionContext 本身**
+/// （`FBSSceneTransitionContext` 39 方法 / 0 ivar，有 `setActions: @"NSSet"`）。
+/// 但那条结论是从**母本符号**读出来的；本机这一格传进来的到底是可变还是不可变、
+/// 有没有 `setActions:`，一次都没量过。
+///
+/// 只读：问类名、方法表；不动 context 一个字节。
+static void AevonProbeTransitionContext(id context, id settings) {
+    if (context == nil && settings == nil) return;
+    if (__sync_fetch_and_add(&AevonProbeTctx, 1) >= 4) return;
+    AevonActStep("probe:tctx");
+    @try {
+        NSString *ctxList = context != nil ? AevonProbeMethodList(context, 24) : @"-";
+        NSString *setList = settings != nil ? AevonProbeMethodList(settings, 12) : @"-";
+        int canActions = (context != nil &&
+                          [context respondsToSelector:NSSelectorFromString(@"setActions:")]) ? 1 : 0;
+        int canFrame = (context != nil &&
+                        [context respondsToSelector:NSSelectorFromString(@"setFrame:")]) ? 1 : 0;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: tctx cls=%s actions=%d frame=%d %s | set cls=%s %s",
+                      context != nil ? object_getClassName(context) : "nil",
+                      canActions, canFrame, [ctxList UTF8String],
+                      settings != nil ? object_getClassName(settings) : "nil",
+                      [setList UTF8String]] UTF8String]);
+    } @catch (NSException *e) {
+        AevonLogRaw("probe: tctx threw");
+    }
+}
+
 static void AevonProbePresenterBirth(id scene) {
     if (scene == nil) return;
     if (__sync_fetch_and_add(&AevonProbePres, 1) >= 4) return;
