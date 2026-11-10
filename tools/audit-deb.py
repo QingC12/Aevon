@@ -703,6 +703,23 @@ def main():
                   b"gate: stand down why=",
                   b"gate: released why=",
                   b"probe: gate snapshot why=",
+                  # 0.2.76 — URL 四路（跳转 / 分享 / 授权 / 支付）去名单化。
+                  # 判据从「两个 scheme」换成「问 LaunchServices 这条 URL 归谁」，
+                  # 于是三行都必须能在产物里搜到：
+                  #
+                  #   `bundle from url` = 请求里没有 bundle，是**这条分支**把目标
+                  #       App 算出来的。Aevon(210) 的
+                  #       `notify: hit op=open b=- … act=#UILinkConnectionAction`
+                  #       以前紧跟 `why=nobundle` 整条放行，现在它必须有这一行；
+                  #   `landing: url hand … why=auth` = 微/QQ/支付宝那一族刻意让给
+                  #       分流（吞掉 + 自建），落点不接 —— 出现它说明「两条链不再
+                  #       各建一张卡」这条规则被走到了；
+                  #   `landing: url keep … why=front` = 目标 App 已经在前台且不在卡
+                  #       里，落点不动它。这条是防「把用户正在用的整屏 App 缩进卡」
+                  #       的那道否决，不能没有。
+                  b"notify: bundle from url b=%@",
+                  b"landing: url hand b=%s why=auth",
+                  b"landing: url keep b=%s why=front card=0",
                   # 通知名 `com.aevon.gate` **不在这里断言**：它只有 14 字节，会被
                   # Swift 编成立即数，二进制里一个字节都没有。它通不通，由运行时
                   # 那两行直接读出来：`settings: G0 emergency stop -> on` 之后若

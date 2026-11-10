@@ -3017,13 +3017,149 @@ static AevonURLCoreProc AevonURLCoreOriginal = NULL;
 static long AevonURLCalls = 0;
 static long AevonURLCuts = 0;
 
-/// 这条 URL 指向哪个 App。只认微信 / QQ 两族的 scheme —— 别的 App 的 URL
-/// 一条都不动，`display` 原样传下去。
-static const char *AevonLandingBundleForURL(const char *url) {
-    if (url == NULL) return NULL;
-    if (strncasecmp(url, "weixin://", 9) == 0) return "com.tencent.xin";
-    if (strncasecmp(url, "mqq", 3) == 0) return "com.tencent.mqq";
-    return NULL;
+/// 0.2.76 — 落点钩子刚刚接管的那个 App。
+///
+/// 两条链会撞：`_openURLCore:` 在外层（我们这个钩子），它调原实现之后才进
+/// `_handleOpenApplicationRequest:`（`AevonOpenDecide` 那个钩子）。于是一次
+/// openURL 会同时被「落点」和「分流」看见 —— 落点排一张卡、分流再排一张，
+/// 屏幕上就是一大一小两个。
+///
+/// 规则：**落点接了，分流就让路。** 反过来不成立 —— 授权那一族刻意不由落点接
+/// （见下面 `authFamily`），因为它们要的是「吞掉 + 自建」，那件事只有分流会做。
+static char AevonLandingClaim[128] = {0};
+static double AevonLandingClaimAt = 0;
+
+/// 微 /  QQ / 支付宝 / 云闪付 —— 授权登录与支付这一族。
+///
+/// 它们**不**走落点：0.2.74 的「吞掉这次激活、卡片自建、URL 本地投递」能省掉
+/// 整屏那一帧，而那条链在 `AevonOpenDecide` 里。落点再插一手只会把系统激活
+/// 放回来，正好抵消掉它。
+static int AevonBundleIsAuthFamily(const char *b) {
+    if (b == NULL) return 0;
+    return strncmp(b, "com.tencent.xin", 15) == 0 ||
+           strncmp(b, "com.tencent.mqq", 15) == 0 ||
+           strncmp(b, "com.eg.android.AlipayGphone", 27) == 0 ||
+           strncmp(b, "com.unionpay", 12) == 0;
+}
+
+// MARK: - 0.2.76 这条 URL 要去哪个 App（去名单化）
+//
+//  0.2.63~0.2.75 的判据是一张两个元素的名单：`weixin://` → 微信，`mqq*` → QQ。
+//  于是「URL 打开一个 App」这件事只有这两个 App 有资格进卡片，其余全部交给
+//  系统整屏 —— 点一条 https、点一个 `alipays://`、从相册分享到别的 App，看到的
+//  都是全屏。
+//
+//  Stheno / TrollOpen 没有名单。报告里那句「它们接管的是**应用启动**这件事本身」
+//  落到 URL 上就是这个问题：**这次打开要去哪个 App**。系统回答这个问题的唯一
+//  权威是 LaunchServices：
+//      `-[LSApplicationWorkspace applicationForOpeningURL:]` → `LSApplicationProxy`
+//      → `.bundleIdentifier`
+//  它认得 scheme，也认得通用链接归属哪个 App —— 后者正是字符串猜不出来的那一种
+//  （微信登录走的 `https://help.wechat.com/app/…` 就属于这里）。
+//
+//  这一版把名单从「判断」降级成「快路」：命中就省一次查询，没命中就问系统；
+//  问不到（没有任何 App 认领这条 URL）才真的不接管，`display` 原样下发。
+//
+//  三条永远不问：`tel` / `facetime` 是通话界面，整屏是它的正确形态；`file` 是
+//  文件 URL，没有「打开它的 App」这回事。这三个连快路都不进，直接返回 nil。
+
+/// `LSApplicationProxy.bundleIdentifier`，守卫后取。
+static NSString *AevonProxyBundleID(id proxy) {
+    if (proxy == nil) return nil;
+    SEL sel = NSSelectorFromString(@"bundleIdentifier");
+    if (![proxy respondsToSelector:sel]) return nil;
+    id value = ((id (*)(id, SEL))objc_msgSend)(proxy, sel);
+    return [value isKindOfClass:[NSString class]] ? (NSString *)value : nil;
+}
+
+/// 这条 URL 指向哪个 App。nil = 问不出来。
+static NSString *AevonTargetForURLString(NSString *text) {
+    if (![text isKindOfClass:[NSString class]] || text.length < 4) return nil;
+    const char *raw = text.UTF8String;
+    if (raw == NULL) return nil;
+
+    // 快路。这两族不交给 LaunchServices 是有原因的：装了多开 / 企业版时同一个
+    // scheme 可能被别的 bundle 抢注，而这两族的落点行为从 0.2.63 起被十几版
+    // 真机日志验证过，不该因为一次查询结果变化就换掉。
+    if (strncasecmp(raw, "weixin://", 9) == 0) return @"com.tencent.xin";
+    if (strncasecmp(raw, "mqq", 3) == 0) return @"com.tencent.mqq";
+    // 系统自己的入口，一律不进卡：`tel` / `facetime` 是通话界面（整屏是它的
+    // 正确形态），`file` 没有「打开它的 App」，`prefs` / `itms-services` 是设置
+    // 与安装流程 —— 它们出现在屏幕上时用户要的是那件事本身，不是一个窗口。
+    if (strncasecmp(raw, "tel:", 4) == 0) return nil;
+    if (strncasecmp(raw, "facetime", 8) == 0) return nil;
+    if (strncasecmp(raw, "file:", 5) == 0) return nil;
+    if (strncasecmp(raw, "prefs:", 6) == 0) return nil;
+    if (strncasecmp(raw, "app-prefs:", 10) == 0) return nil;
+    if (strncasecmp(raw, "x-apple", 7) == 0) return nil;
+    if (strncasecmp(raw, "itms-services:", 14) == 0) return nil;
+    if (strncasecmp(raw, "itms-apps:", 10) == 0) return nil;
+
+    NSURL *url = [NSURL URLWithString:text];
+    if (url == nil || url.scheme.length == 0) return nil;
+
+    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+    if (workspaceClass == Nil) return nil;
+    SEL sharedSel = NSSelectorFromString(@"defaultWorkspace");
+    if (![(id)workspaceClass respondsToSelector:sharedSel]) return nil;
+    id workspace = ((id (*)(id, SEL))objc_msgSend)((id)workspaceClass, sharedSel);
+    if (workspace == nil) return nil;
+
+    // 主路：单个答案。这条在 SpringBoard 里是进程内缓存，不打 IPC。
+    SEL oneSel = NSSelectorFromString(@"applicationForOpeningURL:");
+    if ([workspace respondsToSelector:oneSel]) {
+        NSString *bid = AevonProxyBundleID(
+            ((id (*)(id, SEL, id))objc_msgSend)(workspace, oneSel, url));
+        if (bid.length > 2) return bid;
+    }
+    // 退路：`applicationsForOpeningURL:` 取第一个。新版系统上主路返回 nil 的
+    // 那几种（多候选、通用链接刚装）走这里。
+    SEL manySel = NSSelectorFromString(@"applicationsForOpeningURL:");
+    if ([workspace respondsToSelector:manySel]) {
+        id list = ((id (*)(id, SEL, id))objc_msgSend)(workspace, manySel, url);
+        if ([list isKindOfClass:[NSArray class]] && [(NSArray *)list count] > 0) {
+            NSString *bid = AevonProxyBundleID([(NSArray *)list objectAtIndex:0]);
+            if (bid.length > 2) return bid;
+        }
+    }
+    return nil;
+}
+
+/// 从一次打开请求的 action 对象里把 URL 掏出来。
+///
+/// Aevon(210) 11:42:00 的那一拍是
+///   `notify: hit op=open b=- src=- act=#UILinkConnectionAction … url=-`
+/// 目标 App 与 URL 都是空，于是 `why=nobundle` 整条放行，用户看到全屏。
+/// `UILinkConnectionAction` 是「应用外的一条链接」最纯的形状：URL 装在 action
+/// 自己身上，不在 `options` 的任何 `__PayloadURL` 里 —— 所以 `AevonOpenURLOf`
+/// 扫遍所有已知键也读不到。
+///
+/// 读法按对象形状逐级退：`url` / `URL` / `linkURL` 选择子 → `info` 字典同名键。
+/// 每一步都先 `respondsToSelector:`（裸 KVC 碰缺键会杀进程，工程硬禁令）。
+static NSString *AevonActionURL(id action) {
+    if (action == nil) return nil;
+    NSArray *names = [NSArray arrayWithObjects:@"url", @"URL", @"linkURL", nil];
+    for (NSString *name in names) {
+        SEL sel = NSSelectorFromString(name);
+        if (![action respondsToSelector:sel]) continue;
+        id value = ((id (*)(id, SEL))objc_msgSend)(action, sel);
+        if ([value isKindOfClass:[NSURL class]]) return [(NSURL *)value absoluteString];
+        if ([value isKindOfClass:[NSString class]]) return (NSString *)value;
+    }
+    SEL infoSel = NSSelectorFromString(@"info");
+    if ([action respondsToSelector:infoSel]) {
+        id info = ((id (*)(id, SEL))objc_msgSend)(action, infoSel);
+        if ([info isKindOfClass:[NSDictionary class]]) {
+            NSArray *keys = [NSArray arrayWithObjects:
+                             @"URL", @"url", @"UILinkConnectionActionURL", nil];
+            for (NSString *key in keys) {
+                id value = [(NSDictionary *)info objectForKey:key];
+                if ([value isKindOfClass:[NSURL class]]) return [(NSURL *)value absoluteString];
+                if ([value isKindOfClass:[NSString class]]) return (NSString *)value;
+            }
+        }
+    }
+    return nil;
 }
 
 /// 日志里那一段 URL 的「门牌」：scheme://host，最多 40 个字符。
@@ -3087,12 +3223,16 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
     if ([url isKindOfClass:[NSURL class]]) text = [(NSURL *)url absoluteString];
     else if ([url isKindOfClass:[NSString class]]) text = (NSString *)url;
     const char *raw = text.length > 0 ? text.UTF8String : NULL;
-    const char *target = AevonLandingBundleForURL(raw);
+    // 0.2.76 — 目标 App 由 LaunchServices 回答（见 `AevonTargetForURLString`）。
+    // 名单只剩「快路」，不再是否决：https 通用链接、`alipays://`、任何第三方
+    // 深链，只要系统能说出归谁，这里就说得出来。
+    NSString *targetID = AevonTargetForURLString(text);
+    const char *target = targetID.length > 2 ? targetID.UTF8String : NULL;
 
     int running = 0;
     int land = 0;
     if (target != NULL) {
-        NSString *bundleID = [NSString stringWithUTF8String:target];
+        NSString *bundleID = targetID;
         running = AevonAppPid(bundleID) > 0 ? 1 : 0;
         // 主队列才接手：`AevonOpenCardDirect` 与窗口状态都是主线程的东西，在系统
         // 的工作区队列上读它们会撞上正在拆窗的那一拍。不在主队列就只记录。
@@ -3100,14 +3240,40 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
         // 不看进程在不在（0.2.67）：分享那一刻微 / QQ 经常还没起进程，而它正是
         // 我们要接的那一次。`running` 只进日志，不再进判断。
         //
-        // 不为「卡已经在」留例外：卡在的时候更应该接 —— 那时系统把它摆成全屏
-        // 只会把卡片盖掉，而我们要的是那条 URL 落进已经开着的那张卡。
-        if (display != nil) {
-            if ([NSThread isMainThread]) {
+        // 0.2.76 — **`display` 不再是前提。**
+        //
+        // 0.2.63 起这里要求 `display != nil` 才落卡，理由是「系统自己也会传 nil，
+        // 那是它已经在按我们要的方式排」。加了通用解析之后这条理由不成立了：
+        // 目标 App 是**我们**算出来的，系统那一拍是不是已经把 display 传成 nil
+        // 与我们要不要建卡无关 —— 传 nil 只说明它这一拍不摆屏，卡还得我们自己给。
+        // 真机读数里 `d=nil` 与 `d=FBSDisplayConfiguration` 两种都出现过，两种都
+        // 应该落卡。
+        //
+        // 唯一新增的否决：目标 App **已经在前台、且不在我们任何一张卡里**。
+        // 那是「它本来就在最前面」，把它缩进卡只会打断用户手上这件事；而它若在
+        // 卡里，`AevonOpenCardDirect` 会复用那张卡，正是我们要的。
+        if ([NSThread isMainThread]) {
+            int cardUp = AevonCardIsUpFor(target) == 1 ||
+                         AevonCardIsComingFor(target) == 1;
+            int front = AevonAppFrontmost(bundleID);
+            if (AevonBundleIsAuthFamily(target)) {
+                // 授权 / 支付交给分流那一支（吞掉 + 自建 + 本地投递）。
+                // 这里放回来只会让系统激活重演一次整屏。
+                if (seen < 6) {
+                    AevonLogRaw([[NSString stringWithFormat:
+                                  @"landing: url hand b=%s why=auth", target] UTF8String]);
+                }
+            } else if (front == 1 && !cardUp) {
+                if (seen < 6) {
+                    AevonLogRaw([[NSString stringWithFormat:
+                                  @"landing: url keep b=%s why=front card=0",
+                                  target] UTF8String]);
+                }
+            } else {
                 land = 1;
-            } else if (seen < 2) {
-                AevonLogRaw([[NSString stringWithFormat:@"landing: url offmain b=%s", target] UTF8String]);
             }
+        } else if (seen < 2) {
+            AevonLogRaw([[NSString stringWithFormat:@"landing: url offmain b=%s", target] UTF8String]);
         }
     }
     if (land) __sync_fetch_and_add(&AevonURLCuts, 1);
@@ -3142,6 +3308,15 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
         // 收卡链紧接着把同一份 scene 收进卡里 —— 用户看到的是闪一下，而不是
         // 一个没有前台 App、手势失效的主屏。**主屏永远有前台 App** 这条优先。
         id forwarded = display;
+        // 0.2.76 — 先立牌，再交出去。
+        //
+        // 原实现会一路走到 `_handleOpenApplicationRequest:`，也就是
+        // `AevonOpenDecide` 那个钩子。牌必须在**调用之前**立好，否则分流那一拍
+        // 还会以为没人接，照着 `share` / `isWebLink` 再排一张卡。
+        if (land) {
+            snprintf(AevonLandingClaim, sizeof(AevonLandingClaim), "%s", target);
+            AevonLandingClaimAt = CFAbsoluteTimeGetCurrent();
+        }
         AevonURLCoreOriginal(self, _cmd, url, forwarded, animating,
                              settings, origin, result);
     }
@@ -6678,6 +6853,34 @@ static int AevonOpenDecide(id request, id options, id settings,
     if (AevonDivertExhausted()) { *why = "cap"; return 0; }
 
     id target = AevonOpenBundleOf(request);
+    // 0.2.76 — **`b=-` 不再等于「不管」。**
+    //
+    //  Aevon(210) 11:42:00 的那一拍：
+    //      notify: hit op=open b=- src=- act=#UILinkConnectionAction …
+    //      notify: pass b=- op=open why=nobundle
+    //  请求里确实没有 bundle —— 这是一条「应用外的链接」，目标 App 得由系统按
+    //  URL 现算。以前这一格直接放行，于是链接整屏打开。
+    //
+    //  补两步：先把 URL 掏出来（`__PayloadURL` / 通用链接 → action 自身），
+    //  再问 LaunchServices 这条 URL 归谁。答出来就照常走下面那套分流，与
+    //  「请求里本来就带 bundle」完全同一条路，不新增分支。
+    if (target == nil || ![target isKindOfClass:[NSString class]] ||
+        [(NSString *)target length] < 3) {
+        NSString *viaURL = AevonOpenURLOf(request, options);
+        if (viaURL.length == 0) viaURL = AevonActionURL(AevonOpenFirstAction(request, options));
+        NSString *resolved = AevonTargetForURLString(viaURL);
+        if (resolved != nil) {
+            id action = AevonOpenFirstAction(request, options);
+            char shape[40];
+            AevonURLShape(viaURL, shape, sizeof(shape));
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"notify: bundle from url b=%@ act=#%s shape=%s",
+                          resolved,
+                          action != nil ? object_getClassName(action) : "-",
+                          shape] UTF8String]);
+            target = resolved;
+        }
+    }
     if (target == nil) { *why = "nobundle"; return 0; }
     const char *raw = [(NSString *)target UTF8String];
     if (raw == NULL || strlen(raw) < 3) { *why = "nobundle"; return 0; }
@@ -6685,6 +6888,18 @@ static int AevonOpenDecide(id request, id options, id settings,
 
     // SpringBoard 自己也有开请求（解锁后回到主屏之类）。吞掉它就是吞掉主屏。
     if (strncmp(bundle, "com.apple.springboard", 21) == 0) { *why = "springboard"; return 0; }
+
+    // 0.2.76 — 落点已经接了，分流让路（见 `AevonLandingClaim`）。
+    //
+    // 一次 openURL 依次经过两处：`_openURLCore:`（落点钩子，外层）与
+    // `_handleOpenApplicationRequest:`（这个钩子，内层）。落点已经把卡排上了，
+    // 这里再排一张就是一大一小两个窗口；而这里若按 `share` 吞掉，系统那次激活
+    // 也会跟着消失 —— 落点的收卡链等的正是那次激活。两条都不成立，只能让路。
+    if (AevonLandingClaim[0] != '\0' && strcmp(AevonLandingClaim, bundle) == 0 &&
+        CFAbsoluteTimeGetCurrent() - AevonLandingClaimAt < 2.0) {
+        *why = "landing";
+        return 0;
+    }
 
     // 0.2.55 — 微信 / QQ 的每一次打开先照一张相（见 `AevonSsoProbe`）。
     if (strncmp(bundle, "com.tencent.xin", 15) == 0 ||
