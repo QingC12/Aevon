@@ -4859,6 +4859,60 @@ static int AevonOpenURLWindowScenes(void) {
 static CFAbsoluteTime AevonOpenURLWaitAt = 0;
 static int AevonOpenURLWaitStep = 0;
 
+/// 0.2.74 — 通用链接（http/https）必须按系统那条正门投：`continueUserActivity`。
+///
+/// 0.2.55~0.2.59 的「卡内授权」失败在一个很具体的地方：微信 SDKv2 的登录是
+/// **universal link**（`https://help.wechat.com/app/<appid>/auth/…`），系统对它的
+/// 交付入口是 `scene:continueUserActivity:`；我们只投了 `scene:openURLContexts:`，
+/// 微信收到 https 只会打开主页（用户报的「没有授权选项」）。宿主现在把 URL 拿到
+/// 手了，就照系统那条路再造一份 `NSUserActivityTypeBrowsingWeb` 递进去。
+///
+/// 只对微信 / QQ 生效：Safari 的普通链接、以及各家的自定义 scheme 都继续走
+/// `openURLContexts`，那条路已经在真机上跑了几十个版本。
+static BOOL AevonOpenURLUniversal(UIApplication *app, NSURL *url) {
+    if (app == nil || url == nil) return NO;
+    NSString *scheme = url.scheme.lowercaseString;
+    if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) return NO;
+    NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
+    if (![bundle hasPrefix:@"com.tencent.xin"] &&
+        ![bundle hasPrefix:@"com.tencent.mqq"]) return NO;
+
+    NSUserActivity *activity = [[NSUserActivity alloc]
+        initWithActivityType:@"NSUserActivityTypeBrowsingWeb"];
+    activity.webpageURL = url;
+    BOOL ok = NO;
+    SEL sceneSel = sel_registerName("scene:continueUserActivity:");
+    for (UIScene *scene in app.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        id d = ((id (*)(id, SEL))objc_msgSend)(scene, sel_registerName("delegate"));
+        if (d == nil || ![d respondsToSelector:sceneSel]) continue;
+        @try {
+            BOOL (*call)(id, SEL, UIScene *, NSUserActivity *) =
+                (BOOL (*)(id, SEL, UIScene *, NSUserActivity *))objc_msgSend;
+            ok = call(d, sceneSel, scene, activity);
+        } @catch (__unused NSException *exception) {
+            ok = NO;
+        }
+        if (ok) break;
+    }
+    if (!ok) {
+        id delegate = app.delegate;
+        SEL appSel = sel_registerName("application:continueUserActivity:restorationHandler:");
+        if (delegate != nil && [delegate respondsToSelector:appSel]) {
+            @try {
+                BOOL (*call)(id, SEL, UIApplication *, NSUserActivity *, id) =
+                    (BOOL (*)(id, SEL, UIApplication *, NSUserActivity *, id))objc_msgSend;
+                void (^handler)(NSArray *) = ^(NSArray *restorable) { (void)restorable; };
+                ok = call(delegate, appSel, app, activity, handler);
+            } @catch (__unused NSException *exception) {
+                ok = NO;
+            }
+        }
+    }
+    [activity release];
+    return ok;
+}
+
 static void AevonOpenURLApply(void);
 
 /// 主线程执行：读投递文件 → 调 App 自己的 open URL 入口 → 写回执。
@@ -4939,6 +4993,14 @@ static void AevonOpenURLApply(void) {
     const char *via = "none";
     BOOL ok = NO;
 
+    // 0.2.74 — 通用链接先按系统的正门投（只对微信 / QQ 生效）。成功就不再走
+    // `openURLContexts`：同一条授权 URL 递两次，微信会把登录页开两遍。
+    if (AevonOpenURLUniversal(app, url)) {
+        ok = YES;
+        via = "useractivity";
+        AevonAppLogWrite("app: openurl useractivity\n");
+    }
+
     // ① 先用 scene 的正门。QQ / 微信 / 抖音都是 scene 化的 App，系统对它们
     //    **根本不会**调 `application:openURL:options:`，只调这条 —— 顺序反过来
     //    就等于拿一条系统从不走的路去问它认不认。`UIOpenURLContext` 没有公开
@@ -4972,7 +5034,7 @@ static void AevonOpenURLApply(void) {
         }
     }
     Class ctxCls = NSClassFromString(@"UIOpenURLContext");
-    if (targetDelegate != nil) {
+    if (!ok && targetDelegate != nil) {
         id context = nil;
         if (ctxCls == Nil) {
             via = "noctx";
@@ -5024,7 +5086,7 @@ static void AevonOpenURLApply(void) {
                 [context release];
             }
         }
-    } else {
+    } else if (!ok) {
         via = "noscene";
     }
 

@@ -260,6 +260,43 @@ fullscreen launch rejected: %{public}@
    要彻底消除首帧整屏，需要在 `FBSystemService -openApplication:options:withResult:`
    上先建卡、再放行 —— 那是下一步，不是本次范围。
 
+## 六点七、0.2.74：方案 A —— 吞掉激活，授权全程留在卡里
+
+真机探针（0.2.73）：
+
+```
+landing: activate cls=FBSystemService types=v68@0:8@16@24B32@36@44@52@?60
+landing: entity   cls=SBInCallPresentationManager types=@24@0:8@16
+```
+
+- `FBSystemService -_activateBundleID:requestID:isTrusted:options:source:originalSource:withResult:`
+  存在，形状就是 Stheno 用的那一条；但 Aevon 现有的四个
+  `_handleOpenApplicationRequest` 变体已经能拦住整屏（分享分流已证明），
+  这一版先不另挂钩子。
+- `overrideAppSceneEntityForLaunchingApplication:` 在本机只有
+  `SBInCallPresentationManager` 一个 owner，**启动实体覆盖这条路不可用**，
+  TrollOpenJB 的那条路线在本机走不通。
+
+于是 0.2.74 回到「吞掉 + 自建卡 + 投递」，并把 0.2.55~0.2.59 失败的两个
+机制逐个补掉：
+
+| 旧失败点 | 0.2.74 的处理 |
+|---|---|
+| 微信 universal link 走 `NSUserActivity`，只投 `openURLContexts` 只开主页 | App 侧新增 `AevonOpenURLUniversal`：http(s) URL 对微信 / QQ 先按系统正门调 `scene:continueUserActivity:`，成功才停 |
+| QQ SSO 需要真实激活 | 卡片走 `AevonOwnStart`（`launchIntent=4`）自建 scene；投递后再由回执决定是否退回系统全屏 |
+| 进入时按 Home / 回桌面 | 授权分支改用 `AevonOpenCardDirect`（跳过 home-first），发起方全屏一个字节都不动 |
+| 卡片建不起来就静默失败 | `AevonForwardHold(fallback=1)`：4~7 秒内没有投递结论就 `notify: link fallback` 交回系统，保证登录能完成 |
+| 完成不收卡 | 回跳命中 `authreturn` / `callback` / `incard` 时 `AevonAuthCardCloseSoon` 收微信 / QQ 卡 |
+
+对应的新日志位：
+
+```
+notify: oauth swallow b=<目标> src=<来源> scheme=<scheme> pay=<kind> card=<0|1>
+notify: oauth card b=<目标> fwd=<0|1>
+notify: oauth pass b=<目标> … why=nourl        ← 没有 URL 可投，退回放行
+app: openurl useractivity                      ← App 侧按通用链接投递
+```
+
 ## 七、复现命令
 
 ```bash

@@ -674,10 +674,15 @@ def main():
                   b"notify: auth card close b=%@ why=%s",
                   b"notify: share swap nogate b=%s door=%d",
                   b"win: card closed after auth b=",
-                  # 0.2.60 — 授权一律交回系统（`oauth pass`）。它出现 ⇒ 微信 / QQ
-                  # 的登录由系统原生打开；同一份日志里**不该**再有
-                  # `notify: link b=… kind=oauth` 紧跟 `appurl send`。
-                  b"notify: oauth pass b=%s scheme=%s card=%d",
+                  # 0.2.74 — 方案 A：授权那一支改回「吞掉 + 自建卡 + 投递」。
+                  #   `oauth swallow` = 这一条请求没有交给 SpringBoard，屏上只会
+                  #       多一张卡；它后面必须跟 `notify: oauth card` 与
+                  #       `notify: appurl send` / `appurl ack`；
+                  #   `oauth pass … why=nourl` = 没有 URL 可投，退回 0.2.73 的
+                  #       「放行 + 事后收卡」；这条是兜底，不该在正常登录里出现。
+                  b"notify: oauth swallow b=%s src=%@ scheme=%s pay=%s card=%d",
+                  b"notify: oauth card b=%s fwd=%d",
+                  b"notify: oauth pass b=%s scheme=%s pay=%s card=%d why=nourl",
                   # 0.2.62 — 放行之后 100 ms 内收进卡片（Aevon(203) 第 1 条：授权
                   # 不能停在整屏）。两行一起断言：`card` = 真的收进来了，
                   # `giveup` = 收不进来时把登记彻底撤掉（否则整屏只画上半截）。

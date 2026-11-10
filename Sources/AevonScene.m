@@ -6342,15 +6342,20 @@ static void AevonAuthSwapScheduleMode(const char *target, int build) {
     });
 }
 
+/// 0.2.74 — 记下「刚刚真的发生了一次授权」。
+///
+/// 授权结果回到第三方 App 时，那一方的那张卡用完就该收（见 `AevonOpenDecide`
+/// 的 `authreturn` 分支）；而「微信里点了一个分享链接」也会走同一条形状，只看
+/// 形状分不出来，只能靠这几秒内的授权记录。0.2.74 起两条路都要记 —— 吞掉那条
+/// 不再经过 `AevonAuthSwapSchedule`，所以抽成独立一格。
+static void AevonAuthSeenNote(const char *target) {
+    if (target == NULL || target[0] == '\0') return;
+    snprintf(AevonAuthSeen, sizeof(AevonAuthSeen), "%s", target);
+    AevonAuthSeenAt = CFAbsoluteTimeGetCurrent();
+}
+
 static void AevonAuthSwapSchedule(const char *target) {
-    // 0.2.67 — 记下「刚刚真的发生了一次授权」。授权结果回到第三方 App 时，
-    // 那一方的那张卡用完就该收（见 `AevonOpenDecide` 的 `authreturn` 分支）；
-    // 而「微信里点了一个分享链接」也会走同一条形状，只看形状分不出来，只能
-    // 靠这几秒内的授权记录。
-    if (target != NULL && target[0] != '\0') {
-        snprintf(AevonAuthSeen, sizeof(AevonAuthSeen), "%s", target);
-        AevonAuthSeenAt = CFAbsoluteTimeGetCurrent();
-    }
+    AevonAuthSeenNote(target);
     AevonAuthSwapScheduleMode(target, 0);
 }
 
@@ -6767,9 +6772,42 @@ static int AevonOpenDecide(id request, id options, id settings,
             if (isOAuth && !AevonOpenIsShareSource(request, options)) {
                 char shape[40];
                 AevonURLShape(linkURL, shape, sizeof(shape));
+                // 0.2.74 — **方案 A：吞掉这次激活，授权全程留在悬浮卡里。**
+                //
+                // 0.2.60~0.2.73 走的是「先放行、再收卡」：系统把微信 / QQ 拉成
+                // 整屏，我们 50~100 ms 后再把它塞进卡片。登录确实能成，但用户
+                // 每一次都先看到一整屏，再看到它缩回浮窗 —— 这正是本轮要消除的
+                // 那一下。参考包（FloatingView / Stheno / SplitView）的做法是
+                // 「应用启动即入窗」，Aevon 的等价落点就是这一支：不把请求交给
+                // SpringBoard，改由卡片自建 scene（`AevonOpenCardDirect`），再把
+                // URL 投进 App（`AevonForwardHold` → `AevonAppOpenSend`）。
+                //
+                // 能这么做只有一个前提：**手里得有一条 URL 可以投**。投递链只
+                // 认 URL；`pay=paste` 且没有 URL 的那一种，卡片建起来也拿不到
+                // 授权页，只能退回系统激活。所以先问一句，答不出来就走回 0.2.73。
+                int deliverable = (linkURL.length > 0 &&
+                                   AevonOpenCarriesPayload(request, options)) ? 1 : 0;
+                if (deliverable) {
+                    // 回跳要靠这条记录认人（`authreturn`）。吞掉这一族不再经过
+                    // `AevonAuthSwapSchedule`，必须在这里单独记一笔。
+                    AevonAuthSeenNote(bundle);
+                    AevonLogRaw([[NSString stringWithFormat:
+                                  @"notify: oauth swallow b=%s src=%@ scheme=%s pay=%s card=%d",
+                                  bundle,
+                                  AevonOpenSourceApp(request, options) != nil
+                                      ? (id)AevonOpenSourceApp(request, options) : @"-",
+                                  shape, AevonOpenPayloadKind(request, options),
+                                  (AevonCardIsUpFor(bundle) == 1 ||
+                                   AevonCardIsComingFor(bundle) == 1) ? 1 : 0]
+                                 UTF8String]);
+                    *why = "oauth";
+                    AevonDivertAt = now;
+                    snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
+                    return 1;
+                }
                 AevonLogRaw([[NSString stringWithFormat:
-                              @"notify: oauth pass b=%s scheme=%s card=%d",
-                              bundle, shape,
+                              @"notify: oauth pass b=%s scheme=%s pay=%s card=%d why=nourl",
+                              bundle, shape, AevonOpenPayloadKind(request, options),
                               (AevonCardIsUpFor(bundle) == 1 ||
                                AevonCardIsComingFor(bundle) == 1) ? 1 : 0]
                              UTF8String]);
@@ -9838,7 +9876,22 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                     });
                 }
             }
-            AevonOpenFromNotification(bundle);
+            if (strcmp(why, "oauth") == 0) {
+                // 0.2.74 — 授权 / 支付：**不按 Home、不切前台**，直接建卡。
+                //
+                // `AevonOpenFromNotification` 走的是 `openFromNotification`，它带
+                // home-first：目标在屏上时先按一次 Home 再建卡。授权这条路上
+                // 「在屏上」的是发起授权的 App，那一下 Home 正好把用户送回桌面 ——
+                // 用户要的「全程保持发起方全屏、不回桌面」就是被这一句破坏的。
+                // `AevonOpenCardDirect` 跳过 home-first，卡片自建 scene；发起方
+                // 的 scene 我们一个字节都不碰，它继续占着整屏。
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"notify: oauth card b=%s fwd=%d", bundle, forwarded]
+                             UTF8String]);
+                AevonOpenCardDirect(bundle);
+            } else {
+                AevonOpenFromNotification(bundle);
+            }
             // 0.1.89：这次没转发，SpringBoard 就没有机会去收面板 / 收横幅 —— 那两件
             // 事本来挂在它的收尾里。自己补上。
             // 0.1.90：横幅在这里收，面板不在这里收 —— 面板要等卡片，见
