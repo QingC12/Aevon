@@ -104,6 +104,9 @@ public enum Gate {
             try? manager.removeItem(atPath: Aevon.panicPath)
             try? manager.removeItem(atPath: Aevon.legacyPanicPath)
         }
+        // 0.2.75 — 写完之后必须喊一声。文件与偏好都只是「放在那里」，
+        // SpringBoard 进程不会自己去看；没有这一句，开关就只是界面上的一个勾。
+        notifyPost(Aevon.noteGate)
     }
 
     // MARK: 分流文件闸（0.2.60 起有界面开关）
@@ -154,6 +157,7 @@ public enum Gate {
             state["attempts"] = 0
         }
         writeState(state)
+        notifyPost(Aevon.noteGate)
     }
 
     /// Clears the crash counter on both sides of the channel.
@@ -166,6 +170,65 @@ public enum Gate {
         writeState(state)
         setPrefBool("disabled", false)
         setPrefBool("!gate.disabled", false)
+        // 解闸同样要喊：`refreshRuntime` 只有收到通知才复查，而「复位」正是
+        // 用户把 G0/G1 关掉之后期望立刻生效的那一下。
+        notifyPost(Aevon.noteGate)
+    }
+
+    // MARK: 运行期闸（0.2.75）
+
+    //
+    //  Aevon(207)：`settings: G0 emergency stop -> on` 之后
+    //  `win: touch in=17 eat=3`、`ring: edge swipe open`、`win: keepalive beat`
+    //  一条不少。用户的原话是「闸门都无法制止」。
+    //
+    //  两道机制同时缺失：
+    //
+    //    ① 设置侧只写文件 / 偏好，不发任何通知 —— SpringBoard 不知道；
+    //    ② 即使知道，`evaluate()` 也只在加载时跑过一次，之后没有任何复查点，
+    //       而 `AevonInstallTouchTap` 用 `dispatch_once` 装上的 `sendEvent:`
+    //       替身永远不会被摘掉。
+    //
+    //  修法分两半：写的那半在 `setPanic` / `setDisabled` / `resetAttempts`
+    //  末尾发 `Aevon.noteGate`；读的那半就是下面这个快照。快照刻意做成一个
+    //  Bool —— 触摸路径上不能有 IO，连 `fileExists` 都不该每根手指查一次。
+    //
+
+    /// 闸关着 = 我们已经交还触摸。初值 false：加载时 `evaluate()` 已经 pass，
+    /// 否则 `AevonStart` 在更早的地方就返回了。
+    private static var runtimeOffFlag = false
+    private static var runtimeKnown = false
+
+    /// 触摸路径读这一个。主线程写、主线程读，不做原子包装。
+    public static var runtimeOff: Bool { runtimeOffFlag }
+
+    /// 立刻复查 G0/G1（只看这两道，不碰 G2 的计数与写盘）。
+    ///
+    /// 返回「现在是不是该停手」。调用方在返回 true 时执行停手动作 —— 这么做是
+    /// 为了让 Gate 不依赖 UI 层：`Gate.swift` 同时编进 tweak 与设置包，把
+    /// `RingHost` / `FloatHost` 写进来会让设置包链接到一堆用不上的东西。
+    @discardableResult
+    public static func refreshRuntime(_ why: String) -> Bool {
+        let g0 = panicActive
+        let g1 = disabledActive
+        let off = g0 || g1
+        // 三元不写在插值里：这一行的类型检查在 0.2.57 / 0.0.30 各拖垮过一次构建。
+        let flag = off ? "1" : "0"
+        let f0 = g0 ? "1" : "0"
+        let f1 = g1 ? "1" : "0"
+        if !runtimeKnown {
+            runtimeKnown = true
+            runtimeOffFlag = off
+            Log.write("gate: runtime armed off=" + flag + " why=" + why)
+            return off
+        }
+        if off == runtimeOffFlag { return off }
+        runtimeOffFlag = off
+        // 前缀刻意长过 15 字节：短的那个会被 Swift 编成立即数，二进制里 grep
+        // 不到，audit 就少一条能证明「闸真的接上了」的锚点。
+        Log.write("gate: runtime switch " + flag + " why=" + why
+                  + " g0=" + f0 + " g1=" + f1)
+        return off
     }
 
     // MARK: Control channel (Settings -> SpringBoard)
@@ -260,4 +323,15 @@ public enum Gate {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         return formatter.string(from: Date(timeIntervalSince1970: timestamp))
     }
+}
+
+/// 0.2.75 — `-[UIApplication sendEvent:]` 的替身每收一个触摸先问这一句。
+///
+/// 为什么是 C 函数而不是直接调 `Gate.runtimeOff`：替身写在 `AevonScene.m` 里，
+/// 那是纯 ObjC 文件，要看见 Swift 的静态成员就得有桥接头，而这个工程刻意没有
+/// Umbrella header（`Boot.swift` 顶部那几个 `@_silgen_name` 就是同一个理由的
+/// 产物）。返回值取 `int` 而非 `BOOL`：跨语言边界上不依赖 ABI 的类型细节。
+@_cdecl("AevonGateOff")
+public func AevonGateOff() -> Int32 {
+    return Gate.runtimeOff ? 1 : 0
 }

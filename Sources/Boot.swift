@@ -55,6 +55,40 @@ private let commandCallback: CFNotificationCallback = { _, _, _, _, _ in
     }
 }
 
+/// 0.2.75 — 闸动了。
+///
+/// 这道回调是「紧急停止」真正落地的地方。以前设置侧改完 G0/G1 只写文件与偏好，
+/// 这一侧既不收通知、也没有任何复查点，于是用户看到的是开关打勾、行为照旧。
+private let gateCallback: CFNotificationCallback = { _, _, _, _, _ in
+    DispatchQueue.main.async {
+        gateApply("note")
+    }
+}
+
+/// 复查闸，并在它为「关」时把浮窗与圆盘一起收掉。
+///
+/// 为什么停手要收窗口，而不是只让 `sendEvent:` 放行：放行只是把手指还给系统，
+/// 窗口本身还盖在屏幕上 —— 触摸会正常派发，落点却是我们的空窗口，那一块照样
+/// 是死的。用户要的是「这个插件现在别管事」，那就得把它从屏幕上撤走。
+///
+/// 刻意不 respring：G0 的意义是「不重启也能马上停下来」。真要重启，设置页有
+/// 单独的命令。
+private func gateApply(_ why: String) {
+    let off = Gate.refreshRuntime(why)
+    guard off else {
+        // 解闸：圆盘按用户自己的开关重新评估，卡片不自动复活（谁关的就谁开）。
+        RingHost.gateStopped = false
+        RingHost.shared.refresh()
+        Log.write("gate: released why=\(why)")
+        return
+    }
+    RingHost.gateStopped = true
+    RingHost.shared.refresh()
+    let cards = FloatHost.standDownAll("gate stopped")
+    Log.write("gate: stand down why=\(why) cards=\(cards) ring=0 touch=0")
+    SceneProbe.gateSnapshot(why: why, cards: cards)
+}
+
 private func observeCommands() {
     let center = CFNotificationCenterGetDarwinNotifyCenter()
     CFNotificationCenterAddObserver(center, nil, commandCallback,
@@ -62,6 +96,9 @@ private func observeCommands() {
                                     .deliverImmediately)
     CFNotificationCenterAddObserver(center, nil, prefsCallback,
                                     Aevon.notePrefs as CFString, nil,
+                                    .deliverImmediately)
+    CFNotificationCenterAddObserver(center, nil, gateCallback,
+                                    Aevon.noteGate as CFString, nil,
                                     .deliverImmediately)
 }
 
@@ -134,6 +171,11 @@ public func AevonStart() {
     // way a probe that killed SpringBoard can be read instead of guessed at.
     SceneProbe.reportPreviousDeath()
     observeCommands()
+    // 0.2.75 — 运行期闸的初值。走到这一行 `evaluate()` 已经 pass，所以它必然
+    // 记成 `off=0`；这一句的价值是给日志一个锚点：排查时先看 `runtime armed`
+    // 在不在，再看后面有没有 `runtime off` —— 两行就能分清「闸没接上」和
+    // 「闸接了但没人动它」。
+    Gate.refreshRuntime("boot")
     scheduleStableReset()
 
     // ---------------------------------------------------------------------

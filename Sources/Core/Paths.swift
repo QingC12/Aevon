@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.2.74"
+    public static let version = "0.2.75"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -148,6 +148,19 @@ public enum Aevon {
     /// The payload is not in the notification: whoever receives it reads the
     /// snapshot file, which is written *before* this is posted.
     public static let notePrefs      = "com.aevon.prefs"
+
+    /// 0.2.75 — 「安全闸动了，立刻复查」。
+    ///
+    /// 为什么不能复用上面两条：`noteCommand` 的回调第一句就是
+    /// `takePendingCommand()`，没有挂起命令就直接返回；`notePrefs` 的回调只刷
+    /// 圆盘与探针，从来不问闸。两道闸是「现在就必须停手」的语义，值一次单独的
+    /// 通道，读的是同一个 `Gate.refreshRuntime()`。
+    ///
+    /// Aevon(207) 的现场：`22:07:17 settings: G0 emergency stop -> on` 之后
+    /// `win: touch in=` 照常计数、`ring:` 照常响应 —— 开关确实写进了偏好域，但
+    /// SpringBoard 这一侧从头到尾没收到过任何通知，而闸本身又只在加载时判定
+    /// 一次。两道保险同时失效，用户看到的就是「闸门都无法制止」。
+    public static let noteGate       = "com.aevon.gate"
 }
 
 // MARK: - Darwin notifications

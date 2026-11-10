@@ -683,6 +683,31 @@ def main():
                   b"notify: oauth swallow b=%s src=%@ scheme=%s pay=%s card=%d",
                   b"notify: oauth card b=%s fwd=%d",
                   b"notify: oauth pass b=%s scheme=%s pay=%s card=%d why=nourl",
+                  # 0.2.75 — 安全闸的**运行期**复查。Aevon(207) 里用户把 G0 与 G1
+                  # 都打开，`win: touch in=17 eat=3` 照样在吞 —— 原因是设置侧只写
+                  # 文件/偏好不发通知，而闸本身只在加载时判定一次。这五条就是
+                  # 「那道闸现在真的会在运行中停下来」的全部证词：
+                  #
+                  #   `armed`  = 快照接了初值（没这行 = 这一版又只在加载时判一次）；
+                  #   `switch` = 状态真的变了（G0/G1 任一打开）；
+                  #   `stand down … cards=` = 卡片与圆盘被撤走，`cards` 是撤了几张
+                  #       （0 也可能是对的：闸在没卡时打开；所以它要和 `probe:` 那行
+                  #       一起读，不能单看）；
+                  #   `released` = 解闸，圆盘按用户自己的开关重新评估；
+                  #   `probe: gate snapshot` = 停手那一刻屏上剩什么（探针，只读）。
+                  #
+                  # 前缀全部长过 15 字节：短的那种被 Swift 编成立即数，二进制里
+                  # 一个字节都搜不到，断言会在 CI 里挂而本地看着没问题。
+                  b"gate: runtime armed off=",
+                  b"gate: runtime switch ",
+                  b"gate: stand down why=",
+                  b"gate: released why=",
+                  b"probe: gate snapshot why=",
+                  # 通知名 `com.aevon.gate` **不在这里断言**：它只有 14 字节，会被
+                  # Swift 编成立即数，二进制里一个字节都没有。它通不通，由运行时
+                  # 那两行直接读出来：`settings: G0 emergency stop -> on` 之后若
+                  # 紧跟 `gate: runtime switch 1`，通知就是通的；只出现前者，说明
+                  # 喊了没人应 —— 那正是 Aevon(207) 的形状。
                   # 0.2.62 — 放行之后 100 ms 内收进卡片（Aevon(203) 第 1 条：授权
                   # 不能停在整屏）。两行一起断言：`card` = 真的收进来了，
                   # `giveup` = 收不进来时把登记彻底撤掉（否则整屏只画上半截）。

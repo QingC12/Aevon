@@ -203,8 +203,16 @@ final class RingHost: NSObject {
     /// switch works even when Preferences and SpringBoard disagree about where
     /// the domain lives on roothide.
     var isEnabled: Bool {
+        // 0.2.75 — 闸关优先于用户的开关，且**不回写** `desktop`：G0/G1 是
+        // 「现在停手」，`desktop` 是「我要不要这个功能」。把前者写成后者，
+        // 用户解闸之后会发现圆盘自己没回来 —— 那是另一场投诉。
+        if RingHost.gateStopped { return false }
         return RingConfig.loadRuntime().desktop
     }
+
+    /// 0.2.75 — 闸关时的一次性熔断。`refresh()` 读到 false 就会 `stop()`，
+    /// 窗口随之拆掉，右缘那条 `UIPanGestureRecognizer` 也就不在了。
+    static var gateStopped = false
 
     // MARK: - Lifecycle
 
@@ -1896,5 +1904,8 @@ private final class PassthroughView: UIView {
 /// 返回值：非 0 = 这一拍吞掉（不往应用传）。
 @_cdecl("AevonRingEdgeTouch")
 public func AevonRingEdgeTouch(_ phase: Int32, _ x: Double, _ y: Double) -> Int32 {
-    RingHost.shared.edgeTouch(phase: phase, x: x, y: y) ? 1 : 0
+    // 0.2.75 — 闸关：右缘整条还给系统 / 应用。这是浮窗之外唯一还会主动
+    // 认领触摸的地方，漏掉它，「闸门都无法制止」就还留着一半。
+    if Gate.runtimeOff { return 0 }
+    return RingHost.shared.edgeTouch(phase: phase, x: x, y: y) ? 1 : 0
 }

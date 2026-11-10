@@ -254,6 +254,33 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         host.onClose = nil
     }
 
+    /// 0.2.75 — 闸关：每一格都收，回到「这台手机没有 Aevon」的状态。
+    ///
+    /// 为什么「不吞触摸」还不够：`sendEvent:` 那一挡确实把手指还给系统了，可
+    /// 窗口本身还盖在屏幕上 —— 触摸会正常派发，落点却是我们的空窗口，那一块
+    /// 区域照样是死的。闸的语义是停手，那就得把手收回来，而不是把手摊开。
+    ///
+    /// 走 `requestClose` 而不是 `teardown()`：前者是注释里写明的唯一关窗出口，
+    /// 它会走 0.2 s 出场、然后回调 `onClose` —— 宿主在那里拆场景、清 band、
+    /// 撤销 armed。直接 teardown 会把这些一并跳过，留下一具没有窗口的壳。
+    /// 只有在回调已经被摘走（上一次关窗走到一半）时才退到 teardown 兜底。
+    @discardableResult
+    static func standDownAll(_ reason: String) -> Int {
+        ensureSlots()
+        var n = 0
+        for slot in slots {
+            guard slot.window != nil else { continue }
+            n += 1
+            if slot.onClose == nil {
+                slot.teardown()
+                slot.bundle = ""
+            } else {
+                slot.requestClose(reason)
+            }
+        }
+        return n
+    }
+
     /// 当前主窗里演的 App；没有主窗时是空串。
     ///
     /// 0.0.98 — `cardUp` 原来是「有没有卡」唯一答案，多窗之后它变成「屏幕上还有
@@ -4626,6 +4653,10 @@ final class BandRoot: UIView {
 /// 就是唯一的保险。
 @_cdecl("AevonFloatTouch")
 public func AevonFloatTouch(_ phase: Int32, _ x: Double, _ y: Double, _ stamp: Double) -> Int32 {
+    // 0.2.75 — 闸关就一步都不走。`AevonSendEventReplacement` 已经挡了一道，
+    // 这里是第二道：那条路只覆盖 SpringBoard 的 `UIApplication`，而这条
+    // `@_cdecl` 是公开符号，任何别的注入点都能直接调它。
+    if Gate.runtimeOff { return 0 }
     let point = CGPoint(x: CGFloat(x), y: CGFloat(y))
     let when = TimeInterval(stamp)
     // 0.1.10 — 竖条那一声 `AevonRingGrip.barTouch` **删掉了**。
@@ -4656,6 +4687,7 @@ public func AevonFloatTouch(_ phase: Int32, _ x: Double, _ y: Double, _ stamp: D
 /// 多指不归主窗管这条纪律因此没被破坏。
 @_cdecl("AevonFloatTouchMini")
 public func AevonFloatTouchMini(_ phase: Int32, _ x: Double, _ y: Double, _ stamp: Double) -> Int32 {
+    if Gate.runtimeOff { return 0 }
     let point = CGPoint(x: CGFloat(x), y: CGFloat(y))
     let when = TimeInterval(stamp)
     for host in FloatHost.touchOrder where host.onMini {

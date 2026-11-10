@@ -3817,10 +3817,32 @@ extern int AevonFloatTouchMini(int phase, double x, double y, double stamp);
 /// 就是证据。定义在 `RingHost.swift` 末尾（`@_cdecl`）。
 extern int AevonRingEdgeTouch(int phase, double x, double y);
 
+/// 0.2.75 — 运行期闸快照。定义在 `Sources/Core/Gate.swift` 末尾（`@_cdecl`）。
+///
+/// 这个工程没有 Umbrella header，所以跨语言只有 C 符号这一条路 —— 与上面
+/// `AevonRingEdgeTouch` / 下面 `AevonFloatTouch` 是同一个约定。
+extern int AevonGateOff(void);
+
 static IMP AevonSendEventOriginal = NULL;
 
 static void AevonSendEventReplacement(id self, SEL _cmd, UIEvent *event) {
     if (AevonSendEventOriginal == NULL) return;
+
+    // 0.2.75 — 闸关：**一个字节都不看**，原样交回系统。
+    //
+    // Aevon(207) 里用户把 G0 与 G1 都打开，`win: touch in=17 eat=3` 照样在吞。
+    // 原因是 `AevonInstallTouchTap` 用 `dispatch_once` 装钩子，装完永不复查；
+    // 闸又只在 `Gate.evaluate()` 那一次跑过。于是「紧急停止」只改了设置界面
+    // 上的一行字。
+    //
+    // 现在每个触摸先问一句内存里的 Bool（`Gate.refreshRuntime` 在收到
+    // `com.aevon.gate` 时更新它）。放在最前面而不是放进 `AevonFloatTouch`：
+    // 那条路只覆盖单指与多指两个分支，而 `allTouches` / `locationInView:`
+    // 这些调用本身也不该在停手之后发生。
+    if (AevonGateOff()) {
+        ((void (*)(id, SEL, UIEvent *))AevonSendEventOriginal)(self, _cmd, event);
+        return;
+    }
 
     BOOL eaten = NO;
     NSSet *touches = [event allTouches];

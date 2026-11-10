@@ -774,9 +774,40 @@ zStackParticipantDidChange:
     /// is claimed, so there is never a moment where the scene is hosted by
     /// nobody. SpringBoard's own scene and the keyboard's are not touched:
     /// taking the desktop's presentation is what blacked the screen.
+    /// 0.2.75 — 闸关那一刻的现场快照。
+    ///
+    /// 为什么单独留一份：用户报「闸门无法制止」时，日志能证明的只有「我们还在
+    /// 吞触摸」（`win: touch in=17 eat=3`），证明不了「停手之后屏上还剩什么」。
+    /// 这一行加上随后那份窗口计数，下次就能一眼分清「闸是真的停干净了」和
+    /// 「闸只停了触摸、窗口还盖着」—— 这两件事在用户感受上完全不一样。
+    ///
+    /// 只读：不实例化未知类、不改任何 scene 的 settings、不开窗。
+    static func gateSnapshot(why: String, cards: Int) {
+        guard let application = sharedApplication() else {
+            Log.write("probe: gate snapshot why=" + why + " no app in this process")
+            return
+        }
+        var windowScenes = 0
+        var active = 0
+        var windows = 0
+        for scene in application.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            windowScenes += 1
+            if scene.activationState == .foregroundActive { active += 1 }
+            windows += windowScene.windows.count
+        }
+        // 两次拼接而不是一次长的：这一整个文件的教训是类型检查超时，
+        // 0.2.57 与 0.0.30 各丢过一次构建（见 `runTail` 上面那段注释）。
+        let live = " cards=" + String(cards)
+            + " wscene=" + String(windowScenes)
+            + " active=" + String(active)
+        let rest = " windows=" + String(windows)
+            + " ring=" + (RingHost.shared.isEnabled ? "up" : "down")
+        Log.write("probe: gate snapshot why=" + why + live + rest)
+    }
+
     static func runWindow() {
         reportLastStep()
-
         // 0.0.27 puts the mother ship's mechanism in place before anything else
         // happens, because the last three versions were solving a problem she
         // does not have. Her route is in the reverse notes, with the encodings
