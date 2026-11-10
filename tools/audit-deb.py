@@ -1194,21 +1194,22 @@ def main():
                   #   own destroyed  关卡：destroyScene，而不是 push background
                   b"win: own gate need=%d miss=%ld",
                   b"win: own miss %s%s %s",
-                  # 0.3.1 — 自建 scene 整条下线（Aevon(225) 的安全模式就崩在
-                  # `createSceneWithDefinition:initialParameters:` 那一行）。
+                  # 0.3.1 — 自建 scene 在**行为上**下线（Aevon(225) 的安全模式
+                  # 就崩在 `createSceneWithDefinition:initialParameters:` 那一行）。
                   #
-                  # 这里只留三条**反向**断言。正向那几条（`win: own begin` /
-                  # `win: own compose ok` / `win: own done`）必须消失：
-                  # `AevonOwnStart` 在 Swift 侧已经没有调用者（`openCard` 改成
-                  # 「挂起启动 + 等系统 scene」），链接器的 `-dead_strip` 会把整个
-                  # 函数连同它的日志字面量一起丢掉 —— CI 实测两次都是 missing，
-                  # 那不是缺陷，正是要的效果：那条链在产物里一个字节都不剩。
+                  # 但代码仍留在产物里，这一点已实测：`AevonOwnStart` 是全局符号
+                  # （`NSInteger AevonOwnStart(...)`，非 static），C 侧还有引用，
+                  # 链接器的 `-dead_strip` 不会摘它 —— 0.3.1 产物里
+                  # `win: own begin` / `win: own compose ok` / `win: own done` /
+                  # `createSceneWithDefinition:initialParameters:` 各命中 1~2 次。
                   #
-                  # 写成反向还有一个好处：以后谁把自建 scene 接回来，这三条会
-                  # 立刻红，不会悄悄复活。
-                  b"win: own begin b=%@ from=%s frame=%.0fx%.0f",  # gone
-                  b"win: own compose ok scene=%s id=%s",  # gone
-                  b"win: own done phase=%ld scene=%s",  # gone
+                  # 所以这里**不能**写反向断言（写了就必红）。真正的闸是运行时那一个：
+                  # 文件级 `AevonOwnRetired = 1`，函数第一句就返回 0，一次
+                  # `objc_msgSend` 都不会发生。下一版若把这套代码整段摘除（推荐），
+                  # 再把这些断言连同函数一起删 —— 0.2.92 的教训是「要删就删到底」。
+                  b"win: own begin b=%@ from=%s frame=%.0fx%.0f",
+                  b"win: own compose ok scene=%s id=%s",
+                  b"win: own done phase=%ld scene=%s",
                   b"win: own scene up after ",
                   b"win: own gave up door=%ld b=%@ after %ldms",
                   b"win: own destroyed %@",
