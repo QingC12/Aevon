@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.2.79"
+    public static let version = "0.2.80"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -71,6 +71,11 @@ public enum Aevon {
     /// where the domain lives on roothide, and because "one shot" is exactly
     /// what a file is.
     public static let probePath = "/var/mobile/Library/Logs/Aevon/probe.request"
+
+    /// 承载层普查跑过没有。内容是这个包的版本号：装新版本会重跑一份，
+    /// 单纯重启不会 —— 普查是只读的，但它没有理由在每次开机都占一行日志。
+    /// 0.2.80 起，这一份是「Stheno 的 presenter 路能不能走」在真机上的唯一证词。
+    public static let presenterStampPath = "/var/mobile/Library/Logs/Aevon/presenter.stamp"
 
     /// The class a scan was looking at when the process stopped. Written before
     /// each class is touched, so it is the one witness that survives a SIGKILL —

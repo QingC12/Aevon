@@ -694,6 +694,22 @@ def main():
                   #       `url=` 只说明这一拍照样带不带 URL，不参与判断。
                   b"notify: oauth native b=%s src=%@ scheme=%s pay=%s url=%d card=%d",
                   b"notify: oauth card b=%s fwd=%d",
+                  # 0.2.80 — 承载层只读普查。这是 Stheno 的 presenter 路线在
+                  # 本机能不能走的唯一证词，少了这几行就只剩推断：
+                  #   class     每个类在不在、方法数、ivar 数、父类
+                  #   selector  关注选择子定义在哪个类上、真实类型编码
+                  #   ivar      presenter / hostView 的形状（P1 的接口面）
+                  #   method    两类的全量方法名
+                  #   live      前台 scene 答不答 presenter 那三个选择子
+                  #   end/skip  这一轮跑完 / 本版本已跑过
+                  b"presenter: census begin version=",
+                  b"presenter: class ",
+                  b"presenter: selector ",
+                  b"presenter: ivar ",
+                  b"presenter: method ",
+                  b"presenter: live app=1 scene=",
+                  b"presenter: census end classes=",
+                  b"presenter: census skip version=",
                   # 0.2.75 — 安全闸的**运行期**复查。Aevon(207) 里用户把 G0 与 G1
                   # 都打开，`win: touch in=17 eat=3` 照样在吞 —— 原因是设置侧只写
                   # 文件/偏好不发通知，而闸本身只在加载时判定一次。这五条就是

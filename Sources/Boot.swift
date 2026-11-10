@@ -178,6 +178,14 @@ public func AevonStart() {
     Gate.refreshRuntime("boot")
     scheduleStableReset()
 
+    // 0.2.80 — Stheno 的 presenter 路线开工前先取证。
+    //
+    // 这一步只读：问类在不在、选择子定义在哪个类上、真实类型编码是什么。
+    // 一个未知选择子都不调，一个 presenter 都不建。产出（`presenter: …` 那些行）
+    // 决定 P1 怎么写 —— 权限表里的每个字段都是 SpringBoard 崩不崩的分界线。
+    // 每个版本只跑一次，标记文件带版本号，重启不重放。
+    SceneProbe.presenterCensusOnce()
+
     // ---------------------------------------------------------------------
     // The carrier shape, hosted in SpringBoard.
     //

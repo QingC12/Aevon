@@ -806,6 +806,201 @@ zStackParticipantDidChange:
         Log.write("probe: gate snapshot why=" + why + live + rest)
     }
 
+    // MARK: - 承载层 census（0.2.80）
+
+    /// Stheno 的浮窗不是「在 SpringBoard 里塞一个 UIView」，是独立 Scene 承载：
+    /// `UIScenePresentationManager.createPresenterWithIdentifier:priority:` 建
+    /// presenter，宿主视图是 `_UIContextLayerHostView`，浮窗根是挂在
+    /// `windowScene` 上的窗口。Aevon 的两条旧路都走完了：自建 scene 换不到授权
+    /// SDK 的认可（0.2.74~0.2.78，三处真机证伪），事后收卡留下一帧全屏与黑底
+    /// （0.2.79 现状）。第三条路开工前必须先问清 iOS 17.3.1 的实情。
+    ///
+    /// 这一节**只问，不动手**，纪律来自用户 2026-11-10 的定档（先探针取证、
+    /// 不许让手机冒风险）：
+    ///
+    ///   · 只 `NSClassFromString` / `class_copyMethodList` / `class_copyIvarList`
+    ///     / `method_getTypeEncoding` / `responds(to:)`；
+    ///   · 不创建 presenter、不调任何 `create` / `init` / `activate` / `set…`；
+    ///   · 不碰 scene 的 settings，不 swizzle，不装 hook；
+    ///   · 每个版本只跑一次（标记文件带版本号），重启不重放。
+    ///
+    /// 产出决定 P1 怎么写：类在不在、选择子定义在哪个类上、真实类型编码是什么。
+    /// 少核一个字段的代价是 SpringBoard 崩 —— 所以先落纸，再动手。
+    private static let presenterClassNames = [
+        "UIScenePresentationManager",
+        "UIScenePresenter",
+        "UIScenePresentationContext",
+        "UIScenePresentationContextAttributes",
+        "_UIContextLayerHostView",
+        "_UISceneLayerHostView",
+        "SBDeviceApplicationSceneViewController",
+        "SBDeviceApplicationSceneHandle",
+        "UIWindowScene",
+    ]
+
+    /// 精确到选择子的关注清单。名字按母本二进制里的写法抄，不做归一化：
+    /// 一个字符的差异就是「找不到」和「找错」的区别。
+    private static let presenterSelectorNames: [String] = [
+        "createPresenterWithIdentifier:priority:",
+        "initWithSceneLayer:",
+        "presenterForIdentifier:",
+        "presentationView",
+        "activate",
+        "deactivate",
+        "invalidate",
+        "modifyPresentationContext:",
+        "interceptUpdateWithNewSettings:",
+        "setResizesHostedContext:",
+        "updateSettings:withTransitionContext:completion:",
+        "defaultManager",
+        "sharedManager",
+        "contentView",
+        "_presentationManager",
+        "_scenePresenter",
+    ]
+
+    /// 开机时问一次。版本号进标记文件：装新包会重跑一份，单纯重启不会。
+    @discardableResult
+    static func presenterCensusOnce() -> Bool {
+        let want = Aevon.version
+        if let seen = try? String(contentsOfFile: Aevon.presenterStampPath, encoding: .utf8),
+           seen.trimmingCharacters(in: .whitespacesAndNewlines) == want {
+            Log.write("presenter: census skip version=" + want)
+            return false
+        }
+        DispatchQueue.main.async {
+            runPresenterCensus()
+            try? FileManager.default.createDirectory(atPath: Aevon.stateDir,
+                                                     withIntermediateDirectories: true)
+            try? want.write(toFile: Aevon.presenterStampPath, atomically: true,
+                            encoding: .utf8)
+        }
+        return true
+    }
+
+    /// 一次只读普查。逐类报「在不在 / 方法数 / 父类」，再报关注选择子的
+    /// 定义类与真实编码；`_UIContextLayerHostView` / presenter 两类额外报
+    /// ivar 形状与全量方法名 —— P1 就是照这几张表写调用。
+    static func runPresenterCensus() {
+        let start = Date()
+        Log.write("presenter: census begin version=" + Aevon.version)
+        var exists = 0
+        var missing = 0
+        for name in presenterClassNames {
+            guard let cls = NSClassFromString(name) else {
+                missing += 1
+                Log.write("presenter: class " + name + " exists=0")
+                continue
+            }
+            exists += 1
+            describeCarrier(cls, name: name)
+        }
+        describeLiveCarrier()
+        // 分两段拼，理由同 `gateSnapshot`：这个文件的类型检查超时丢过两次构建。
+        let first = "presenter: census end classes=" + String(presenterClassNames.count)
+            + " exists=" + String(exists)
+        let second = " missing=" + String(missing)
+            + " ms=" + String(Int(Date().timeIntervalSince(start) * 1000))
+        Log.write(first + second)
+    }
+
+    private static func describeCarrier(_ cls: AnyClass, name: String) {
+        let meta: AnyClass? = object_getClass(cls)
+        var instanceCount: UInt32 = 0
+        var classCount: UInt32 = 0
+        let instanceList = class_copyMethodList(cls, &instanceCount)
+        var classList: UnsafeMutablePointer<Method>? = nil
+        if let meta = meta { classList = class_copyMethodList(meta, &classCount) }
+        defer {
+            if let list = instanceList { free(list) }
+            if let list = classList { free(list) }
+        }
+        var ivarCount: UInt32 = 0
+        let ivars = class_copyIvarList(cls, &ivarCount)
+        defer { if let ivars = ivars { free(ivars) } }
+
+        let parent = class_getSuperclass(cls).map { NSStringFromClass($0) } ?? "nil"
+        let head = "presenter: class " + name + " exists=1"
+        let counts = " imethods=" + String(instanceCount) + " cmethods=" + String(classCount)
+        let shape = " ivars=" + String(ivarCount) + " super=" + parent
+        Log.write(head + counts + shape)
+
+        if let list = instanceList {
+            for index in 0..<Int(instanceCount) {
+                let sel = method_getName(list[index])
+                let text = NSStringFromSelector(sel)
+                guard presenterSelectorNames.contains(text) else { continue }
+                let enc = method_getTypeEncoding(list[index]).map { String(cString: $0) } ?? "?"
+                Log.write("presenter: selector " + text + " side=- owner=" + name + " enc=" + enc)
+            }
+        }
+        if let list = classList {
+            for index in 0..<Int(classCount) {
+                let sel = method_getName(list[index])
+                let text = NSStringFromSelector(sel)
+                guard presenterSelectorNames.contains(text) else { continue }
+                let enc = method_getTypeEncoding(list[index]).map { String(cString: $0) } ?? "?"
+                Log.write("presenter: selector " + text + " side=+ owner=" + name + " enc=" + enc)
+            }
+        }
+
+        // 形状：这三类的 ivar 就是 P1 的接口面。别的类不看，省日志。
+        let wantsIvars = (name == "_UIContextLayerHostView"
+                          || name == "UIScenePresentationManager"
+                          || name == "UIScenePresenter")
+        if wantsIvars, let list = ivars {
+            for index in 0..<Int(ivarCount) {
+                let ivar = list[index]
+                let field = ivar_getName(ivar).map { String(cString: $0) } ?? "?"
+                let type = ivar_getTypeEncoding(ivar).map { String(cString: $0) } ?? "?"
+                let offset = ivar_getOffset(ivar)
+                Log.write("presenter: ivar " + name + "." + field
+                          + " type=" + type + " off=" + String(offset))
+            }
+        }
+
+        // 全量方法名：这两类方法数适中，且 P1 的每一步调用都长在这上面。
+        let wantsMethods = (name == "UIScenePresenter"
+                            || name == "UIScenePresentationManager")
+        if wantsMethods, let list = instanceList {
+            for index in 0..<Int(instanceCount) {
+                let sel = method_getName(list[index])
+                let text = NSStringFromSelector(sel)
+                if presenterSelectorNames.contains(text) { continue }
+                let enc = method_getTypeEncoding(list[index]).map { String(cString: $0) } ?? "?"
+                Log.write("presenter: method " + name + "." + text + " enc=" + enc)
+            }
+        }
+    }
+
+    /// 活体只问「答不答」，一个 getter 都不调 —— 调用未知 getter 可能返回结构体，
+    /// 那正是 0.0.16 的 SpringBoard 安全模式。回答本身也是数据：前台 scene 上
+    /// 拿得到 presenter 的话，P1 就不必自己去找 manager。
+    private static func describeLiveCarrier() {
+        guard let application = sharedApplication() else {
+            Log.write("presenter: live app=none scene=none")
+            return
+        }
+        var foreground: UIWindowScene?
+        for scene in application.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            if scene.activationState == .foregroundActive { foreground = windowScene; break }
+        }
+        guard let scene = foreground else {
+            Log.write("presenter: live app=1 scene=none")
+            return
+        }
+        let box = scene as NSObject
+        let pm = box.responds(to: NSSelectorFromString("_presentationManager")) ? 1 : 0
+        let pm2 = box.responds(to: NSSelectorFromString("presentationManager")) ? 1 : 0
+        let sp = box.responds(to: NSSelectorFromString("_scenePresenter")) ? 1 : 0
+        let sv = box.responds(to: NSSelectorFromString("_sceneView")) ? 1 : 0
+        let cls = NSStringFromClass(type(of: scene))
+        let first = "presenter: live app=1 scene=" + cls + " pm=" + String(pm)
+        let second = " pm2=" + String(pm2) + " sp=" + String(sp) + " sv=" + String(sv)
+        Log.write(first + second)
+    }
+
     static func runWindow() {
         reportLastStep()
         // 0.0.27 puts the mother ship's mechanism in place before anything else
