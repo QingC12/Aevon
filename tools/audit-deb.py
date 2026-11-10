@@ -1194,18 +1194,21 @@ def main():
                   #   own destroyed  关卡：destroyScene，而不是 push background
                   b"win: own gate need=%d miss=%ld",
                   b"win: own miss %s%s %s",
-                  b"win: own begin b=%@ from=%s frame=%.0fx%.0f",
-                  b"win: own compose ok scene=%s id=%s",
-                  b"win: own done phase=%ld scene=%s",
                   # 0.3.1 — 自建 scene 整条下线（Aevon(225) 的安全模式就崩在
                   # `createSceneWithDefinition:initialParameters:` 那一行）。
                   #
-                  # 只钉 OC 那条：`AevonOwnLog` 走 `initWithFormat:`，格式串会作为
-                  # 字面量留在二进制里（已在 0.3.0 产物上实测：`win: own begin ...`
-                  # 等四条各命中 1 次）。Swift 的 `win: own retired ...` 是插值，
-                  # 不产生独立字面量，所以**不**钉它 —— 0.2.92 在
-                  # `(INTERRUPTED)` 上已经栽过一次，同一条坑不踩第二遍。
-                  b"win: own disabled b=%@ from=%s",
+                  # 这里只留三条**反向**断言。正向那几条（`win: own begin` /
+                  # `win: own compose ok` / `win: own done`）必须消失：
+                  # `AevonOwnStart` 在 Swift 侧已经没有调用者（`openCard` 改成
+                  # 「挂起启动 + 等系统 scene」），链接器的 `-dead_strip` 会把整个
+                  # 函数连同它的日志字面量一起丢掉 —— CI 实测两次都是 missing，
+                  # 那不是缺陷，正是要的效果：那条链在产物里一个字节都不剩。
+                  #
+                  # 写成反向还有一个好处：以后谁把自建 scene 接回来，这三条会
+                  # 立刻红，不会悄悄复活。
+                  b"win: own begin b=%@ from=%s frame=%.0fx%.0f",  # gone
+                  b"win: own compose ok scene=%s id=%s",  # gone
+                  b"win: own done phase=%ld scene=%s",  # gone
                   b"win: own scene up after ",
                   b"win: own gave up door=%ld b=%@ after %ldms",
                   b"win: own destroyed %@",
