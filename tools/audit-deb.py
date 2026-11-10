@@ -1101,9 +1101,6 @@ def main():
                   #                （forceBackgrounded / _setDeactivationReasons /
                   #                 SBTransientOverlayWindow / 进程事务 / _openURLCore）。
                   #                只问不调，问错也只是 0。
-                  b"notify: shareprobe b=%s src=%s pay=%s form=%c fwd=%d origin=%s ac=%s"
-                  b" susp=%d fsusp=%d set=%s setSusp=%d setFlag=%d getSusp=%d getFlag=%d"
-                  b" pid=%d seen=%d purl=%s keys=%s",
                   # 0.2.12 —— 挂起位写在 settings 对象上（不是 options 字典）。
                   # 0.2.9 那版 `win: act dump` 已作废并删除（四个 tag 全是 n=1
                   # _settings=0x1 —— 这个类只有一个 ivar，做差在数学上不可能有结果），
