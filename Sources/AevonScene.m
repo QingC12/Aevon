@@ -1860,6 +1860,10 @@ static void AevonSeenNote(id scene) {
 ///
 /// 「我们没看到」被当成了「它不存在」，收卡就必然放弃。这里补一条不依赖拦截
 /// 的读数：枚举系统的 scene 账本，按 identifier 找。它只读，且只在主线程调用。
+/// 先声明：定义在下面（`AevonSceneForeground` 之后更远的 `AevonContentStateOf`）。
+/// `AevonLiveSceneForBundle` 要用它给同一个 bundle 的多份 scene 打分。
+long AevonContentStateOf(id scene);
+
 static id AevonLiveSceneForBundle(NSString *bundle) {
     if (bundle == nil || [bundle length] == 0) return nil;
     const char *text = [bundle UTF8String];
@@ -1867,13 +1871,34 @@ static id AevonLiveSceneForBundle(NSString *bundle) {
     id manager = AevonSceneManager();
     if (manager == nil) return nil;
     __block id found = nil;
+    __block int foundScore = -1;
+    __block int shells = 0;
     AevonEnumerateScenes(manager, ^(id scene) {
-        if (found != nil || scene == nil) return;
+        if (scene == nil) return;
         const char *name = AevonSceneName(scene);
         if (name == NULL || strcmp(name, "?") == 0) return;
         if (strstr(name, text) == NULL) return;
-        found = scene;
+        // 0.2.79 — 同一份 bundle 可能有好几份 scene（自建那张拆掉之后还会在
+        // 账本里留一会儿）。以前取第一份，正好取到空壳：Aevon(212) 12:21:06
+        // 的微信就是 `cs=0` + `natural=430x932`，贴上去整张卡是黑的。
+        // 这里按「前台运行 / 前台可见 / 有内容 / settings 前台位」打分，
+        // 全为 0 就当作只有空壳，交回 nil —— 调用方会走自建那条路。
+        int score = 0;
+        if (AevonBoolOf(scene, @"accessibilitySceneIsRunningInForeground") == 1) score += 4;
+        if (AevonBoolOf(scene, @"accessibilitySceneIsForegroundVisible") == 1) score += 4;
+        long state = AevonContentStateOf(scene);
+        if (state >= 2) score += 2;
+        else if (state == 1) score += 1;
+        if (AevonSceneForeground(scene) == 1) score += 2;
+        if (score == 0) shells += 1;
+        if (score > foundScore) { foundScore = score; found = scene; }
     });
+    if (foundScore <= 0) return nil;
+    if (shells > 0) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"win: live scene pick b=%@ best=%d shells=%d",
+                      bundle, foundScore, shells] UTF8String]);
+    }
     return found;
 }
 
@@ -1884,7 +1909,17 @@ id AevonSeenSceneForBundle(NSString *bundle) {
     for (int i = 0; i < AevonSeenCount; i++) {
         if (strstr(AevonSeenName[i], text) == NULL) continue;
         id scene = objc_loadWeak(&AevonSeenWeak[i]);
-        if (scene != nil) return scene;
+        if (scene == nil) continue;
+        // 0.2.79 — **空壳不交。** 与 `AevonLiveSceneForBundle` 同一把尺：
+        // 前台运行 / 前台可见 / 有内容 / settings 前台位，四条全是 0 就是空壳。
+        // 12:21:06 的微信就是被这一格交出去的（`cs=0`），整张卡黑。
+        if (AevonBoolOf(scene, @"accessibilitySceneIsRunningInForeground") == 0 &&
+            AevonBoolOf(scene, @"accessibilitySceneIsForegroundVisible") == 0 &&
+            AevonContentStateOf(scene) == 0 &&
+            AevonSceneForeground(scene) != 1) {
+            continue;
+        }
+        return scene;
     }
     // 0.2.73 — 表里查不到不等于没有 scene（见上面那段真机现场）。
     return AevonLiveSceneForBundle(bundle);
@@ -3036,8 +3071,14 @@ static double AevonLandingClaimAt = 0;
 /// 放回来，正好抵消掉它。
 static int AevonBundleIsAuthFamily(const char *b) {
     if (b == NULL) return 0;
+    // 0.2.79 — 补上 `com.alipay.iphoneclient`。这是支付宝在 App Store 版上的
+    // 真 bundle id；`com.eg.android.AlipayGphone` 是 Android 用的那一个，
+    // 名单里只写它等于「支付永远认不出来」。Aevon(212) 12:21:28 的支付现场：
+    //   notify: share b=com.alipay.iphoneclient src=com.chinaunicom.mobilebusiness
+    // 它被当成分享，走了「自建 scene + 投 URL」，然后 `appurl give why=timeout`。
     return strncmp(b, "com.tencent.xin", 15) == 0 ||
            strncmp(b, "com.tencent.mqq", 15) == 0 ||
+           strncmp(b, "com.alipay.iphoneclient", 23) == 0 ||
            strncmp(b, "com.eg.android.AlipayGphone", 27) == 0 ||
            strncmp(b, "com.unionpay", 12) == 0;
 }
@@ -6753,7 +6794,7 @@ static void AevonPastePromoteTick(char *copy, int tick) {
     //
     // 文件本身不受影响：`__PasteSharingToken` 是系统在激活这一拍交给 QQ 的，
     // 我们在它之后才动 scene；QQ 进程没有被挂起，读剪贴板与收卡互不阻塞。
-    if (tick >= 1 && live == 1 && scene != nil) {
+    if (tick >= 1 && scene != nil && (live == 1 || sceneFG == 1)) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"notify: paste promote card b=%s front=%d board=%d live=%d scene=%d tick=%d",
                       copy, front, board, live, sceneFG, tick] UTF8String]);
@@ -6761,7 +6802,20 @@ static void AevonPastePromoteTick(char *copy, int tick) {
         free(copy);
         return;
     }
-    if (board != 1 && up) {
+    // 0.2.79 — **先等目标自己的 scene，不要先把来源 App 拉回来。**
+    //
+    // Aevon(212) 12:20:08 的现场：`paste promote b=com.tencent.mqq front=-1
+    // board=0 live=0 scene=1 tick=0` —— 第 0 拍（20 ms）QQ 的进程号还是 0，
+    // 旧判据 `up = (front==1||sceneFG==1)` 当场成立，于是立刻
+    // `share swap restore`：把文件 App 顶回前台，等 60 ms 再把 QQ 收进卡片。
+    // 用户看到的就是「QQ 先整屏 → 闪回文件列表 → 再变小窗」。
+    //
+    // 现在前 3 拍（≈180 ms）只做一件事：等 `scene` 到位。拿到就直收，一次都不
+    // 把来源 App 拉出来。超过 3 拍还没拿到才退回旧路 —— 那条路至少保证内容
+    // 送得到。`live` 只参与上面那一格，不单独当条件：`SBApplicationController`
+    // 对微 / QQ 常常答 0（0.2.67 的教训），拿它当必要条件会把每一次分享都拖到
+    // 超时。
+    if (board != 1 && up && tick >= 3) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"notify: paste promote b=%s front=%d board=%d live=%d scene=%d tick=%d",
                       copy, front, board, live, sceneFG, tick] UTF8String]);
@@ -7171,6 +7225,7 @@ static int AevonOpenDecide(id request, id options, id settings,
         int isOAuth = !isSafari &&
             (strncmp(bundle, "com.tencent.xin", 15) == 0 ||
              strncmp(bundle, "com.tencent.mqq", 15) == 0 ||
+             strncmp(bundle, "com.alipay.iphoneclient", 23) == 0 ||
              strncmp(bundle, "com.eg.android.AlipayGphone", 27) == 0 ||
              strncmp(bundle, "com.unionpay", 12) == 0);
         // 0.2.53 — 通用链接被系统解析到了别的 App（GitHub 之类）：改投 Safari。
@@ -7206,42 +7261,36 @@ static int AevonOpenDecide(id request, id options, id settings,
             if (isOAuth && !AevonOpenIsShareSource(request, options)) {
                 char shape[40];
                 AevonURLShape(linkURL, shape, sizeof(shape));
-                // 0.2.74 — **方案 A：吞掉这次激活，授权全程留在悬浮卡里。**
+                // 0.2.79 — **撤掉 0.2.74 的「吞掉 + 自建 scene + 本地投递」。**
                 //
-                // 0.2.60~0.2.73 走的是「先放行、再收卡」：系统把微信 / QQ 拉成
-                // 整屏，我们 50~100 ms 后再把它塞进卡片。登录确实能成，但用户
-                // 每一次都先看到一整屏，再看到它缩回浮窗 —— 这正是本轮要消除的
-                // 那一下。参考包（FloatingView / Stheno / SplitView）的做法是
-                // 「应用启动即入窗」，Aevon 的等价落点就是这一支：不把请求交给
-                // SpringBoard，改由卡片自建 scene（`AevonOpenCardDirect`），再把
-                // URL 投进 App（`AevonForwardHold` → `AevonAppOpenSend`）。
+                // Aevon(212) 的四条现场把它证伪了，而且每一条都能指到同一处：
                 //
-                // 能这么做只有一个前提：**手里得有一条 URL 可以投**。投递链只
-                // 认 URL；`pay=paste` 且没有 URL 的那一种，卡片建起来也拿不到
-                // 授权页，只能退回系统激活。所以先问一句，答不出来就走回 0.2.73。
-                int deliverable = (linkURL.length > 0 &&
-                                   AevonOpenCarriesPayload(request, options)) ? 1 : 0;
-                if (deliverable) {
-                    // 回跳要靠这条记录认人（`authreturn`）。吞掉这一族不再经过
-                    // `AevonAuthSwapSchedule`，必须在这里单独记一笔。
-                    AevonAuthSeenNote(bundle);
-                    AevonLogRaw([[NSString stringWithFormat:
-                                  @"notify: oauth swallow b=%s src=%@ scheme=%s pay=%s card=%d",
-                                  bundle,
-                                  AevonOpenSourceApp(request, options) != nil
-                                      ? (id)AevonOpenSourceApp(request, options) : @"-",
-                                  shape, AevonOpenPayloadKind(request, options),
-                                  (AevonCardIsUpFor(bundle) == 1 ||
-                                   AevonCardIsComingFor(bundle) == 1) ? 1 : 0]
-                                 UTF8String]);
-                    *why = "oauth";
-                    AevonDivertAt = now;
-                    snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
-                    return 1;
-                }
+                //   · QQ  `appurl ack ok=1 via=app-src … dlg=- rsp=0`
+                //         —— URL 投进去了，QQ 的 OpenSDK 一个字都没接。卡片里
+                //         没有授权页，用户看到的就是「小窗开着、里面是 QQ 主页」。
+                //   · 支付宝 `appurl give why=timeout at=6342ms`
+                //         —— 连回执都没有。
+                //   · 微信第二次 `own live attach` + `launch state cs=0`
+                //         —— 贴到上一张卡留下的空壳 scene，整张卡是黑的。
+                //
+                // 三条是同一个根：**自建 scene 里没有系统那一次激活**。微 / QQ /
+                // 支付宝的授权与支付，全靠系统激活那一拍把 SDK 叫醒，URL 只是
+                // 附带品。0.2.55~0.2.59 试过投递，0.2.74~0.2.78 又试了一遍，
+                // 两次都是同一个结果：投递成功、业务不认。
+                //
+                // 所以回到 0.2.60~0.2.73 的路（这条路上登录是成立的，代价是先
+                // 整屏一小段）：**请求原样交给系统**，`display` 一个字节都不改；
+                // 15 ms 一拍盯着 scene，scene 一登记就收进卡片
+                // （`AevonAuthSwapSchedule` → `AevonAuthSwapTick`）。
+                // 参考三家的共同做法也是这一条 —— 它们不投 URL，只改落点。
+                AevonAuthSeenNote(bundle);
                 AevonLogRaw([[NSString stringWithFormat:
-                              @"notify: oauth pass b=%s scheme=%s pay=%s card=%d why=nourl",
-                              bundle, shape, AevonOpenPayloadKind(request, options),
+                              @"notify: oauth native b=%s src=%@ scheme=%s pay=%s url=%d card=%d",
+                              bundle,
+                              AevonOpenSourceApp(request, options) != nil
+                                  ? (id)AevonOpenSourceApp(request, options) : @"-",
+                              shape, AevonOpenPayloadKind(request, options),
+                              linkURL.length > 0 ? 1 : 0,
                               (AevonCardIsUpFor(bundle) == 1 ||
                                AevonCardIsComingFor(bundle) == 1) ? 1 : 0]
                              UTF8String]);
@@ -7463,10 +7512,34 @@ static int AevonOpenDecide(id request, id options, id settings,
     // 授权回跳与「从微信里把东西分享给某个 App」。两者都该由系统原样交付：
     // 用户点的就是那个 App，把它按进小窗只会让人一愣。真的在传文件的那一种
     // 仍带 `__PasteSharingToken`，继续走下面的 share 路。
-    if (kind != NULL && strcmp(kind, "share") == 0 &&
-        AevonOpenSourceIsSso(request, options) == 1 &&
-        AevonOpenTargetIsSso(bundle) == 0 &&
-        AevonOpenAnyValue(request, options, @"__PasteSharingToken") == nil) {
+    int returnShape = (kind != NULL && strcmp(kind, "share") == 0 &&
+                       AevonOpenSourceIsSso(request, options) == 1 &&
+                       AevonOpenTargetIsSso(bundle) == 0) ? 1 : 0;
+    int returnTokenless = (returnShape &&
+        AevonOpenAnyValue(request, options, @"__PasteSharingToken") == nil) ? 1 : 0;
+    int returnKnown = 0;
+    if (returnShape && !returnTokenless) {
+        // 0.2.79 — **带 paste token 的授权回跳也是回跳。**
+        //
+        // Aevon(212) 12:21:07 的现场：
+        //   notify: share source b=com.tencent.xin target=com.tcl.tclplus
+        //   notify: paste token b=com.tcl.tclplus cls=UISPasteSharingToken
+        //   notify: paste promote schedule b=com.tcl.tclplus
+        //   notify: paste promote card b=com.tcl.tclplus …
+        // 微信把登录结果塞在粘贴板里送回来，旧判据一句 `token == nil` 就把它
+        // 划成了分享，于是 `paste promote` 在 60 ms 后把**发起登录的那个 App**
+        // 从全屏收进了卡片 —— 用户报的「发起授权的 App 也变成悬浮窗」就是这一下。
+        //
+        // 收窄到两条同时成立才认：来源是微 / QQ **本体**（不是 .sharetimeline /
+        // .ShareExtension 那些扩展），且 30 秒内真的发生过一次授权。分享面板
+        // 递过来的文件两条都不满足，仍然走原来的 `paste` 路。
+        NSString *srcExact = AevonOpenSourceApp(request, options);
+        int exact = ([srcExact isKindOfClass:[NSString class]] &&
+                     ([srcExact isEqualToString:@"com.tencent.xin"] ||
+                      [srcExact isEqualToString:@"com.tencent.mqq"])) ? 1 : 0;
+        if (exact && AevonAuthReturnMatched(srcExact) == 1) returnKnown = 1;
+    }
+    if (returnShape && (returnTokenless || returnKnown)) {
         int inCard = (AevonCardIsUpFor(bundle) == 1 ||
                       AevonCardIsComingFor(bundle) == 1) ? 1 : 0;
         // 只有「刚发生过授权」才收递结果那一方的卡；用户只是从微信里点了个
@@ -7476,11 +7549,11 @@ static int AevonOpenDecide(id request, id options, id settings,
             AevonAuthCardCloseSoon(AevonOpenSourceApp(request, options), "return");
         }
         AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: auth return b=%s src=%@ recent=%d in=%d",
+                      @"notify: auth return b=%s src=%@ recent=%d in=%d ptk=%d",
                       bundle,
                       AevonOpenSourceApp(request, options) != nil
                           ? (NSString *)AevonOpenSourceApp(request, options) : @"-",
-                      recent, inCard] UTF8String]);
+                      recent, inCard, returnTokenless ? 0 : 1] UTF8String]);
         *why = "authreturn";
         return inCard == 1 ? 1 : 0;
     }

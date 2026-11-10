@@ -1653,15 +1653,50 @@ zStackParticipantDidChange:
     }
 
     /// 第一条口径：manager 枚举。所有正常建卡的 App 都走这条。
+    ///
+    /// 0.2.79 — **同一个 bundle 可能有好几份 scene，取分数最高的那一份。**
+    ///
+    /// Aevon(212) 12:21:06 的现场（微信第二次授权）：
+    ///   win: own live attach com.tencent.xin t=0ms wait=0ms
+    ///   win: launch state cs=0 layers=-1 seen=0 held=1
+    ///   win: first frame shown after 112ms (first frame)
+    /// 拿到的是一张 `contentState = 0`、`natural = 430x932` 的空壳 —— 12:20:40
+    /// 那次授权收卡时 `own handed over` 留下的那一份（没有 presenter、微信的窗口
+    /// 也已经跟着卡没了）。旧代码取枚举顺序里的**第一个**，正好取到它，于是整张
+    /// 卡是黑的。用户报的「微信悬浮窗第二次变黑」就是这一行。
+    ///
+    /// 现在给每一份打分：前台可见 4、前台运行 4、有内容 2/1、settings 前台位 2。
+    /// 全部分数为 0 就是「只有空壳」—— 返回 nil，让 `openCard` 走自建那条路
+    /// （那条路在 12:20:39 是成功的：`own compose ok` → `first frame 158ms`）。
     private static func listedScene(_ bundleID: String) -> NSObject? {
         guard let manager = AevonSceneManager() as? NSObject else { return nil }
-        var found: NSObject?
+        var best: NSObject?
+        var bestScore = -1
+        var count = 0
         AevonEnumerateScenes(manager) { scene in
-            guard found == nil, let scene = scene as? NSObject else { return }
+            guard let scene = scene as? NSObject else { return }
             let identifier = value(of: scene, "identifier").map { String(describing: $0) } ?? ""
-            if identifier.contains(bundleID) { found = scene }
+            guard identifier.contains(bundleID) else { return }
+            count += 1
+            var score = 0
+            if AevonBoolOf(scene, "accessibilitySceneIsRunningInForeground") == 1 { score += 4 }
+            if AevonBoolOf(scene, "accessibilitySceneIsForegroundVisible") == 1 { score += 4 }
+            let state = AevonContentStateOf(scene)
+            if state >= 2 { score += 2 } else if state == 1 { score += 1 }
+            if (value(of: scene, "settings").map { AevonBoolOf($0, "isForeground") } ?? -1) == 1 {
+                score += 2
+            }
+            if score > bestScore {
+                bestScore = score
+                best = scene
+            }
         }
-        return found
+        if bestScore <= 0 {
+            Log.write("win: listed scene all shell b=" + bundleID
+                      + " n=" + String(count) + " best=" + String(bestScore))
+            return nil
+        }
+        return best
     }
 
     /// The system's own answer to "may this scene go to sleep", as a number.
@@ -1852,7 +1887,21 @@ zStackParticipantDidChange:
             // 0.2.38 — 「让路」= 松手，不是拆掉。自建 scene 也不再销毁：
             // 0.2.37 在系统正要把这张 scene 拉成全屏的那一拍 destroy 它，
             // 设置 App 直接闪退，其它 App 常常变成「全屏底部黑」。
-            let handover = yielding
+            //
+            // 0.2.79 — **授权收尾不交还，照旧销毁。**
+            //
+            // Aevon(212) 12:20:40 的现场：
+            //   win: card closed after auth b=com.tencent.xin
+            //   win: own handed over sceneID:com.tencent.xin-default
+            //   win: background after teardown door=1 own=1 handover=1
+            // 那一拍 `yielding` 是之前让路留下的，于是走出了 handover：scene
+            // 留在系统账本里（`natural=430x932`、没有 presenter），微信的窗口
+            // 却已经跟着卡一起没了。12:21:06 第二次授权 `own live attach` 贴上
+            // 去，`launch state cs=0` —— 用户看到的就是「第二次微信是黑的」。
+            //
+            // 授权这条路永远不会有「系统接着把这张 scene 拉成全屏」的下文：
+            // 用户要的是回发起方。交还没有任何收益。
+            let handover = yielding && reason != "auth done"
             let screenSize = UIScreen.main.bounds.size
             if !closingBundle.isEmpty && (!owned || handover) {
                 AevonSceneFrameSet(closingBundle, 0, 0,

@@ -617,6 +617,13 @@ def main():
                   b"ring: launch skip ",
                   # 0.2.4 — 第二条口径：拦截点记过的 scene（manager 枚举列不出的那种）。
                   b"win: scene from hook table ",
+                  # 0.2.79 — 同一个 bundle 多份 scene 时的打分取舍。
+                  #   `all shell` = 全部空壳（前台运行/可见/内容/前台位都是 0），
+                  #       交回 nil，让 `openCard` 走自建；
+                  #   `pick` = 打过分、挑中了不是空壳的那一份。
+                  # 12:21:06 的微信黑卡就是「没打分、取第一份」造成的。
+                  b"win: listed scene all shell b=",
+                  b"win: live scene pick b=",
                   # 0.2.4 — 挂起启动带重试（对应母版 maxAttempts/delay）。
                   b"win: icon relaunch %@ try=%ld door=%ld t=%ldms",
                   # 0.2.3 — 等 scene 那几秒的现场快照（pid + 全部 scene 标识）。
@@ -674,15 +681,19 @@ def main():
                   b"notify: auth card close b=%@ why=%s",
                   b"notify: share swap nogate b=%s door=%d",
                   b"win: card closed after auth b=",
-                  # 0.2.74 — 方案 A：授权那一支改回「吞掉 + 自建卡 + 投递」。
-                  #   `oauth swallow` = 这一条请求没有交给 SpringBoard，屏上只会
-                  #       多一张卡；它后面必须跟 `notify: oauth card` 与
-                  #       `notify: appurl send` / `appurl ack`；
-                  #   `oauth pass … why=nourl` = 没有 URL 可投，退回 0.2.73 的
-                  #       「放行 + 事后收卡」；这条是兜底，不该在正常登录里出现。
-                  b"notify: oauth swallow b=%s src=%@ scheme=%s pay=%s card=%d",
+                  # 0.2.79 — **撤掉 0.2.74 的「吞掉 + 自建 + 投递」。**
+                  #
+                  # Aevon(212) 把它证伪在三处，而且每一处都指向同一个根：
+                  # 自建 scene 里没有系统那一次激活。
+                  #   · QQ      `appurl ack ok=1 via=app-src … rsp=0` —— SDK 没接；
+                  #   · 支付宝  `appurl give why=timeout at=6342ms` —— 连回执都没有；
+                  #   · 微信第二次 `own live attach` + `launch state cs=0` —— 黑卡。
+                  #
+                  #   `oauth native` = 这一条授权 / 支付原样交给系统激活，卡片在
+                  #       scene 一登记时收回来（紧跟 `notify: auth swap card`）。
+                  #       `url=` 只说明这一拍照样带不带 URL，不参与判断。
+                  b"notify: oauth native b=%s src=%@ scheme=%s pay=%s url=%d card=%d",
                   b"notify: oauth card b=%s fwd=%d",
-                  b"notify: oauth pass b=%s scheme=%s pay=%s card=%d why=nourl",
                   # 0.2.75 — 安全闸的**运行期**复查。Aevon(207) 里用户把 G0 与 G1
                   # 都打开，`win: touch in=17 eat=3` 照样在吞 —— 原因是设置侧只写
                   # 文件/偏好不发通知，而闸本身只在加载时判定一次。这五条就是
@@ -734,7 +745,10 @@ def main():
                   # 挂起的进程不跑，SSO 没人接；而且「激活一个不上屏的目标」正是
                   # 0.2.69 分享死局的形状）。
                   # 0.2.67 — 授权结果回到第三方 App：放行，不按进小窗。
-                  b"notify: auth return b=%s src=%@ recent=%d in=%d",
+                  # 0.2.79 — 补 `ptk=`：带 paste token 的回跳（微信把登录结果
+                  # 塞在粘贴板里送回来）也要认成回跳，否则发起方会被
+                  # `paste promote` 收进卡片。`ptk=1` 就是那一格。
+                  b"notify: auth return b=%s src=%@ recent=%d in=%d ptk=%d",
                   # 0.2.63/0.2.66 — 落点（对比报告的方案 A）：系统的 URL 打开入口带一个
                   # `display` 参数（真机编码 `v60@0:8@16@24B32@36@44@?52` ⇒ 它是对象）。
                   # 0.2.70 — **display 原样下发**（0.2.69 的 nil + 补台已撤：nil 让目标
@@ -1245,7 +1259,11 @@ def main():
                  b"ring: card route declined (",                  # gone
                  # 0.2.12 — 形状转储整块删除。四个 tag 全 `n=1 _settings=0x1`，
                  # 它从来没有回答过任何问题，只会占预算。还能 grep 到就是没删干净。
-                 b"win: act dump tag=%s c=%s n=%u %s"):            # gone
+                 b"win: act dump tag=%s c=%s n=%u %s",            # gone
+                 # 0.2.79 — 投递那条链在授权 / 支付上被证伪，两行日志随
+                 # 代码一起删除。还能 grep 到就说明那一支又回来了。
+                 b"notify: oauth swallow b=%s src=%@ scheme=%s pay=%s card=%d",  # gone
+                 b"notify: oauth pass b=%s scheme=%s pay=%s card=%d why=nourl"):   # gone
         if gone in dylib_early:
             bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "
                 "back (hot zone 0.1.18 / summon bar 0.1.24 / cover lock gate 0.1.90)")
