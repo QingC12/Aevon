@@ -2368,8 +2368,32 @@ long AevonSceneAckCount(void) { return AevonAckCount; }
 ///
 /// 返回 1 = 这次真的换了屏幕。
 static CFAbsoluteTime AevonDisplayAt[AEVON_ARMED_MAX];
+
+/// 这份 scene 设置能不能写。**全工程只有这一个口径。**
+///
+/// iOS 的 scene 设置是「不可变基类 + Mutable 子类」两件套：
+/// `FBSceneSettings` / `FBMutableSceneSettings`、`UIApplicationSceneSettings` /
+/// `UIMutableApplicationSceneSettings`。往**不可变**那份调 setter，FrontBoard 内部
+/// 不是抛 `NSException`，而是直接 `BSLogAssert` → `__builtin_trap()`
+/// （Aevon(224) 的崩溃报告：`EXC_BREAKPOINT / SIGTRAP`，栈顶
+/// `-[FBSSettings _setValue:forSetting:]`）。
+///
+/// ⛔ **trap 抓不住** —— `@try` 对它无效。唯一活路是事前判类型，所以这道闸必须
+/// 出现在每一次写之前，不能靠外层兜。0.0.98 就把它写进了 `AevonWriteFrame`，
+/// 0.2.90 新加的「出生即卡尺寸」自己数了一遍 `respondsToSelector:` 就动手，
+/// 于是漏了 —— 代价是一次安全模式（点备忘录里的链接跳 Safari，那次 settings 是
+/// `UIApplicationSceneSettings`；而 QQ / 微信卡一直是 `UIMutableApplicationSceneSettings`，
+/// 所以这条路从来没被踩到）。
+static BOOL AevonSettingsMutable(id settings) {
+    if (settings == nil) return NO;
+    const char *name = object_getClassName(settings);
+    if (name == NULL) return NO;
+    return strstr(name, "Mutable") != NULL;
+}
+
 static BOOL AevonWriteDisplay(id settings, int slot) {
     if (settings == nil) return NO;
+    if (!AevonSettingsMutable(settings)) return NO;
     if (slot < 0 || slot >= AEVON_ARMED_MAX) return NO;
     if (!(AevonFrameMask & (1 << slot))) return NO;
     CGRect target = AevonFrameTargets[slot];
@@ -2422,8 +2446,7 @@ static BOOL AevonWriteFrame(id settings, int slot) {
     if (slot < 0 || slot >= AEVON_ARMED_MAX) return NO;
     if (!(AevonFrameMask & (1 << slot))) return NO;
     CGRect target = AevonFrameTargets[slot];
-    const char *className = object_getClassName(settings);
-    if (className == NULL || strstr(className, "Mutable") == NULL) return NO;
+    if (!AevonSettingsMutable(settings)) return NO;
     SEL setter = sel_registerName("setFrame:");
     if (![settings respondsToSelector:setter]) return NO;
     SEL getter = sel_registerName("frame");
@@ -2685,6 +2708,7 @@ static volatile int AevonLevelForced = 0;
 
 static void AevonRestoreLevel(id settings) {
     if (settings == nil || !AevonLevelForced) return;
+    if (!AevonSettingsMutable(settings)) return;
     SEL setter = sel_registerName("setLevel:");
     if (![settings respondsToSelector:setter]) return;
     ((void (*)(id, SEL, double))objc_msgSend)(settings, setter, 0.0);
@@ -3892,7 +3916,7 @@ static NSString *AevonActBlockSig(id block) {
     if (lookup == NULL) return nil;
     AevonActStep("blocksig");
     const char *s = lookup((void *)block);
-    AevonActStep("");
+    AevonActStep("sig:done");
     if (s == NULL) return nil;
     // 地址闸：arm64 用户态在 0x1_0000_0000 … 0x80_0000_0000 之间。落在外面的
     // 不是字符串（0.2.89 那三次就是这里进来一个 `@SError"` 形状的野指针）。
@@ -3931,22 +3955,59 @@ static int AevonActFrameBirth(id settings, NSString *ident,
     if (want.length == 0 || ![ident containsString:want]) return 0;
     // 到这里就确认「这次建 scene 是为卡目标造的」，再挡就是真挡住了 —— 后面每一条
     // 都要在日志里说清是哪一条挡的，否则下一轮又只能猜。
+    //
+    // ⛔ **0.2.92 — 可变闸必须排在任何一次 objc_msgSend 之前。**
+    //
+    // 这一刀 0.2.90 只数了 `respondsToSelector:` 就写，而 Aevon(224) 的 Safari 那次
+    // 拿到的是**不可变**的 `UIApplicationSceneSettings`：写下去 FrontBoard 内部
+    // 直接 trap（崩溃报告 `EXC_BREAKPOINT / SIGTRAP`，栈顶
+    // `-[FBSSettings _setValue:forSetting:]`），`@try` 抓不住，SpringBoard 当场重启。
+    // 更糟的是 `frame birth wrote=` 那行是**函数返回之后**才打的 —— 崩在返回之前，
+    // 于是三份日志一条证据都没有，只能从崩溃报告反推。
     if (whyOut != NULL) *whyOut = "no-frame";
-    SEL fSel = NSSelectorFromString(@"frame");
-    SEL sSel = NSSelectorFromString(@"setFrame:");
-    if (![settings respondsToSelector:fSel]) return 2;
-    if (whyOut != NULL) *whyOut = "no-setframe";
-    if (![settings respondsToSelector:sSel]) return 2;
-    if (whyOut != NULL) *whyOut = "screen-shape";
-    CGRect cur = ((CGRect (*)(id, SEL))objc_msgSend)(settings, fSel);
-    if (cur.size.width < 400.0 || cur.size.height < 900.0) return 2;
-    CGRect next = CGRectMake(0.0, 0.0, cur.size.width, cur.size.height - 215.0);
-    ((void (*)(id, SEL, CGRect))objc_msgSend)(settings, sSel, next);
-    CGRect back = ((CGRect (*)(id, SEL))objc_msgSend)(settings, fSel);
-    if (beforeOut != NULL) *beforeOut = cur;
-    if (afterOut != NULL) *afterOut = back;
-    if (whyOut != NULL) *whyOut = "wrote";
-    return 1;
+    AevonActStep("birth:enter");
+    if (!AevonSettingsMutable(settings)) {
+        if (whyOut != NULL) *whyOut = "immutable";
+        AevonActStep("birth:immutable");
+        return 2;
+    }
+    // 闸过了才是真可变对象；剩下的异常（类簇、奇怪的 selector）用 @try 兜住。
+    // 注意 @try 挡不住 trap，所以上面那道闸才是主防线，这段只是补漏。
+    @try {
+        SEL fSel = NSSelectorFromString(@"frame");
+        SEL sSel = NSSelectorFromString(@"setFrame:");
+        if (![settings respondsToSelector:fSel]) {
+            if (whyOut != NULL) *whyOut = "no-frame";
+            AevonActStep("birth:noframe");
+            return 2;
+        }
+        if (![settings respondsToSelector:sSel]) {
+            if (whyOut != NULL) *whyOut = "no-setframe";
+            AevonActStep("birth:noset");
+            return 2;
+        }
+        if (whyOut != NULL) *whyOut = "screen-shape";
+        CGRect cur = ((CGRect (*)(id, SEL))objc_msgSend)(settings, fSel);
+        if (cur.size.width < 400.0 || cur.size.height < 900.0) {
+            AevonActStep("birth:small");
+            return 2;
+        }
+        CGRect next = CGRectMake(0.0, 0.0, cur.size.width, cur.size.height - 215.0);
+        ((void (*)(id, SEL, CGRect))objc_msgSend)(settings, sSel, next);
+        CGRect back = ((CGRect (*)(id, SEL))objc_msgSend)(settings, fSel);
+        if (beforeOut != NULL) *beforeOut = cur;
+        if (afterOut != NULL) *afterOut = back;
+        if (whyOut != NULL) *whyOut = "wrote";
+        AevonActStep("birth:wrote");
+        return 1;
+    } @catch (NSException *e) {
+        if (whyOut != NULL) *whyOut = "threw";
+        AevonActStep("birth:threw");
+        AevonLogRaw([[NSString stringWithFormat:@"act: frame birth threw %s cls=%s",
+                      e.reason != nil ? [e.reason UTF8String] : "-",
+                      object_getClassName(settings)] UTF8String]);
+        return 2;
+    }
 }
 
 /// 先按已知真名找，找不到才全类扫。
@@ -4519,6 +4580,7 @@ double AevonSceneLevel(id scene) {
 /// 那时候宁可不写 —— 一笔类型写错的 settings，比不写更糟。
 static void AevonWriteLevelIdle(id settings) {
     if (settings == nil) return;
+    if (!AevonSettingsMutable(settings)) return;
     SEL getter = sel_registerName("level");
     BOOL sane = NO;
     if ([settings respondsToSelector:getter]) {

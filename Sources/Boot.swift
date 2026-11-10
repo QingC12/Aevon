@@ -126,6 +126,14 @@ public func AevonStart() {
     // 这两份标记只在进程被信号杀掉时才留得下来（正常走完自己删）。所以开机
     // 读到它们 = 上一次没走完，名字就是断点。Aevon(223) 那三次连崩里一句
     // 线索都没有，正是因为那一下死在写日志之前 —— 这一行就是补上的那句话。
+    //
+    // 0.2.92 — 加判定后缀。0.2.91 那版在正常收尾时把 `act.step` 写成**空串**，
+    // 于是「崩在写日志之前」和「什么都没发生」长得一模一样，Aevon(224) 就栽在
+    // 这上面（读到 `step=-`，其实不是没有断点，是断点被自己擦掉了）。现在正常
+    // 收尾写具体终态名，开机就知道该不该当事故看。
+    let settledSteps: Set<String> = ["sig:done", "birth:wrote", "birth:immutable",
+                                     "birth:noset", "birth:noframe", "birth:small",
+                                     "birth:threw"]
     let stepFiles: [(path: String, label: String)] = [
         (Aevon.urlStepPath, "url"),
         (Aevon.actStepPath, "act"),
@@ -133,7 +141,15 @@ public func AevonStart() {
     for entry in stepFiles {
         guard let raw = try? String(contentsOfFile: entry.path, encoding: .utf8) else { continue }
         let step = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        Log.write("boot: last \(entry.label) step=\(step.isEmpty ? "-" : step)")
+        let verdict: String
+        if step.isEmpty {
+            verdict = "-"
+        } else if settledSteps.contains(step) {
+            verdict = "\(step) (settled)"
+        } else {
+            verdict = "\(step) (INTERRUPTED)"
+        }
+        Log.write("boot: last \(entry.label) step=\(verdict)")
         try? FileManager.default.removeItem(atPath: entry.path)
     }
 

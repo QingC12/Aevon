@@ -867,6 +867,14 @@ def main():
                   b"act: hits activate=%ld scene=%ld boot=%d fw=%ld fs=%ld card=%s",
                   b"act: frame birth wrote=1 b=%s before=%.0fx%.0f after=%.0fx%.0f",
                   b"act: frame birth blocked why=%s b=%s set=%s",
+                  # 0.2.92 — 不可变 settings 是 trap 不是异常：写下去 FrontBoard
+                  # `_setValue:forSetting:` 直接 `__builtin_trap()`，`@try` 抓不住。
+                  # 这几串是「闸真的在写之前」的证词，缺一条就说明又有人绕过闸写信。
+                  b"act: frame birth threw %s cls=%s",
+                  b"birth:immutable",
+                  b"birth:enter",
+                  b"birth:wrote",
+                  b"(INTERRUPTED)",
                   # `_Block_signature` 用 dlsym 取，所以这串必须进二进制；取不到就
                   # 是这一格空着，不是这条断言该消失。
                   b"_Block_signature",

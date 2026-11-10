@@ -48,6 +48,13 @@ import urllib.request
 
 REPO = os.environ.get("AEVON_REPO", "QingC12/Aevon")
 BRANCH = os.environ.get("AEVON_BRANCH", "main")
+
+# 0.2.92 — 提交署名写死在这里，不再依赖「GitHub 拿 token 用户当 author」这条默认
+# 行为。默认行为是对的，但默认就是没写在纸上的意思：token 一换身份、或者有人改走
+# git 模式，远端就多一个头像。写死的成本是零。
+AUTHOR_NAME = os.environ.get("AEVON_AUTHOR_NAME", "QingC")
+AUTHOR_MAIL = os.environ.get("AEVON_AUTHOR_MAIL",
+                             "121048049+QingC12@users.noreply.github.com")
 TOKEN = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
 MODE = os.environ.get("AEVON_PUSH_MODE", "auto").lower()
 if not TOKEN:
@@ -282,7 +289,9 @@ def push_api(message):
     mark = time.time()
     commit = api(
         "/repos/%s/git/commits" % REPO,
-        {"message": message, "tree": new_tree["sha"], "parents": [parent_sha]},
+        {"message": message, "tree": new_tree["sha"], "parents": [parent_sha],
+         "author": {"name": AUTHOR_NAME, "email": AUTHOR_MAIL},
+         "committer": {"name": AUTHOR_NAME, "email": AUTHOR_MAIL}},
     )
     clock["提交"] = time.time() - mark
     mark = time.time()

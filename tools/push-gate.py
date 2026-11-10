@@ -573,6 +573,65 @@ def check_generator():
 
 
 # ---------------------------------------------------------------------------
+def check_author():
+    """作者身份闸 —— 提交被记到谁名下，由 author email 决定，不由 token 决定。
+
+    GitHub 的 noreply 邮箱有两种写法：`<userid>+<login>@users.noreply.github.com`
+    和老式 `<login>@users.noreply.github.com`。后者只要那个 login 真实存在，
+    提交就会挂号到**别人**名下。
+
+    Aevon 上真出过这事：0.2.71 的两条提交用了 `qingc@users.noreply.github.com`
+    （少了 `121048049+` 前缀），仓库 Contributors 从此多出一个陌生账号
+    `qingc` / Sandy Cai（id 11208278）。代码一个字节没被改，但公开历史里挂着
+    一个不属于本项目的头像，清掉只能改写历史。
+
+    所以推之前挡：本次待推送的每一条提交，author email 必须就是我们自己的
+    noreply 地址。
+    """
+    section("作者身份")
+    want = "121048049+QingC12@users.noreply.github.com"
+    # 少数字前缀的老式写法，只要 login 是我们自己，归属仍然正确 —— 不拦，
+    # 只是不如标准写法稳（login 一旦被抢注就不再等价）。真正会导致「多一个头像」
+    # 的是 login 别人家的地址，比如 `qingc@…`。
+    alike = {want, "QingC12@users.noreply.github.com"}
+
+    # ① git 身份本身。`git commit` 用它写 author，`git push` 把它原样带到远端。
+    name = subprocess.run(["git", "config", "user.name"],
+                          capture_output=True, text=True).stdout.strip()
+    mail = subprocess.run(["git", "config", "user.email"],
+                          capture_output=True, text=True).stdout.strip()
+    if mail in alike:
+        ok(f"作者身份: git 身份 = {name} <{mail}>")
+    else:
+        bad(f"作者身份: git config user.email = {mail or '(空)'}，应为 {want}")
+        bad("          旧式 `<login>@users.noreply.github.com` 少了数字前缀，"
+            "GitHub 会把它归到同名真实用户 —— Aevon 的 `qingc@…` 就是这么把两条"
+            "提交记到 Sandy Cai（id 11208278）名下的")
+
+    # ② 本地历史里已有的脏 author。`gh-push.py` 的 api 模式只建一条新提交、
+    #    author 由 token 用户决定，不会带这些上去；但 git 模式推的是本地已固化的
+    #    author —— 那两条 `qingc@…` 就是这么进远端的。所以这一条按警告处理，
+    #    同时把「为什么会脏」摆出来。
+    has_base = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
+        capture_output=True).returncode == 0
+    rng = "origin/main..HEAD" if has_base else "HEAD"
+    out = subprocess.run(["git", "log", "--format=%h|%an|%ae", rng],
+                         capture_output=True, text=True).stdout.strip()
+    rows = [ln.split("|", 2) for ln in out.splitlines() if ln.count("|") == 2]
+    wrong = [r for r in rows if r[2] not in alike]
+    if not rows:
+        ok("作者身份: 没有待推送提交")
+    elif not wrong:
+        ok(f"作者身份: {len(rows)} 条待推送提交全部记为 QingC12")
+    else:
+        for sha, an, ae in wrong[:6]:
+            warn(f"作者身份: 本地提交 {sha} {an} <{ae}> 不合规")
+        warn(f"作者身份: 共 {len(wrong)} 条历史提交 author 不合规 —— "
+             "api 模式不带它们上远端，git 模式会")
+
+
+# ---------------------------------------------------------------------------
 def print_manifest(files, ver):
     if not LIST:
         return
@@ -611,6 +670,7 @@ def main():
     check_audit_tokens()
     check_swift()
     check_generator()
+    check_author()
 
     if not QUIET:
         print_manifest(files, ver)
