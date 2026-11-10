@@ -4229,11 +4229,31 @@ static id AevonPresenterBuild(id scene, const char *why) {
         if ([presenter respondsToSelector:viewSel]) {
             view = ((id (*)(id, SEL))objc_msgSend)(presenter, viewSel);
         }
+        // 0.3.4 — **试一次 `setResizesHostedContext:`（只写、不激活）。**
+        //
+        // 这是母本命中 2 次的那一条，生产代码也一直在用
+        // （`SceneProbe.swift` 的 `AevonCallSetBool(presenter, "setResizesHostedContext:", true)`）。
+        // 「告诉 presenter：把 scene 的承载内容缩到 presenter 的尺寸」——
+        // 少了这一句，一个只占屏幕五分之一的卡就是在要求一张全屏画布自己缩小。
+        //
+        // 只问、只写，不 activate、不挂窗口：本版仍不改变任何观感，
+        // 目的是确认「这个 presenter 收不收这一刀」。
+        int resized = -1;
+        SEL resizeSel = NSSelectorFromString(@"setResizesHostedContext:");
+        if ([presenter respondsToSelector:resizeSel]) {
+            @try {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(presenter, resizeSel, YES);
+                resized = 1;
+            } @catch (NSException *inner) {
+                resized = 0;
+            }
+        }
         AevonLogRaw([[NSString stringWithFormat:
-                      @"presenter: birth ok=1 b=%s why=%s cls=%s view=%s",
+                      @"presenter: birth ok=1 b=%s why=%s cls=%s view=%s resize=%d",
                       want, why != NULL ? why : "-",
                       object_getClassName(presenter),
-                      view != nil ? object_getClassName(view) : "nil"] UTF8String]);
+                      view != nil ? object_getClassName(view) : "nil",
+                      resized] UTF8String]);
         // 原型阶段**不 activate、不挂窗口**。把这个 presenter 交回去只是为了让
         // 调用方能在同一栈里决定下一步；本次调用方一律忽略返回值。
         return presenter;
@@ -4258,7 +4278,27 @@ static void AevonProbePresenterBirth(id scene) {
     const char *sceneName = AevonSceneName(scene);
     if (sceneName == NULL || AevonActCardBundle[0] == '\0') return;
     if (strstr(sceneName, AevonActCardBundle) == NULL) return;
-    if (__sync_fetch_and_add(&AevonProbePres, 1) >= 8) return;
+    // ⛔ 0.3.4 — **按 bundle 去重，不再按总条数限流。**
+    //
+    // 0.3.2/0.3.3 的预算是「总共 8 条」，真机结果（Aevon(229)）：
+    //   1124–1226 行，20:12:21–20:12:25，8 条**全是 QQ**；
+    //   而 Safari 的 scene 在 1240 行（20:12:28）才第一次出现，支付宝更晚。
+    //   ⇒ 预算被第一个 App 一次用完，其余三路一条都没记。
+    //
+    // 同一个错误我已经犯了三次（0.3.1 按总条数、0.3.2 加了场景过滤但仍按总条数、
+    // 0.3.3 撞名）。这次改成「每个 bundle 各记一次」：读 `AevonSeenNote` 的
+    // 去重表做不到（那是 scene 名字，不是 bundle），所以这里自己维护一张小表。
+    //
+    // 表满就整体重置 —— 它只服务于取证，不参与任何判断。
+    static char AevonProbePresSeen[16][64];
+    static int AevonProbePresCount = 0;
+    for (int i = 0; i < AevonProbePresCount; i++) {
+        if (strcmp(AevonProbePresSeen[i], AevonActCardBundle) == 0) return;
+    }
+    if (AevonProbePresCount >= 16) AevonProbePresCount = 0;
+    strlcpy(AevonProbePresSeen[AevonProbePresCount], AevonActCardBundle,
+            sizeof(AevonProbePresSeen[0]));
+    AevonProbePresCount += 1;
     AevonActStep("probe:pres");
     @try {
         int hasPM = [scene respondsToSelector:NSSelectorFromString(@"uiPresentationManager")] ? 1 : 0;
