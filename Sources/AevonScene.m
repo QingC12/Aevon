@@ -4128,14 +4128,58 @@ static void AevonProbeTransitionContext(id context, id settings) {
     @try {
         NSString *ctxList = context != nil ? AevonProbeMethodList(context, 24) : @"-";
         NSString *setList = settings != nil ? AevonProbeMethodList(settings, 12) : @"-";
+        SEL actSel = NSSelectorFromString(@"setActions:");
         int canActions = (context != nil &&
-                          [context respondsToSelector:NSSelectorFromString(@"setActions:")]) ? 1 : 0;
+                          [context respondsToSelector:actSel]) ? 1 : 0;
         int canFrame = (context != nil &&
                         [context respondsToSelector:NSSelectorFromString(@"setFrame:")]) ? 1 : 0;
-        AevonLogRaw([[NSString stringWithFormat:
-                      @"probe: tctx cls=%s actions=%d frame=%d %s | set cls=%s %s",
+        // 0.3.6 — **`setActions:` 的真实签名与现状。**
+        //
+        // 三条读数已经把可选方向收敛到这一条（A: options 只有 setDictionary:；
+        // B: settings 零 setter；C: presenter 能建但消不掉系统全屏窗）。
+        // 而 0.2.86 的全类扫描证明本机只有 `UISOpenURLAction` 实现
+        // `initWithURL:workspaceOriginatingProcess:` —— 所以塞进 setActions: 的
+        // 只能是那一种 BSAction。
+        //
+        // 这一版只问三件事，一个字节都不写：
+        //   ① `setActions:` 的编码（参数到底是 NSSet 还是 NSArray）
+        //   ② 有没有 `actions` getter（能读才知道现在是空的还是系统填了什么）
+        //   ③ 读出来的东西是什么类、有几个
+        //
+        // 只读：`method_getTypeEncoding` + 一次 getter 调用（读，不写）。
+        const char *actEnc = "-";
+        int getter = 0;
+        const char *nowCls = "-";
+        long nowCount = -1;
+        if (canActions) {
+            Method m = class_getInstanceMethod(object_getClass(context), actSel);
+            if (m != NULL) {
+                const char *e = method_getTypeEncoding(m);
+                if (e != NULL) actEnc = e;
+            }
+            SEL getSel = NSSelectorFromString(@"actions");
+            if ([context respondsToSelector:getSel]) {
+                getter = 1;
+                @try {
+                    id now = ((id (*)(id, SEL))objc_msgSend)(context, getSel);
+                    if (now != nil) {
+                        nowCls = object_getClassName(now);
+                        if ([now respondsToSelector:NSSelectorFromString(@"count")]) {
+                            nowCount = (long)((NSUInteger (*)(id, SEL))objc_msgSend)(
+                                now, NSSelectorFromString(@"count"));
+                        }
+                    }
+                } @catch (NSException *inner) {
+                    nowCls = "threw";
+                }
+            }
+        }
+        // 格式串必须写成**一行**：audit 断言钉的是字面量，跨行的 `@"..." @"..."`
+        // 在产物里是两段，`grep` 找不到完整那一串（0.2.92 同一条坑）。
+        AevonLogRaw([[NSString stringWithFormat:@"probe: tctx cls=%s actions=%d enc=%s getter=%d now=%s n=%ld frame=%d %s | set cls=%s %s",
                       context != nil ? object_getClassName(context) : "nil",
-                      canActions, canFrame, [ctxList UTF8String],
+                      canActions, actEnc, getter, nowCls, nowCount, canFrame,
+                      [ctxList UTF8String],
                       settings != nil ? object_getClassName(settings) : "nil",
                       [setList UTF8String]] UTF8String]);
     } @catch (NSException *e) {

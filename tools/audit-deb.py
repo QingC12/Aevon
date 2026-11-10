@@ -1224,6 +1224,9 @@ def main():
                   # `AevonCallSetBool(presenter, …)` 从 0.2.x 起一直静默失效。
                   b"presenter: resize ctx cls=%@ read=%@",
                   b"presenter: resize ctx no setter cls=%@",
+                  # 0.3.6 — 线 B 扩展：`setActions:` 的真实编码、有没有 getter、
+                  # 现状是什么。三条读数把方向收敛到这一条之后，先问清楚再动手。
+                  b"probe: tctx cls=%s actions=%d enc=%s getter=%d now=%s n=%ld frame=%d %s | set cls=%s %s",
                   b"presenter: birth fail b=%s why=nil id=%s",
                   b"presenter: birth skip b=%s why=nopm",
                   b"presenter: birth threw b=%s why=%s",
