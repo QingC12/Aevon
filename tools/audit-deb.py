@@ -740,6 +740,15 @@ def main():
                   b"presenter.census",
                   b"presenter.force",
                   b"presenter: live app=none scene=none",
+                  # 0.2.84 — 第二轮普查：按选择子反查归属类。第一轮只回答「类在不在」，
+                  # 而写调用需要的是「这一步定义在哪个类上、编码是什么」。三条字面量
+                  # 就是这一轮真的跑过、并且自己收尾了的证词：
+                  #   pass begin … classes=  开始扫，附带运行时类总数
+                  #   pass end found=…       扫完，命中的「选择子 × 类」总条数
+                  #   aborted                拿不到类表（真机上不该出现，出现即这一版白跑）
+                  b"carrier: pass begin why=",
+                  b"carrier: pass end found=",
+                  b"carrier: pass aborted, no class list",
                   # 0.2.75 — 安全闸的**运行期**复查。Aevon(207) 里用户把 G0 与 G1
                   # 都打开，`win: touch in=17 eat=3` 照样在吞 —— 原因是设置侧只写
                   # 文件/偏好不发通知，而闸本身只在加载时判定一次。这五条就是

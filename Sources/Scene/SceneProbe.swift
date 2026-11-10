@@ -831,9 +831,14 @@ zStackParticipantDidChange:
     /// 少核一个字段的代价是 SpringBoard 崩 —— 所以先落纸，再动手。
     private static let presenterClassNames = [
         "UIScenePresentationManager",
-        "UIScenePresenter",
+        // 0.2.84 — 真名带下划线。0.2.83 写的是 `UIScenePresenter`，于是
+        // `exists=0`；Aevon(215) 的 `missing=2` 里有一个是我们自己打错的字，
+        // 不是这台机器没有它（同一份日志里 `_UIScenePresenter=1`）。
+        "_UIScenePresenter",
         "UIScenePresentationContext",
-        "UIScenePresentationContextAttributes",
+        // 0.2.84 — `UIScenePresentationContextAttributes` 不存在；可变子类真名是
+        // `UIMutableScenePresentationContext`。同一个字面错误，同一个后果。
+        "UIMutableScenePresentationContext",
         "_UIContextLayerHostView",
         "_UISceneLayerHostView",
         "SBDeviceApplicationSceneViewController",
@@ -982,6 +987,9 @@ zStackParticipantDidChange:
         let second = " missing=" + String(missing)
             + " ms=" + String(Int(Date().timeIntervalSince(start) * 1000))
         censusNote(first + second)
+        // 0.2.84 — 第二轮接在后面。它自己分批、自己收尾（`carrier: pass end`），
+        // 所以这一行不阻塞：第一轮的账先落地，第二轮的账随后到，两轮各自可读。
+        runCarrierCensus(why: why)
     }
 
     private static func describeCarrier(_ cls: AnyClass, name: String) {
@@ -1027,7 +1035,7 @@ zStackParticipantDidChange:
         // 形状：这三类的 ivar 就是 P1 的接口面。别的类不看，省日志。
         let wantsIvars = (name == "_UIContextLayerHostView"
                           || name == "UIScenePresentationManager"
-                          || name == "UIScenePresenter")
+                          || name == "_UIScenePresenter")
         if wantsIvars, let list = ivars {
             for index in 0..<Int(ivarCount) {
                 let ivar = list[index]
@@ -1040,7 +1048,7 @@ zStackParticipantDidChange:
         }
 
         // 全量方法名：这两类方法数适中，且 P1 的每一步调用都长在这上面。
-        let wantsMethods = (name == "UIScenePresenter"
+        let wantsMethods = (name == "_UIScenePresenter"
                             || name == "UIScenePresentationManager")
         if wantsMethods, let list = instanceList {
             for index in 0..<Int(instanceCount) {
@@ -1075,10 +1083,215 @@ zStackParticipantDidChange:
         let pm2 = box.responds(to: NSSelectorFromString("presentationManager")) ? 1 : 0
         let sp = box.responds(to: NSSelectorFromString("_scenePresenter")) ? 1 : 0
         let sv = box.responds(to: NSSelectorFromString("_sceneView")) ? 1 : 0
+        // 0.2.84 — 0.2.83 那四个名字（`_presentationManager` / `presentationManager`
+        // / `_scenePresenter` / `_sceneView`）全是我猜的，于是四个零。真入口在
+        // 生产代码里天天用：`float()` 拿 `scene` 的 `uiPresentationManager`，
+        // 历史日志里 `win: presenter cls=_UIScenePresenter` 出现过几百次。
+        // 所以这一行改成问那三个**真的会用到**的名字，把「猜」换成「核」。
+        let fb = box.responds(to: NSSelectorFromString("_fbScene")) ? 1 : 0
+        let bs = box.responds(to: NSSelectorFromString("_scene")) ? 1 : 0
+        let upm = box.responds(to: NSSelectorFromString("uiPresentationManager")) ? 1 : 0
         let cls = NSStringFromClass(type(of: scene))
         let first = "presenter: live app=1 scene=" + cls + " pm=" + String(pm)
         let second = " pm2=" + String(pm2) + " sp=" + String(sp) + " sv=" + String(sv)
-        censusNote(first + second)
+        let third = " fb=" + String(fb) + " bs=" + String(bs) + " upm=" + String(upm)
+        censusNote(first + second + third)
+    }
+
+    // MARK: - 载体 census II（0.2.84）
+
+    /// 第二轮问的不是「类在不在」，是**这一步归谁**。
+    ///
+    /// 第一轮（0.2.83）用一张写死的「类 × 选择子」表去问，问出来的只有
+    /// 「这个类有没有」。而母本的链路是六步拼接的，写调用真正需要的另一张纸
+    /// 是：每一步的选择子**定义在哪个类上、编码是什么、是实例还是类方法**。
+    /// 0.2.83 的 `live pm=0 pm2=0 sp=0 sv=0` 就是这个缺口的形状 —— 四个名字
+    /// 全是我猜的，猜错一次就是四个零。
+    ///
+    /// 这一轮改为**按选择子反查归属**：遍历运行时里已注册的类，只看自有方法表
+    /// （`class_copyMethodList`，不含继承），命中的记下类名与编码。母本六步
+    /// 里的每一步名字都会因此落到一个具体的类上。
+    ///
+    /// 只读、分批、每批前落盘：`objc_copyClassList` 一次拿全量类表，每 800 个
+    /// 类让出一次 runloop（开机那一拍不许出现一整段长阻塞），批前把进度写进
+    /// `presenter.step`，崩了下次启动由 `reportPresenterDeath` 点名到批。
+    private static let carrierSelectors: [String] = [
+        // 一、激活拦截（Stheno 的 `_activateBundleID:…` 一族，三处证伪之后
+        //     唯一还没被本工程碰过的那一步）
+        "_activateBundleID:requestID:isTrusted:options:source:originalSource:withResult:",
+        "launchApplicationWithIdentifier:suspended:",
+        "_handleOpenApplicationRequest:options:activationSettings:origin:withResult:",
+        // 二、建 scene（母本走的是 SBSceneManager 的完整版，不是 FBSceneManager 的简版）
+        "_createSceneWithDefinition:settings:initialClientSettings:transitionContext:fromRemnant:usingClientProvider:completion:",
+        "_scene:interceptUpdateWithNewSettings:",
+        "_setDeactivationReasons:onScene:withSettings:reason:",
+        // 三、取呈现层
+        "uiPresentationManager",
+        "createPresenterWithIdentifier:priority:",
+        "createPresenterWithIdentifier:",
+        "createPresenterForLayerTarget:identifier:priority:",
+        "_presenterWithIdentifier:",
+        // 四、宿主视图
+        "presentationView",
+        "sceneLayer",
+        "initWithSceneLayer:",
+        "modifyPresentationContext:",
+        "setResizesHostedContext:",
+        // 五、另一条（借系统自己的宿主）
+        "newSceneViewController",
+        "newSceneViewWithReferenceSize:contentOrientation:containerOrientation:hostRequester:",
+        "initWithSceneHandle:",
+        "sceneIfExists",
+        // 六、收尾
+        "_dismissPresentable:withReason:animated:userInfo:",
+    ]
+
+    /// 这五类要**全量**方法表 —— 上一步就该有，0.2.83 只给了名字带过滤的那几行。
+    private static let carrierDumpClasses = [
+        "_UIScenePresenter",
+        "_UIContextLayerHostView",
+        "_UISceneLayerHostView",
+        "UIScenePresentationContext",
+        "UIMutableScenePresentationContext",
+    ]
+
+    private static var carrierHits: [String: [String]] = [:]
+    private static var carrierScanFrom = 0
+    private static var carrierTotal = 0
+    private static var carrierList: UnsafeMutablePointer<AnyClass>? = nil
+
+    /// 选择子的名字指针做键：同一套运行时里选择子是唯一的，指针就是身份。
+    /// 用 `Set<Selector>` 也行，但字符串名字在 Swift 覆盖层里的可哈希性属于
+    /// 平台细节，而这条路上不值得为一个 `Set` 的写法再烧一次 CI。
+    private static let carrierSelectorKeys: Set<UInt> = {
+        var set = Set<UInt>()
+        for name in carrierSelectors {
+            let sel = sel_registerName(name)
+            if let text = sel_getName(sel) {
+                set.insert(UInt(bitPattern: UnsafeRawPointer(text)))
+            }
+        }
+        return set
+    }()
+
+    static func runCarrierCensus(why: String) {
+        // 设置页按钮可能在上一轮扫描还没走完时被再点一下。类表是静态的，两轮
+        // 并排跑只会把同一条账写两遍、把批游标搅乱 —— 直接不接。
+        if carrierList != nil {
+            censusNote("carrier: pass busy, ignored why=" + why)
+            return
+        }
+        for name in carrierDumpClasses {
+            try? name.write(toFile: Aevon.presenterStepPath, atomically: true,
+                            encoding: .utf8)
+            if let cls = NSClassFromString(name) {
+                dumpCarrierClass(cls, name: name)
+            } else {
+                censusNote("carrier: class " + name + " exists=0")
+            }
+        }
+        try? FileManager.default.removeItem(atPath: Aevon.presenterStepPath)
+        carrierHits = [:]
+        carrierScanFrom = 0
+        var total: UInt32 = 0
+        guard let list = objc_copyClassList(&total) else {
+            censusNote("carrier: pass aborted, no class list")
+            return
+        }
+        carrierList = list
+        carrierTotal = Int(total)
+        censusNote("carrier: pass begin why=" + why + " classes=" + String(carrierTotal))
+        DispatchQueue.main.async { carrierStep() }
+    }
+
+    private static func carrierStep() {
+        guard let list = carrierList else { return }
+        // 800 个类一批：`class_copyMethodList` 会把这个类的元数据摊开（Swift 类
+        // 还要先实例化 metadata），一个批次的耗时不是常数。批小一点，开机那一拍
+        // 就不会出现一整段几百毫秒的主线程阻塞。
+        let end = min(carrierScanFrom + 800, carrierTotal)
+        let from = carrierScanFrom
+        try? ("carrier+" + String(from)).write(toFile: Aevon.presenterStepPath,
+                                               atomically: true, encoding: .utf8)
+        if from % 8000 == 0 {
+            censusNote("carrier: scan at=" + String(from) + "/" + String(carrierTotal))
+        }
+        for index in from..<end {
+            let cls: AnyClass = list[index]
+            var count: UInt32 = 0
+            guard let methods = class_copyMethodList(cls, &count) else { continue }
+            var slot = 0
+            while slot < Int(count) {
+                let sel = method_getName(methods[slot])
+                defer { slot += 1 }
+                guard let text = sel_getName(sel),
+                      carrierSelectorKeys.contains(UInt(bitPattern: UnsafeRawPointer(text)))
+                else { continue }
+                let name = NSStringFromSelector(sel)
+                let enc = method_getTypeEncoding(methods[slot]).map { String(cString: $0) } ?? "?"
+                carrierHits[name, default: []].append(NSStringFromClass(cls) + " " + enc)
+            }
+            free(methods)
+        }
+        carrierScanFrom = end
+        if end < carrierTotal {
+            DispatchQueue.main.async { carrierStep() }
+            return
+        }
+        free(list)
+        carrierList = nil
+        try? FileManager.default.removeItem(atPath: Aevon.presenterStepPath)
+        emitCarrierHits()
+    }
+
+    private static func emitCarrierHits() {
+        var found = 0
+        for name in carrierSelectors {
+            let hits = carrierHits[name] ?? []
+            found += hits.count
+            if hits.isEmpty {
+                censusNote("carrier: none " + name)
+                continue
+            }
+            var head = hits
+            if head.count > 6 { head = Array(hits.prefix(6)) }
+            let body = head.joined(separator: " ; ")
+            let countText = " n=" + String(hits.count) + " | "
+            censusNote("carrier: own " + name + countText + body)
+        }
+        let tail = "carrier: pass end found=" + String(found)
+            + " for=" + String(carrierSelectors.count)
+        censusNote(tail)
+    }
+
+    private static func dumpCarrierClass(_ cls: AnyClass, name: String) {
+        var methodCount: UInt32 = 0
+        let methods = class_copyMethodList(cls, &methodCount)
+        defer { if let list = methods { free(list) } }
+        var ivarCount: UInt32 = 0
+        let ivars = class_copyIvarList(cls, &ivarCount)
+        defer { if let list = ivars { free(list) } }
+        let parent = class_getSuperclass(cls).map { NSStringFromClass($0) } ?? "nil"
+        let head = "carrier: class " + name + " methods=" + String(methodCount)
+        censusNote(head + " ivars=" + String(ivarCount) + " super=" + parent)
+        if let list = methods {
+            var index = 0
+            while index < Int(methodCount) {
+                defer { index += 1 }
+                let text = NSStringFromSelector(method_getName(list[index]))
+                let enc = method_getTypeEncoding(list[index]).map { String(cString: $0) } ?? "?"
+                censusNote("carrier: m " + name + " " + text + " " + enc)
+            }
+        }
+        if let list = ivars {
+            var index = 0
+            while index < Int(ivarCount) {
+                defer { index += 1 }
+                let field = ivar_getName(list[index]).map { String(cString: $0) } ?? "?"
+                let type = ivar_getTypeEncoding(list[index]).map { String(cString: $0) } ?? "?"
+                censusNote("carrier: v " + name + "." + field + " " + type)
+            }
+        }
     }
 
     static func runWindow() {
