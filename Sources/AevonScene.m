@@ -6058,6 +6058,23 @@ static void AevonShareSwapTick(char *target, char *source, int tick) {
             free(target); free(source);
             return;
         }
+        // 0.2.72 — 来源已经在卡片里：**不要再把它顶回前台**。
+        //
+        // 0.2.71 的真机现场（09:41:36）是这一串：
+        //   notify: share swap restore b=com.tencent.mqq door=1
+        //   win: card yield seen b=com.tencent.mqq now=430x932 want=430x717
+        //   win: card yielded to fullscreen b=com.tencent.mqq
+        // 授权回跳时 QQ 本来好好待在卡里，这一句把它拉成整屏，卡片随即让路 ——
+        // 用户看到的就是「授权完 QQ 突然全屏」。来源已经有卡时不需要它让位：
+        // 它不在前台，目标那一份 scene 本来就能被直接接走。
+        if (AevonCardIsUpFor(source) == 1) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"notify: share swap keep b=%s src=%s",
+                          target, source] UTF8String]);
+            AevonOpenCardDirect(target);
+            free(target); free(source);
+            return;
+        }
         NSInteger door = AevonLaunchForeground(sourceID);
         AevonLogRaw([[NSString stringWithFormat:@"notify: share swap restore b=%s door=%d",
                       source, (int)door] UTF8String]);
@@ -6217,7 +6234,17 @@ static void AevonAuthSwapTick(char *target, int tick, int build) {
         free(target);
         return;
     }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+    // 0.2.72 — 前四拍用 15 ms，之后回到 50 ms。
+    //
+    // `tick >= 1` 那道门是「让系统那次激活先落地」，不是「等 50 毫秒」；
+    // 真机上完成的时刻由 scene 登记决定，所以把前四拍的间隔压到 15 ms
+    // 只是让「scene 一登记就接走」这件事早 35~135 ms 发生 —— 用户看到的
+    // 整屏窗口就是从 50 ms 起算的，这一改直接把那段压掉。
+    // 0.2.71 之前的 50 ms 固定节拍会让 `first frame shown` 之后还要多等一拍，
+    // 那正是「授权先整屏一下」的观感来源。
+    int64_t step = (tick < 4) ? (int64_t)(0.015 * NSEC_PER_SEC)
+                              : (int64_t)(0.05 * NSEC_PER_SEC);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, step),
                    dispatch_get_main_queue(), ^{
         AevonAuthSwapTick(target, tick + 1, build);
     });
@@ -6640,9 +6667,20 @@ static int AevonOpenDecide(id request, id options, id settings,
     if (!notifyKind) {
         NSString *linkURL = AevonOpenURLOf(request, options);
         int isSafari = strncmp(bundle, "com.apple.mobilesafari", 22) == 0;
+        // 0.2.72 — 支付并入授权一族。
+        //
+        // 逆向对照（FloatingView / Stheno / SplitView）：它们没有一条按 scheme
+        // 或 bundle 特判微信 / QQ / 支付宝，接管的是「**应用启动**」这件事本身
+        // （`FBSystemService -openApplication:options:withResult:`、
+        // `SBMainWorkspace -_activateBundleID:…withResult:`）。所以凡是落到
+        // 「系统要激活一个 App」的请求，在它们那里都进同一个窗口；Aevon 这边
+        // 对应的就是这一支。支付宝 / 云闪付被支付 SDK 拉起时形状与微信登录
+        // 完全相同（带 URL + 来源是第三方 App），漏掉它们等于每次支付都整屏。
         int isOAuth = !isSafari &&
             (strncmp(bundle, "com.tencent.xin", 15) == 0 ||
-             strncmp(bundle, "com.tencent.mqq", 15) == 0);
+             strncmp(bundle, "com.tencent.mqq", 15) == 0 ||
+             strncmp(bundle, "com.eg.android.AlipayGphone", 27) == 0 ||
+             strncmp(bundle, "com.unionpay", 12) == 0);
         // 0.2.53 — 通用链接被系统解析到了别的 App（GitHub 之类）：改投 Safari。
         // 条件是「browsing-web 活动 + 没有 paste token + 不是分享」，所以只命中
         // 「用户点了一个网页链接」这一种，不会误伤深链回调和分享。
