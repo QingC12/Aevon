@@ -4050,7 +4050,7 @@ static void AevonProbePresenterBirth(id scene) {
                       object_getClassName(scene), identText,
                       hasPM, hasCreate, pmText] UTF8String]);
     } @catch (NSException *e) {
-        AevonLogRaw(@"probe: pres threw");
+        AevonLogRaw("probe: pres threw");
     }
 }
 
