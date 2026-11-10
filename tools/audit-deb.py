@@ -1218,6 +1218,12 @@ def main():
                   # 真机撞了 7 次 `already in use`，只有卡片拆掉之后才成功 1 次。
                   b"presenter: birth ok=1 b=%s why=%s cls=%s view=%s resize=%d",
                   b"presenter: birth fail b=%s why=busy(%s) id=%s",
+                  # 0.3.5 — `setResizesHostedContext:` 的 owner 是
+                  # `UIMutableScenePresentationContext`，不是 presenter。
+                  # Aevon(230) 四路全部 `resize=-1` 就是这个原因；生产链那句
+                  # `AevonCallSetBool(presenter, …)` 从 0.2.x 起一直静默失效。
+                  b"presenter: resize ctx cls=%@ read=%@",
+                  b"presenter: resize ctx no setter cls=%@",
                   b"presenter: birth fail b=%s why=nil id=%s",
                   b"presenter: birth skip b=%s why=nopm",
                   b"presenter: birth threw b=%s why=%s",

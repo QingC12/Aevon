@@ -2389,7 +2389,20 @@ zStackParticipantDidChange:
         // scene's own size. Without it a card that is a fifth of the screen is
         // asking a full-screen surface to shrink itself, and an unshrunk surface
         // in a cropped view is not necessarily a picture.
-        _ = AevonCallSetBool(presenter, "setResizesHostedContext:", true)
+        //
+        // ⛔ 0.3.5 — **这一句从 0.2.x 起就是静默失效的。**
+        //
+        // Aevon(230) 的选主子普查（同一天日志，20:42:11）写得很直接：
+        //   presenter: selector setResizesHostedContext: owner=UIMutableScenePresentationContext
+        //   presenter: selector modifyPresentationContext: owner=_UIScenePresenter
+        // `setResizesHostedContext:` **不在 presenter 上**，所以
+        // `AevonCallSetBool(presenter, …)` 恒返回 0；而这里写的是 `_ =`，
+        // 返回值被丢掉 —— 于是「没调成」和「调成了」在日志里长得一模一样。
+        // 同一个形状在 Aevon(230) 的探针里表现为四路全部 `resize=-1`。
+        //
+        // 正确入口：`modifyPresentationContext:`（presenter，参数 block），
+        // block 收到 `UIMutableScenePresentationContext`，在它身上写。
+        AevonModifyContextSetResize(presenter, "setResizesHostedContext:")
 
         guard let raw = value(of: presenter, "presentationView"),
               let view = raw as? UIView else {

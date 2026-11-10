@@ -38,6 +38,7 @@ extern void AevonOpenFromNotification(const char *bundleID);
 // 0.2.46 — 跳过 openCard 的 home-first，直接建卡。
 // 分享那条路先把来源 App 顶回前台，目标已经不占全屏，不需要再按一次 Home。
 extern void AevonOpenCardDirect(const char *bundleID);
+extern int AevonModifyContextSetResize(id presenter, const char *selName);
 // 0.1.88 — 两条只读查询，都由 Swift 侧 `@_cdecl` 导出：
 //   AevonActivateSwitchOff()  → 1 表示 `notify.off` 在，一个字节都不许改行为；
 //   AevonCardIsUpFor(bundle)  → 1 表示这个 App 已经在主悬浮窗/停靠小窗里。
@@ -4235,14 +4236,29 @@ static id AevonPresenterBuild(id scene, const char *why) {
         // 「告诉 presenter：把 scene 的承载内容缩到 presenter 的尺寸」——
         // 少了这一句，一个只占屏幕五分之一的卡就是在要求一张全屏画布自己缩小。
         //
-        // 只问、只写，不 activate、不挂窗口：本版仍不改变任何观感，
-        // 目的是确认「这个 presenter 收不收这一刀」。
+        // ⛔ 0.3.5 — **这一刀不能写在 presenter 上。**
+        //
+        // Aevon(230) 四路读数全是 `resize=-1`，而同一天的日志自己给出了答案：
+        //   presenter: selector modifyPresentationContext: owner=_UIScenePresenter        v24@0:8@?16
+        //   presenter: selector setResizesHostedContext:  owner=UIMutableScenePresentationContext v20@0:8B16
+        //   presenter: selector setResizesHostedContext:  owner=_UIContextLayerHostView
+        //   presenter: selector setResizesHostedContext:  owner=_UISceneLayerHostView
+        //
+        // **owner 不是 `_UIScenePresenter`。** 所以 `[presenter setResizesHostedContext:]`
+        // 永远答 0 —— 这也解释了生产链 `SceneProbe.swift:2392` 那一句为什么一直是
+        // 静默失效：返回值被 `_ =` 丢掉了，从来没人看过。
+        //
+        // 正确入口是 `modifyPresentationContext:`（presenter 上，参数是 block）：
+        // block 收到一个 `UIMutableScenePresentationContext`，在**它**身上写。
+        //
+        // 本版仍然只写、不 activate、不挂窗口。
         int resized = -1;
-        SEL resizeSel = NSSelectorFromString(@"setResizesHostedContext:");
-        if ([presenter respondsToSelector:resizeSel]) {
+        SEL modifySel = NSSelectorFromString(@"modifyPresentationContext:");
+        if ([presenter respondsToSelector:modifySel]) {
             @try {
-                ((void (*)(id, SEL, BOOL))objc_msgSend)(presenter, resizeSel, YES);
-                resized = 1;
+                // 直接调 Swift 侧那一份（与生产链同一个实现，只此一处）。
+                resized = (int)AevonModifyContextSetResize(presenter,
+                                                           "setResizesHostedContext:");
             } @catch (NSException *inner) {
                 resized = 0;
             }
