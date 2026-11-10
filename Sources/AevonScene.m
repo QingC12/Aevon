@@ -1847,6 +1847,36 @@ static void AevonSeenNote(id scene) {
 /// `objc_loadWeak` 而不是 `objc_loadWeakRetained`：调用点在主线程、拿到就立刻用，
 /// 中间没有别的释放机会；而 `+1` 的那一版在 MRC 下要么漏 release（每次开窗漏一个
 /// scene 引用），要么依赖 autorelease pool 的深度 —— 两条都比这里多一个失败面。
+/// 0.2.73 — 直接问 `FBSceneManager`：「这个 bundle 现在有活着的 scene 吗」。
+///
+/// 0.2.72 真机，两次授权都是这一行结束的：
+///
+///     notify: auth swap giveup b=com.tencent.mqq fg=-1 live=0 tick=60 build=0
+///
+/// 而同一分钟 QQ 的 paste token 已经出现（`notify: paste token b=com.tcl.tclplus`
+/// 紧接 `notify: share source b=com.tencent.mqq`）—— 进程在跑、scene 在，只是它
+/// **没有从我们的拦截点经过**：冷启动那一次 settings 更新早于这次登记，之后
+/// 又没有第二次更新，于是 `AevonSeenNote` 永远没记到它。
+///
+/// 「我们没看到」被当成了「它不存在」，收卡就必然放弃。这里补一条不依赖拦截
+/// 的读数：枚举系统的 scene 账本，按 identifier 找。它只读，且只在主线程调用。
+static id AevonLiveSceneForBundle(NSString *bundle) {
+    if (bundle == nil || [bundle length] == 0) return nil;
+    const char *text = [bundle UTF8String];
+    if (text == NULL || text[0] == '\0') return nil;
+    id manager = AevonSceneManager();
+    if (manager == nil) return nil;
+    __block id found = nil;
+    AevonEnumerateScenes(manager, ^(id scene) {
+        if (found != nil || scene == nil) return;
+        const char *name = AevonSceneName(scene);
+        if (name == NULL || strcmp(name, "?") == 0) return;
+        if (strstr(name, text) == NULL) return;
+        found = scene;
+    });
+    return found;
+}
+
 id AevonSeenSceneForBundle(NSString *bundle) {
     if (bundle == nil || [bundle length] == 0) return nil;
     const char *text = [bundle UTF8String];
@@ -1856,7 +1886,8 @@ id AevonSeenSceneForBundle(NSString *bundle) {
         id scene = objc_loadWeak(&AevonSeenWeak[i]);
         if (scene != nil) return scene;
     }
-    return nil;
+    // 0.2.73 — 表里查不到不等于没有 scene（见上面那段真机现场）。
+    return AevonLiveSceneForBundle(bundle);
 }
 
 /// 表里现在记了几个 —— 日志用，不参与任何判断。
@@ -6174,11 +6205,22 @@ static void AevonShareSwapSchedule(const char *target) {
 /// 与 `AevonShareSwapTick` 的区别只有一条：**不去顶来源 App**。那条是给分享用
 /// 的（分享面板开在来源 App 里，要先把它顶回来才能看见下一屏）；授权时来源 App
 /// 正在等 QQ 的 code，把它顶上来只会把 QQ 挤下去。
-/// `build` = 0：授权那一族（系统已经放行、激活之后收卡）。等不到 scene 就彻底
-///              松手，让系统自己全屏 —— 那时我们连 scene 都没有，建卡也没内容。
+/// `build` = 0：授权那一族（系统已经放行、激活之后收卡）。等满 6 秒仍没有
+///              scene，就自己建一份 —— 0.2.72 真机上「放弃」的结果是
+///              `auth swap giveup … build=0` 之后屏幕上什么都没发生，
+///              用户点「授权」等于没点。宁可慢，也必须落到卡里。
 /// `build` = 1：落点那一族（`display` 已经被切掉，系统不会摆屏）。等不到 scene
 ///              说明这次激活根本没造出 scene，必须自己建一份，否则就是「点了
 ///              没反应」。
+static void AevonAuthSwapTick(char *target, int tick, int build);
+
+/// 0.2.73 — 第 `tick` 拍对应的真实毫秒数。前四拍是 15 ms，之后 50 ms，
+/// 所以 `tick * 50` 从第五拍起就不准了，日志里必须换算。
+static int AevonAuthSwapElapsed(int tick) {
+    if (tick <= 4) return tick * 15;
+    return 60 + (tick - 4) * 50;
+}
+
 static void AevonAuthSwapTick(char *target, int tick, int build) {
     if (target == NULL) return;
     if (target[0] == '\0') { free(target); return; }
@@ -6209,28 +6251,39 @@ static void AevonAuthSwapTick(char *target, int tick, int build) {
     if (tick >= 1 && scene != nil) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"notify: auth swap card b=%s after=%dms fg=%d live=%d board=%d",
-                      target, tick * 50, fg, live, AevonSpringboardActive()] UTF8String]);
+                      target, AevonAuthSwapElapsed(tick), fg, live,
+                      AevonSpringboardActive()] UTF8String]);
         AevonOpenCardDirect(target);
         free(target);
         return;
     }
-    int deadline = build ? 30 : 60;
+    // 0.2.73 — 授权那一族从 60 拍（3 s）放宽到 120 拍（6 s）。
+    // 0.2.72 的两次放弃都发生在 QQ 冷启动期间：`tick=60` 时它的 scene 还没造出来，
+    // 而 paste token 在放弃之后才出现。多等 3 秒的代价是用户多看一眼来源 App；
+    // 少等的代价是这一次授权完全没被接管。两害相权，等。
+    int deadline = build ? 30 : 120;
     if (tick >= deadline) {
+        int seen = AevonSeenCountOf();
+        int fb = AevonLiveSceneForBundle(targetID) != nil ? 1 : 0;
         AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: auth swap giveup b=%s fg=%d live=%d tick=%d build=%d",
-                      target, fg, live, tick, build] UTF8String]);
+                      @"notify: auth swap giveup b=%s fg=%d live=%d tick=%d build=%d seen=%d fb=%d",
+                      target, fg, live, tick, build, seen, fb] UTF8String]);
+        // 0.2.73 — 两族都建卡。
+        //
+        // 原来只有 `build=1`（落点）建卡，授权那一族是「松手、让系统全屏」。
+        // 真机上这条松手分支的下场是屏幕上**什么都没发生**：系统那次激活没造出
+        // scene，我们也不再管，用户点「授权」等于没点。而卡片自己有能力建 scene
+        // （`win: own start … door=1` → `own compose ok`），没有理由不用它。
         if (build) {
-            // 系统没摆屏、也没给 scene：自己建一份。慢一点，但「点了有反应」。
             AevonLogRaw([[NSString stringWithFormat:
                           @"landing: url build b=%s after=%dms",
-                          target, tick * 50] UTF8String]);
-            AevonOpenCardDirect(target);
-            free(target);
-            return;
+                          target, AevonAuthSwapElapsed(tick)] UTF8String]);
+        } else {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"notify: auth swap build b=%s after=%dms seen=%d fb=%d",
+                          target, AevonAuthSwapElapsed(tick), seen, fb] UTF8String]);
         }
-        // 收不进卡就彻底松手：留着登记会让这个 App 的整屏只画上半截。
-        AevonSceneFrameClearBundle(targetID);
-        AevonHookDisarm(targetID);
+        AevonOpenCardDirect(target);
         free(target);
         return;
     }
