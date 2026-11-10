@@ -1092,6 +1092,39 @@ static BOOL AevonOwnStageFirst(NSString *bundleID) {
 /// 2 = 已经有一次在跑（不重入）。
 NSInteger AevonOwnStart(NSString *bundleID, CGRect frame, const char *from) {
     if (bundleID.length == 0) return 0;
+
+    // ⛔ 0.3.1 — **这条路整条关闭，任何一行私有 API 都不再执行。**
+    //
+    // Aevon(225) 的安全模式就崩在这条链里。崩溃报告栈（faultingThread 0）：
+    //   libdispatch _dispatch_main_queue_drain
+    //   Aevon.dylib +0x5de4                                    ← 我们
+    //   FrontBoard -[FBSceneManager createSceneWithDefinition:initialParameters:]
+    //   FrontBoard -[FBSceneWorkspace _createSceneWithDefinition:...]
+    //   FrontBoard -[FBScene initWithDefiniton:remnant:settings:...]
+    //   FrontBoard -[FBScene _activateWithTransitionContext:error:]
+    //   FrontBoard -[FBWorkspace registerHost:settings:...error:]  ← EXC_BREAKPOINT/SIGTRAP
+    //
+    // 触发场景：支付宝付完回跳联通 App（`chinaunicom://safepay/?{...}`），联通当时
+    // 没有活 scene（日志 `win: listed scene all shell b=com.chinaunicom.mobilebusiness
+    // n=1 best=0`），于是落到这一格自建。
+    //
+    // 而且这条路在**业务上**也早就被判死（0.2.74~0.2.78 真机）：自建 scene 里没有
+    // 系统那一次激活 ⇒ QQ `rsp=0`、支付宝 `timeout 6342ms`、微信空壳 `cs=0`。
+    // 既危险又没用，留一行都是负债。
+    //
+    // 返回 0 = 「这套私有面不可用」，调用方按原路回落（挂起启动 + 等系统 scene）。
+    // 不删函数体是因为它被 900 行互相关联的代码引用，整段摘除的风险远大于收益；
+    // 但入口这一行保证**一次 objc_msgSend 都不会发生**。
+    // 用 `volatile` 是刻意的：写死 `return 0` 会让编译器判定后面整段不可达，
+    // `-Wunreachable-code` 在 Theos 的默认告警集里会把整包编译打断。一个运行时
+    // 读到的常量既保证行为，也不会触发那条告警。
+    static volatile int AevonOwnRetired = 1;
+    if (AevonOwnRetired) {
+        AevonOwnLog(@"win: own disabled b=%@ from=%s (0.3.1 自建 scene 下线)",
+                    bundleID, from != NULL ? from : "-");
+        return 0;
+    }
+
     // 1 = 在建、2 = 建好了还没被取走。两种都算「有一次在跑」：覆盖 2 会丢掉
     // 上一张卡还没拿到手的那个 scene，而丢掉的 scene 没有人会去 destroy 它。
     if (AevonOwnPhase == 1 || AevonOwnPhase == 2) return 2;
@@ -1826,6 +1859,10 @@ static int AevonSeenCount = 0;
 ///
 /// 所以这里不判断归不归我们管：只要名字是 `sceneID:` 开头、不是 SpringBoard 自己
 /// 的，就记下来。归谁管由 `AevonSlotOfScene` 在真正的建卡路径上决定。
+/// 0.3.1 — 三条取证线的前向声明。`AevonSeenNote` 在文件很靠前的位置，
+/// 而线 C 的实现跟着 `AevonActFrameBirth` 一起放（那里才有 scene 相关的上下文）。
+static void AevonProbePresenterBirth(id scene);
+
 static void AevonSeenNote(id scene) {
     if (scene == nil) return;
     const char *name = AevonSceneName(scene);
@@ -1855,6 +1892,11 @@ static void AevonSeenNote(id scene) {
         }
     }
     objc_storeWeak(&AevonSeenWeak[slot], scene);
+    // 0.3.1 — 线 C：第一次看见这个 scene 的那一刻，正是「已建、还没上屏」。
+    // 挂在这里而不是 completion 里，是因为 completion 那个 block 由系统持有、
+    // 我们只在钩子里见过它的指针，包装它等于改行为；而 `AevonSeenNote` 是
+    // 系统自己把 scene 交出来的第一个只读窗口，足够回答「presenter 能不能建」。
+    AevonProbePresenterBirth(scene);
 }
 
 /// 拦截点记过的、名字含这个 bundle 的 scene。没有就返回 nil。
@@ -3959,6 +4001,48 @@ static NSString *AevonActBlockSig(id block) {
 ///   ③ 当下的帧认得出是整块屏幕（宽 ≥ 400、高 ≥ 900）。横屏、外接屏、分屏全在这里挡掉。
 /// 写的是「宽 × (高 − 215)」—— 215 就是画布让给键盘的那一段，717 = 932 − 215 的同一个数。
 /// 写完立刻读回，读回值原样进日志：**这条读数是这一版唯一的行为证据**。
+
+/// 0.3.1 — 线 C：scene 已建、还没上屏那一拍，presenter 能不能建。
+///
+/// 这是 Stheno 的全部秘密所在：它不消灭激活，只是**在系统把 scene 摆上屏之前
+/// 把 presenter 换掉**（`createPresenterWithIdentifier:priority:` 命中 4 次、
+/// `setResizesHostedContext:` 2 次、`uiPresentationManager` 2 次）。scene 的
+/// `activationState` 由 scene 自己决定，与占屏面积无关 —— 0.2.90 已确认这一条。
+///
+/// 所以只要 completion 这一拍能建出 presenter，我们就能照它的做法走，
+/// 而不必去改任何 settings（那条路对四个 App 全被 `immutable` 挡住）。
+///
+/// 只读：只问 `uiPresentationManager` 拿不拿得到、`respondsToSelector` 有没有，
+/// 一次 `createPresenterWithIdentifier:` 都不调（那是写行为，要下一版才动）。
+static void AevonProbePresenterBirth(id scene) {
+    if (scene == nil) return;
+    if (__sync_fetch_and_add(&AevonProbePres, 1) >= 4) return;
+    AevonActStep("probe:pres");
+    @try {
+        int hasPM = [scene respondsToSelector:NSSelectorFromString(@"uiPresentationManager")] ? 1 : 0;
+        id pm = nil;
+        if (hasPM) {
+            pm = ((id (*)(id, SEL))objc_msgSend)(scene, NSSelectorFromString(@"uiPresentationManager"));
+        }
+        int hasCreate = (pm != nil &&
+                         [pm respondsToSelector:
+                          NSSelectorFromString(@"createPresenterWithIdentifier:priority:")]) ? 1 : 0;
+        id ident = nil;
+        SEL idSel = NSSelectorFromString(@"identifier");
+        if ([scene respondsToSelector:idSel]) {
+            ident = ((id (*)(id, SEL))objc_msgSend)(scene, idSel);
+        }
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: pres scene=%s id=%s pm=%d create=%d pmcls=%s",
+                      object_getClassName(scene),
+                      [ident isKindOfClass:[NSString class]] ? [(NSString *)ident UTF8String] : "-",
+                      hasPM, hasCreate,
+                      pm != nil ? object_getClassName(pm) : "nil"] UTF8String]);
+    } @catch (NSException *e) {
+        AevonLogRaw(@"probe: pres threw");
+    }
+}
+
 static int AevonActFrameBirth(id settings, NSString *ident,
                               CGRect *beforeOut, CGRect *afterOut,
                               const char **whyOut) {
@@ -4153,6 +4237,9 @@ static void AevonActInstall(NSMutableString *out) {
                               rsig != nil ? [rsig UTF8String] : "-"]
                              UTF8String]);
             }
+            // 0.3.1 — 线 A：先把 options 摊开看一眼（只读，前 3 拍）。
+            // 这一格是 Stheno 唯一动手的地方，它改了什么我们从来不知道。
+            AevonProbeActOptions(options);
             // 原样尾调。参数一个不改、返回值不改，这一版的全部行为就是「没有行为」。
             void (*original)(id, SEL, id, id, BOOL, id, id, id, id) =
                 (void (*)(id, SEL, id, id, BOOL, id, id, id, id))mine->original;
@@ -4222,6 +4309,8 @@ static void AevonActInstall(NSMutableString *out) {
                               clientSettings != nil ? object_getClassName(clientSettings) : "nil",
                               csig != nil ? [csig UTF8String] : "-"] UTF8String]);
             }
+            // 0.3.1 — 线 B：transitionContext 能不能装路由（只读，前 4 拍）。
+            AevonProbeTransitionContext(context, settings);
             // 出生即卡尺寸 —— 这一版唯一一处写行为，并且只写一次（在第一笔提交之前）。
             // 写在**调用原函数之前**是全部要点：之后写就成了又一笔撤销，正是要停的事。
             CGRect birthBefore = CGRectZero;

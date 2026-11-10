@@ -1197,7 +1197,11 @@ def main():
                   b"win: own begin b=%@ from=%s frame=%.0fx%.0f",
                   b"win: own compose ok scene=%s id=%s",
                   b"win: own done phase=%ld scene=%s",
-                  b"win: own start %@ door=%ld live=%d canvas=%.0fx%.0f t=%ldms wait=%ldms",
+                  # 0.3.1 — 自建 scene 整条下线（Aevon(225) 的安全模式就崩在
+                  # `createSceneWithDefinition:initialParameters:` 那一行）。
+                  # 这一格改成「挂起启动 + 等系统 scene」，日志随之改名。
+                  b"win: own retired %@ door=%ld t=%ldms wait=%ldms",
+                  b"win: own disabled b=%@ from=%s",
                   b"win: own scene up after ",
                   b"win: own gave up door=%ld b=%@ after %ldms",
                   b"win: own destroyed %@",

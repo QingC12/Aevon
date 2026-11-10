@@ -1736,18 +1736,44 @@ zStackParticipantDidChange:
             pollForScene(bundleID, ticks: 0, start: Date(), homed: homed, fallback: fallback)
             return
         }
-        let canvas = FloatHost.fatRender(in: UIScreen.main.bounds.size)
-        let started = AevonOwnStart(bundleID, CGRect(origin: .zero, size: canvas), "openCard")
-        Log.write(String(format: "win: own start %@ door=%ld live=%d canvas=%.0fx%.0f t=%ldms wait=%ldms",
-                         bundleID, started, 0, canvas.width, canvas.height,
-                         Int((CFAbsoluteTimeGetCurrent() - ownAt) * 1000),
+        // ⛔ 0.3.1 — **自建 scene 整条下线。**
+        //
+        // Aevon(225) 的崩溃报告把它判死了。栈（faultingThread 0）：
+        //   libdispatch _dispatch_main_queue_drain
+        //   Aevon.dylib +0x5de4
+        //   FrontBoard -[FBSceneManager createSceneWithDefinition:initialParameters:]
+        //   FrontBoard -[FBSceneWorkspace _createSceneWithDefinition:...]
+        //   FrontBoard -[FBScene initWithDefiniton:remnant:settings:...]
+        //   FrontBoard -[FBScene _activateWithTransitionContext:error:]
+        //   FrontBoard -[FBWorkspace registerHost:settings:...error:]   ← EXC_BREAKPOINT
+        //
+        // 崩点就是我们自己调 `createSceneWithDefinition:initialParameters:` 那一行。
+        // 触发场景是支付宝付完回跳联通 App（`chinaunicom://safepay/...`）：联通当时
+        // 没有活 scene（`listed scene all shell n=1 best=0`），于是走了这一格。
+        //
+        // 另外 0.2.74~0.2.78 早就用真机证伪了这条路的**业务**面（QQ `rsp=0`、
+        // 支付宝 `timeout 6342ms`、微信空壳 `cs=0`）：自建 scene 里没有系统那一次
+        // 激活，授权/支付 SDK 不认。既然既危险又没用，就不该留。
+        //
+        // 现在退回「挂起启动 + 等系统 scene」：`launchApplicationWithIdentifier:
+        // suspended:` 只把进程拉起来，不给它建 scene 的机会；scene 由系统在真正
+        // 激活时造，我们只等、只贴。一个私有构造器都不碰。
+        _ = ownAt
+        let launchAt = CFAbsoluteTimeGetCurrent()
+        let door = AevonLaunchSuspended(sharedApplication(), bundleID)
+        Log.write(String(format: "win: own retired %@ door=%ld t=%ldms wait=%ldms",
+                         bundleID, door,
+                         Int((CFAbsoluteTimeGetCurrent() - launchAt) * 1000),
                          Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
-        if started == 1 {
-            mark("OWN-build")
-            markHosted(bundleID)
-            pollForScene(bundleID, ticks: 0, start: Date(), homed: homed, fallback: fallback)
+        guard door == 1 else {
+            AevonHookDisarm(bundleID)
+            fallback("own retired door=" + String(door))
             return
         }
+        mark("OWN-retired")
+        markHosted(bundleID)
+        pollForScene(bundleID, ticks: 0, start: Date(), homed: homed, fallback: fallback)
+        return
         // 走到这里只剩两种情形：`AevonOwnGate` 说这套私有面在这台机器上不齐
         // （连试都不试），或者已经有一次在跑（不重入）。这一张卡的 scene 将来是
         // 系统的那个，关卡时**不能**销毁 —— 见 `AevonOwnHeld`。
