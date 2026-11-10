@@ -4118,7 +4118,12 @@ static void AevonProbeActOptions(id options) {
 /// 只读：问类名、方法表；不动 context 一个字节。
 static void AevonProbeTransitionContext(id context, id settings) {
     if (context == nil && settings == nil) return;
-    if (__sync_fetch_and_add(&AevonProbeTctx, 1) >= 4) return;
+    // 0.3.2 — 只记 `context != nil` 的。
+    //
+    // 0.3.1 前 4 条全是 `cls=nil`（开机那几拍 SpringBoard / SystemAperture 自建
+    // scene 时第 4 参就是 nil），把预算用在了不会说话的样本上。
+    if (context == nil) return;
+    if (__sync_fetch_and_add(&AevonProbeTctx, 1) >= 8) return;
     AevonActStep("probe:tctx");
     @try {
         NSString *ctxList = context != nil ? AevonProbeMethodList(context, 24) : @"-";
@@ -4138,9 +4143,97 @@ static void AevonProbeTransitionContext(id context, id settings) {
     }
 }
 
+/// 0.3.2 — **换承运人原型：只建造，不激活。**
+///
+/// 判据来自 Aevon(227) 的三条读数（都已在本机取证）：
+///   · 线 A `FBSOpenApplicationOptions`：ivar 只有 `_payload`，可写方法只有
+///     `setDictionary:` —— **没有落点位可改**；
+///   · 线 B `settings` 是 `UIApplicationSceneSettings`，48 个方法**零 setter**
+///     （日志原文 `|(no setter)`），`definition` 在业务 App 上还是不可变的
+///     `FBSSceneDefinition` —— **改属性这条路封死**；
+///   · 线 C `pm=1 create=1 pmcls=UIScenePresentationManager` —— **只有换承运人可行**。
+///
+/// 这与 Stheno 的静态形状完全吻合（`_activateBundleID`=2 只为拿时机、
+/// `createPresenterWithIdentifier`=4、`setResizesHostedContext`=2，而
+/// `_handleOpenApplicationRequest` / `_openURLCore` / `overrideAppSceneEntity` 全为 0）。
+///
+/// 本函数只做三件事：拿 pm、建 presenter、把结果写进日志。**不 activate、
+/// 不挂窗口、不改任何 scene 属性。** 目的只有一个：回答「业务 scene 上
+/// `create=` 是不是也成立」—— 线 C 在 0.3.1 里只测到了 Sileo / 文件 App。
+///
+/// 安全：整段 `@try`；任何一步失败立即返回 nil，调用方按原路走（放行 + 收卡），
+/// 一句话都不影响启动。这是「先问能不能，再谈挂不挂」的顺序。
+static id AevonPresenterBuild(id scene, const char *why) {
+    if (scene == nil) return nil;
+    if (AevonActivateSwitchOff()) return nil;
+    // 只对卡目标动手：不是我们要收的那张就不碰。
+    const char *want = AevonActCardBundle;
+    if (want[0] == '\0') return nil;
+    @try {
+        SEL pmSel = NSSelectorFromString(@"uiPresentationManager");
+        if (![scene respondsToSelector:pmSel]) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"presenter: birth skip b=%s why=nopm", want] UTF8String]);
+            return nil;
+        }
+        id pm = ((id (*)(id, SEL))objc_msgSend)(scene, pmSel);
+        if (pm == nil) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"presenter: birth skip b=%s why=nilmgr", want] UTF8String]);
+            return nil;
+        }
+        SEL makeSel = NSSelectorFromString(@"createPresenterWithIdentifier:priority:");
+        if (![pm respondsToSelector:makeSel]) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"presenter: birth skip b=%s why=nocreate", want] UTF8String]);
+            return nil;
+        }
+        // identifier 用固定的那一支：与 `FloatHost` 生产环境用的同名，
+        // 这样「原型建的」与「卡片建的」在日志里可以对上号。
+        id presenter = ((id (*)(id, SEL, id, NSInteger))objc_msgSend)(
+            pm, makeSel, @"com.aevon.float", (NSInteger)0);
+        if (presenter == nil) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"presenter: birth fail b=%s why=nil", want] UTF8String]);
+            return nil;
+        }
+        // `presentationView` 是只读属性：拿它只为了确认这个 presenter 真的可用
+        // （一个没有 view 的 presenter 贴不进卡，0.0.20 的黑屏就是这个形状）。
+        SEL viewSel = NSSelectorFromString(@"presentationView");
+        id view = nil;
+        if ([presenter respondsToSelector:viewSel]) {
+            view = ((id (*)(id, SEL))objc_msgSend)(presenter, viewSel);
+        }
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"presenter: birth ok=1 b=%s why=%s cls=%s view=%s",
+                      want, why != NULL ? why : "-",
+                      object_getClassName(presenter),
+                      view != nil ? object_getClassName(view) : "nil"] UTF8String]);
+        // 原型阶段**不 activate、不挂窗口**。把这个 presenter 交回去只是为了让
+        // 调用方能在同一栈里决定下一步；本次调用方一律忽略返回值。
+        return presenter;
+    } @catch (NSException *e) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"presenter: birth threw b=%s why=%s", want,
+                      e.reason != nil ? [e.reason UTF8String] : "-"] UTF8String]);
+        return nil;
+    }
+}
+
 static void AevonProbePresenterBirth(id scene) {
     if (scene == nil) return;
-    if (__sync_fetch_and_add(&AevonProbePres, 1) >= 4) return;
+    // 0.3.2 — **只记目标场景。**
+    //
+    // 0.3.1 的预算是「前 4 条」，结果被开机时的 Sileo / 文件 App 全吃掉了：
+    // 首条在 19:33:08（开机 +14 s），而第一个业务 scene（QQ）在 19:33:17。
+    // 四路的真实读数一条都没拿到 —— 探针在，但没看着该看的东西。
+    //
+    // 现在先判「这个 scene 是不是我们正要收的那张卡」（`AevonActCardBundle`
+    // 是四路汇合时写下的目标），不是就一个字节都不记。
+    const char *sceneName = AevonSceneName(scene);
+    if (sceneName == NULL || AevonActCardBundle[0] == '\0') return;
+    if (strstr(sceneName, AevonActCardBundle) == NULL) return;
+    if (__sync_fetch_and_add(&AevonProbePres, 1) >= 8) return;
     AevonActStep("probe:pres");
     @try {
         int hasPM = [scene respondsToSelector:NSSelectorFromString(@"uiPresentationManager")] ? 1 : 0;
@@ -4166,6 +4259,11 @@ static void AevonProbePresenterBirth(id scene) {
                       @"probe: pres scene=%s id=%s pm=%d create=%d pmcls=%s",
                       object_getClassName(scene), identText,
                       hasPM, hasCreate, pmText] UTF8String]);
+        // 0.3.2 — 探针说 `create=1` 之后，真的建一次（只建造、不激活）。
+        // 这一步把「有这个选择子」升级成「这个选择子在这个 scene 上能出东西」。
+        if (hasPM && hasCreate) {
+            (void)AevonPresenterBuild(scene, "probe");
+        }
     } @catch (NSException *e) {
         AevonLogRaw("probe: pres threw");
     }
