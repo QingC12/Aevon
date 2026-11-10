@@ -3063,6 +3063,62 @@ static int AevonBundleIsAuthFamily(const char *b) {
 //  三条永远不问：`tel` / `facetime` 是通话界面，整屏是它的正确形态；`file` 是
 //  文件 URL，没有「打开它的 App」这回事。这三个连快路都不进，直接返回 nil。
 
+// MARK: - 0.2.77 解析不出来时的那条路
+//
+// 0.2.76 把「这条 URL 归谁」全押在 LaunchServices 上。Aevon(211) 第一次真机
+// 取到读数，那一次是：
+//
+//   landing: url chinaunicom://safepay/ b=- d=SBApplication a=1 run=0 land=0 n=2
+//
+// `chinaunicom://` 是联通 App 自己的 scheme（装着的），但两条 LS 路都答了 nil，
+// 于是支付回跳整屏。静态证明不了是哪一步断的（类不在 / 选择子不在 / 返回空 /
+// 代理拿不到 bundleIdentifier），所以这一版做两件事：
+//
+//   ① 把失败的那一步记下来 —— `landing: url ls miss step=…`，下份日志直接定位；
+//   ② **不再等它**：解析不出来就把这条 URL 记在案上（下面的 pending 三件套），
+//      让下一跳——系统已经把目标 App 算好了的那一跳——自己把门牌报出来。
+//
+// ② 的形状是「不吞」：`AevonOpenDecide` 照常放行（URL 正常交付），只是顺手排
+// 一条收卡链（`AevonLandCardSchedule` 背后是 0.2.66 的「scene 是钥匙」）。
+// 所以它最坏的结果是「跟现在一样整屏」，不会让 URL 送不到 —— 0.2.69 那次
+// `display=nil` 把主屏前台弄丢的教训就在这。
+
+/// 一条解析不出来的 URL，以及它被记下的时刻。一次性：谁消费谁清零。
+static char AevonLinkPending[192] = {0};
+static double AevonLinkPendingAt = 0;
+static int AevonLinkPendingNotes = 0;
+static int AevonLSMissNotes = 0;
+
+/// 这些 scheme 不进卡：`tel` / `facetime` 是通话界面（整屏是它的正确形态），
+/// `file` 没有「打开它的 App」，`prefs` / `itms-services` 是设置与安装流程 ——
+/// 它们出现在屏幕上时用户要的是那件事本身，不是一个窗口。
+static int AevonURLIsSystemEntry(const char *raw) {
+    if (raw == NULL) return 1;
+    if (strncasecmp(raw, "tel:", 4) == 0) return 1;
+    if (strncasecmp(raw, "facetime", 8) == 0) return 1;
+    if (strncasecmp(raw, "file:", 5) == 0) return 1;
+    if (strncasecmp(raw, "prefs:", 6) == 0) return 1;
+    if (strncasecmp(raw, "app-prefs:", 10) == 0) return 1;
+    if (strncasecmp(raw, "x-apple", 7) == 0) return 1;
+    if (strncasecmp(raw, "itms-services:", 14) == 0) return 1;
+    if (strncasecmp(raw, "itms-apps:", 10) == 0) return 1;
+    return 0;
+}
+
+/// https 不走 pending：那一条已经在分流的 `safari` 分支里跑通了（Aevon(211)
+/// 11:57:17/24/28/33 四次 `notify: link … kind=safari` → 四张卡）。再插一条
+/// 平行的路只会让两条链抢同一张卡。
+static int AevonURLIsWeb(const char *raw) {
+    if (raw == NULL) return 0;
+    return strncasecmp(raw, "http://", 7) == 0 || strncasecmp(raw, "https://", 8) == 0;
+}
+
+static void AevonLSMiss(const char *step) {
+    if (AevonLSMissNotes >= 6) return;
+    AevonLSMissNotes += 1;
+    AevonLogRaw([[NSString stringWithFormat:@"landing: url ls miss step=%s", step] UTF8String]);
+}
+
 /// `LSApplicationProxy.bundleIdentifier`，守卫后取。
 static NSString *AevonProxyBundleID(id proxy) {
     if (proxy == nil) return nil;
@@ -3083,34 +3139,29 @@ static NSString *AevonTargetForURLString(NSString *text) {
     // 真机日志验证过，不该因为一次查询结果变化就换掉。
     if (strncasecmp(raw, "weixin://", 9) == 0) return @"com.tencent.xin";
     if (strncasecmp(raw, "mqq", 3) == 0) return @"com.tencent.mqq";
-    // 系统自己的入口，一律不进卡：`tel` / `facetime` 是通话界面（整屏是它的
-    // 正确形态），`file` 没有「打开它的 App」，`prefs` / `itms-services` 是设置
-    // 与安装流程 —— 它们出现在屏幕上时用户要的是那件事本身，不是一个窗口。
-    if (strncasecmp(raw, "tel:", 4) == 0) return nil;
-    if (strncasecmp(raw, "facetime", 8) == 0) return nil;
-    if (strncasecmp(raw, "file:", 5) == 0) return nil;
-    if (strncasecmp(raw, "prefs:", 6) == 0) return nil;
-    if (strncasecmp(raw, "app-prefs:", 10) == 0) return nil;
-    if (strncasecmp(raw, "x-apple", 7) == 0) return nil;
-    if (strncasecmp(raw, "itms-services:", 14) == 0) return nil;
-    if (strncasecmp(raw, "itms-apps:", 10) == 0) return nil;
+    if (AevonURLIsSystemEntry(raw)) return nil;
 
     NSURL *url = [NSURL URLWithString:text];
     if (url == nil || url.scheme.length == 0) return nil;
 
     Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
-    if (workspaceClass == Nil) return nil;
+    if (workspaceClass == Nil) { AevonLSMiss("class"); return nil; }
     SEL sharedSel = NSSelectorFromString(@"defaultWorkspace");
-    if (![(id)workspaceClass respondsToSelector:sharedSel]) return nil;
+    if (![(id)workspaceClass respondsToSelector:sharedSel]) { AevonLSMiss("shared"); return nil; }
     id workspace = ((id (*)(id, SEL))objc_msgSend)((id)workspaceClass, sharedSel);
-    if (workspace == nil) return nil;
+    if (workspace == nil) { AevonLSMiss("ws"); return nil; }
 
     // 主路：单个答案。这条在 SpringBoard 里是进程内缓存，不打 IPC。
     SEL oneSel = NSSelectorFromString(@"applicationForOpeningURL:");
     if ([workspace respondsToSelector:oneSel]) {
-        NSString *bid = AevonProxyBundleID(
-            ((id (*)(id, SEL, id))objc_msgSend)(workspace, oneSel, url));
+        id proxy = ((id (*)(id, SEL, id))objc_msgSend)(workspace, oneSel, url);
+        NSString *bid = AevonProxyBundleID(proxy);
         if (bid.length > 2) return bid;
+        // 0.2.77 — 分开记：`one-nil` 是 LS 没答案，`one-bid` 是对象到手但取不到
+        // bundleIdentifier。两者的修法完全不同，日志里不能再长得一样。
+        AevonLSMiss(proxy == nil ? "one-nil" : "one-bid");
+    } else {
+        AevonLSMiss("one-sel");
     }
     // 退路：`applicationsForOpeningURL:` 取第一个。新版系统上主路返回 nil 的
     // 那几种（多候选、通用链接刚装）走这里。
@@ -3120,7 +3171,12 @@ static NSString *AevonTargetForURLString(NSString *text) {
         if ([list isKindOfClass:[NSArray class]] && [(NSArray *)list count] > 0) {
             NSString *bid = AevonProxyBundleID([(NSArray *)list objectAtIndex:0]);
             if (bid.length > 2) return bid;
+            AevonLSMiss("many-bid");
+        } else {
+            AevonLSMiss("many-none");
         }
+    } else {
+        AevonLSMiss("many-sel");
     }
     return nil;
 }
@@ -3293,6 +3349,25 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
                       @"landing: url %s b=%s d=%s a=%d run=%d land=%d n=%ld",
                       shape, target != NULL ? target : "-", dcls,
                       animating ? 1 : 0, running, land, seen + 1] UTF8String]);
+    }
+
+    // 0.2.77 — 解析不出来就把这条 URL 记在案上。
+    //
+    // 记的是**原始字符串**，而且一个字都不改：`AevonURLCoreOriginal` 拿到的还是
+    // 原来那个 `url`，`display` 也照旧 —— 这一段只读，不参与任何判定。真正的
+    // 动作用在下一跳（见 `AevonOpenDecide` 的 `urllate`），那一跳上系统已经把
+    // 目标 App 算好了，比我们猜得准。
+    // 每一拍先把上一拍的记录清掉：只认最近这一次。`_openURLCore:` 会嵌套
+    // （原实现自己还会再开一条 URL），后者才是这一拍的真相。
+    AevonLinkPendingAt = 0;
+    if (target == NULL && raw != NULL && !AevonURLIsWeb(raw) && !AevonURLIsSystemEntry(raw)) {
+        snprintf(AevonLinkPending, sizeof(AevonLinkPending), "%s", raw);
+        AevonLinkPendingAt = CFAbsoluteTimeGetCurrent();
+        if (AevonLinkPendingNotes < 6) {
+            AevonLinkPendingNotes += 1;
+            AevonLogRaw([[NSString stringWithFormat:@"landing: url pending b=- n=%ld",
+                          seen + 1] UTF8String]);
+        }
     }
 
     if (AevonURLCoreOriginal != NULL) {
@@ -5500,18 +5575,98 @@ static char AevonDivertBundle[64] = {0};
 /// 而「坏」是**当下**的事，不是「今天失败过 24 次」的事。
 ///
 /// 所以换成滑动窗口：24 次 / 10 分钟。窗口一过自动归零，不需要重启。
+///
+/// 0.2.77 — **这个形状本身错了，24 次也是错的。**
+///
+/// Aevon(211) 的读数：11:57:05 起三分钟里用户正常开了 24 次卡 —— Safari 四次、
+/// Sileo 一次、QQ 分享一次、微信登录两次、QQ 登录两次、TCL 登录两次 ——
+/// 12:00:17 走到支付那一步正好是第 25 次，于是
+///
+///     notify: pass b=- op=untrusted why=cap src=com.chinaunicom.mobilebusiness
+///     notify: pass b=- op=user      why=cap src=com.alipay.iphoneclient
+///
+/// 联通与支付宝整屏，之后每一次打开都 `why=cap`，要等窗口滑过去才恢复。
+/// **支付小窗是被自己的保险丝掐掉的**，不是支付这条链有 bug。
+///
+/// 保险丝要拦的从来不是「多」，是「同一条反复」：我们的分流自己又触发一次打开，
+/// 再被自己分流。那件事的形状是**同一个 bundle 在几百毫秒里连着来**；而十分钟里
+/// 来了二十几个**不同**的 App，那是一台手机的正常用法，不是故障。
+///
+/// 所以换两把尺：
+///   · 每个 bundle 一条 3 秒 / 6 次的连击计数 —— 只有这一种算「坏了」；
+///   · 全局上限抬到 60 次 / 60 秒 —— 真跑飞了一秒一次也够撞上，正常用撞不到。
 static int AevonDivertCount = 0;
 static double AevonDivertWindow = 0;
-#define AEVON_DIVERT_MAX 24
-#define AEVON_DIVERT_WINDOW 600.0
+#define AEVON_DIVERT_MAX 60
+#define AEVON_DIVERT_WINDOW 60.0
 
-static BOOL AevonDivertExhausted(void) {
+#define AEVON_LOOP_SLOTS 4
+#define AEVON_LOOP_MAX 6
+#define AEVON_LOOP_WINDOW 3.0
+
+typedef struct {
+    char bundle[56];
+    double at;
+    int streak;
+} AevonLoopSlot;
+
+static AevonLoopSlot AevonLoopSlots[AEVON_LOOP_SLOTS];
+static int AevonLoopNotes = 0;
+
+/// 一次分流真的发生了：给它那个 bundle 记一笔连击。
+static void AevonLoopNote(const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return;
+    double now = CFAbsoluteTimeGetCurrent();
+    int slot = -1;
+    for (int i = 0; i < AEVON_LOOP_SLOTS; i++) {
+        if (strcmp(AevonLoopSlots[i].bundle, bundle) == 0) {
+            if (now - AevonLoopSlots[i].at > AEVON_LOOP_WINDOW) AevonLoopSlots[i].streak = 0;
+            AevonLoopSlots[i].at = now;
+            AevonLoopSlots[i].streak += 1;
+            return;
+        }
+        if (slot < 0 && (AevonLoopSlots[i].bundle[0] == '\0' ||
+                         now - AevonLoopSlots[i].at > AEVON_LOOP_WINDOW)) {
+            slot = i;
+        }
+    }
+    if (slot < 0) {
+        // 四个槽都还热着：挤掉最旧的那一个。挤错不会漏拦 —— 漏掉的只是连击计数。
+        slot = 0;
+        for (int i = 1; i < AEVON_LOOP_SLOTS; i++) {
+            if (AevonLoopSlots[i].at < AevonLoopSlots[slot].at) slot = i;
+        }
+    }
+    snprintf(AevonLoopSlots[slot].bundle, sizeof(AevonLoopSlots[slot].bundle), "%s", bundle);
+    AevonLoopSlots[slot].at = now;
+    AevonLoopSlots[slot].streak = 1;
+}
+
+/// 0 = 放行分流；1 = 全局上限；2 = 同一个 App 连击。
+///
+/// `bundle` 为 NULL 时只查全局那一把 —— 调用点在解析出目标之前也要先问一次，
+/// 否则「解析失败」与「被上限挡住」在日志里长得一样。
+static int AevonDivertCapKind(const char *bundle) {
     double now = CFAbsoluteTimeGetCurrent();
     if (AevonDivertWindow <= 0 || now - AevonDivertWindow > AEVON_DIVERT_WINDOW) {
         AevonDivertWindow = now;
         AevonDivertCount = 0;
     }
-    return AevonDivertCount >= AEVON_DIVERT_MAX;
+    if (AevonDivertCount >= AEVON_DIVERT_MAX) return 1;
+    if (bundle == NULL || bundle[0] == '\0') return 0;
+    for (int i = 0; i < AEVON_LOOP_SLOTS; i++) {
+        if (strcmp(AevonLoopSlots[i].bundle, bundle) != 0) continue;
+        if (now - AevonLoopSlots[i].at > AEVON_LOOP_WINDOW) return 0;
+        if (AevonLoopSlots[i].streak < AEVON_LOOP_MAX) return 0;
+        if (AevonLoopNotes < 8) {
+            AevonLoopNotes += 1;
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"notify: divert loop b=%s n=%d",
+                          bundle, AevonLoopSlots[i].streak] UTF8String]);
+        }
+        return 2;
+    }
+    return 0;
 }
 
 /// 「认出来了却没分流」的解释行单独计数，不占 `AevonOpenKeyNotes` 的键名预算 ——
@@ -6850,7 +7005,13 @@ static int AevonOpenDecide(id request, id options, id settings,
     *why = "-";
 
     if (AevonActivateSwitchOff()) { *why = "off"; return 0; }
-    if (AevonDivertExhausted()) { *why = "cap"; return 0; }
+    // 0.2.77 — 两把尺分开问。
+    //
+    // 全局那一把（60 次 / 60 秒）先问：这时还不知道目标是谁。连击那一把必须等
+    // `bundle` 算出来 —— 它认的是「同一个 App 连着来」，没有 bundle 就无从认。
+    // Aevon(211) 里支付被掐掉的那一版把两者合成一个数，于是「今天开了 24 个
+    // 不同的 App」被当成「坏了」。
+    if (AevonDivertCapKind(NULL) == 1) { *why = "cap"; return 0; }
 
     id target = AevonOpenBundleOf(request);
     // 0.2.76 — **`b=-` 不再等于「不管」。**
@@ -6889,6 +7050,10 @@ static int AevonOpenDecide(id request, id options, id settings,
     // SpringBoard 自己也有开请求（解锁后回到主屏之类）。吞掉它就是吞掉主屏。
     if (strncmp(bundle, "com.apple.springboard", 21) == 0) { *why = "springboard"; return 0; }
 
+    // 0.2.77 — 连击熔断（第二个尺，需要 bundle）。同一个 App 3 秒内被分走 6 次，
+    // 说明我们的分流正在自己喂自己 —— 放过这一条，等它自己散。
+    if (AevonDivertCapKind(bundle) == 2) { *why = "loop"; return 0; }
+
     // 0.2.76 — 落点已经接了，分流让路（见 `AevonLandingClaim`）。
     //
     // 一次 openURL 依次经过两处：`_openURLCore:`（落点钩子，外层）与
@@ -6914,6 +7079,38 @@ static int AevonOpenDecide(id request, id options, id settings,
     // 放行的写法与 `springboard` / `plain` 相同（返回 0，原实现照常跑），所以
     // 系统怎么打开它，现在就怎么打开，一个字节都没被动过。
     if (AevonWindowBlacklisted(bundle)) { *why = "blacklist"; return 0; }
+
+    // 0.2.77 — 上一跳解析不出来的那条 URL，到这里已经有答案了。
+    //
+    // `_openURLCore:` 是外层：它手里有 URL，却说不出归谁（Aevon(211)：
+    // `chinaunicom://safepay/ b=-`）。这一层的 `bundle` 是系统自己算出来的，
+    // 权威得多 —— 借它的答案，不再自己猜一遍。
+    //
+    // 关键：这里**不吞**。URL 的交付走系统的原路（`display` 早就原样交出去了），
+    // 我们只把收卡链排上：`AevonLandCardSchedule` 等 scene 一登记就接管
+    // （0.2.66 的「scene 是钥匙」）。最坏的结果与现在一模一样 —— 整屏，
+    // 不会让 URL 送不到，也不会像 0.2.69 那样把主屏的前台弄丢。
+    if (AevonLinkPendingAt > 0) {
+        double age = CFAbsoluteTimeGetCurrent() - AevonLinkPendingAt;
+        AevonLinkPendingAt = 0;
+        // 三条都与「这是一次新的激活」有关，任何一条不成立就照常往下走：
+        //   · `age` —— 超过 0.9 s 的已经与这次打开无关了；
+        //   · 已经在最前面的那个不是「被打开的目标」，多半是来源 App 自己回来；
+        //   · 已经在卡里的不用再排一次（会撞 `AevonOpenCardDirect` 的复用）。
+        if (age < 0.9 && !AevonBundleIsAuthFamily(bundle) &&
+            AevonAppFrontmost([NSString stringWithUTF8String:bundle]) != 1 &&
+            AevonCardIsUpFor(bundle) != 1 && AevonCardIsComingFor(bundle) != 1) {
+            snprintf(AevonLandingClaim, sizeof(AevonLandingClaim), "%s", bundle);
+            AevonLandingClaimAt = CFAbsoluteTimeGetCurrent();
+            char shape[48];
+            AevonLandingShape(AevonLinkPending, shape, sizeof(shape));
+            AevonLogRaw([[NSString stringWithFormat:@"notify: link late b=%s age=%dms shape=%s",
+                          bundle, (int)(age * 1000.0), shape] UTF8String]);
+            AevonLandCardSchedule(bundle);
+            *why = "urllate";
+            return 0;
+        }
+    }
 
     // 0.2.1 — 三条证据先取好，再判路。
     //
@@ -7823,12 +8020,17 @@ static void AevonOpenSnapshot(int slot, id request, id options,
     if (out == NULL || size < 160) return;
     out[0] = '\0';
     AevonOpenTotal += 1;
-    if (AevonOpenTotal > 32) {
-        if (AevonOpenTotal == 33) snprintf(out, size, "notify: open budget spent n=32");
+    // 0.2.77 — 32 抬到 96（每槽 10 抬到 24）。
+    //
+    // Aevon(211) 12:00:23 那一拍正是被这 32 掐掉的：支付回跳的激活在场，日志里
+    // 却一个字都没有 —— 于是「分流被上限挡住」与「这条链根本没走到」在纸面上
+    // 分不开。上限的用意是「别把日志写爆」，不是「少看几拍」。
+    if (AevonOpenTotal > 96) {
+        if (AevonOpenTotal == 97) snprintf(out, size, "notify: open budget spent n=96");
         return;
     }
     if (slot < 0 || slot >= AevonOpenMax) return;
-    if (AevonOpenPer[slot] >= 10) return;
+    if (AevonOpenPer[slot] >= 24) return;
     AevonOpenPer[slot] += 1;
     @try {
         char bundleText[52], sourceText[52], actionText[56], urlText[88];
@@ -10019,6 +10221,8 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
 
     if (verdict == 1) {
         AevonDivertCount += 1;
+        // 0.2.77 — 连击账本。只记「真的分走了」的那些。
+        AevonLoopNote(bundle);
         // `unlock=1` 表示这一拍 SpringBoard 还带着「要不要顺手解锁」的意图。
         // 照样分流，但把它记下来：锁屏点通知若出现「卡片没起来、看门狗补调了
         // 原实现」，这一位就是解释 —— 解锁那一步在卡片这条路上没人做。

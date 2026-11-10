@@ -804,7 +804,7 @@ def main():
                   # 那三个字段的真值，req/opt/set/org 是四个参数的真实类名。
                   b"notify: hit op=%s b=%s src=%s act=%s n=%d url=%s req=%s opt=%s set=%s org=%s",
                   # 闸五：预算用尽后闭嘴的那一行（四条合计 32 行）。
-                  b"notify: open budget spent n=32",
+                  b"notify: open budget spent n=96",
                   # 0.1.88 — 分流。这是第一次「不原样转发」，所以每一条分支都要
                   # 能在产物里 grep 到：哪一条缺了，就等于那一种结局没有证词。
                   #
@@ -817,6 +817,19 @@ def main():
                   b"notify: divert b=%s op=%s why=%s unlock=%d n=%d",
                   b"notify: divert chain b=%s op=%s why=%s result=%s",
                   b"notify: divert pass b=%s why=%s",
+                  # 0.2.77 — 熔断换了形状：全局 60 次 / 60 秒，外加每个 App
+                  # 3 秒 / 6 次的连击计数。Aevon(211) 12:00:17 的支付就是被旧的
+                  # 「24 次 / 10 分钟」掐掉的（三分钟的正常使用只有 24 次）。
+                  # `why=cap` / `why=loop` 只有四个字母，会被编成立即数，所以
+                  # 断言认这一行长的 —— 它是「究竟哪一把尺掐的」的唯一证词。
+                  b"notify: divert loop b=%s n=%d",
+                  # 0.2.77 — 落点解析不出来时的三条证词：
+                  #   pending  记在案上了（下一跳应当报门牌）
+                  #   ls miss  LaunchServices 断在哪一步（class/shared/ws/one-nil/…）
+                  #   link late 下一跳把目标报出来了，收卡链已排上
+                  b"landing: url pending b=- n=%ld",
+                  b"landing: url ls miss step=%s",
+                  b"notify: link late b=%s age=%dms",
                   # 0.2.1 — 判据收紧以后的新结局：带 payload、但来源是 SpringBoard 的
                   # 那种打开，只在紧跟我们自己那次分流时才被吞（`why=syschain` 会出现在
                   # 上面那行 chain 日志里 —— 短串会被编成立即数，所以断言只认这条长的）。
