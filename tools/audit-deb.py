@@ -766,6 +766,27 @@ def main():
                   b"shape: dump finished",
                   b"FBSMutableSceneDefinition",
                   b"FBSMutableSceneSettings",
+                  # 0.2.86 — 方案 S 判死之后的一轮「URL 装哪」取证。这一轮不再问
+                  # 「谁实现了什么」，而是问「action 投进哪个容器」：
+                  #   · 七类 `carrier: class` —— parameters / transitionContext /
+                  #     UISOpenURLAction / LSApplicationWorkspace，母本那条
+                  #     `initWithURL:workspaceOriginatingProcess:` 所在的对象链；
+                  #   · 八条选择子 —— `transitionContext` / `setActions:` 一族，
+                  #     命中与不命中都是读数（`carrier: none` 同样是答案）；
+                  #   · `shape: payload` / `shape: actions` / `shape: act[]` ——
+                  #     打开请求里 payload 与 actions 元素的真实类名和 ivar 名。
+                  # 0.2.85 把 shape 挂在 `verdict == 1` 上，真机两次分享都走
+                  # `return 0`，探针一次没落地；这一版改挂在「带 payload」上。
+                  b"FBSSceneParameters",
+                  b"FBSSceneTransitionContext",
+                  b"UIMutableSceneTransitionContext",
+                  b"UISOpenURLAction",
+                  b"LSApplicationWorkspace",
+                  b"openSensitiveURL:withOptions:",
+                  b"setObject:forActivationSetting:",
+                  b"shape: payload url=#%s len=%d",
+                  b"shape: actions cls=%s n=%lu",
+                  b"shape: act[%lu] cls=%s vars=%s",
                   # 0.2.75 — 安全闸的**运行期**复查。Aevon(207) 里用户把 G0 与 G1
                   # 都打开，`win: touch in=17 eat=3` 照样在吞 —— 原因是设置侧只写
                   # 文件/偏好不发通知，而闸本身只在加载时判定一次。这五条就是

@@ -1179,6 +1179,25 @@ zStackParticipantDidChange:
         "invalidate",
         "isActive",
         "isHosting",
+        // 十、0.2.86 —— URL 的投递容器（方案 T）。
+        //
+        // 0.2.85 已经把「definition 带 URL」判死：`FBSSceneDefinition` 只有三个
+        // ivar（identity / clientIdentity / specification），没有地方放 URL 或
+        // action。母本二进制里 `transitionContext` 是**选择子面里单独一条**，
+        // 而 `UISOpenURLAction` 又恰好是 BSAction 的子类 —— BSAction 的标准投递
+        // 容器就是 scene 的 transition context。这八条就是那条链上每一跳的名字。
+        //
+        // `setObject:forActivationSetting:` 单独列出来的理由：`SBActivationSettings`
+        // 第 5 个 key 就叫 `url`（见 `win: act key 5 "url"`），所以「URL 是不是
+        // 从 activationSettings 这一层塞进去的」必须在同一张账上回答。
+        "transitionContext",
+        "setTransitionContext:",
+        "actions",
+        "setActions:",
+        "addAction:",
+        "setObject:forActivationSetting:",
+        "openURL:withOptions:",
+        "openSensitiveURL:withOptions:",
     ]
 
     /// 这五类要**全量**方法表 —— 上一步就该有，0.2.83 只给了名字带过滤的那几行。
@@ -1198,6 +1217,28 @@ zStackParticipantDidChange:
         "FBSSceneSettings",
         "FBSMutableSceneSettings",
         "FBSceneManager",
+        // 0.2.86 — 方案 S 判死之后，问题变成「URL 到底装在哪个对象上」。
+        //
+        // 0.2.85 的读数把答案逼得很窄：全 99452 个类里只有 `UISOpenURLAction`
+        // 实现 `initWithURL:workspaceOriginatingProcess:`，而 `FBSSceneDefinition`
+        // 的 17 个方法没有一个碰得到 URL、actions 或 transitionContext。于是母本
+        // 的第 4 个参数 `transitionContext` 就成了唯一还没被看过的那一格。
+        //
+        // 这七类就是那一格的全部候选：`parameters` 是 `createSceneWithDefinition:
+        // initialParameters:` 那一层，`*SceneTransitionContext` 是 action 的投递
+        // 容器，`UISOpenURLAction` 是被投递的那个东西，`LSApplicationWorkspace`
+        // 是母本二进制里唯一出现的「自己发起打开」的入口。
+        //
+        // 五类里只要有一类能同时拿出「装 action 的 setter」和「读 url 的 getter」，
+        // 方案 T 的第一行就写得了；全都没有，就说明 URL 必须走打开请求的 options 层，
+        // 自建 scene 这条线彻底没有 URL 通路。
+        "FBSSceneParameters",
+        "FBSMutableSceneParameters",
+        "FBSSceneTransitionContext",
+        "UISceneTransitionContext",
+        "UIMutableSceneTransitionContext",
+        "UISOpenURLAction",
+        "LSApplicationWorkspace",
     ]
 
     private static var carrierHits: [String: [String]] = [:]

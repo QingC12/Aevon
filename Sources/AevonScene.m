@@ -7059,12 +7059,13 @@ static void AevonAuthCardCloseSoon(NSString *who, const char *why) {
 //   origin   —— `workspaceOriginatingProcess`。母本那个构造器
 //               `initWithURL:workspaceOriginatingProcess:` 的第二个参数很可能吃它
 //
-// 打三样，**只打一次**：
+// 打四样，**只打一次**：
 //   ① 每个参数的类名 / 自有方法数 / 父类；
 //   ② 十一个 URL 家族名字逐个问。答「有」的**先看返回类型**再决定要不要读 ——
 //      只有返回 `@` 才 `performSelector:`（这是纪律：`perform` 只用于返回对象的
 //      选择子，标量走别路）。读到 NSString / NSURL 才打值，别的一律只打类名。
 //   ③ 自有方法表，每参数最多 42 条、每行 10 条。
+//   ④ 0.2.86 —— `__PayloadURL` 与 `__Actions` 里的东西各是什么类、带哪些 ivar。
 //
 // 为什么只做一次：这是打开请求的热路径，`class_copyMethodList` 会摊开类元数据。
 // 一次够用 —— 这四个参数的类不会因为目标 bundle 不同而变。
@@ -7079,7 +7080,10 @@ static void AevonOpenShapeDump(id request, id options, id settings, id origin) {
                             "initialURL", "_initialURL",
                             "workspaceOriginatingProcess",
                             "_workspaceOriginatingProcess",
-                            "bundleIdentifier", "identifier", "requestIdentifier"};
+                            "bundleIdentifier", "identifier", "requestIdentifier",
+                            // 0.2.86 —— 投递容器本身。`transitionContext` 若在这四个
+                            // 参数上答得出来，URL 就不必走 definition（它也没有那个位）。
+                            "transitionContext", "actions", "specification"};
     const int probeCount = (int)(sizeof(probes) / sizeof(probes[0]));
 
     for (int index = 0; index < 4; index++) {
@@ -7156,6 +7160,48 @@ static void AevonOpenShapeDump(id request, id options, id settings, id origin) {
             }
             free(list);
         }
+    }
+    // 0.2.86 —— 「URL 装在哪个对象上」比「哪个类有哪些方法」更值钱。
+    //
+    // 母本那条 `initWithURL:workspaceOriginatingProcess:` 造出来的是 `UISOpenURLAction`
+    // （BSAction 的子类），而 BSAction 的标准投递容器是 scene 的 transition context。
+    // 所以这里把 `__Actions` 逐元素摊开、把每个元素的 ivar 名列出来：若元素正是
+    // `UISOpenURLAction`，它身上一定同时躺着 url 与 workspaceOriginatingProcess。
+    //
+    // 这一段只在请求**真的带了东西**时才跑（`AevonOpenCarriesPayload`）：桌面上
+    // 点图标的普通打开不占这一次性预算。0.2.85 把整块挂在 `verdict == 1` 上，
+    // 结果 Aevon(218) 两次分享都走 `return 0`，探针一次都没落地 —— 挂错了位置。
+    @try {
+        id urlValue = AevonOpenAnyValue(request, options, @"__PayloadURL");
+        if (urlValue != nil) {
+            const char *name = object_getClassName(urlValue);
+            int length = [urlValue respondsToSelector:@selector(length)]
+                       ? (int)[urlValue length] : -1;
+            AevonLogRaw([[NSString stringWithFormat:@"shape: payload url=#%s len=%d",
+                          name != NULL ? name : "?", length] UTF8String]);
+        } else {
+            AevonLogRaw("shape: payload url=nil");
+        }
+        id actions = AevonOpenAnyValue(request, options, @"__Actions");
+        if (actions == nil) {
+            AevonLogRaw("shape: actions none");
+        } else {
+            NSUInteger count = [actions respondsToSelector:@selector(count)]
+                             ? [actions count] : 0;
+            AevonLogRaw([[NSString stringWithFormat:@"shape: actions cls=%s n=%lu",
+                          object_getClassName(actions), (unsigned long)count] UTF8String]);
+            for (NSUInteger i = 0; i < count && i < 6; i++) {
+                id item = [actions respondsToSelector:@selector(objectAtIndex:)]
+                        ? [actions objectAtIndex:i] : nil;
+                if (item == nil) continue;
+                char vars[120];
+                AevonIvarNamesOf(item, vars, sizeof(vars), 8);
+                AevonLogRaw([[NSString stringWithFormat:@"shape: act[%lu] cls=%s vars=%s",
+                              (unsigned long)i, object_getClassName(item), vars] UTF8String]);
+            }
+        }
+    } @catch (__unused NSException *exception) {
+        AevonLogRaw("shape: payload threw");
     }
     AevonLogRaw("shape: dump finished");
 }
@@ -10406,11 +10452,19 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
         }
     }
 
+    // 0.2.86 —— 形状转储的闸从 `verdict == 1` 挪到「这一次打开真的带了东西」。
+    //
+    // 0.2.85 把它放在 `verdict == 1` 里面，理由是「桌面上点图标也会走这条钩子，
+    // 别把一次性预算用掉」。这条理由只对了一半：Aevon(218) 里两次分享都落在
+    // `return 0`（`why=auth` 让路 / `why=paste` 放行），于是探针一次都没跑，
+    // 上一版加的取证白装了一轮。真正要挡的是「没有 payload 的普通打开」，
+    // 那正是 `AevonOpenCarriesPayload` 回答的问题 —— 用它挡，比用分流结论挡准。
+    if (AevonOpenCarriesPayload(request, options)) {
+        AevonOpenShapeDump(request, options, settings, origin);
+    }
+
     if (verdict == 1) {
         AevonDivertCount += 1;
-        // 0.2.85 — 只在「真的要分走这一拍」时摊一次参数形状。放在这里而不是
-        // 钩子入口：桌面上普通的点图标也会走这条钩子，那会把一次性预算白白用掉。
-        AevonOpenShapeDump(request, options, settings, origin);
         // 0.2.77 — 连击账本。只记「真的分走了」的那些。
         AevonLoopNote(bundle);
         // `unlock=1` 表示这一拍 SpringBoard 还带着「要不要顺手解锁」的意图。
