@@ -3322,6 +3322,9 @@ static int AevonLandingEncodingOK(const char *encoding) {
 
 static void AevonLandCardSchedule(const char *target);
 static void AevonLandingGuardStart(const char *target);
+/// 0.2.88 — 定义在下面（`SBActivationSettings` 那一族旁边）。这里先declared：
+/// 落点那一支在文件靠前的位置，而函数体要用同一个键位表。
+static void AevonWriteEventOnly(id settings, const char *why, const char *bundle);
 
 static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
                                     BOOL animating, id settings, id origin, id result) {
@@ -3378,6 +3381,10 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
                 //
                 // 所以这里只负责「不让卡抢在系统前面」，放不放行仍由分流那一支
                 // 统一决定（`why=oauthpass` / `why=linkpass` 都走 `return 0`）。
+                // 0.2.88 — 分享 / 授权也是「系统原生激活」，所以同一格开关也写在这里。
+                // Aevon(220) 14:48:24 那条 QQ 分享就是这么走的：`landing: url hand
+                // why=auth` → 系统整屏 → 420 ms 后卡片才贴上 scene。
+                AevonWriteEventOnly(settings, "oauthpass", target);
                 if (seen < 6) {
                     AevonLogRaw([[NSString stringWithFormat:
                                   @"landing: url hand b=%s why=auth", target] UTF8String]);
@@ -7995,8 +8002,26 @@ static void AevonOpenValueText(id value, char *out, size_t size) {
 /// （唤醒屏幕、免打扰那些都在同一张表里）。
 static int AevonActSuspIndex = -1;
 static int AevonActSuspFlag = 0;
+/// 0.2.88 — 第二格：`eventOnly`。
+///
+/// Aevon(220) 把剩下的那一帧定死了：三条路都是「我们放行 → 系统在 0 ms 开始演
+/// 整屏 → 我们 15~30 ms 后才知道要建卡 → 卡片首帧在 366~1972 ms」。整屏不是我们
+/// 摆的，是放行之后系统自己摆的；我们只是事后把 scene 搬进卡片，那扇全屏窗里
+/// 就只剩黑。
+///
+/// `SBActivationSettings` 的键表是本机自己打出来的（`win: act key 0..19`），
+/// 第 6 格叫 `eventOnly`：语义正是「把这次启动的事件投给 App，但不要做呈现」。
+/// 它和 `suspended`（第 3 格）是两件事 —— `suspended` 只管进程起不起来，
+/// 0.2.12 试过并读回 1，整屏照旧；`eventOnly` 管的是「摆不摆」。
+///
+/// 挑选原则与 `suspended` 完全一致：只按名字找、只挑一个、只置一位、置完读回。
+/// 名字里没有 event only 就一位都不置（`-1` ⇒ 整格跳过）。
+static int AevonActEventIndex = -1;
+static int AevonActEventFlag = 0;
 static char AevonActSetEnc[32] = "-";
 static int AevonActKeyNotes = 0;
+/// `notify: eventbit` 的独立预算。理由同这个工程里每一条现场行。
+static int AevonEventBitNotes = 0;
 /// `notify: forward suspbit` 的独立预算。理由同这个工程里每一条现场行：跟别人共用
 /// 一个计数器，就会在几次操作之后静默，而静默看起来跟「没发生」一模一样。
 static int AevonSuspBitNotes = 0;
@@ -8055,7 +8080,11 @@ static void AevonActSettingNames(id settings) {
                       keyOK, keyArg != 0 ? keyArg : '-', valOK,
                       valArg != 0 ? valArg : '-', valObj != 0 ? valObj : '-',
                       setOK, setA != 0 ? setA : '-', setB != 0 ? setB : '-'] UTF8String]);
-        if (!setOK) AevonActSuspIndex = -1;   // 形状不对就不许置位
+        if (!setOK) {
+            // 形状不对就不许置位（两格一起作废）。
+            AevonActSuspIndex = -1;
+            AevonActEventIndex = -1;
+        }
 
         int named = 0;
         for (int i = 0; keyOK && i < 32 && AevonActKeyNotes < 20; i++) {
@@ -8086,13 +8115,20 @@ static void AevonActSettingNames(id settings) {
                     }
                 }
                 // 名字本身也算：`keyDescriptionForSetting:` 直接给出 Suspend 之类时走这条。
-                if (AevonActSuspIndex < 0) {
-                    NSString *low = [[NSString stringWithUTF8String:nameraw] lowercaseString];
-                    if ([low rangeOfString:@"suspend"].location != NSNotFound ||
-                        [low rangeOfString:@"background"].location != NSNotFound) {
-                        AevonActSuspIndex = i;
-                        AevonActSuspFlag = 1;
-                    }
+                NSString *low = [[NSString stringWithUTF8String:nameraw] lowercaseString];
+                if (AevonActSuspIndex < 0 &&
+                    ([low rangeOfString:@"suspend"].location != NSNotFound ||
+                     [low rangeOfString:@"background"].location != NSNotFound)) {
+                    AevonActSuspIndex = i;
+                    AevonActSuspFlag = 1;
+                }
+                // 0.2.88 — 第二格 `eventOnly`（Aevon(220) 的键表里是第 6 格）。
+                // 只认「event」和「only」两段都在的那一格名，别的一概不碰。
+                if (AevonActEventIndex < 0 &&
+                    [low rangeOfString:@"event"].location != NSNotFound &&
+                    [low rangeOfString:@"only"].location != NSNotFound) {
+                    AevonActEventIndex = i;
+                    AevonActEventFlag = 1;
                 }
                 AevonLogRaw([[NSString stringWithFormat:@"win: act key %d \"%.30s\"%@",
                               i, nameraw, desc] UTF8String]);
@@ -8103,8 +8139,56 @@ static void AevonActSettingNames(id settings) {
         }
         AevonLogRaw([[NSString stringWithFormat:@"win: act key pick=%d flag=%d n=%d enc=%s",
                       AevonActSuspIndex, AevonActSuspFlag, named, AevonActSetEnc] UTF8String]);
+        // 0.2.88 — 第二格的读数单独一行。`-1` 表示这台机器的键表里没有那一格，
+        // 那是读数不是故障（`eventbit` 会整格跳过，行为与 0.2.87 一致）。
+        AevonLogRaw([[NSString stringWithFormat:@"win: act key ev=%d evflag=%d",
+                      AevonActEventIndex, AevonActEventFlag] UTF8String]);
     } @catch (NSException *exception) {
         AevonLogRaw("win: act key threw");
+    }
+}
+
+/// 0.2.88 — 放行之前，把「只投事件、不要呈现」写进这一次激活的设置。
+///
+/// Aevon(220) 的现场是三段同形状：`notify: pass` 之后系统在 0 ms 开始演整屏，
+/// 我们 15~30 ms 才知道要建卡，卡片首帧 366~1972 ms。整屏不是我们摆的，是这次
+/// 激活摆的；等卡片把 scene 搬走，那扇全屏窗里就只剩黑。
+///
+/// `SBActivationSettings` 第 6 格 `eventOnly` 就是「摆不摆」那一格（键名由本机
+/// `win: act key 6 "eventOnly"` 打出来，不是猜的）。与 `suspended`（第 3 格）
+/// 是两件事：后者只管进程起不起来，0.2.12 读过 1，整屏照旧。
+///
+/// 三道闸：① 只在「这一次放行之后会建卡」的路由上写 —— 点图标那种 `plain`
+/// 绝不能写，写了就是「点了没反应」；② 总开关关着不写；③ 键表里没挑到那一格
+/// 不写。写完立刻读回，读回值进日志。
+static void AevonWriteEventOnly(id settings, const char *why, const char *bundle) {
+    if (settings == nil || why == NULL) return;
+    if (AevonActEventIndex < 0) return;
+    if (strcmp(why, "linkpass") != 0 &&
+        strcmp(why, "safaripass") != 0 &&
+        strcmp(why, "oauthpass") != 0) return;
+    if (AevonActivateSwitchOff() != 0) return;
+    @try {
+        SEL setter = sel_registerName("setFlag:forActivationSetting:");
+        SEL getter = sel_registerName("flagForActivationSetting:");
+        if (![settings respondsToSelector:setter]) return;
+        ((void (*)(id, SEL, unsigned long, unsigned long))objc_msgSend)
+            (settings, setter, (unsigned long)AevonActEventFlag,
+             (unsigned long)AevonActEventIndex);
+        long read = -1;
+        if ([settings respondsToSelector:getter]) {
+            read = (long)((unsigned long (*)(id, SEL, unsigned long))objc_msgSend)
+                (settings, getter, (unsigned long)AevonActEventIndex);
+        }
+        if (AevonEventBitNotes >= 12) return;
+        AevonEventBitNotes += 1;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"notify: eventbit idx=%d flag=%d read=%ld b=%s why=%s n=%d",
+                      AevonActEventIndex, AevonActEventFlag, read,
+                      bundle != NULL && bundle[0] != '\0' ? bundle : "-", why,
+                      AevonEventBitNotes] UTF8String]);
+    } @catch (NSException *exception) {
+        AevonLogRaw("notify: eventbit threw");
     }
 }
 
@@ -10684,6 +10768,9 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                 });
             }
         }
+        // 0.2.88 — 放行之前写「别摆到屏上」。只有会建卡的那三条路会命中，
+        // 点图标（`plain`）一个字都不改；写没写、读回多少，`notify: eventbit` 里。
+        AevonWriteEventOnly(settings, why, bundle);
         IMP original = slot >= 0 ? AevonOpenOrig[slot] : NULL;
         if (original != NULL) {
             ((void (*)(id, SEL, id, id, id, id, id))original)

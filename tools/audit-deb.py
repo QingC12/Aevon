@@ -808,6 +808,15 @@ def main():
                   b"notify: prewarm b=%s door=%ld ms=%d",
                   b"FBSOpenApplicationOptions",
                   b"openApplication:options:withResult:",
+                  # 0.2.88 — 整屏那一帧的开关。`SBActivationSettings` 第 6 格
+                  # `eventOnly`（键名由本机键表打出来，不是猜的），两行就是它的
+                  # 全部判据面：
+                  #   · `win: act key ev=` —— 键表里有没有这一格。`-1` = 本机没有，
+                  #     那是读数不是故障，`eventbit` 整格跳过、行为退回 0.2.87；
+                  #   · `notify: eventbit` —— 写给哪一次激活、读回多少。`read=1` 才是
+                  #     「写进去了」，与 `suspended` 当初的判据同形。
+                  b"win: act key ev=%d evflag=%d",
+                  b"notify: eventbit idx=%d flag=%d read=%ld b=%s why=%s n=%d",
                   # 0.2.75 — 安全闸的**运行期**复查。Aevon(207) 里用户把 G0 与 G1
                   # 都打开，`win: touch in=17 eat=3` 照样在吞 —— 原因是设置侧只写
                   # 文件/偏好不发通知，而闸本身只在加载时判定一次。这五条就是
