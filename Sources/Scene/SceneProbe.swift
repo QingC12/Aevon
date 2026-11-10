@@ -867,6 +867,10 @@ zStackParticipantDidChange:
     /// 代价是这一版少一份日志，那个代价比崩溃循环低得多。
     @discardableResult
     static func presenterCensusOnce() -> Bool {
+        // 先看上一轮死在哪。必须在版本标记之前：崩过的那一次标记已经写了，
+        // 下面的 skip 会直接返回，这一行就永远打不出来 —— 而它恰恰是
+        // 「普查把手机带走了」唯一能看的东西。
+        reportPresenterDeath()
         let want = Aevon.version
         if let seen = try? String(contentsOfFile: Aevon.presenterStampPath, encoding: .utf8),
            seen.trimmingCharacters(in: .whitespacesAndNewlines) == want {
@@ -897,7 +901,6 @@ zStackParticipantDidChange:
     /// 定义类与真实编码；`_UIContextLayerHostView` / presenter 两类额外报
     /// ivar 形状与全量方法名 —— P1 就是照这几张表写调用。
     static func runPresenterCensus() {
-        reportPresenterDeath()
         let start = Date()
         Log.write("presenter: census begin version=" + Aevon.version)
         var exists = 0
