@@ -127,6 +127,16 @@
 			<string>查看日志</string>
 		</dict>
 		<dict>
+			<key>action</key>
+			<string>probePresenter:</string>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>defaults</key>
+			<string>com.aevon</string>
+			<key>label</key>
+			<string>承载层普查（只读）</string>
+		</dict>
+		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
@@ -182,7 +192,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>Aevon 0.2.82 · 装完或改完闸门需要重启桌面。</string>
+			<string>Aevon 0.2.83 · 装完或改完闸门需要重启桌面。</string>
 			<key>label</key>
 			<string></string>
 		</dict>

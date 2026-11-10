@@ -43,6 +43,20 @@ enum SceneActions {
         request("window", from: controller, title: "已请求建窗取证")
     }
 
+    /// 0.2.83 — 承载层普查，现场重跑一遍。
+    ///
+    /// 0.2.82 把它绑在「一个版本只跑一次」上，而 `postinst` 一装包就截断
+    /// `Aevon.log`（0.2.21 定的）——于是那份数据写出来的同时就注定读不到，
+    /// Aevon(214) 只留下 `census skip version=0.2.82`。这个按钮把取证的代价
+    /// 从「烧一个构建 + 装包 + 重启」降到「按一下」。
+    ///
+    /// 只读：只问类在不在、选择子定义在谁身上、真实类型编码是什么，
+    /// 不建 presenter、不改任何 scene。结果同时写进日志与
+    /// `/var/mobile/Library/Logs/Aevon/presenter.census`（后者不会被装包截断）。
+    static func probePresenter(from controller: UIViewController) {
+        request("presenter", from: controller, title: "已请求承载层普查")
+    }
+
     private static func request(_ mode: String, from controller: UIViewController, title: String) {
         // The file is written here, not through SceneProbe: that type lives in
         // the tweak target only, and asking Settings to reach into SpringBoard's
@@ -70,6 +84,11 @@ enum SceneActions {
                 + "写进 /var/mobile/Aevon.log，再用它们的副本尝试建一个新场景。"
                 + "第二步会真的向系统注册场景，失败时 SpringBoard 可能注销一次——"
                 + "第一步的数据在此之前已经落盘，重开机后照样能读。"
+        } else if mode == "presenter" {
+            message = "只读普查，两秒内完成：只问类在不在、选择子定义在谁身上、"
+                + "真实类型编码是什么，不建 presenter、不改任何场景。\n\n"
+                + "结果写两处：/var/mobile/Aevon.log，以及一份不会被装包截断的账本 "
+                + "/var/mobile/Library/Logs/Aevon/presenter.census。"
         } else {
             message = "SpringBoard 会在一秒内把结果写进 /var/mobile/Aevon.log。"
                 + "这次转储只发生一次，不会在下次开机重放。"

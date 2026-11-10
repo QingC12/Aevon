@@ -48,6 +48,9 @@ enum SceneProbe {
         case "api":    runSurface()
         case "calls":  runCalls()
         case "window": runWindow()
+        // 0.2.83 — 设置页那个按钮。它走的是「现场跑一遍」，因此不看版本标记：
+        // 按一次就该出一份账，哪怕这一版的开机普查已经跑过。
+        case "presenter": runPresenterCensus(why: "panel")
         default:       run()
         }
         return true
@@ -865,6 +868,10 @@ zStackParticipantDidChange:
     /// 把 SpringBoard 带走了，而请求文件已经先删掉，所以它没能重放自己。这里同
     /// 一条纪律 —— 万一普查中途出事，下次启动只会看到「已跑过」，不会二次崩；
     /// 代价是这一版少一份日志，那个代价比崩溃循环低得多。
+    ///
+    /// 0.2.83 — 那条「代价」真的兑付过一次：0.2.82 的普查跑了，数据却在装包
+    /// 截断日志时没了（Aevon(214) 只剩 `census skip`）。所以现在有三个入口 ——
+    /// 开机（每版本一次）、设置页按钮（随时）、`presenter.force`（手写即重跑）。
     @discardableResult
     static func presenterCensusOnce() -> Bool {
         // 先看上一轮死在哪。必须在版本标记之前：崩过的那一次标记已经写了，
@@ -872,7 +879,14 @@ zStackParticipantDidChange:
         // 「普查把手机带走了」唯一能看的东西。
         reportPresenterDeath()
         let want = Aevon.version
-        if let seen = try? String(contentsOfFile: Aevon.presenterStampPath, encoding: .utf8),
+        // 0.2.83 — 强制重跑。普查的数据会被装包截断日志吃掉一次，第二次不该
+        // 还得等一个构建才能补。手写这个文件即等于「这一轮照跑」，跑完删掉。
+        let forced = FileManager.default.fileExists(atPath: Aevon.presenterForcePath)
+        if forced {
+            try? FileManager.default.removeItem(atPath: Aevon.presenterForcePath)
+        }
+        if !forced,
+           let seen = try? String(contentsOfFile: Aevon.presenterStampPath, encoding: .utf8),
            seen.trimmingCharacters(in: .whitespacesAndNewlines) == want {
             Log.write("presenter: census skip version=" + want)
             return false
@@ -881,8 +895,10 @@ zStackParticipantDidChange:
                                                  withIntermediateDirectories: true)
         try? want.write(toFile: Aevon.presenterStampPath, atomically: true,
                         encoding: .utf8)
-        DispatchQueue.main.async {
-            runPresenterCensus()
+        // 0.2.83 — 推后三秒。开机那一拍 SpringBoard 正在铺自己的场景与键盘，
+        // 普查只读，但没有理由挤在最忙的三秒里。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            runPresenterCensus(why: forced ? "force" : "boot")
         }
         return true
     }
@@ -894,15 +910,56 @@ zStackParticipantDidChange:
               !text.isEmpty else { return }
         try? FileManager.default.removeItem(atPath: Aevon.presenterStepPath)
         let name = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        Log.write("presenter: last census stopped at " + name)
+        censusNote("presenter: last census stopped at " + name)
+    }
+
+    /// 0.2.83 — 普查的每一行都走这里：日志一份、专用账本一份。
+    ///
+    /// 两处都写是刻意的。日志是操作者手上那份（设置页「查看日志」直接读它），
+    /// 而账本是给「装包会截断日志」这个事实准备的对策 —— 0.2.82 的普查产出
+    /// 就是这么丢的：`postinst` 一截断，一个版本只跑一次的那份数据再也不可能出现。
+    ///
+    /// 账本有自己的上限并按轮次追加：几轮并排放在一起，正好能看出「这一轮和
+    /// 上一轮差在哪」。
+    private static let censusCap: Int64 = 256 * 1024
+
+    private static let censusClock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd HH:mm:ss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
+    }()
+
+    private static func censusNote(_ text: String) {
+        Log.write(text)
+        let manager = FileManager.default
+        var info: stat = stat()
+        if stat(Aevon.presenterCensusPath, &info) == 0, info.st_size > censusCap {
+            try? manager.removeItem(atPath: Aevon.presenterCensusPath)
+        }
+        if !manager.fileExists(atPath: Aevon.presenterCensusPath) {
+            manager.createFile(atPath: Aevon.presenterCensusPath, contents: nil)
+        }
+        guard let handle = FileHandle(forWritingAtPath: Aevon.presenterCensusPath) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        let line = censusClock.string(from: Date()) + " " + text + "\n"
+        try? handle.write(contentsOf: Data(line.utf8))
     }
 
     /// 一次只读普查。逐类报「在不在 / 方法数 / 父类」，再报关注选择子的
     /// 定义类与真实编码；`_UIContextLayerHostView` / presenter 两类额外报
     /// ivar 形状与全量方法名 —— P1 就是照这几张表写调用。
-    static func runPresenterCensus() {
+    ///
+    /// 0.2.83 — `why` 区分这一轮是谁叫起来的：`boot`（装新版本后第一次开机）、
+    /// `panel`（设置页按钮）、`force`（手写了 presenter.force）。三种入口写出来
+    /// 的账一模一样，但读账的人一听就知道是不是自己刚点的那一下。
+    static func runPresenterCensus(why: String = "boot") {
         let start = Date()
-        Log.write("presenter: census begin version=" + Aevon.version)
+        // 两段拼，理由同 `gateSnapshot`：这个文件的类型检查超时丢过两次构建，
+        // 一次四段以上的 `+` 链在 Swift 里不是免费的。
+        let head = "presenter: census begin version=" + Aevon.version
+        censusNote(head + " why=" + why + " file=" + Aevon.presenterCensusPath)
         var exists = 0
         var missing = 0
         for name in presenterClassNames {
@@ -911,7 +968,7 @@ zStackParticipantDidChange:
                             encoding: .utf8)
             guard let cls = NSClassFromString(name) else {
                 missing += 1
-                Log.write("presenter: class " + name + " exists=0")
+                censusNote("presenter: class " + name + " exists=0")
                 continue
             }
             exists += 1
@@ -924,7 +981,7 @@ zStackParticipantDidChange:
             + " exists=" + String(exists)
         let second = " missing=" + String(missing)
             + " ms=" + String(Int(Date().timeIntervalSince(start) * 1000))
-        Log.write(first + second)
+        censusNote(first + second)
     }
 
     private static func describeCarrier(_ cls: AnyClass, name: String) {
@@ -954,7 +1011,7 @@ zStackParticipantDidChange:
                 let text = NSStringFromSelector(sel)
                 guard presenterSelectorNames.contains(text) else { continue }
                 let enc = method_getTypeEncoding(list[index]).map { String(cString: $0) } ?? "?"
-                Log.write("presenter: selector " + text + " side=- owner=" + name + " enc=" + enc)
+                censusNote("presenter: selector " + text + " side=- owner=" + name + " enc=" + enc)
             }
         }
         if let list = classList {
@@ -963,7 +1020,7 @@ zStackParticipantDidChange:
                 let text = NSStringFromSelector(sel)
                 guard presenterSelectorNames.contains(text) else { continue }
                 let enc = method_getTypeEncoding(list[index]).map { String(cString: $0) } ?? "?"
-                Log.write("presenter: selector " + text + " side=+ owner=" + name + " enc=" + enc)
+                censusNote("presenter: selector " + text + " side=+ owner=" + name + " enc=" + enc)
             }
         }
 
@@ -977,7 +1034,7 @@ zStackParticipantDidChange:
                 let field = ivar_getName(ivar).map { String(cString: $0) } ?? "?"
                 let type = ivar_getTypeEncoding(ivar).map { String(cString: $0) } ?? "?"
                 let offset = ivar_getOffset(ivar)
-                Log.write("presenter: ivar " + name + "." + field
+                censusNote("presenter: ivar " + name + "." + field
                           + " type=" + type + " off=" + String(offset))
             }
         }
@@ -991,7 +1048,7 @@ zStackParticipantDidChange:
                 let text = NSStringFromSelector(sel)
                 if presenterSelectorNames.contains(text) { continue }
                 let enc = method_getTypeEncoding(list[index]).map { String(cString: $0) } ?? "?"
-                Log.write("presenter: method " + name + "." + text + " enc=" + enc)
+                censusNote("presenter: method " + name + "." + text + " enc=" + enc)
             }
         }
     }
@@ -1001,7 +1058,7 @@ zStackParticipantDidChange:
     /// 拿得到 presenter 的话，P1 就不必自己去找 manager。
     private static func describeLiveCarrier() {
         guard let application = sharedApplication() else {
-            Log.write("presenter: live app=none scene=none")
+            censusNote("presenter: live app=none scene=none")
             return
         }
         var foreground: UIWindowScene?
@@ -1010,7 +1067,7 @@ zStackParticipantDidChange:
             if scene.activationState == .foregroundActive { foreground = windowScene; break }
         }
         guard let scene = foreground else {
-            Log.write("presenter: live app=1 scene=none")
+            censusNote("presenter: live app=1 scene=none")
             return
         }
         let box = scene as NSObject
@@ -1021,7 +1078,7 @@ zStackParticipantDidChange:
         let cls = NSStringFromClass(type(of: scene))
         let first = "presenter: live app=1 scene=" + cls + " pm=" + String(pm)
         let second = " pm2=" + String(pm2) + " sp=" + String(sp) + " sv=" + String(sv)
-        Log.write(first + second)
+        censusNote(first + second)
     }
 
     static func runWindow() {

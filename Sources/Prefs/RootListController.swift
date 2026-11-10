@@ -245,6 +245,13 @@ final class RootListController: PSListController {
         SceneActions.probeCalls(from: self)
     }
 
+    /// 0.2.83 — 承载层普查。Stheno 的 presenter 路线能不能走，全靠这一份账。
+    /// 0.2.82 把它绑在「每版一次」上，而装包会截断日志 —— 所以在拿到数据之前，
+    /// 这一行就是唯一能重来的入口（不必再烧一个构建、不必重启）。
+    @objc func probePresenter(_ specifier: PSSpecifier) {
+        SceneActions.probePresenter(from: self)
+    }
+
     private func alert(_ title: String, _ message: String) {
         let sheet = UIAlertController(title: title, message: message, preferredStyle: .alert)
         sheet.addAction(UIAlertAction(title: "好", style: .default, handler: nil))

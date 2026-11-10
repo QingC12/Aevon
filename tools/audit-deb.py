@@ -319,6 +319,23 @@ def main():
     else:
         ok("prefs: loads Root.plist explicitly into the specifiers ivar")
 
+    # 0.2.83 — 承载层普查那行必须真的接线。
+    #
+    # 0.2.80 写好了三个探针函数却没有一行 plist 指向它们，于是「探针按钮」
+    # 在设置里根本不存在，取证通路只剩开机那一次 —— 而开机那一次被装包截断
+    # 吃掉了。这里两头都查：plist 里有这一行，二进制里有同名 @objc 入口。
+    # 只查 plist 会放过「行画出来了、点下去没反应」这种最难查的形态。
+    if root is not None:
+        if not any(i.get("action") == "probePresenter:"
+                   for i in plistlib.loads(root).get("items", [])):
+            bad("prefs: Root.plist has no probePresenter: row — the census "
+                "is unreachable without a rebuild")
+        elif b"probePresenter:" not in prefs:
+            bad("prefs: Root.plist names probePresenter: but the bundle has "
+                "no such @objc action — the row would be dead")
+        else:
+            ok("prefs: 承载层普查 row is wired (plist action + @objc entry)")
+
     # 0.0.6's panel page returned early when Preferences had already filled the
     # ivar, which made all eight panels render the same rows. The log line is
     # the only thing that tells the two cases apart on a device, so its presence
@@ -712,6 +729,17 @@ def main():
                   b"presenter: census skip version=",
                   # 上一轮普查死在哪 —— 标记先写、普查后跑的代价由这一行补回来。
                   b"presenter: last census stopped at ",
+                  # 0.2.83 — 普查的第二个出口。0.2.82 那一轮的数据是被装包动作
+                  # 吃掉的：`postinst` 从 0.2.21 起就截断 Aevon.log，而普查一个
+                  # 版本只跑一次 ⇒ Aevon(214) 只剩一行 `census skip version=0.2.82`。
+                  # 这三条字面量就是「数据不会再被装包吃掉」与「不必烧构建、
+                  # 不必重启就能重跑」在二进制里的证词：
+                  #   presenter.census  专用账本（追加，装包不清）
+                  #   presenter.force   手写即强制重跑
+                  #   why=              boot / panel / force，三个入口分开读
+                  b"presenter.census",
+                  b"presenter.force",
+                  b"presenter: live app=none scene=none",
                   # 0.2.75 — 安全闸的**运行期**复查。Aevon(207) 里用户把 G0 与 G1
                   # 都打开，`win: touch in=17 eat=3` 照样在吞 —— 原因是设置侧只写
                   # 文件/偏好不发通知，而闸本身只在加载时判定一次。这五条就是

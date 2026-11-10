@@ -190,6 +190,12 @@ def build_root():
                                 "手机上就能把现场发出来，不用导出文件。"})
     items.append({"cell": "PSButtonCell", "label": "查看日志",
                   "action": "openLog:", "defaults": DOMAIN})
+    # 0.2.83 — 承载层普查。只读，两秒出结果；写进日志与
+    # /var/mobile/Library/Logs/Aevon/presenter.census（后者不会被装包截断）。
+    # 存在的理由：0.2.82 的普查数据被 postinst 的日志截断吃掉了，
+    # 而重来一次不该再烧一个构建。
+    items.append({"cell": "PSButtonCell", "label": "承载层普查（只读）",
+                  "action": "probePresenter:", "defaults": DOMAIN})
 
     items.append({"cell": "PSGroupCell", "label": "安全",
                   "footerText": "任一闸门开着，重载桌面后 Aevon 不装任何 hook；"

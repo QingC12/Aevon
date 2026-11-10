@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.2.82"
+    public static let version = "0.2.83"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -81,6 +81,22 @@ public enum Aevon {
     /// 调用，调用前先把名字落盘 —— 一个只读普查理论上不该崩，但「理论上」不值钱，
     /// 上次 SpringBoard 安全模式就是拿「理论上」换来的。跑完即删。
     public static let presenterStepPath = "/var/mobile/Library/Logs/Aevon/presenter.step"
+
+    /// 0.2.83 — 普查自己的一份账，和 Aevon.log 分开。
+    ///
+    /// 为什么非分不可：0.2.82 那一轮普查的产出**被装包动作吃掉了**。
+    /// `postinst` 从 0.2.21 起就把 `/var/mobile/Aevon.log` 截断（省得每次进
+    /// Filza 手动删），而普查是「一个版本只跑一次」；于是「跑过 → 装包清日志
+    /// → 重启看到 skip」这条路上，数据在写出来的那一秒就已经注定读不到。
+    /// Aevon(214) 正是这一格：13:09:25 的 `census skip version=0.2.82` 说明
+    /// 上一次真跑过，而日志从 13:09:23 才开始 —— 前半段不存在了。
+    ///
+    /// 一份独立文件还有第二个好处：追加、不清空，多次普查可以并排读。
+    public static let presenterCensusPath = "/var/mobile/Library/Logs/Aevon/presenter.census"
+
+    /// 手写这个文件 = 下一次开机**无视**版本标记再跑一遍普查，跑完自己删掉。
+    /// 存在的理由：普查一旦被任何东西吃掉，重来一次不该再烧一个构建。
+    public static let presenterForcePath = "/var/mobile/Library/Logs/Aevon/presenter.force"
 
     /// The class a scan was looking at when the process stopped. Written before
     /// each class is touched, so it is the one witness that survives a SIGKILL —
