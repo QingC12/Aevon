@@ -1086,6 +1086,12 @@ static BOOL AevonOwnStageFirst(NSString *bundleID) {
     return NO;
 }
 
+/// 0.3.1 — 自建 scene 的**总开关**。1 = 已下线（Aevon(225) 崩溃后定案）。
+///
+/// 打开方式只有一种：把它改成 0 并重新审一遍 `.ips`。默认 1，且没有任何运行
+/// 时入口能改它 —— 这不是一个「设置项」，是一条「这条链永不再跑」的固定结论。
+static volatile int AevonOwnRetired = 1;
+
 /// 起进程 + 建 scene。异步，结果落在 `AevonOwnScene`。
 ///
 /// 返回：0 = 参数/闸不过（立刻回落），1 = 已开始（等 `AevonOwnTake`），
@@ -1118,8 +1124,12 @@ NSInteger AevonOwnStart(NSString *bundleID, CGRect frame, const char *from) {
     // 用 `volatile` 是刻意的：写死 `return 0` 会让编译器判定后面整段不可达，
     // `-Wunreachable-code` 在 Theos 的默认告警集里会把整包编译打断。一个运行时
     // 读到的常量既保证行为，也不会触发那条告警。
-    static volatile int AevonOwnRetired = 1;
-    if (AevonOwnRetired) {
+    // 开关放在**函数外面**（文件级静态量），并在里面不做无条件 return：
+    // 函数内的 `return 0` 会让编译器把后面整段判成不可达、连日志字面量一起蒸掉
+    // （0.3.1 第一次构建就是这样：`win: own disabled` 在产物里 0 命中）。
+    // 现在的形状是「读一个文件级变量，真则记一行并返回，假则照旧往下走」，
+    // 两条路都可达，字面量与分支都在。
+    if (AevonOwnRetired != 0) {
         AevonOwnLog(@"win: own disabled b=%@ from=%s (0.3.1 自建 scene 下线)",
                     bundleID, from != NULL ? from : "-");
         return 0;
