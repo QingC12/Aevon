@@ -3454,168 +3454,34 @@ static void AevonStepClear(void) {
 
 static void AevonURLCoreBody(id self, SEL _cmd, id url, id display,
                              BOOL animating, id settings, id origin, id result) {
-    long seen = __sync_fetch_and_add(&AevonURLCalls, 1);
-    AevonURLForwarded = 0;
-    AevonStepMark("url:enter");
-    NSString *text = nil;
-    if ([url isKindOfClass:[NSURL class]]) text = [(NSURL *)url absoluteString];
-    else if ([url isKindOfClass:[NSString class]]) text = (NSString *)url;
-    const char *raw = text.length > 0 ? text.UTF8String : NULL;
-    // 0.2.76 — 目标 App 由 LaunchServices 回答（见 `AevonTargetForURLString`）。
-    // 名单只剩「快路」，不再是否决：https 通用链接、`alipays://`、任何第三方
-    // 深链，只要系统能说出归谁，这里就说得出来。
-    NSString *targetID = AevonTargetForURLString(text);
-    AevonStepMark("url:target");
-    const char *target = targetID.length > 2 ? targetID.UTF8String : NULL;
 
-    int running = 0;
-    int land = 0;
-    if (target != NULL) {
-        NSString *bundleID = targetID;
-        running = AevonAppPid(bundleID) > 0 ? 1 : 0;
-        // 主队列才接手：`AevonOpenCardDirect` 与窗口状态都是主线程的东西，在系统
-        // 的工作区队列上读它们会撞上正在拆窗的那一拍。不在主队列就只记录。
-        //
-        // 不看进程在不在（0.2.67）：分享那一刻微 / QQ 经常还没起进程，而它正是
-        // 我们要接的那一次。`running` 只进日志，不再进判断。
-        //
-        // 0.2.76 — **`display` 不再是前提。**
-        //
-        // 0.2.63 起这里要求 `display != nil` 才落卡，理由是「系统自己也会传 nil，
-        // 那是它已经在按我们要的方式排」。加了通用解析之后这条理由不成立了：
-        // 目标 App 是**我们**算出来的，系统那一拍是不是已经把 display 传成 nil
-        // 与我们要不要建卡无关 —— 传 nil 只说明它这一拍不摆屏，卡还得我们自己给。
-        // 真机读数里 `d=nil` 与 `d=FBSDisplayConfiguration` 两种都出现过，两种都
-        // 应该落卡。
-        //
-        // 唯一新增的否决：目标 App **已经在前台、且不在我们任何一张卡里**。
-        // 那是「它本来就在最前面」，把它缩进卡只会打断用户手上这件事；而它若在
-        // 卡里，`AevonOpenCardDirect` 会复用那张卡，正是我们要的。
-        if ([NSThread isMainThread]) {
-            AevonStepMark("url:branch");
-            int cardUp = AevonCardIsUpFor(target) == 1 ||
-                         AevonCardIsComingFor(target) == 1;
-            int front = AevonAppFrontmost(bundleID);
-            if (AevonBundleIsAuthFamily(target)) {
-                // 0.2.87 — **并轨母版，这一格不再另立门户。**
-                //
-                // 0.2.5x~0.2.7x 这里写的是「授权 / 支付交给分流那一支（吞掉 +
-                // 自建 + 本地投递）。这里放回来只会让系统激活重演一次整屏」。
-                //
-                // ⛔ 前半句已被 Aevon(212) 证伪：自建 scene 里**没有系统那一次
-                //    激活**，QQ 答 `rsp=0`、支付宝 `timeout 6342ms`、微信空壳。
-                // ⛔ 后半句是**代价**，不是理由。母版也接受这一小段整屏，它的解法
-                //    是把目标提前拉热（`launchApplicationWithIdentifier:suspended:`，
-                //    复刻方案 P5 原话「场景先建好不跑，要显示时再激活」），
-                //    而不是绕开系统激活。
-                //
-                // 所以这里只负责「不让卡抢在系统前面」，放不放行仍由分流那一支
-                // 统一决定（`why=oauthpass` / `why=linkpass` 都走 `return 0`）。
-                // 0.2.88 — 分享 / 授权也是「系统原生激活」，所以同一格开关也写在这里。
-                // Aevon(220) 14:48:24 那条 QQ 分享就是这么走的：`landing: url hand
-                // why=auth` → 系统整屏 → 420 ms 后卡片才贴上 scene。
-                AevonWriteEventOnly(settings, "oauthpass", target);
-                if (seen < 6) {
-                    AevonLogRaw([[NSString stringWithFormat:
-                                  @"landing: url hand b=%s why=auth", target] UTF8String]);
-                }
-            } else if (front == 1 && !cardUp) {
-                if (seen < 6) {
-                    AevonLogRaw([[NSString stringWithFormat:
-                                  @"landing: url keep b=%s why=front card=0",
-                                  target] UTF8String]);
-                }
-            } else {
-                land = 1;
-            }
-        } else if (seen < 2) {
-            AevonLogRaw([[NSString stringWithFormat:@"landing: url offmain b=%s", target] UTF8String]);
-        }
-    }
-    if (land) __sync_fetch_and_add(&AevonURLCuts, 1);
-    if (seen < 6 || land) {
-        char shape[48];
-        AevonLandingShape(raw, shape, sizeof(shape));
-        // display 是对象，可能本来就是 nil（系统自己也会传 nil）。只读类名。
-        const char *dcls = "-";
-        if (display == nil) dcls = "nil";
-        else if ((uintptr_t)display > 0x1000) {
-            const char *name = object_getClassName(display);
-            dcls = name != NULL ? name : "?";
-        } else {
-            dcls = "scalar";
-        }
-        AevonLogRaw([[NSString stringWithFormat:
-                      @"landing: url %s b=%s d=%s a=%d run=%d land=%d n=%ld",
-                      shape, target != NULL ? target : "-", dcls,
-                      animating ? 1 : 0, running, land, seen + 1] UTF8String]);
-    }
-
-    // 0.2.77 — 解析不出来就把这条 URL 记在案上。
+    // ⛔ 0.3.8 — **URL 接管全部清除，这里只剩放行。**
     //
-    // 记的是**原始字符串**，而且一个字都不改：`AevonURLCoreOriginal` 拿到的还是
-    // 原来那个 `url`，`display` 也照旧 —— 这一段只读，不参与任何判定。真正的
-    // 动作用在下一跳（见 `AevonOpenDecide` 的 `urllate`），那一跳上系统已经把
-    // 目标 App 算好了，比我们猜得准。
-    // 每一拍先把上一拍的记录清掉：只认最近这一次。`_openURLCore:` 会嵌套
-    // （原实现自己还会再开一条 URL），后者才是这一拍的真相。
-    AevonLinkPendingAt = 0;
-    if (target == NULL && raw != NULL && !AevonURLIsWeb(raw) && !AevonURLIsSystemEntry(raw)) {
-        snprintf(AevonLinkPending, sizeof(AevonLinkPending), "%s", raw);
-        AevonLinkPendingAt = CFAbsoluteTimeGetCurrent();
-        if (AevonLinkPendingNotes < 6) {
-            AevonLinkPendingNotes += 1;
-            AevonLogRaw([[NSString stringWithFormat:@"landing: url pending b=- n=%ld",
-                          seen + 1] UTF8String]);
-        }
-    }
-
+    // 用户的原始要求（0.3.0 起说过三次）：「彻底清除现有的 URL 功能，然后按照
+    // Stheno 母版的数据从新制作」。0.3.0~0.3.7 我做的是「把四路合并成一个调度」，
+    // 骨架没变，所以观感一直是「先全屏 → 变浮窗 → 黑」。
+    //
+    // 母版 `Stheno.dylib` 的实测（2,153,664 B，单切片计数）：
+    //   _openURLCore                0    ← 它根本不钩 URL
+    //   _handleOpenApplicationRequest 0  ← 也不钩打开请求
+    //   _activateBundleID            2   ← 只钩激活那一拍
+    //   createPresenterWithIdentifier 4
+    //   _UIContextLayerHostView      4
+    //   initWithWindowScene          2   （SthenoWindow 的构造器）
+    //
+    // 也就是说：URL 在母版里属于 P8（扩展能力），承载层（P1）才是主干。
+    // 我们一直在 P8 上改，P1 从来没做。
+    //
+    // 这一版按「先清除、再照母版重做」的第一步走：**把 URL 行为清零**。
+    // 钩子壳保留（拆钩子会让 App 打不开），但一个字节都不改参数、不建卡、不吞请求。
+    // 系统原样打开，与没装插件一致。
+    //
+    // 下一版才是照 P1 重建承载层，然后再在 P8 用母版的形状接 URL。
     if (AevonURLCoreOriginal != NULL) {
-        // 0.2.70 — **回滚 0.2.69 的 nil display。**
-        //
-        // 0.2.69 的现场（用户真机）：分享到 QQ 时 QQ 既不建卡也不上屏，主屏的
-        // 前台 App 又被撤掉 ⇒ 上滑回桌面失效，连注销都做不到。原因是 nil 的
-        // 语义是「打开，但不摆到任何屏幕上」：目标 scene 不会进入可用的前台
-        // 状态，建卡那条「等 scene」的链等不到东西；再叠加 0.35 s 后重新激活
-        // 来源 App，把目标唯一那次激活也顶掉了。
-        //
-        // 现在 display 原样下发。全屏帧会露出一瞬，`AevonLandCardSchedule` 的
-        // 收卡链紧接着把同一份 scene 收进卡里 —— 用户看到的是闪一下，而不是
-        // 一个没有前台 App、手势失效的主屏。**主屏永远有前台 App** 这条优先。
-        id forwarded = display;
-        // 0.2.76 — 先立牌，再交出去。
-        //
-        // 原实现会一路走到 `_handleOpenApplicationRequest:`，也就是
-        // `AevonOpenDecide` 那个钩子。牌必须在**调用之前**立好，否则分流那一拍
-        // 还会以为没人接，照着 `share` / `isWebLink` 再排一张卡。
-        if (land) {
-            snprintf(AevonLandingClaim, sizeof(AevonLandingClaim), "%s", target);
-            AevonLandingClaimAt = CFAbsoluteTimeGetCurrent();
-        }
-        AevonStepMark("url:forward");
+        AevonURLCoreOriginal(self, _cmd, url, display, animating, settings, origin, result);
         AevonURLForwarded = 1;
-        AevonURLCoreOriginal(self, _cmd, url, forwarded, animating,
-                             settings, origin, result);
     }
-    if (!land) return;
 
-    // 收卡交给同一条「等 scene」的链：这一栈在系统的工作区事务里，事务没提交
-    // 之前建窗会和 FrontBoard 抢同一份 scene（0.0.31 的死锁纪律）。60 ms 的固定
-    // 延时在冷启动那一次不够用（QQ 首次起来要一秒多），所以按 scene 登记来。
-    //
-    // 0.3.0 — 这一格原来叫 `AevonLandCardSchedule`（落点专用，`build=1`）。现在
-    // 四路共用 `AevonCardSettle`，kind 按目标 App 归类：授权族报 auth/pay，
-    // 其余（Safari 链接、第三方深链）报 link。判定条件本身一个字没改。
-    AevonRouteKind urlKind = AevonRouteKindLink;
-    if (AevonBundleIsAuthFamily(target)) {
-        urlKind = (strncmp(target, "com.alipay.iphoneclient", 23) == 0 ||
-                   strncmp(target, "com.eg.android.AlipayGphone", 27) == 0 ||
-                   strncmp(target, "com.unionpay", 12) == 0)
-                      ? AevonRouteKindPay : AevonRouteKindAuth;
-    }
-    AevonCardSettle(target, urlKind);
-    // 0.2.71 — 看门狗：万一这一拍把前台弄丢，1.8 s 后自己拉回来。
-    AevonLandingGuardStart(target);
 }
 
 /// 0.2.91 — 外面这一层只干一件事：**别让异常穿出去**。
@@ -4031,6 +3897,9 @@ static NSString *AevonActBlockSig(id block) {
 static long AevonProbeAOpt = 0;
 static long AevonProbeTctx = 0;
 static long AevonProbePayloadDump = 0;
+static long AevonProbeCarrier = 0;
+static long AevonProbeDismiss = 0;
+static long AevonProbeSceneVC = 0;
 
 /// 0.3.1 — 一个对象的**可写方法名 + 编码**，最多 `limit` 条，写进一行。
 ///
@@ -4092,6 +3961,182 @@ static NSString *AevonProbeIvars(id object, int limit) {
 /// 都是 0）。所以这一格是「它到底改了什么」的唯一入口。
 ///
 /// 只读：方法表 + ivar 表，一次写操作都没有。
+// ============================================================================
+// 0.3.8 — 母版 P1 承载链取证（线 D / E / F）
+//
+// 依据 `Stheno-1比1复刻方案-2026-11-02.md` §P1。母版的六步是：
+//   ① 探测（任一不符 → fail-closed）
+//   ② 取 App 已有的主 scene handle（**不新建**）
+//   ③ 建 presenter，把 SBDeviceApplicationSceneViewController 的 view
+//      挂进 _UIContextLayerHostView
+//   ④ 建 SthenoWindow(windowScene:) 作浮窗根
+//   ⑤ 内容 MIN 等比铺满，不裁切
+//   ⑥ 关窗：撤 presenter → 释放 → 允许回收
+//
+// 这一版只做 ①：把六步依赖的符号在本机逐个问清楚。**一条 hook 都不装。**
+//
+// 与 0.3.x 那七版的根本区别：那些版本全在 P8（URL）上改，P1（承载）从来没做。
+// 而母版的 `_openURLCore` / `_handleOpenApplicationRequest` 命中都是 0 ——
+// 它压根不钩 URL。所以「先全屏再变窗」的根源是承载层没做对，不是 URL 判据不对。
+// ============================================================================
+
+/// 0.3.8 — 类级方法表：只要**类对象**和选择子名，不需要实例。
+///
+/// 与 `AevonProbeMethodList` 的区别：那个要一个活对象（`object_getClass`），
+/// 这里 `NSClassFromString` 就够 —— 探针阶段不许实例化任何系统类。
+static NSString *AevonProbeClassMethods(const char *clsName, const char *prefix, int limit) {
+    if (clsName == NULL) return @"-";
+    Class cls = objc_getClass(clsName);
+    if (cls == Nil) return @"(absent)";
+    unsigned int count = 0;
+    Method *list = class_copyMethodList(cls, &count);
+    NSMutableString *out = [NSMutableString stringWithFormat:@"n=%u", count];
+    int shown = 0;
+    for (unsigned int i = 0; list != NULL && i < count && shown < limit; i++) {
+        const char *name = sel_getName(method_getName(list[i]));
+        if (name == NULL) continue;
+        if (prefix != NULL && prefix[0] != '\0' && strncmp(name, prefix, strlen(prefix)) != 0) {
+            continue;
+        }
+        const char *enc = method_getTypeEncoding(list[i]);
+        [out appendFormat:@" |%s %s", name, enc != NULL ? enc : "?"];
+        shown += 1;
+    }
+    if (list != NULL) free(list);
+    if (shown == 0) [out appendString:@" |(none)"];
+    return out;
+}
+
+/// 0.3.8 — 一条「类在不在 + 某选择子的归属与编码」。
+///
+/// `owner` 用 `class_getInstanceMethod` 问：它会沿继承链找，答出来的类名
+/// 就是真正实现这个方法的那一层 —— 这正是我们要的（`setResizesHostedContext:`
+/// 的 owner 是 `UIMutableScenePresentationContext` 而不是 presenter，
+/// 就是靠这个问出来的）。
+static NSString *AevonProbeSelOwner(const char *clsName, const char *selName) {
+    if (clsName == NULL || selName == NULL) return @"-";
+    Class cls = objc_getClass(clsName);
+    if (cls == Nil) return @"(absent-class)";
+    SEL sel = sel_registerName(selName);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (m == NULL) return @"(absent)";
+    Class owner = NULL;
+    // 沿继承链反查 owner：从 cls 往上，第一个自有实现者。
+    for (Class c = cls; c != Nil; c = class_getSuperclass(c)) {
+        unsigned int n = 0;
+        Method *own = class_copyMethodList(c, &n);
+        BOOL found = NO;
+        for (unsigned int i = 0; own != NULL && i < n; i++) {
+            if (method_getName(own[i]) == sel) { found = YES; break; }
+        }
+        if (own != NULL) free(own);
+        if (found) { owner = c; break; }
+    }
+    const char *enc = method_getTypeEncoding(m);
+    return [NSString stringWithFormat:@"%s %s",
+            owner != NULL ? class_getName(owner) : "?",
+            enc != NULL ? enc : "?"];
+}
+
+/// 线 D — 建独立承载所需的 5 个符号。
+///
+/// 母版的形状：`UIWindow(windowScene:)` 当根 → `UIScenePresentationManager`
+/// 建 presenter → `_UIContextLayerHostView` 当宿主 → 把 scene 的
+/// `SBDeviceApplicationSceneViewController.view` 挂进去。
+static void AevonProbeCarrierSymbols(void) {
+    if (__sync_fetch_and_add(&AevonProbeCarrier, 1) > 0) return;
+    AevonActStep("probe:carrier");
+    @try {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: D1 UIWindow initWithWindowScene = %@",
+                      AevonProbeSelOwner("UIWindow", "initWithWindowScene:")] UTF8String]);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: D2 UIWindow scene = %@",
+                      AevonProbeSelOwner("UIWindow", "setWindowScene:")] UTF8String]);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: D3 UIScenePresentationManager createPresenter = %@",
+                      AevonProbeSelOwner("UIScenePresentationManager",
+                                         "createPresenterWithIdentifier:priority:")] UTF8String]);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: D4 _UIContextLayerHostView initWithSceneLayer = %@",
+                      AevonProbeSelOwner("_UIContextLayerHostView", "initWithSceneLayer:")] UTF8String]);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: D5 UIMutableScenePresentationContext setResizes = %@",
+                      AevonProbeSelOwner("UIMutableScenePresentationContext",
+                                         "setResizesHostedContext:")] UTF8String]);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: D6 UIWindow class=%d scn=%d",
+                      objc_getClass("UIWindow") != Nil,
+                      objc_getClass("UIScenePresentationManager") != Nil] UTF8String]);
+    } @catch (NSException *e) {
+        AevonLogRaw("probe: D threw");
+    }
+}
+
+/// 线 E — 收窗链。母版各用 2 次，Aevon 一次都没调过。
+///
+/// 这两条是「把系统那扇全屏窗收掉」的候选入口 —— 0.3.x 七版一直缺的
+/// 就是「让系统窗消失」，只能在它被搬空之后看着它黑。
+static void AevonProbeDismissChain(void) {
+    if (__sync_fetch_and_add(&AevonProbeDismiss, 1) > 0) return;
+    AevonActStep("probe:dismiss");
+    @try {
+        const char *seeds[6] = {
+            "SBTransientOverlayPresenter",
+            "SBTransientOverlayViewController",
+            "SBDeviceApplicationSceneViewController",
+            "SBDeviceApplicationSceneHandle",
+            "SBSceneManagerCoordinator",
+            "FBSceneManager",
+        };
+        for (int i = 0; i < 6; i++) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"probe: E%d %s dismiss=%s deactivate=%s",
+                          i + 1, seeds[i],
+                          [AevonProbeSelOwner(seeds[i],
+                              "_dismissPresentable:withReason:animated:userInfo:") UTF8String],
+                          [AevonProbeSelOwner(seeds[i],
+                              "deactivateWithTransitionContext:") UTF8String]] UTF8String]);
+        }
+    } @catch (NSException *e) {
+        AevonLogRaw("probe: E threw");
+    }
+}
+
+/// 线 F — 场景视图控制器的可用面。
+///
+/// 母版第 3 步要把它的 `view` 挂进 `_UIContextLayerHostView`。
+/// 只列 `set` / `new` / `view` / `scene` 四族，别的不看。
+static void AevonProbeSceneController(void) {
+    if (__sync_fetch_and_add(&AevonProbeSceneVC, 1) > 0) return;
+    AevonActStep("probe:scenev");
+    @try {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: F1 SBDeviceApplicationSceneViewController set* = %@",
+                      AevonProbeClassMethods("SBDeviceApplicationSceneViewController", "set", 14)]
+                     UTF8String]);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: F2 SBDeviceApplicationSceneViewController new* = %@",
+                      AevonProbeClassMethods("SBDeviceApplicationSceneViewController", "new", 8)]
+                     UTF8String]);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: F3 SBDeviceApplicationSceneHandle new* = %@",
+                      AevonProbeClassMethods("SBDeviceApplicationSceneHandle", "new", 8)] UTF8String]);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: F4 _UIContextLayerHostView set* = %@",
+                      AevonProbeClassMethods("_UIContextLayerHostView", "set", 10)] UTF8String]);
+    } @catch (NSException *e) {
+        AevonLogRaw("probe: F threw");
+    }
+}
+
+/// 三条线的总入口。开机跑一次，全部只读。
+static void AevonProbeP1Carrier(void) {
+    AevonProbeCarrierSymbols();
+    AevonProbeDismissChain();
+    AevonProbeSceneController();
+}
+
 static void AevonProbeActOptions(id options) {
     if (options == nil) return;
     if (__sync_fetch_and_add(&AevonProbeAOpt, 1) >= 3) return;
@@ -4742,6 +4787,10 @@ void AevonLandingBoot(void) {
     // 0.2.89 — 第①段探针。开机就装，理由同上：它要看的正是「第一张卡还不存在」
     // 的那一次激活。两个都只读、原样尾调，装不上只会少几行读数，不影响任何行为。
     AevonActInstall(out);
+    // 0.3.8 — 母版 P1 承载链取证（线 D/E/F）。开机跑一次，三条线全只读：
+    // 只问类在不在、选择子归谁、编码是什么，一次 hook 都不装、一个实例都不建。
+    // 这是「照母版 P1 重做」的第一步；URL 已在同一版清零。
+    AevonProbeP1Carrier();
     // 一行一条：日志是按行读的，把一整段塞进一条会让下一轮的 grep 全部落空。
     for (NSString *raw in [out componentsSeparatedByString:@"\n"]) {
         NSString *line = [raw stringByTrimmingCharactersInSet:
@@ -7961,6 +8010,13 @@ static void AevonAuthCardCloseSoon(NSString *who, const char *why) {
 ///   返回 0 → 原样转发，行为与 0.1.87 一致。
 /// `why` 只用于日志：它把「没分流」的四种原因分开，否则下一份日志里
 /// 「一个 notify: divert 都没有」与「分流了但没生效」长得一样。
+/// 0.3.8 — 旧四路分流的判定函数。**已不参与任何行为**（调用点已清零），
+/// 但函数体保留：它里面的判据（分享来源 / 授权族 / paste token / 熔断）
+/// 是下一版照母版 P8 重建 URL 时的现成材料，删掉等于把判据也丢了。
+///
+/// 反消除：定义之后有一处 `__attribute__((used))` 的取地址引用。`-Osize`
+/// 会消除「从来没被引用」的静态函数（0.2.87 烧过一次 run），取地址比
+/// `__attribute__((unused))` 可靠 —— 后者只压警告，不挡优化。
 static int AevonOpenDecide(id request, id options, id settings,
                            char *bundle, size_t size, const char **why) {
     if (bundle == NULL || size == 0) return 0;
@@ -8650,6 +8706,11 @@ static int AevonOpenDecide(id request, id options, id settings,
     snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
     return 1;
 }
+
+
+/// 0.3.8 — 取一次地址，阻止 `-Osize` 把上面这个「已无调用者」的函数整段消除。
+static int (*const AevonRouteLegacyRef)(id, id, id, char *, size_t, const char **)
+    __attribute__((used)) = AevonOpenDecide;
 
 /// 只读取一个键。两条路按从便宜到贵的顺序试：
 ///   ① `objectForKey:` —— 字典本身；
@@ -11300,8 +11361,17 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
         line[0] = '\0';
     } else if (slot >= 0 && AevonOpenOrig[slot] != NULL) {
         @try {
-            verdict = AevonOpenDecide(request, options, settings,
-                                      bundle, sizeof(bundle), &why);
+            // ⛔ 0.3.8 — **URL / 打开请求接管全部清除。**
+            //
+            // 与 `AevonURLCoreBody` 同一个理由（见那里的说明）：先清零，再照
+            // 母版 P1 重建承载层。这里原来是四路分流的唯一判定点（notify /
+            // share / oauth / link 全靠它决定吞不吞、建不建卡）。
+            //
+            // 现在一律放行：`verdict = 0` 之后紧跟原实现，系统按自己的方式打开，
+            // 与没装插件一致。`AevonOpenDecide` 本体仍留着（下一版重建承载层时
+            // 会需要它的判据函数），但不再被调用。
+            verdict = 0;
+            why = "cleared";
         } @catch (NSException *exception) {
             verdict = 0;
             why = "threw";

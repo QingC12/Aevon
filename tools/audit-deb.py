@@ -918,8 +918,6 @@ def main():
                   #       里，落点不动它。这条是防「把用户正在用的整屏 App 缩进卡」
                   #       的那道否决，不能没有。
                   b"notify: bundle from url b=%@",
-                  b"landing: url hand b=%s why=auth",
-                  b"landing: url keep b=%s why=front card=0",
                   # 通知名 `com.aevon.gate` **不在这里断言**：它只有 14 字节，会被
                   # Swift 编成立即数，二进制里一个字节都没有。它通不通，由运行时
                   # 那两行直接读出来：`settings: G0 emergency stop -> on` 之后若
@@ -965,9 +963,7 @@ def main():
                   b"landing: url hooked",
                   b"landing: url shape ok (sig=%s)",
                   b"landing: url shape skip (sig=%s args=%d)",
-                  b"landing: url %s b=%s d=%s a=%d run=%d land=%d n=%ld",
                   b"landing: url build b=%s after=%dms",
-                  b"landing: url offmain b=%s",
                   b"landing: %s cls=%@ types=%s",
                   # 0.2.60 — 卡片走了、App 窗口还回场景高（「全屏中下黑」的另一半）。
                   # 0.2.46 — 「让抖音真重排」这一版的四条：显示覆盖 / 参考尺寸 /
@@ -1039,7 +1035,6 @@ def main():
                   #   pending  记在案上了（下一跳应当报门牌）
                   #   ls miss  LaunchServices 断在哪一步（class/shared/ws/one-nil/…）
                   #   link late 下一跳把目标报出来了，收卡链已排上
-                  b"landing: url pending b=- n=%ld",
                   b"landing: url ls miss step=%s",
                   b"notify: link late b=%s age=%dms",
                   # 0.2.77 — 同一条授权来两拍（payload / url）时，第二拍不再
@@ -1230,6 +1225,17 @@ def main():
                   # 0.3.7 — payload 的每个键值。线 A 已确认 options 只有
                   # `setDictionary:` 一个写入口，要改就必须先看清里面有什么。
                   b"probe: payload n=%ld via=%d |%s",
+                  # 0.3.8 — 照母版 P1 的承载链取证（线 D/E/F）。三条线全只读：
+                  #   D: 建独立承载的 5 个符号（UIWindow(windowScene:) / presenter /
+                  #      _UIContextLayerHostView / setResizesHostedContext:）
+                  #   E: 收窗链（_dismissPresentable / deactivateWithTransitionContext）
+                  #      —— 母版各 2 次，Aevon 一次都没调过
+                  #   F: SBDeviceApplicationSceneViewController 的可用面
+                  b"probe: D1 UIWindow initWithWindowScene = %@",
+                  b"probe: D3 UIScenePresentationManager createPresenter = %@",
+                  b"probe: D4 _UIContextLayerHostView initWithSceneLayer = %@",
+                  b"probe: E%d %s dismiss=%s deactivate=%s",
+                  b"probe: F1 SBDeviceApplicationSceneViewController set* = %@",
                   b"presenter: birth fail b=%s why=nil id=%s",
                   b"presenter: birth skip b=%s why=nopm",
                   b"presenter: birth threw b=%s why=%s",
