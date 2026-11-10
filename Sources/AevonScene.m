@@ -4029,7 +4029,6 @@ static NSString *AevonActBlockSig(id block) {
 /// 0.3.1 — 三条只读取证线的日志预算（一次装机能答完）。
 static long AevonProbeAOpt = 0;
 static long AevonProbeTctx = 0;
-static long AevonProbePres = 0;
 
 /// 0.3.1 — 一个对象的**可写方法名 + 编码**，最多 `limit` 条，写进一行。
 ///
