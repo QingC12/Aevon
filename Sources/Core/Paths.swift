@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.2.90"
+    public static let version = "0.2.91"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -71,6 +71,19 @@ public enum Aevon {
     /// where the domain lives on roothide, and because "one shot" is exactly
     /// what a file is.
     public static let probePath = "/var/mobile/Library/Logs/Aevon/probe.request"
+
+    /// 0.2.91 — 「上一次死在哪一步」。
+    ///
+    /// 两份都是**进程被信号带走时才会留在盘上**的标记：正常走完就自己删掉。
+    /// 所以开机看到这两行，说明上一次运行没走完，而后面的名字就是断点。
+    ///
+    /// `last.step` 由 URL 落点那条路写（`url:enter` / `url:target` / `url:branch` /
+    /// `url:forward` / `url:rescue`）；`act.step` 由激活探针写，只用在一个会
+    /// 解引用私有结构的地方（`_Block_signature`）。Aevon(223) 那三次连崩之所以
+    /// 一行线索都没留下，就是因为那一下死在写日志之前。
+    public static let urlStepPath = "/var/mobile/Library/Logs/Aevon/last.step"
+    public static let actStepPath = "/var/mobile/Library/Logs/Aevon/act.step"
+
 
     /// 承载层普查跑过没有。内容是这个包的版本号：装新版本会重跑一份，
     /// 单纯重启不会 —— 普查是只读的，但它没有理由在每次开机都占一行日志。

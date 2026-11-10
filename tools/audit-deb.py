@@ -698,6 +698,14 @@ def main():
                   b"notify: auth card close b=%@ why=%s",
                   b"notify: share swap nogate b=%s door=%d",
                   b"win: card closed after auth b=",
+                  # 0.2.91 — 分享点了就进安全模式：`_Block_signature` 被当成
+                  # `struct { void *; const char *; } *` 读。真原型返回的是
+                  # `const char *` 本身，于是 `sig->signature` 读到签名串自己的
+                  # 第 8~16 字节（崩溃地址 `0x22726f7272455340` = `@SError"`），
+                  # `strnlen` 踩上去就是 EXC_BAD_ACCESS + PAC 失败，而且是**在
+                  # 写日志之前** —— 所以三份日志里连一行 `act: activate` 都没有。
+                  # 这一条断言证明的是「出错时有话说」，不是「不会出错」：
+                  b"landing: url threw %s",
                   # 0.2.79 — **撤掉 0.2.74 的「吞掉 + 自建 + 投递」。**
                   #
                   # Aevon(212) 把它证伪在三处，而且每一处都指向同一个根：

@@ -121,6 +121,23 @@ public func AevonStart() {
 
     Log.write("boot ok: version \(Aevon.version), pid \(getpid())")
 
+    // 0.2.91 — 上一次是被哪一步带走的。
+    //
+    // 这两份标记只在进程被信号杀掉时才留得下来（正常走完自己删）。所以开机
+    // 读到它们 = 上一次没走完，名字就是断点。Aevon(223) 那三次连崩里一句
+    // 线索都没有，正是因为那一下死在写日志之前 —— 这一行就是补上的那句话。
+    let stepFiles: [(path: String, label: String)] = [
+        (Aevon.urlStepPath, "url"),
+        (Aevon.actStepPath, "act"),
+    ]
+    for entry in stepFiles {
+        guard let raw = try? String(contentsOfFile: entry.path, encoding: .utf8) else { continue }
+        let step = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        Log.write("boot: last \(entry.label) step=\(step.isEmpty ? "-" : step)")
+        try? FileManager.default.removeItem(atPath: entry.path)
+    }
+
+
     // 0.1.93 — 主线程心跳。Aevon(161) 最后三十五分钟一行日志都没有：手指按在
     // 屏幕上，`sendEvent` 一次都没再被调用。那种「什么都停了」有两种完全不同的
     // 成因 —— 主线程被卡死，或者窗口根本收不到触摸 —— 而日志上长得一模一样。

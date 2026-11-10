@@ -3331,9 +3331,44 @@ static void AevonLandingGuardStart(const char *target);
 /// 落点那一支在文件靠前的位置，而函数体要用同一个键位表。
 static void AevonWriteEventOnly(id settings, const char *why, const char *bundle);
 
-static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
-                                    BOOL animating, id settings, id origin, id result) {
+/// 0.2.91 — 「最后一步」落盘。
+///
+/// 为什么需要它：Aevon(223) 里 SpringBoard 在 50 秒内重启三次，而**那三次一共
+/// 一行我们自己的日志都没有**（`Log.write` 每行 open→write→close，不带缓冲，
+/// 所以「没写」就是真的没执行到，不是丢在缓冲里）。日志停在
+/// `app: page sheet _UIDICActivityViewController` 之后，也就是说死亡点在我们
+/// 某个**还没来得及写第一行日志**的位置。
+///
+/// `act.step` 那套只覆盖 `_Block_signature`。这一份覆盖 URL 落点这条路：每一步
+/// 覆盖之前先把名字原子写到 `last.step`，进程要是被信号杀掉，文件里留着的就是
+/// 最后一步。下一次开机 `boot: last step=…` 直接把它念出来。
+///
+/// 成本：一次 `writeToFile:atomically:`，只在真的打开一条 URL 时发生（不是热路径）。
+static char AevonURLStep[64] = {0};      // 内存里也存一份，正常路径不重复写盘
+static int AevonURLForwarded = 0;        // 这一拍有没有已经把 URL 交给系统
+
+static void AevonStepMark(const char *what) {
+    if (what == NULL) return;
+    if (strcmp(AevonURLStep, what) == 0) return;   // 同一步不重复写盘
+    snprintf(AevonURLStep, sizeof(AevonURLStep), "%s", what);
+    NSString *body = [NSString stringWithUTF8String:what];
+    [body writeToFile:@"/var/mobile/Library/Logs/Aevon/last.step"
+           atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+}
+
+/// 这一拍走完了（不管走的是哪条支）。把标记删掉 —— **留着就说明没走完**，
+/// 这正是下一次开机要念的那句话。只在「被信号带走」时才会留下。
+static void AevonStepClear(void) {
+    AevonURLStep[0] = '\0';
+    [[NSFileManager defaultManager] removeItemAtPath:@"/var/mobile/Library/Logs/Aevon/last.step"
+                                               error:NULL];
+}
+
+static void AevonURLCoreBody(id self, SEL _cmd, id url, id display,
+                             BOOL animating, id settings, id origin, id result) {
     long seen = __sync_fetch_and_add(&AevonURLCalls, 1);
+    AevonURLForwarded = 0;
+    AevonStepMark("url:enter");
     NSString *text = nil;
     if ([url isKindOfClass:[NSURL class]]) text = [(NSURL *)url absoluteString];
     else if ([url isKindOfClass:[NSString class]]) text = (NSString *)url;
@@ -3342,6 +3377,7 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
     // 名单只剩「快路」，不再是否决：https 通用链接、`alipays://`、任何第三方
     // 深链，只要系统能说出归谁，这里就说得出来。
     NSString *targetID = AevonTargetForURLString(text);
+    AevonStepMark("url:target");
     const char *target = targetID.length > 2 ? targetID.UTF8String : NULL;
 
     int running = 0;
@@ -3368,6 +3404,7 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
         // 那是「它本来就在最前面」，把它缩进卡只会打断用户手上这件事；而它若在
         // 卡里，`AevonOpenCardDirect` 会复用那张卡，正是我们要的。
         if ([NSThread isMainThread]) {
+            AevonStepMark("url:branch");
             int cardUp = AevonCardIsUpFor(target) == 1 ||
                          AevonCardIsComingFor(target) == 1;
             int front = AevonAppFrontmost(bundleID);
@@ -3467,6 +3504,8 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
             snprintf(AevonLandingClaim, sizeof(AevonLandingClaim), "%s", target);
             AevonLandingClaimAt = CFAbsoluteTimeGetCurrent();
         }
+        AevonStepMark("url:forward");
+        AevonURLForwarded = 1;
         AevonURLCoreOriginal(self, _cmd, url, forwarded, animating,
                              settings, origin, result);
     }
@@ -3478,6 +3517,36 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
     AevonLandCardSchedule(target);
     // 0.2.71 — 看门狗：万一这一拍把前台弄丢，1.8 s 后自己拉回来。
     AevonLandingGuardStart(target);
+}
+
+/// 0.2.91 — 外面这一层只干一件事：**别让异常穿出去**。
+///
+/// 这个替身从 0.2.76 起到 0.2.90 一直是**整段裸奔**：`AevonTargetForURLString`
+/// 里问 LaunchServices、`AevonAppFrontmost` 里遍历 `SBApplicationController`
+/// 的应用表、`AevonBundleIsAuthFamily` 里查名单 —— 任何一处抛一次
+/// `NSInvalidArgumentException`，在 SpringBoard 里就是一次安全模式，而且
+/// **抛在写日志之前**，所以日志上什么都不会有（Aevon(223) 那三次连崩正是这个
+/// 形状：分享点下去、六秒后重启、一行日志都没有）。
+///
+/// 兜底原则是**等价于没钩过**：异常之后如果这一拍还没把 URL 交给系统，就原样
+/// 交出去。分享可以「不进浮窗」，但不能「点不动」。
+static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
+                                    BOOL animating, id settings, id origin, id result) {
+    @try {
+        AevonURLCoreBody(self, _cmd, url, display, animating, settings, origin, result);
+    } @catch (NSException *e) {
+        AevonStepMark("url:threw");
+        AevonLogRaw([[NSString stringWithFormat:@"landing: url threw %s",
+                      e.reason != nil ? [e.reason UTF8String] : "-"] UTF8String]);
+        if (!AevonURLForwarded && AevonURLCoreOriginal != NULL) {
+            AevonStepMark("url:rescue");
+            AevonURLCoreOriginal(self, _cmd, url, display, animating, settings, origin, result);
+            AevonURLForwarded = 1;
+        }
+    } @finally {
+        // 走到这里说明这一拍没把进程带走 —— 标记该消失了。
+        AevonStepClear();
+    }
 }
 
 // MARK: - 0.2.71 — 落点看门狗
@@ -3788,26 +3857,47 @@ static void AevonActStep(const char *what) {
 
 /// 只读：问运行时这个块的真实参数编码。
 ///
-/// `_Block_signature` 是 libSystem 的私有符号，用 `dlsym` 取 —— **不静态链接**：
+/// `_Block_signature` 是 libclosure 的私有符号，用 `dlsym` 取 —— **不静态链接**：
 /// 静态链接一个系统不导出的符号，代价是 dyld 在加载这个库时直接拒载，那就是开机
 /// 卡死，不是一个读数丢失。取不到就返回 nil，这一格空着，别的读数照常。
 ///
-/// 拿到签名串之后还要过一道字符闸：签名只由类型字符、数字和引号组成。出现别的
-/// 字符说明这一格不是签名串（或者结构布局变了），宁可空着也不把野指针当 C 串读。
+/// ⛔ **0.2.91 — 这里原来把返回值声明错了，代价是三次 SpringBoard 安全模式。**
+///
+/// `_Block_signature(void *aBlock)` 在 `Block_private.h` 里的原型是
+/// `const char * _Block_signature(void *)` —— **它直接返回签名串本身**。
+/// 0.2.89 把它声明成 `struct { void *reserved; const char *signature; } *`，
+/// 于是 `sig->signature` 读的是**签名串自己的第 8~16 字节**，把那 8 个字符
+/// 当成指针交给 `strnlen`。Aevon(223) 的崩溃报告逐字节对得上：
+///
+///   EXC_BAD_ACCESS (SIGSEGV) / KERN_INVALID_ADDRESS at 0x22726f7272455340
+///   "possible pointer authentication failure"
+///   0  libsystem_platform  _platform_strnlen
+///   1  Aevon.dylib          +0x16658
+///   2  Aevon.dylib          +0x1633c
+///   3  FrontBoard           -[FBSystemService openApplication:withOptions:originator:requestID:completion:]_block_invoke
+///
+/// 0x22726f7272455340 按小端读出来是 `@SError"` —— 正是签名串中间的一段。
+/// 它发生在 §激活探针的 `rsig=` 那一格，而那一格在写日志**之前**，所以三份
+/// 日志里连一行 `act: activate` 都没有：分享点下去、六秒后重启、什么都没留下。
+///
+/// 现在按真原型取，并且加一道地址闸：不是用户态指针就直接放弃。这一格即便
+/// 还是读不到，也只该是「没有读数」，不该是「没有手机」。
 static NSString *AevonActBlockSig(id block) {
     if (block == nil) return nil;
-    typedef struct { void *reserved; const char *signature; } AevonActSig;
-    static AevonActSig *(*lookup)(void *) = NULL;
+    static const char *(*lookup)(void *) = NULL;
     if (AevonActSigTried == 0) {
         AevonActSigTried = 1;
-        lookup = (AevonActSig *(*)(void *))dlsym(RTLD_DEFAULT, "_Block_signature");
+        lookup = (const char *(*)(void *))dlsym(RTLD_DEFAULT, "_Block_signature");
     }
     if (lookup == NULL) return nil;
     AevonActStep("blocksig");
-    AevonActSig *sig = lookup((void *)block);
+    const char *s = lookup((void *)block);
     AevonActStep("");
-    if (sig == NULL || sig->signature == NULL) return nil;
-    const char *s = sig->signature;
+    if (s == NULL) return nil;
+    // 地址闸：arm64 用户态在 0x1_0000_0000 … 0x80_0000_0000 之间。落在外面的
+    // 不是字符串（0.2.89 那三次就是这里进来一个 `@SError"` 形状的野指针）。
+    uintptr_t addr = (uintptr_t)s;
+    if (addr < 0x100000000ULL || addr >= 0x8000000000ULL) return nil;
     size_t n = strnlen(s, 96);
     if (n < 3) return nil;
     static const char kSigChars[] = "@vVqQibBcCsSfdlL*#:^?{}()[]<>\"";
