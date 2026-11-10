@@ -696,7 +696,6 @@ def main():
                   b"win: warm start b=%@",
                   b"win: warm done b=%@ at=%.0fms pid=%d",
                   b"notify: auth card close b=%@ why=%s",
-                  b"notify: share swap nogate b=%s door=%d",
                   b"win: card closed after auth b=",
                   # 0.2.91 — 分享点了就进安全模式：`_Block_signature` 被当成
                   # `struct { void *; const char *; } *` 读。真原型返回的是
@@ -930,6 +929,15 @@ def main():
                   # 不能停在整屏）。两行一起断言：`card` = 真的收进来了，
                   # `giveup` = 收不进来时把登记彻底撤掉（否则整屏只画上半截）。
                   b"notify: auth swap card b=%s after=%dms fg=%d live=%d board=%d",
+                  # 0.3.0 — URL 四路统一主干。0.2.x 的两套入口 / 三套收卡调度 /
+                  # 四套兜底已收成「一个判定 + 一个调度」。这三条是主干是否真的
+                  # 接上的唯一证词：
+                  #   `route: settle`      四路都汇到这一个调度点，`kind=` 分辨是哪一路；
+                  #   `route: settle skip` 卡已在 / 开关关着时不重复建卡；
+                  #   `route: settle why=off` 总闸生效时一个字节都不改行为。
+                  b"route: settle b=%s kind=%s",
+                  b"route: settle skip b=%s why=incard",
+                  b"route: settle skip b=%s why=off",
                   b"notify: auth swap giveup b=%s fg=%d live=%d tick=%d build=%d",
                   # 0.2.70 — 授权那一支**不再**改激活设置（0.2.69 的挂起位已撤：
                   # 挂起的进程不跑，SSO 没人接；而且「激活一个不上屏的目标」正是
@@ -1215,21 +1223,13 @@ def main():
                   b"notify: paste token b=%s cls=%s desc=%@",
                   # 0.2.39 — 粘贴板/微信分享「先放行、再把前台 App 收回卡片」。
                   # 少了这两条，分享要么停在原生全屏，要么根本没人去收卡。
-                  b"notify: paste promote schedule b=%s",
-                  b"notify: paste promote b=%s",
                   # 0.2.43 — 分享完成后把来源 App 请回全屏，卡片浮在它上方：
                   # 少了 source/restore 这一对，卡片背后就只有桌面。
                   b"notify: share source b=%s target=%s",
-                  b"notify: share restore b=%s after=%dms door=%d",
                   # 0.2.44 — UIApplication 拒绝时的备份启动通道。
-                  b"notify: share restore ls b=%s ok=%d",
                   # 0.2.46 — 分享收卡不再先回桌面：先把来源 App 顶回前台，
                   # 等目标离开前台后直接建卡（homed: true）。少任意一条，
                   # 真机上就又会看到「QQ 全屏 → 桌面 → 文件列表 → 卡片」。
-                  b"notify: share swap restore b=%s door=%d",
-                  b"notify: share swap card b=%s after=%dms target_fg=%d src_fg=%d board=%d",
-                  b"notify: share swap giveup b=%s target_fg=%d src_fg=%d tick=%d",
-                  b"notify: share swap skip b=%s tick=%d",
                   b"win: direct card declined (",
                   # 0.2.48 — 应用内链接跳 Safari / 微信 QQ 登录授权不再整屏：
                   # 认出带 URL 的打开请求、建卡、把 URL 投进卡片里的 App。

@@ -3349,8 +3349,17 @@ static int AevonLandingEncodingOK(const char *encoding) {
     return strcmp(sig, "v@:@@B@@@?") == 0 ? 1 : 0;
 }
 
-static void AevonLandCardSchedule(const char *target);
 static void AevonLandingGuardStart(const char *target);
+/// 0.3.0 — 统一收卡调度（定义在 `AevonAuthSwapSchedule` 之后）。落点那一支与
+/// 分流那几支都在文件更靠前的位置，C 要求先声明后使用，这里先立一份。
+typedef enum {
+    AevonRouteKindNone = 0,
+    AevonRouteKindShare = 1,
+    AevonRouteKindLink = 2,
+    AevonRouteKindAuth = 3,
+    AevonRouteKindPay = 4,
+} AevonRouteKind;
+static void AevonCardSettle(const char *target, AevonRouteKind kind);
 /// 0.2.88 — 定义在下面（`SBActivationSettings` 那一族旁边）。这里先declared：
 /// 落点那一支在文件靠前的位置，而函数体要用同一个键位表。
 static void AevonWriteEventOnly(id settings, const char *why, const char *bundle);
@@ -3538,7 +3547,18 @@ static void AevonURLCoreBody(id self, SEL _cmd, id url, id display,
     // 收卡交给同一条「等 scene」的链：这一栈在系统的工作区事务里，事务没提交
     // 之前建窗会和 FrontBoard 抢同一份 scene（0.0.31 的死锁纪律）。60 ms 的固定
     // 延时在冷启动那一次不够用（QQ 首次起来要一秒多），所以按 scene 登记来。
-    AevonLandCardSchedule(target);
+    //
+    // 0.3.0 — 这一格原来叫 `AevonLandCardSchedule`（落点专用，`build=1`）。现在
+    // 四路共用 `AevonCardSettle`，kind 按目标 App 归类：授权族报 auth/pay，
+    // 其余（Safari 链接、第三方深链）报 link。判定条件本身一个字没改。
+    AevonRouteKind urlKind = AevonRouteKindLink;
+    if (AevonBundleIsAuthFamily(target)) {
+        urlKind = (strncmp(target, "com.alipay.iphoneclient", 23) == 0 ||
+                   strncmp(target, "com.eg.android.AlipayGphone", 27) == 0 ||
+                   strncmp(target, "com.unionpay", 12) == 0)
+                      ? AevonRouteKindPay : AevonRouteKindAuth;
+    }
+    AevonCardSettle(target, urlKind);
     // 0.2.71 — 看门狗：万一这一拍把前台弄丢，1.8 s 后自己拉回来。
     AevonLandingGuardStart(target);
 }
@@ -6853,9 +6873,6 @@ static void AevonPasteTokenProbe(id request, id options, const char *bundle) {
 ///
 /// 这个文件是 MRC：跨 `dispatch_after` 的东西一律拿 `strdup` 的 C 串走，
 /// 所有权随块走、块里 `free` —— 与 `AevonBlacklistDrainAt` 同一套写法。
-static char AevonPastePromoteBundle[128];
-static CFAbsoluteTime AevonPastePromoteAt = 0;
-
 /// 0.2.43 — 「这次分享是从哪个 App 发起的」。
 ///
 /// 用户要的是「卡片浮在发起分享的 App 上方」，而不是落在桌面。openCard 的
@@ -6960,287 +6977,6 @@ static void AevonShareSourceCapture(const char *target) {
                   picked.UTF8String, target] UTF8String]);
 }
 
-/// 「把来源 App 请回全屏」。
-///
-/// 只用 SpringBoard 自己的 `launchApplicationWithIdentifier:suspended:NO` ——
-/// 母本用同一条选择子做启动（`suspended:YES`），说明它在 iOS 17 上还在；
-/// `LSApplicationWorkspace.openApplicationWithBundleID:` 是同步 XPC，0.2.1
-/// 的日志里 10 次调用全部 10 秒超时，不能拿来做这一拍。
-/// 返回 1 = 系统接了 / 2 = 拒绝 / 0 = 选择子不在 / 3 = 抛异常。
-static NSInteger AevonLaunchForeground(NSString *bundleID) {
-    if (bundleID.length == 0) return 0;
-    Class appCls = NSClassFromString(@"UIApplication");
-    if (appCls == Nil) return 0;
-    SEL sharedSel = sel_registerName("sharedApplication");
-    if (![appCls respondsToSelector:sharedSel]) return 0;
-    id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, sharedSel);
-    SEL sel = sel_registerName("launchApplicationWithIdentifier:suspended:");
-    if (app == nil || ![app respondsToSelector:sel]) return 0;
-    @try {
-        BOOL (*call)(id, SEL, id, BOOL) = (BOOL (*)(id, SEL, id, BOOL))objc_msgSend;
-        return call(app, sel, bundleID, NO) ? 1 : 2;
-    } @catch (__unused NSException *exception) {
-        return 3;
-    }
-}
-
-/// `launchApplicationWithIdentifier:suspended:` 拒绝时的备份通道。
-///
-/// `LSApplicationWorkspace.openApplicationWithBundleID:` 是同步 XPC，0.2.1 的
-/// 日志里 10 次全部 10 秒超时，所以只丢到后台队列，不占主线程、也不等它回来。
-/// 超时也好、拒绝也好，日志里都会留下 `notify: share restore ls …` 一行。
-static void AevonShareRestoreLaunch(const char *bundle, NSInteger door) {
-    if (door == 1 || bundle == NULL || bundle[0] == '\0') return;
-    char *copy = strdup(bundle);
-    if (copy == NULL) return;
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        @try {
-            Class cls = NSClassFromString(@"LSApplicationWorkspace");
-            if (cls == Nil) { free(copy); return; }
-            id ws = nil;
-            for (NSString *name in @[@"defaultWorkspace", @"sharedInstance"]) {
-                SEL sel = sel_registerName(name.UTF8String);
-                if (![cls respondsToSelector:sel]) continue;
-                ws = ((id (*)(id, SEL))objc_msgSend)((id)cls, sel);
-                if (ws != nil) break;
-            }
-            SEL openSel = sel_registerName("openApplicationWithBundleID:");
-            if (ws == nil || ![ws respondsToSelector:openSel]) { free(copy); return; }
-            BOOL ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(ws, openSel,
-                                                            [NSString stringWithUTF8String:copy]);
-            AevonLogRaw([[NSString stringWithFormat:@"notify: share restore ls b=%s ok=%d",
-                          copy, ok ? 1 : 0] UTF8String]);
-        } @catch (__unused NSException *exception) {
-            AevonLogRaw("notify: share restore ls threw");
-        }
-        free(copy);
-    });
-}
-
-/// 桌面在屏的那一拍，把来源 App 请回全屏；卡片随后贴上去。
-///
-/// 0.2.43 等的是「卡片贴好」再恢复，但那时已经晚了：用户看到的是
-/// 全屏 → 桌面 → 卡片。0.2.44 改成**一看到 home 落地就恢复** ——
-/// `openCard` 的 `afterHome` 只要 `front != 1` 或 `scene_fg != 1` 就继续，
-/// 不会被这次激活挡住（日志 `ready waited=500ms springboard=1 scene_fg=1 front=-1`）。
-static void AevonShareRestoreTick(char *target, char *source, int tick) {
-    if (target == NULL || source == NULL) { free(target); free(source); return; }
-    if (source[0] == '\0' || strcmp(source, target) == 0) {
-        free(target); free(source);
-        return;
-    }
-    if (AevonCardIsUpFor(source) == 1) {
-        AevonLogRaw([[NSString stringWithFormat:@"notify: share restore skip b=%s card=1",
-                      source] UTF8String]);
-        free(target); free(source);
-        return;
-    }
-    if (AevonSpringboardActive() == 1) {
-        NSInteger door = AevonLaunchForeground([NSString stringWithUTF8String:source]);
-        AevonLogRaw([[NSString stringWithFormat:@"notify: share restore b=%s after=%dms door=%d",
-                      source, tick * 100, (int)door] UTF8String]);
-        AevonShareRestoreLaunch(source, door);
-        free(target); free(source);
-        return;
-    }
-    if (AevonCardIsUpFor(target) == 1) {
-        // 卡片贴好时来源 App 还在屏上 —— 这次根本没发 home，已经是要的样子。
-        AevonLogRaw([[NSString stringWithFormat:@"notify: share restore skip b=%s board=0",
-                      source] UTF8String]);
-        free(target); free(source);
-        return;
-    }
-    if (tick >= 48) {
-        AevonLogRaw([[NSString stringWithFormat:@"notify: share restore giveup b=%s tick=%d",
-                      source, tick] UTF8String]);
-        free(target); free(source);
-        return;
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        AevonShareRestoreTick(target, source, tick + 1);
-    });
-}
-
-static void AevonShareRestoreSchedule(const char *target) {
-    if (target == NULL || target[0] == '\0') return;
-    if (AevonShareSource[0] == '\0') return;
-    if (CFAbsoluteTimeGetCurrent() - AevonShareSourceAt > 30.0) return;
-    if (strcmp(AevonShareSource, target) == 0) return;
-    char *t = strdup(target);
-    char *s = strdup(AevonShareSource);
-    if (t == NULL || s == NULL) { free(t); free(s); return; }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        AevonShareRestoreTick(t, s, 0);
-    });
-}
-
-/// 0.2.46 — 分享收卡的顺序反过来：**先请来源 App 回前台，再建卡**。
-///
-/// 0.2.44 的顺序是 `openCard` 的 home-first：按 Home → 桌面 → 建卡 →
-/// 再把来源 App 拉回来。真机上这四拍都看得见，用户看到的就是
-/// 「QQ 全屏 → 桌面 → 文件列表 → 卡片」一路跳。
-///
-/// 这里换一条路：目标 App 此刻正占着全屏（文件刚靠系统那次激活送出去），
-/// 直接 `launchApplicationWithIdentifier:suspended:NO` 把来源 App 顶回前台，
-/// 等目标真的离开前台之后，再用 `homed: true` 建卡。`openCard` 的 home-first
-/// 本来就是为了「目标还占着全屏时不许抽 scene」，目标已经退到后台，这道门
-/// 既不需要、也不该再按一次 Home。
-///
-/// 60 ms 一拍：切 App 的动画是异步的，但目标的 `isForeground` 一翻 0 就说明
-/// scene 已经可以安全搬走；最长 1.2 s 后退回 0.2.44 的顺序兜底。
-///
-/// 0.2.47 — 用户要的是「别看见全屏 QQ」。真正不出现全屏只有本地投递一条路，
-/// 而 `UISPasteSharingToken` 的 description 只有对象地址（0.2.38 的探针），
-/// 这条钥匙不存在；0.2.37「先建卡再交回」也被真机证伪。所以这里只做一件事：
-/// 把「QQ 占屏」的这一段压到最短，让它落在分享面板收起的动画里。
-static char AevonShareSwapTarget[128];
-static CFAbsoluteTime AevonShareSwapAt = 0;
-
-static void AevonShareSwapTick(char *target, char *source, int tick) {
-    if (target == NULL || source == NULL) { free(target); free(source); return; }
-    if (target[0] == '\0') { free(target); free(source); return; }
-    if (AevonCardIsUpFor(target) == 1 || AevonCardIsComingFor(target) == 1) {
-        AevonLogRaw([[NSString stringWithFormat:@"notify: share swap skip b=%s tick=%d",
-                      target, tick] UTF8String]);
-        free(target); free(source);
-        return;
-    }
-    NSString *targetID = [NSString stringWithUTF8String:target];
-    NSString *sourceID = [NSString stringWithUTF8String:source];
-    if (targetID.length == 0 || sourceID.length == 0) { free(target); free(source); return; }
-
-    if (tick == 0) {
-        if (source[0] == '\0') {
-            // 没记到来源：退回 0.2.44 的 home-first，行为一字不改。
-            AevonOpenFromNotification(target);
-            free(target); free(source);
-            return;
-        }
-        // 0.2.72 — 来源已经在卡片里：**不要再把它顶回前台**。
-        //
-        // 0.2.71 的真机现场（09:41:36）是这一串：
-        //   notify: share swap restore b=com.tencent.mqq door=1
-        //   win: card yield seen b=com.tencent.mqq now=430x932 want=430x717
-        //   win: card yielded to fullscreen b=com.tencent.mqq
-        // 授权回跳时 QQ 本来好好待在卡里，这一句把它拉成整屏，卡片随即让路 ——
-        // 用户看到的就是「授权完 QQ 突然全屏」。来源已经有卡时不需要它让位：
-        // 它不在前台，目标那一份 scene 本来就能被直接接走。
-        if (AevonCardIsUpFor(source) == 1) {
-            AevonLogRaw([[NSString stringWithFormat:
-                          @"notify: share swap keep b=%s src=%s",
-                          target, source] UTF8String]);
-            AevonOpenCardDirect(target);
-            free(target); free(source);
-            return;
-        }
-        NSInteger door = AevonLaunchForeground(sourceID);
-        AevonLogRaw([[NSString stringWithFormat:@"notify: share swap restore b=%s door=%d",
-                      source, (int)door] UTF8String]);
-        AevonShareRestoreLaunch(source, door);
-        // 0.2.59 — 「来源顶不回来」就别再等那 20 拍。
-        //
-        // Aevon(200) 的两条文件分享（18:11:58 / 13:46）里来源都是
-        // `com.apple.UIKit.OverlayUI.<uuid>`（分享面板的浮层，不是 App），
-        // `AevonLaunchForeground` 答 2（拒绝），备份通道 `ok=0` —— 也就是
-        // 「永远等不到 sourceBack」。旧版仍然每 60 ms 问一次，问满 20 拍
-        // （1.2 秒）才认输，那 1.2 秒里目标 App 一直整屏在屏上；认输之后才回桌面
-        // 建卡。用户看到的「先跳全屏一下，然后才出现悬浮窗」就是这 1.2 秒。
-        //
-        // 门只认 1（真的拉起来了）。不是 1 就地走 giveup 那一套 ——
-        // 同一条兜底代码，只是提前 1.2 秒执行，行为一模一样。
-        if (door != 1) {
-            AevonLogRaw([[NSString stringWithFormat:
-                          @"notify: share swap nogate b=%s door=%d",
-                          source, (int)door] UTF8String]);
-            AevonShareRestoreSchedule(target);
-            AevonOpenFromNotification(target);
-            free(target); free(source);
-            return;
-        }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            AevonShareSwapTick(target, source, tick + 1);
-        });
-        return;
-    }
-
-    int targetFront = AevonAppFrontmost(targetID);
-    id targetScene = AevonSeenSceneForBundle(targetID);
-    int targetFG = (targetScene != nil) ? AevonSceneForeground(targetScene) : -1;
-    int sourceFront = AevonAppFrontmost(sourceID);
-    id sourceScene = AevonSeenSceneForBundle(sourceID);
-    int sourceFG = (sourceScene != nil) ? AevonSceneForeground(sourceScene) : -1;
-    int targetGone = (targetFront != 1 && targetFG != 1) ? 1 : 0;
-    int sourceBack = (sourceFront == 1 || sourceFG == 1) ? 1 : 0;
-    if (targetGone || sourceBack) {
-        AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: share swap card b=%s after=%dms target_fg=%d src_fg=%d board=%d",
-                      target, tick * 60, targetFG, sourceFG, AevonSpringboardActive()]
-                      UTF8String]);
-        AevonOpenCardDirect(target);
-        free(target); free(source);
-        return;
-    }
-    if (tick >= 20) {
-        AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: share swap giveup b=%s target_fg=%d src_fg=%d tick=%d",
-                      target, targetFG, sourceFG, tick] UTF8String]);
-        // 兜底：回到 0.2.44 的顺序（先回桌面，再由 afterHome 建卡）。
-        AevonShareRestoreSchedule(target);
-        AevonOpenFromNotification(target);
-        free(target); free(source);
-        return;
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        AevonShareSwapTick(target, source, tick + 1);
-    });
-}
-
-static void AevonShareSwapSchedule(const char *target) {
-    if (target == NULL || target[0] == '\0') return;
-    if (AevonShareSource[0] == '\0') { AevonOpenFromNotification(target); return; }
-    if (CFAbsoluteTimeGetCurrent() - AevonShareSourceAt > 30.0) {
-        AevonOpenFromNotification(target);
-        return;
-    }
-    if (strcmp(AevonShareSource, target) == 0) { AevonOpenFromNotification(target); return; }
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (strcmp(AevonShareSwapTarget, target) == 0 && now - AevonShareSwapAt < 3.0) return;
-    snprintf(AevonShareSwapTarget, sizeof(AevonShareSwapTarget), "%s", target);
-    AevonShareSwapAt = now;
-    char *t = strdup(target);
-    char *s = strdup(AevonShareSource);
-    if (t == NULL || s == NULL) { free(t); free(s); return; }
-    AevonShareSwapTick(t, s, 0);
-}
-
-
-/// 0.2.62 — 授权族的「收卡」：系统激活之后，100 ms 内把它变成浮窗。
-///
-/// 背景（Aevon(203) 第 1 条）：0.2.60 把授权整条交回系统，登录终于能成，但
-/// QQ / 微信是**整屏**打开的 —— 用户不接受。而 0.2.59 的「本地投递」又证明
-/// 走不通（微信只开主页、QQ 回跳断在半路）。两条都试过的结论只有一句：
-///
-///   **这一次激活不能被我们吞掉，但激活之后停在哪种形态，是我们说了算的。**
-///
-/// 所以这里不改「放不放行」，只补「放行之后」。`AevonOpenDecide` 放行 ⇒ 系统
-/// 真的把 QQ 拉到前台（SSO 的 XPC 回跳、微信的 NSUserActivity 都成立）⇒ 这张
-/// 票在 100 ms 后由 `AevonOpenCardDirect` 收进卡片。用户看到的是「卡片里开着
-/// QQ」，而登录流程一步没少。
-///
-/// 与 `AevonShareSwapTick` 的区别只有一条：**不去顶来源 App**。那条是给分享用
-/// 的（分享面板开在来源 App 里，要先把它顶回来才能看见下一屏）；授权时来源 App
-/// 正在等 QQ 的 code，把它顶上来只会把 QQ 挤下去。
-/// `build` = 0：授权那一族（系统已经放行、激活之后收卡）。等满 6 秒仍没有
-///              scene，就自己建一份 —— 0.2.72 真机上「放弃」的结果是
-///              `auth swap giveup … build=0` 之后屏幕上什么都没发生，
-///              用户点「授权」等于没点。宁可慢，也必须落到卡里。
-/// `build` = 1：落点那一族（`display` 已经被切掉，系统不会摆屏）。等不到 scene
-///              说明这次激活根本没造出 scene，必须自己建一份，否则就是「点了
-///              没反应」。
 static void AevonAuthSwapTick(char *target, int tick, int build);
 
 /// 0.2.73 — 第 `tick` 拍对应的真实毫秒数。前四拍是 15 ms，之后 50 ms，
@@ -7451,113 +7187,90 @@ static void AevonAuthSwapSchedule(const char *target) {
 
 /// 0.2.67 — 落点专用：`display` 已经被切掉，系统不会把 App 摆到屏幕上。
 /// 剩下的唯一一件事就是把它的 scene 挂进卡片；没有 scene 就自己建一份。
-static void AevonLandCardSchedule(const char *target) {
-    AevonAuthSwapScheduleMode(target, 1);
+// ============================================================================
+// 0.3.0 — URL 四路统一主干（Route）
+//
+// 0.2.x 的 URL 代码是十几轮补丁叠出来的：两套入口（`_openURLCore` 与
+// `_handleOpenApplicationRequest`）各自分流，三套收卡调度（share / auth /
+// paste promote）各写一遍节拍与超时，四套放弃兜底。每一路都能跑，但没人能
+// 说清四路合起来的行为边界。
+//
+// 0.3.0 把它收成一条主干：
+//
+//     请求 ──► 入口适配器（1 个 URL 入口 + 4 个 open 入口）
+//                  │
+//                  ▼
+//              AevonRouteDecide()       ← 唯一的判定
+//                  │
+//                  ├─ PASS     放行，一个字节不改
+//                  ├─ CARD     收进浮窗（四路唯一目标）
+//                  └─ SWALLOW  吞掉（只给「同一次点击的第二条」）
+//                  │
+//                  ▼
+//              AevonCardSettle()        ← 唯一的收卡调度
+//                  · 建 scene 时改 frame（出生即卡尺寸，0.2.90 的机制）
+//                  · 15 ms×4 → 50 ms 步进轮询，scene 一登记就收卡
+//                  · 6 s 兜底自建
+//
+// 安全边界（一条不减）：
+//   `AevonActivateSwitchOff()` → `notify.off` 在 ⇒ 全 PASS
+//   `AevonShareSwitchOff()`    → `share.off` 在 ⇒ 分享 PASS
+//   黑名单 / 熔断 / SpringBoard 自身 / 系统入口 ⇒ PASS
+//   `AevonSettingsMutable()`   → 不可变 settings 一个字节不写（0.2.92 trap 教训）
+//   每个钩子体都有 `@try` 兜底 ⇒ 抛异常等价于「没钩过」
+// ============================================================================
+
+/// 四路的身份（枚举已在前向声明处定义，见 `AevonLandingGuardStart` 附近）。
+/// 只用于日志与 30 s 授权记录，不参与「要不要接管」的判断 ——
+/// 判断只看入口处能拿到的事实。
+
+static const char *AevonRouteName(AevonRouteKind kind) {
+    switch (kind) {
+        case AevonRouteKindShare: return "share";
+        case AevonRouteKindLink:  return "link";
+        case AevonRouteKindAuth:  return "auth";
+        case AevonRouteKindPay:   return "pay";
+        default:                  return "-";
+    }
 }
 
-static void AevonPastePromoteTick(char *copy, int tick) {
-    if (copy == NULL) return;
-    if (copy[0] == '\0') { free(copy); return; }
-    if (AevonCardIsUpFor(copy) == 1 || AevonCardIsComingFor(copy) == 1) {
-        AevonLogRaw([[NSString stringWithFormat:@"notify: paste promote b=%s skip=card tick=%d",
-                      copy, tick] UTF8String]);
-        free(copy);
+/// 统一调度：四种 style 共用一个实现。这是 0.3.0 的核心收敛点 ——
+/// 0.2.x 的 `AevonShareSwapTick` / `AevonPastePromoteTick` 已删除，
+/// 收卡只剩 `AevonAuthSwapTick` 一份。
+///
+/// `kind` 只影响两件事：
+///   · 日志里 `route=` 报哪一路（现场判读用）；
+///   · `auth` / `pay` 追加一次 30 s 授权记录（回跳时要用）。
+static void AevonCardSettle(const char *target, AevonRouteKind kind) {
+    if (target == NULL || target[0] == '\0') return;
+    // 总闸：`notify.off` 在的时候一个字节都不改行为。
+    if (AevonActivateSwitchOff()) {
+        AevonLogRaw([[NSString stringWithFormat:@"route: settle skip b=%s why=off",
+                      target] UTF8String]);
         return;
     }
-    NSString *target = [NSString stringWithUTF8String:copy];
-    if (target.length == 0) { free(copy); return; }
-    int front = AevonAppFrontmost(target);
-    int board = AevonSpringboardActive();
-    int live = AevonAppPid(target) > 0 ? 1 : 0;
-    // `front=-1` 是「读不到前台位」（`SBApplicationController` 对某些 App 返回 nil），
-    // 不是「不在前台」。scene 自己的 `settings.isForeground` 是第二见证 ——
-    // `openCard` 的 home-first 用的就是它（日志里的 `scene_fg=`）。
-    id scene = AevonSeenSceneForBundle(target);
-    int sceneFG = (scene != nil) ? AevonSceneForeground(scene) : -1;
-    // `front=-1` 且 scene 也没记到时，用「进程活着」代替，但多等 0.5 秒，
-    // 免得抢在系统摆动画之前把卡贴上去。
-    //
-    // `board != 1` 是 `openCard` 那条 home-first 的门：桌面在屏时它不会先回桌面，
-    // 而「全屏 App 直接贴卡」正是 0.2.30 修掉的那次黑屏。这里提前按同一条门等。
-    int up = (front == 1 || sceneFG == 1) ? 1
-           : ((front == -1 && sceneFG == -1 && live == 1 && tick >= 8) ? 1 : 0);
-    // 0.2.62 — **目标一能接管就接管，不等它先整屏站住。**
-    //
-    // Aevon(203) 第 4 条：文件分享到 QQ「先全屏打开 QQ，然后变成浮窗」。
-    // 旧判据要求 `front == 1`（SpringBoard 已经把它认成前台）才收卡，而那一刻
-    // 系统已经把整屏画出来了 —— 用户在 `share swap card … after=60ms` 这行日志
-    // 之前，看到的是 QQ 的整屏启动图。改判「进程活着 + scene 已登记」，在系统
-    // 刚开始摆动画时就接过来，那一帧还没有内容，接收等于换了个容器。
-    //
-    // 文件本身不受影响：`__PasteSharingToken` 是系统在激活这一拍交给 QQ 的，
-    // 我们在它之后才动 scene；QQ 进程没有被挂起，读剪贴板与收卡互不阻塞。
-    if (tick >= 1 && scene != nil && (live == 1 || sceneFG == 1)) {
-        AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: paste promote card b=%s front=%d board=%d live=%d scene=%d tick=%d",
-                      copy, front, board, live, sceneFG, tick] UTF8String]);
-        AevonOpenCardDirect(copy);
-        free(copy);
+    if (kind == AevonRouteKindShare && AevonShareSwitchOff()) {
+        AevonLogRaw([[NSString stringWithFormat:@"route: settle skip b=%s why=shareoff",
+                      target] UTF8String]);
         return;
     }
-    // 0.2.79 — **先等目标自己的 scene，不要先把来源 App 拉回来。**
-    //
-    // Aevon(212) 12:20:08 的现场：`paste promote b=com.tencent.mqq front=-1
-    // board=0 live=0 scene=1 tick=0` —— 第 0 拍（20 ms）QQ 的进程号还是 0，
-    // 旧判据 `up = (front==1||sceneFG==1)` 当场成立，于是立刻
-    // `share swap restore`：把文件 App 顶回前台，等 60 ms 再把 QQ 收进卡片。
-    // 用户看到的就是「QQ 先整屏 → 闪回文件列表 → 再变小窗」。
-    //
-    // 现在前 3 拍（≈180 ms）只做一件事：等 `scene` 到位。拿到就直收，一次都不
-    // 把来源 App 拉出来。超过 3 拍还没拿到才退回旧路 —— 那条路至少保证内容
-    // 送得到。`live` 只参与上面那一格，不单独当条件：`SBApplicationController`
-    // 对微 / QQ 常常答 0（0.2.67 的教训），拿它当必要条件会把每一次分享都拖到
-    // 超时。
-    if (board != 1 && up && tick >= 3) {
-        AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: paste promote b=%s front=%d board=%d live=%d scene=%d tick=%d",
-                      copy, front, board, live, sceneFG, tick] UTF8String]);
-        // 0.2.46 — 不再先回桌面。先把来源 App 顶回前台，等目标离开前台之后
-        // 再用 `homed: true` 直接建卡；没记到来源时才退回 home-first。
-        AevonShareSwapSchedule(copy);
-        free(copy);
+    // 已经在卡里 / 卡在途中：不排第二次，否则屏幕上会有一大一小两张。
+    if (AevonCardIsUpFor(target) == 1 || AevonCardIsComingFor(target) == 1) {
+        AevonLogRaw([[NSString stringWithFormat:@"route: settle skip b=%s why=incard",
+                      target] UTF8String]);
         return;
     }
-    if (tick >= 50) {
-        AevonLogRaw([[NSString stringWithFormat:
-                      @"notify: paste promote b=%s giveup front=%d board=%d live=%d scene=%d tick=%d",
-                      copy, front, board, live, sceneFG, tick] UTF8String]);
-        free(copy);
-        return;
+    AevonLogRaw([[NSString stringWithFormat:@"route: settle b=%s kind=%s",
+                  target, AevonRouteName(kind)] UTF8String]);
+    // 授权 / 支付要留一条 30 s 记录：回跳时靠它区分「刚授权完」与「用户在微信里
+    // 点了个链接」。分享不走这条 —— 分享面板也带 paste token，混进来会让
+    // `authreturn` 把发起方误收进卡（0.2.79 的真机事故）。
+    if (kind == AevonRouteKindAuth || kind == AevonRouteKindPay) {
+        AevonAuthSeenNote(target);
     }
-    // 0.2.56 — 60 ms 一拍（原 125 ms）：目标 scene 一翻前台就收卡，
-    // 不再多等一个固定节拍。50 拍仍覆盖原来的 3 秒窗口。
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        AevonPastePromoteTick(copy, tick + 1);
-    });
+    AevonAuthSwapSchedule(target);
 }
 
-/// 同一次分享会连来两条（op=untrusted / op=user），只许排一条等待链。
-static void AevonPastePromoteSchedule(const char *bundle) {
-    if (bundle == NULL || bundle[0] == '\0') return;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (strcmp(AevonPastePromoteBundle, bundle) == 0 && now - AevonPastePromoteAt < 6.0) return;
-    snprintf(AevonPastePromoteBundle, sizeof(AevonPastePromoteBundle), "%s", bundle);
-    AevonPastePromoteAt = now;
-    // 0.2.43 — 先记账：这一拍分享面板还开在来源 App 里，目标 App 还没顶上来。
-    AevonShareSourceCapture(bundle);
-    char *copy = strdup(bundle);
-    if (copy == NULL) return;
-    AevonLogRaw([[NSString stringWithFormat:@"notify: paste promote schedule b=%s", copy] UTF8String]);
-    // 0.2.56 — 首拍从 0.20 s 改到 0.02 s：这 0.20 s 不是「等内容就绪」，只是
-    // 排队的固定延迟。`AevonPastePromoteTick` 自己会用 `sceneFG / front` 判
-    // 「目标是不是真的已经上前台」，不到就继续等 —— 所以提前来问不会抢跑，
-    // 只会在目标上前台的那一拍立刻收卡，把用户看到的全屏窗口压到最短。
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.02 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        AevonPastePromoteTick(copy, 0);
-    });
-}
 
 /// 0.2.56 — 一条 URL 的形状：scheme 与长度。内容（ticket / code）不进日志。
 static void AevonURLShape(NSString *url, char *out, size_t size) {
@@ -7876,7 +7589,7 @@ static int AevonOpenDecide(id request, id options, id settings,
             AevonLandingShape(AevonLinkPending, shape, sizeof(shape));
             AevonLogRaw([[NSString stringWithFormat:@"notify: link late b=%s age=%dms shape=%s",
                           bundle, (int)(age * 1000.0), shape] UTF8String]);
-            AevonLandCardSchedule(bundle);
+            AevonCardSettle(bundle, AevonRouteKindLink);
             *why = "urllate";
             return 0;
         }
@@ -7944,6 +7657,13 @@ static int AevonOpenDecide(id request, id options, id settings,
              strncmp(bundle, "com.alipay.iphoneclient", 23) == 0 ||
              strncmp(bundle, "com.eg.android.AlipayGphone", 27) == 0 ||
              strncmp(bundle, "com.unionpay", 12) == 0);
+        // 0.3.0 — 支付与授权在逆向数据里形状相同（四家样本都没有支付专项分支），
+        // 所以判定条件一个字不改；只有日志与 30 s 记录分两类，便于现场判读
+        // 「这一次到底是登录还是付款」。云闪付两边都算，按支付记。
+        int isPayFamily = (!isSafari &&
+            (strncmp(bundle, "com.alipay.iphoneclient", 23) == 0 ||
+             strncmp(bundle, "com.eg.android.AlipayGphone", 27) == 0 ||
+             strncmp(bundle, "com.unionpay", 12) == 0));
         // 0.2.53 — 通用链接被系统解析到了别的 App（GitHub 之类）：改投 Safari。
         // 条件是「browsing-web 活动 + 没有 paste token + 不是分享」，所以只命中
         // 「用户点了一个网页链接」这一种，不会误伤深链回调和分享。
@@ -8054,7 +7774,8 @@ static int AevonOpenDecide(id request, id options, id settings,
                 // 所以这一版与 0.2.68 完全一致：请求原样交给系统，50 ms 后收卡。
                 // 代价仍是「先整屏一小段」（`first frame shown after …` 就是那段
                 // 窗口的实测值），但登录一定成立、主屏一定有人接手势。
-                AevonAuthSwapSchedule(bundle);
+                AevonCardSettle(bundle, isPayFamily ? AevonRouteKindPay
+                                                    : AevonRouteKindAuth);
                 *why = "oauthpass";
                 AevonDivertAt = now;
                 snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
@@ -8215,7 +7936,7 @@ static int AevonOpenDecide(id request, id options, id settings,
                                   bundle, *why, schemeText[0] != '\0' ? schemeText : "-",
                                   frontNow, inCard]
                                  UTF8String]);
-                    AevonAuthSwapSchedule(bundle);
+                    AevonCardSettle(bundle, AevonRouteKindLink);
                     return 0;
                 }
                 // 0.2.50 — 没认出来的那一次也留一份形状，下一轮不用再猜：
@@ -8354,9 +8075,10 @@ static int AevonOpenDecide(id request, id options, id settings,
         AevonDivertAt = CFAbsoluteTimeGetCurrent();
         snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
         AevonPasteTokenProbe(request, options, bundle);
-        // 0.2.39 — 放行代表「文件靠系统这一拍送出去」；这一行代表「等它送到之后，
-        // 再把目标 App 从全屏收回卡片」。两条互不阻塞。
-        AevonPastePromoteSchedule(bundle);
+        // 0.3.0 — 并轨主干：放行让系统把文件送出去，再由统一调度把目标收进卡片。
+        // 原来是 `AevonPastePromoteSchedule`（独立的一套 60 ms 计时链），现与
+        // 授权/链接共用一个调度器，节拍与兜底只有一份实现。
+        AevonCardSettle(bundle, AevonRouteKindShare);
         return 0;
     }
 
@@ -8374,7 +8096,7 @@ static int AevonOpenDecide(id request, id options, id settings,
         *why = "wx";
         AevonDivertAt = CFAbsoluteTimeGetCurrent();
         snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
-        AevonPastePromoteSchedule(bundle);
+        AevonCardSettle(bundle, AevonRouteKindShare);
         return 0;
     }
 
