@@ -710,6 +710,8 @@ def main():
                   b"presenter: live app=1 scene=",
                   b"presenter: census end classes=",
                   b"presenter: census skip version=",
+                  # 上一轮普查死在哪 —— 标记先写、普查后跑的代价由这一行补回来。
+                  b"presenter: last census stopped at ",
                   # 0.2.75 — 安全闸的**运行期**复查。Aevon(207) 里用户把 G0 与 G1
                   # 都打开，`win: touch in=17 eat=3` 照样在吞 —— 原因是设置侧只写
                   # 文件/偏好不发通知，而闸本身只在加载时判定一次。这五条就是

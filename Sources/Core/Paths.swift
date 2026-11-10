@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.2.80"
+    public static let version = "0.2.81"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -76,6 +76,11 @@ public enum Aevon {
     /// 单纯重启不会 —— 普查是只读的，但它没有理由在每次开机都占一行日志。
     /// 0.2.80 起，这一份是「Stheno 的 presenter 路能不能走」在真机上的唯一证词。
     public static let presenterStampPath = "/var/mobile/Library/Logs/Aevon/presenter.stamp"
+
+    /// 普查正走到哪个类。写法与 `winStepPath` 同一条纪律：凡是有可能带走进程的
+    /// 调用，调用前先把名字落盘 —— 一个只读普查理论上不该崩，但「理论上」不值钱，
+    /// 上次 SpringBoard 安全模式就是拿「理论上」换来的。跑完即删。
+    public static let presenterStepPath = "/var/mobile/Library/Logs/Aevon/presenter.step"
 
     /// The class a scan was looking at when the process stopped. Written before
     /// each class is touched, so it is the one witness that survives a SIGKILL —

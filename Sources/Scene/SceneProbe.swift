@@ -860,6 +860,11 @@ zStackParticipantDidChange:
     ]
 
     /// 开机时问一次。版本号进标记文件：装新包会重跑一份，单纯重启不会。
+    ///
+    /// **标记先写、普查后跑。** 0.0.7 的教训写在 `consumeRequest` 上面：那次的扫描
+    /// 把 SpringBoard 带走了，而请求文件已经先删掉，所以它没能重放自己。这里同
+    /// 一条纪律 —— 万一普查中途出事，下次启动只会看到「已跑过」，不会二次崩；
+    /// 代价是这一版少一份日志，那个代价比崩溃循环低得多。
     @discardableResult
     static func presenterCensusOnce() -> Bool {
         let want = Aevon.version
@@ -868,25 +873,39 @@ zStackParticipantDidChange:
             Log.write("presenter: census skip version=" + want)
             return false
         }
+        try? FileManager.default.createDirectory(atPath: Aevon.stateDir,
+                                                 withIntermediateDirectories: true)
+        try? want.write(toFile: Aevon.presenterStampPath, atomically: true,
+                        encoding: .utf8)
         DispatchQueue.main.async {
             runPresenterCensus()
-            try? FileManager.default.createDirectory(atPath: Aevon.stateDir,
-                                                     withIntermediateDirectories: true)
-            try? want.write(toFile: Aevon.presenterStampPath, atomically: true,
-                            encoding: .utf8)
         }
         return true
+    }
+
+    /// 上一轮普查死在哪。文件在 = 上次没跑完；名字就是最后碰的那个类。
+    /// 只读一次、立刻删掉，和 `reportPreviousDeath` 对 `winStepPath` 的处理一致。
+    private static func reportPresenterDeath() {
+        guard let text = try? String(contentsOfFile: Aevon.presenterStepPath, encoding: .utf8),
+              !text.isEmpty else { return }
+        try? FileManager.default.removeItem(atPath: Aevon.presenterStepPath)
+        let name = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        Log.write("presenter: last census stopped at " + name)
     }
 
     /// 一次只读普查。逐类报「在不在 / 方法数 / 父类」，再报关注选择子的
     /// 定义类与真实编码；`_UIContextLayerHostView` / presenter 两类额外报
     /// ivar 形状与全量方法名 —— P1 就是照这几张表写调用。
     static func runPresenterCensus() {
+        reportPresenterDeath()
         let start = Date()
         Log.write("presenter: census begin version=" + Aevon.version)
         var exists = 0
         var missing = 0
         for name in presenterClassNames {
+            // 名字先落盘再碰这个类：崩了下次启动由 `reportPresenterDeath` 点名。
+            try? name.write(toFile: Aevon.presenterStepPath, atomically: true,
+                            encoding: .utf8)
             guard let cls = NSClassFromString(name) else {
                 missing += 1
                 Log.write("presenter: class " + name + " exists=0")
@@ -896,6 +915,7 @@ zStackParticipantDidChange:
             describeCarrier(cls, name: name)
         }
         describeLiveCarrier()
+        try? FileManager.default.removeItem(atPath: Aevon.presenterStepPath)
         // 分两段拼，理由同 `gateSnapshot`：这个文件的类型检查超时丢过两次构建。
         let first = "presenter: census end classes=" + String(presenterClassNames.count)
             + " exists=" + String(exists)
