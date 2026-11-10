@@ -7268,6 +7268,12 @@ static void AevonCardSettle(const char *target, AevonRouteKind kind) {
     if (kind == AevonRouteKindAuth || kind == AevonRouteKindPay) {
         AevonAuthSeenNote(target);
     }
+    // 分享要记「谁发起的」：`AevonLandingGuard` 的看门狗在最坏情况下靠它把来源
+    // App 拉回前台。0.2.x 这一步在 `AevonPastePromoteSchedule` 里（那条链已删），
+    // 现在收到同一处 —— 语义不变，位置更靠前。
+    if (kind == AevonRouteKindShare) {
+        AevonShareSourceCapture(target);
+    }
     AevonAuthSwapSchedule(target);
 }
 
