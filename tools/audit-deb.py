@@ -1199,8 +1199,12 @@ def main():
                   b"win: own done phase=%ld scene=%s",
                   # 0.3.1 — 自建 scene 整条下线（Aevon(225) 的安全模式就崩在
                   # `createSceneWithDefinition:initialParameters:` 那一行）。
-                  # 这一格改成「挂起启动 + 等系统 scene」，日志随之改名。
-                  b"win: own retired %@ door=%ld t=%ldms wait=%ldms",
+                  #
+                  # 只钉 OC 那条：`AevonOwnLog` 走 `initWithFormat:`，格式串会作为
+                  # 字面量留在二进制里（已在 0.3.0 产物上实测：`win: own begin ...`
+                  # 等四条各命中 1 次）。Swift 的 `win: own retired ...` 是插值，
+                  # 不产生独立字面量，所以**不**钉它 —— 0.2.92 在
+                  # `(INTERRUPTED)` 上已经栽过一次，同一条坑不踩第二遍。
                   b"win: own disabled b=%@ from=%s",
                   b"win: own scene up after ",
                   b"win: own gave up door=%ld b=%@ after %ldms",
