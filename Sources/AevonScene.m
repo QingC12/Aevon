@@ -3221,7 +3221,6 @@ static int AevonBundleIsAuthFamily(const char *b) {
 /// 一条解析不出来的 URL，以及它被记下的时刻。一次性：谁消费谁清零。
 static char AevonLinkPending[192] = {0};
 static double AevonLinkPendingAt = 0;
-static int AevonLinkPendingNotes = 0;
 static int AevonLSMissNotes = 0;
 
 /// 这些 scheme 不进卡：`tel` / `facetime` 是通话界面（整屏是它的正确形态），
@@ -3243,11 +3242,6 @@ static int AevonURLIsSystemEntry(const char *raw) {
 /// https 不走 pending：那一条已经在分流的 `safari` 分支里跑通了（Aevon(211)
 /// 11:57:17/24/28/33 四次 `notify: link … kind=safari` → 四张卡）。再插一条
 /// 平行的路只会让两条链抢同一张卡。
-static int AevonURLIsWeb(const char *raw) {
-    if (raw == NULL) return 0;
-    return strncasecmp(raw, "http://", 7) == 0 || strncasecmp(raw, "https://", 8) == 0;
-}
-
 static void AevonLSMiss(const char *step) {
     if (AevonLSMissNotes >= 6) return;
     AevonLSMissNotes += 1;
@@ -3404,6 +3398,9 @@ static int AevonLandingEncodingOK(const char *encoding) {
     return strcmp(sig, "v@:@@B@@@?") == 0 ? 1 : 0;
 }
 
+// 0.3.8 — 前台丢失看门狗。URL 清零之后它暂时没有调用者，但**不删**：
+// 它是「万一这一拍把前台弄丢，1.8 s 后自己拉回来」的安全网，下一版照 P1
+// 重建承载层时要用。用 `used` 取一次地址阻止 `-Osize` 消除（0.2.87 教训）。
 static void AevonLandingGuardStart(const char *target);
 /// 0.3.0 — 统一收卡调度（定义在 `AevonAuthSwapSchedule` 之后）。落点那一支与
 /// 分流那几支都在文件更靠前的位置，C 要求先声明后使用，这里先立一份。
@@ -3628,6 +3625,10 @@ static void AevonLandingGuardStart(const char *target) {
         AevonLandingGuardTick(copy, 0);
     });
 }
+
+/// 0.3.8 — 保住看门狗：URL 已清零，它暂时无调用者，但下一版重建承载层要用。
+static void (*const AevonLandingGuardRef)(const char *) __attribute__((used))
+    = AevonLandingGuardStart;
 
 /// 装落点钩子，并把两个「还没用上」的入口记进日志（只记，不钩）。
 static int AevonLandingInstalled = 0;
