@@ -764,9 +764,11 @@ def main():
                   b"initWithURL:workspaceOriginatingProcess:",
                   b"workspaceOriginatingProcess",
                   b"parametersForSpecification:",
-                  b"shape: %s cls=%s n=%u super=%s",
-                  b"shape: %s m rest=%d",
-                  b"shape: dump finished",
+                  # 0.2.87 — 三条 `shape:` 断言随 `AevonOpenShapeDump` 一起删除。
+                  # 它跑过一轮（Aevon(219)）并且答完了：第一个参数是 bundle id
+                  # 字符串，URL 只在 options 的 `__PayloadURL` 里、且是裸 NSURL。
+                  # 函数已从源码移除 —— 未调用的静态函数会被 `-Osize` 整段消除，
+                  # 留断言必然落空（这一版就是这么被 CI 挡下来的）。
                   b"FBSMutableSceneDefinition",
                   b"FBSMutableSceneSettings",
                   # 0.2.86 — 方案 S 判死之后的一轮「URL 装哪」取证。这一轮不再问
@@ -787,9 +789,11 @@ def main():
                   b"LSApplicationWorkspace",
                   b"openSensitiveURL:withOptions:",
                   b"setObject:forActivationSetting:",
-                  b"shape: payload url=#%s len=%d",
-                  b"shape: actions cls=%s n=%lu",
-                  b"shape: act[%lu] cls=%s vars=%s",
+                  # 0.2.87 — `shape: payload` / `shape: actions` / `shape: act[]`
+                  # 三条断言同样随函数删除而移除。它们那一轮的读数记在这里备查：
+                  #   shape: payload url=#NSURL len=-1   → `__PayloadURL` 是裸 NSURL
+                  #   shape: actions none                → 没有现成的 BSAction
+                  #   shape: req cls=__NSCFString        → 第一个参数根本不是 request
                   # 0.2.87 — 三路并轨母版。这一版唯一的**行为改动**是「普通深链
                   # 不再吞掉」，两个新日志行就是它的判据面：
                   #   · `notify: link native` —— 这一族改报 `linkpass` /

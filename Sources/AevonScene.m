@@ -7135,168 +7135,24 @@ static void AevonAuthCardCloseSoon(NSString *who, const char *why) {
     });
 }
 
-// MARK: - 0.2.85 方案 S 现场取证（只读，一次）
+// MARK: - 0.2.85~0.2.86 方案 S / T 现场取证（0.2.87 已删除）
 //
-// 方案 S 的链条是：拿 URL → 建 definition → 建 scene → presenter 承载。
-// 前两步的参数全部长在**这一拍**的四个对象里：
+// 这两个版本在这里有过一个 `AevonOpenShapeDump`：摊开打开请求的四个参数，逐个
+// 问 URL 家族的名字，再把每个参数的自有方法表打出来。它跑过一轮 —— Aevon(219)，
+// 那一轮的读数把两条路同时关掉了：
 //
-//   request  —— 打开请求本身。`AevonOpenBundleOf` 已经从它取到 bundle，
-//               因此 URL 大概率也在这上面，只是名字未知（`url` / `_url` / `URL`）
-//   options  —— 这一层用了很久（`__PayloadURL` / `__Actions` / `__LaunchOrigin`）
-//   settings —— `activationSettings`。方案 S 第 4 步要把它变成 scene 的 settings，
-//               而「能不能直接变」只有看到它的方法表才知道
-//   origin   —— `workspaceOriginatingProcess`。母本那个构造器
-//               `initWithURL:workspaceOriginatingProcess:` 的第二个参数很可能吃它
+//   shape: req cls=__NSCFString n=39 super=NSMutableString   ← 第一个参数是 bundle id 字符串
+//   shape: payload url=#NSURL len=-1                          ← URL 只在 options 的 __PayloadURL 里
+//   shape: actions none                                       ← 没有现成的 BSAction
 //
-// 打四样，**只打一次**：
-//   ① 每个参数的类名 / 自有方法数 / 父类；
-//   ② 十一个 URL 家族名字逐个问。答「有」的**先看返回类型**再决定要不要读 ——
-//      只有返回 `@` 才 `performSelector:`（这是纪律：`perform` 只用于返回对象的
-//      选择子，标量走别路）。读到 NSString / NSURL 才打值，别的一律只打类名。
-//   ③ 自有方法表，每参数最多 42 条、每行 10 条。
-//   ④ 0.2.86 —— `__PayloadURL` 与 `__Actions` 里的东西各是什么类、带哪些 ivar。
+// 结论：URL 不在 request / settings / origin 上，也不在 scene 的 definition 或
+// parameters 里（`FBSSceneDefinition` 3 个 ivar、`FBSSceneParameters` 3 个 ivar，
+// 都没有那一格）。母版自己也从不投 URL —— `_openURLCore` 与 `setActions:` 在
+// `Stheno.dylib` 均 0 命中，它是让**系统**在激活那一拍把 URL 投给目标 App 的。
 //
-// 为什么只做一次：这是打开请求的热路径，`class_copyMethodList` 会摊开类元数据。
-// 一次够用 —— 这四个参数的类不会因为目标 bundle 不同而变。
-// 0.2.87 — 保留但停用（调用点在 `AevonOpenDecide` 之前，已改为只写一段说明）。
-// `unused` 是为了别让编译器为它报警：它是取证工具，不是生产路径的一部分。
-__attribute__((unused))
-static void AevonOpenShapeDump(id request, id options, id settings, id origin) {
-    static int done = 0;
-    if (done) return;
-    done = 1;
-
-    id slots[4] = {request, options, settings, origin};
-    const char *tags[4] = {"req", "opt", "set", "org"};
-    const char *probes[] = {"url", "URL", "_url", "_URL",
-                            "initialURL", "_initialURL",
-                            "workspaceOriginatingProcess",
-                            "_workspaceOriginatingProcess",
-                            "bundleIdentifier", "identifier", "requestIdentifier",
-                            // 0.2.86 —— 投递容器本身。`transitionContext` 若在这四个
-                            // 参数上答得出来，URL 就不必走 definition（它也没有那个位）。
-                            "transitionContext", "actions", "specification"};
-    const int probeCount = (int)(sizeof(probes) / sizeof(probes[0]));
-
-    for (int index = 0; index < 4; index++) {
-        id obj = slots[index];
-        if (obj == nil) {
-            AevonLogRaw([[NSString stringWithFormat:@"shape: %s nil", tags[index]] UTF8String]);
-            continue;
-        }
-        Class cls = object_getClass(obj);
-        uint32_t count = 0;
-        Method *list = class_copyMethodList(cls, &count);
-        Class parent = class_getSuperclass(cls);
-        AevonLogRaw([[NSString stringWithFormat:@"shape: %s cls=%s n=%u super=%s",
-                      tags[index], class_getName(cls), count,
-                      parent != NULL ? class_getName(parent) : "nil"] UTF8String]);
-
-        NSMutableString *probeLine = [NSMutableString stringWithFormat:@"shape: %s probe",
-                                      tags[index]];
-        for (int slot = 0; slot < probeCount; slot++) {
-            SEL sel = sel_registerName(probes[slot]);
-            Method method = class_getInstanceMethod(cls, sel);
-            if (method == NULL) {
-                [probeLine appendFormat:@" %s=-", probes[slot]];
-                continue;
-            }
-            char *ret = method_copyReturnType(method);
-            BOOL objectReturn = (ret != NULL && ret[0] == '@');
-            if (ret != NULL) free(ret);
-            if (!objectReturn) {
-                [probeLine appendFormat:@" %s=!obj", probes[slot]];
-                continue;
-            }
-            id value = nil;
-            @try {
-                value = [obj performSelector:sel];
-            } @catch (__unused NSException *exception) {
-                value = nil;
-            }
-            if ([value isKindOfClass:[NSString class]]) {
-                const char *raw = [(NSString *)value UTF8String];
-                [probeLine appendFormat:@" %s=str:%s", probes[slot], raw != NULL ? raw : "?"];
-            } else if ([value isKindOfClass:[NSURL class]]) {
-                const char *raw = [[(NSURL *)value absoluteString] UTF8String];
-                [probeLine appendFormat:@" %s=url:%s", probes[slot], raw != NULL ? raw : "?"];
-            } else if (value == nil) {
-                [probeLine appendFormat:@" %s=nil", probes[slot]];
-            } else {
-                [probeLine appendFormat:@" %s=#%s", probes[slot], object_getClassName(value)];
-            }
-        }
-        AevonLogRaw([probeLine UTF8String]);
-
-        if (list != NULL) {
-            int shown = (int)(count < 42 ? count : 42);
-            NSMutableString *row = [NSMutableString string];
-            int inRow = 0;
-            for (int i = 0; i < shown; i++) {
-                if (inRow == 0) {
-                    [row setString:[NSString stringWithFormat:@"shape: %s m", tags[index]]];
-                }
-                const char *name = sel_getName(method_getName(list[i]));
-                const char *enc = method_getTypeEncoding(list[i]);
-                [row appendFormat:@" %s=%s", name != NULL ? name : "?",
-                                   enc != NULL ? enc : "?"];
-                inRow++;
-                if (inRow == 10 || i == shown - 1) {
-                    AevonLogRaw([row UTF8String]);
-                    inRow = 0;
-                }
-            }
-            if (shown < (int)count) {
-                AevonLogRaw([[NSString stringWithFormat:@"shape: %s m rest=%d",
-                              tags[index], (int)count - shown] UTF8String]);
-            }
-            free(list);
-        }
-    }
-    // 0.2.86 —— 「URL 装在哪个对象上」比「哪个类有哪些方法」更值钱。
-    //
-    // 母本那条 `initWithURL:workspaceOriginatingProcess:` 造出来的是 `UISOpenURLAction`
-    // （BSAction 的子类），而 BSAction 的标准投递容器是 scene 的 transition context。
-    // 所以这里把 `__Actions` 逐元素摊开、把每个元素的 ivar 名列出来：若元素正是
-    // `UISOpenURLAction`，它身上一定同时躺着 url 与 workspaceOriginatingProcess。
-    //
-    // 这一段只在请求**真的带了东西**时才跑（`AevonOpenCarriesPayload`）：桌面上
-    // 点图标的普通打开不占这一次性预算。0.2.85 把整块挂在 `verdict == 1` 上，
-    // 结果 Aevon(218) 两次分享都走 `return 0`，探针一次都没落地 —— 挂错了位置。
-    @try {
-        id urlValue = AevonOpenAnyValue(request, options, @"__PayloadURL");
-        if (urlValue != nil) {
-            const char *name = object_getClassName(urlValue);
-            int length = [urlValue respondsToSelector:@selector(length)]
-                       ? (int)[urlValue length] : -1;
-            AevonLogRaw([[NSString stringWithFormat:@"shape: payload url=#%s len=%d",
-                          name != NULL ? name : "?", length] UTF8String]);
-        } else {
-            AevonLogRaw("shape: payload url=nil");
-        }
-        id actions = AevonOpenAnyValue(request, options, @"__Actions");
-        if (actions == nil) {
-            AevonLogRaw("shape: actions none");
-        } else {
-            NSUInteger count = [actions respondsToSelector:@selector(count)]
-                             ? [actions count] : 0;
-            AevonLogRaw([[NSString stringWithFormat:@"shape: actions cls=%s n=%lu",
-                          object_getClassName(actions), (unsigned long)count] UTF8String]);
-            for (NSUInteger i = 0; i < count && i < 6; i++) {
-                id item = [actions respondsToSelector:@selector(objectAtIndex:)]
-                        ? [actions objectAtIndex:i] : nil;
-                if (item == nil) continue;
-                char vars[120];
-                AevonIvarNamesOf(item, vars, sizeof(vars), 8);
-                AevonLogRaw([[NSString stringWithFormat:@"shape: act[%lu] cls=%s vars=%s",
-                              (unsigned long)i, object_getClassName(item), vars] UTF8String]);
-            }
-        }
-    } @catch (__unused NSException *exception) {
-        AevonLogRaw("shape: payload threw");
-    }
-    AevonLogRaw("shape: dump finished");
-}
+// 函数已删，两个原因：它挑错了对象（拿 bundle id 当 request 找 URL），而且未被
+// 调用的静态函数会被 `-Osize` 整个消除，留着只会让 audit 断言对着一个二进制里
+// 不存在的字符串。需要时从 0.2.86 的提交里取回。
 
 /// 分流决定。
 ///   返回 1 → 吞掉，开卡片；
