@@ -717,7 +717,6 @@ def main():
                   #       scene 一登记时收回来（紧跟 `notify: auth swap card`）。
                   #       `url=` 只说明这一拍照样带不带 URL，不参与判断。
                   b"notify: oauth native b=%s src=%@ scheme=%s pay=%s url=%d card=%d",
-                  b"notify: oauth card b=%s fwd=%d",
                   # 0.2.80 — 承载层只读普查。这是 Stheno 的 presenter 路线在
                   # 本机能不能走的唯一证词，少了这几行就只剩推断：
                   #   class     每个类在不在、方法数、ivar 数、父类
@@ -1022,8 +1021,6 @@ def main():
                   # 0.2.1 — `divert card up` / `divert replay` / `replay threw` 三条删掉：
                   #   2.5 秒重放整段拔掉（它是自循环的发动机，Aevon(169)）。它们现在在
                   #   反向断言表里，见下面的 `# gone`。
-                  b"notify: divert b=%s op=%s why=%s unlock=%d n=%d",
-                  b"notify: divert chain b=%s op=%s why=%s result=%s",
                   b"notify: divert pass b=%s why=%s",
                   # 0.2.77 — 熔断换了形状：全局 60 次 / 60 秒，外加每个 App
                   # 3 秒 / 6 次的连击计数。Aevon(211) 12:00:17 的支付就是被旧的
@@ -1036,11 +1033,9 @@ def main():
                   #   ls miss  LaunchServices 断在哪一步（class/shared/ws/one-nil/…）
                   #   link late 下一跳把目标报出来了，收卡链已排上
                   b"landing: url ls miss step=%s",
-                  b"notify: link late b=%s age=%dms",
                   # 0.2.77 — 同一条授权来两拍（payload / url）时，第二拍不再
                   # 建第二个 presenter（Aevon(211) 11:58:28 的
                   # `presenter threw … already in use`）。
-                  b"notify: oauth card skip b=%s why=coming",
                   # 0.2.1 — 判据收紧以后的新结局：带 payload、但来源是 SpringBoard 的
                   # 那种打开，只在紧跟我们自己那次分流时才被吞（`why=syschain` 会出现在
                   # 上面那行 chain 日志里 —— 短串会被编成立即数，所以断言只认这条长的）。
@@ -1062,29 +1057,9 @@ def main():
                   # 与 `cover=skip:nocard` 两条。所以这两条必须在产物里，而 `locked`
                   # 必须不在。
                   b"notify: hub d=%@ via=%s",
-                  b"notify: clean d=%s %s n=%d",
                   # 0.1.91 — 面板那行多了两格：`at=` 是手指到面板开始走的毫秒数，
                   # `f=1` 表示「卡在路上就收了」而不是「卡片已经在」。用户报的是
                   # 「会收但慢」，没有这两格，下一版只能再靠感觉调。
-                  b"notify: cover b=%s %s wait=%d at=%dms f=%d",
-                  b"notify: cover sels%s",
-                  b"cover=ok:%s",
-                  b"cover=shape%s",
-                  b"cover=noclass",
-                  b"cover=down p=%ld v=%ld",
-                  b"cover=skip:passcode",
-                  b"cover=skip:nocard",
-                  b"cover=none",
-                  b"banner=ok:%s%s",
-                  b"banner=none%s",
-                  b"banner=nodispatcher",
-                  b"isPasscodeLocked",
-                  b"setCoverSheetPresented:animated:withCompletion:",
-                  b"setCoverSheetPresented:animated:withCompletion:force:",
-                  b"_setCoverSheetPresented:animated:withCompletion:",
-                  b"_dismissCoverSheetAnimated:withCompletion:",
-                  b"dismissCoverSheetAnimated:completion:",
-                  b"dismissCoverSheet",
                   # 0.1.92 — 清通知（点开 = 已读）。母版线 log67~log71 四版试出来的落点，
                   # 每一条都要能在产物里找到，否则「没清」与「没试」在日志里长得一样：
                   #   clear b=… id=… via=… sel=… = 清成功了，写清走的是哪个宿主/哪个方法
@@ -1092,9 +1067,6 @@ def main():
                   #   clear=noreq                = 标识有了，但没有哪个宿主认这条请求
                   #   clear map                  = 一次开机的「能力地图」，下一版据此改名字
                   #   clear b=%@ clear=noid      = 上面那条的 Swift 版（分流那一拍就写）
-                  b"notify: clear b=%s id=%s via=%s sel=%s",
-                  b"notify: clear b=%s id=%s clear=noreq",
-                  b"notify: clear b=%@ clear=noid",
                   b"notify: clear map",
                   # 0.2.5 — 清通知改「截对象」。老路（上面五条 getter + 各宿主比对）在
                   # 真机 6/6 是 `clear=noid`：猜标识这件事本身走不通，不是名字没试全。
@@ -1116,9 +1088,6 @@ def main():
                   b"notify: capture req=%s dest=%s act=%s ok=%d",
                   # 0.2.37 — 两条清通知证词前面多了一格 `%s`（` retry` / 空串），
                   # 1.6 秒那次补刀与第一拍在日志里要能分开。
-                  b"notify: clear%s b=%s via=%s",
-                  b"notify: clear%s b=%s capture=%s id=absent",
-                  b"notify: clear b=%@ via=capture only",
                   # 0.2.7 —— 三家综合（TrollOpen / Myrtle / Mango）这一版的四条证词。
                   #
                   #   shareprobe   分享那一拍的全部现场：来源、payload 类型、结果块形状、
@@ -1145,7 +1114,6 @@ def main():
                   b"win: act enc set=%s get=%s",
                   b'win: act key %d "%.30s"%@',
                   b"win: act key pick=%d flag=%d n=%d enc=%s",
-                  b"notify: forward suspbit idx=%d flag=%d read=%d enc=%s n=%d",
                   # 0.2.39 —— 分享黑名单（`shareBlacklist` / `notify: blacklist drain`）
                   # 已随微信移出整块删除，这里不再断言旧证词。
                   # 一次开机一遍：这一族到底有哪些手段。真 API 名靠 census 不靠 strings。
@@ -1155,7 +1123,6 @@ def main():
                   b"win: ability bg app=%d ctrl=%d mainws=%d sbws=%d set=%d susp=%d fg=%d",
                   b"win: ability deact2 sbws=%d fbmgr=%d fluid=%d coord=%d",
                   # 因果读数：转发前/后目标 App 在系统眼里是不是前台。
-                  b"win: pose b=%@ phase=%s front=%d bg=%d run=%d pid=%d",
                   # 0.2.10 —— 自建 scene 的三问：类在不在 / 名字叫什么 /
                   #                   关键选择子落在哪个类、什么形状。全部 class_copyMethodList
                   #                   + method_getTypeEncoding，一个对象都不建、一次 msgSend
@@ -1246,8 +1213,6 @@ def main():
                   #   forward held      分享那条请求进入待发（这时还没交给系统）
                   #   forward flush     scene 到位 / 超时之后真正投出去，带等了多久
                   b"win: own live attach %@ t=%ldms wait=%ldms",
-                  b"notify: forward held slot=%d form=%c",
-                  b"notify: forward flush why=%s after=%.0fms",
                   # 0.2.37 — 「桌面图标把卡片里的 App 拿去全屏」那一次的两个现场：
                   #   card yield seen   系统往我们 hosted 的 scene 写了整屏 frame
                   #   card yielded      卡片出口真的跑了（Swift 侧）
@@ -1281,8 +1246,6 @@ def main():
                   # `notify: link native b=…`，词条已挪到 0.2.87 段。
                   # 这里保留的是同一族的另外三行：卡里回调 / 建卡 / 回落。
                   b"notify: link incard b=%s scheme=%s front=%d",
-                  b"notify: link card b=%@ kind=%s fwd=%d n=%d",
-                  b"notify: link fallback b=%@ why=%s",
                   b"linkchain",
                   # 0.2.15 —— 尺寸 + 分享两件：
                   #   own display       scene 的 displayConfiguration 被改成画布大小
@@ -1298,8 +1261,6 @@ def main():
                   b"win: own safe top=%.0f bottom=0 src=statusbar",
                   b"win: own safe set %.0f/%.0f enc=%s",
                   b"win: own safe skip top=%.0f bottom=%.0f enc=%s n=%u",
-                  b"notify: appurl send b=%@ opt=%d/%d src=%@ u=%.48s",
-                  b"notify: appurl retry n=%d via=%@",
                   # 0.2.17 —— 抖音「出生整屏」那一次尺寸变化，以及分享不再抢跑。
                   #   own staged        这个 App 的 scene 先按整屏建，贴上后再推到画布
                   #                     （名单里现在只有抖音；串在产物里 = 名单真的编进去了）
@@ -1307,22 +1268,9 @@ def main():
                   #   ack … [%@]        回执原文进主日志（pid / sc / wsc / dlg / rsp）
                   b"win: own staged %.0fx%.0f -> %.0fx%.0f b=%@",
                   b"com.ss.iphone.ugc.Aweme",
-                  b"notify: share lost b=%@ why=%s",
                   # 0.2.18 —— 0 ms 抢跑的修复：两种「等」各自的收尾词不能丢。
                   #   no deliver    卡片 3 秒内一次投递都没发起 ⇒ 就地销毁
                   #   appurl stuck  投递挂满 6 秒 ⇒ 也算失败，仍然不交回 SB
-                  b"notify: share lost b=%@ why=%s at=%.0fms",
-                  b"no deliver",
-                  b"appurl stuck",
-                  b"notify: appurl ack b=%@ ok=%d via=%@ at=%.0fms [%@]",
-                  b"notify: appurl ack b=%@ ok=%d via=%@ at=%.0fms",
-                  b"notify: appurl give b=%@ why=%s at=%.0fms",
-                  b"notify: appurl none b=%@ (no container)",
-                  b"notify: appurl no write b=%@",
-                  b"notify: forward drop why=%s after=%.0fms",
-                  b"com.aevon.openurl.%@",
-                  b"aevon-open.plist",
-                  b"aevon-open-ack",
                   b"setDisplayConfiguration:",
                   # 这一字典的字面量是「自建」这件事在产物里的锚：三个类名任何一个
                   # 拼错，工程就编译成一条永远走不进去的路，而日志只会说 gate miss。
@@ -1330,12 +1278,10 @@ def main():
                   b"FBApplicationProcessLaunchTransaction",
                   b"registerProcessForAuditToken:",
                   b"createSceneWithDefinition:initialParameters:",
-                  b"notify: forward adopt b=%s op=%s",
                   b"win: ability app forceBg=%d ctrl forceBg=%d app dehost=%d ctrl dehost=%d",
                   b"win: ability scene deact=%d/%d overlay=%d txn=%d openurl=%d/%d",
                   # settings 能力行补了两个读数（getFlag / n）。0.2.6 之前它是「一次开机
                   # 只记一次」，分享换一条路进来时日志里什么都没有。
-                  b"notify: fwd settings c=%s setSusp=%d setFlag=%d getSusp=%d getFlag=%d n=%d",
                   # 放行侧独立预算（原来与通知共用 6 条，第三次点击之后永久静默）。
                   b"notify: divert pass b=%s why=%s n=%d",
                   # Mango 的「判内容就绪」：空壳不建卡，继续等。
@@ -1348,22 +1294,11 @@ def main():
                   b"sectionIdentifier",
                   # 取标识的五条无参 getter。`identifier` 故意不在里面（BSAction 自己也有），
                   # 这几条同时是「这一版到底问过哪些名字」的证词。
-                  b"notificationRequestIdentifier",
-                  b"requestIdentifier",
-                  b"notificationUUID",
                   # 找请求：一个按标识取 + 三个列表 + 一张字典。
-                  b"notificationRequestForIdentifier:",
-                  b"requestForIdentifier:",
-                  b"notificationRequestsByIdentifier",
-                  b"presentedNotificationRequests",
                   # 四个清除方法 + 四个 destination 宿主。
                   b"withdrawNotificationRequest:",
-                  b"_withdrawNotificationRequest:",
-                  b"removeNotificationRequest:",
-                  b"clearNotificationRequest:",
                   b"lockScreenDestination",
                   # 0.1.92 — 分享面板 → 浮窗。判据只有一个字符串：来源进程。
-                  b"notify: share b=%@ src=%s pay=%s fwd=%d n=%d",
                   # 0.1.97 — 判据从「只有 sharingd」扩到「来源是分享扩展 或 这次打开带东西」。
                   # 四个字面量就是这两条判据的全部证据面。
                   b"__PayloadURL",
@@ -1377,12 +1312,7 @@ def main():
                   #   系统不认，于是分享时全屏和卡片一起被拉起（Aevon(165) 回环那行的 keys
                   #   里能直接看到那个长名字躺着）。
                   b"__ActivateSuspended",
-                  b"notify: forward susp=%d keys=%lu",
-                  b"notify: forward done ok=1",
-                  b"notify: forward done ok=0",
-                  b"notify: forward done err",
                   # 0.1.96 — 自己交回去的那条请求要认出来，只放行（不认就会二次分流）。
-                  b"notify: forward pass b=%s op=%s",
                   # 0.1.99 — 三条诊断。这一版不改行为，价值全在这三行能不能被真机读出来：
                   #   pass      = 被放行的那条请求（哪一条、为什么、带没带东西）。
                   #               Aevon(167) 里 QQ 有一条 op=user 被放行，而 Sileo 没有，
@@ -1390,8 +1320,6 @@ def main():
                   #   fwd settings = 第 4 个参数（SBActivationSettings）认不认「挂起」相关选择子。
                   #   clear probe  = 点通知时公开链断在哪一跳（母版 log70 取到过标识，我们 6/6 没有）。
                   b"notify: pass b=%s op=%s why=%s src=%s pay=%s n=%d",
-                  b"notify: fwd settings c=%s setSusp=%d setFlag=%d getSusp=%d",
-                  b"notify: clear probe a=%s l1=%s l2=%s l3=%s id=%d info=%s keys=%s n=%d",
                   # 0.1.99 — 能力地图加了 dispatcher 类名那一格（取不到是最要紧的一种结果）。
                   b"notify: clear map d=%s",
                   b"sharingd",
@@ -1410,13 +1338,7 @@ def main():
                   # 没有它，「这条标记会不会永久残留」就又从日志里消失了。
                   b"win: mini flag clear stuck n=%d keep",
                   # 形状闸的六个期望值。它们同时是「这一版到底校验了什么」的证词。
-                  b"v@:BB@",
-                  b"v@:BB@B",
-                  b"v@:B@",
-                  b"v@:",
                   # 横幅：只有 GCD 计时器才动，而且必须是这个名字的那一个。
-                  b"dismissTimer",
-                  b"_dismissTimer",
                   b"dispatch_source",
                   b"bannerDestination",
                   b"dashBoardDestination",
@@ -1995,8 +1917,6 @@ def main():
                       # 与两种「没东西可交」；通道名与回执名也一起钉住 —— 宿主和
                       # 应用两侧的拼写只要差一个字符，这条链就永久静默。
                       b"com.aevon.openurl.",
-                      b"aevon-open.plist",
-                      b"aevon-open-ack",
                       b"app: openurl ok=%d via=%s u=%d opt=%d src=%d sc=%d wsc=%d wins=%d state=%d rsp=%d dlg=%s",
                       # 0.2.18 —— 回执又加了 `wins` / `state`：区分「一条 scene 都没有」
                       # 与「有窗口但没 scene」。两个字段都不进产物就等于这版白改。
