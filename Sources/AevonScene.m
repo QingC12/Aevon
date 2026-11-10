@@ -1696,7 +1696,12 @@ NSInteger AevonOwnDestroy(NSString *bundleID) {
 /// deactivation hook, and two spare slots cost five words of static memory.
 /// 0.0.54 — seven: one of the three candidates (the hosting view controller)
 /// was proved dead on the phone and is gone.
-#define AEVON_HOOK_SLOTS 7
+/// 0.2.89 — twelve: the two activation-beat probes (`act-activate` /
+/// `act-scene`) each reserve one slot per owning class, and the deact /
+/// intercept loops already take up to four. Running out is silent — the
+/// loop breaks and the version ships with nothing installed — so the table
+/// is sized for the worst case rather than the usual one.
+#define AEVON_HOOK_SLOTS 12
 
 typedef struct {
     Class cls;
@@ -3660,12 +3665,251 @@ static void AevonLandingInstall(NSMutableString *out) {
     }
 }
 
+// MARK: - 0.2.89 — 起点迁移第①段：激活那一拍，只读
+//
+// 0.2.87 只并了母版的一半（「不吞」），承载时序一行没动。结果是最坏的组合：
+// 整屏照系统的意走完，我们 15~30 ms 后才建卡，366~1972 ms 才有首帧，中间那段黑
+// （Aevon(220) 三次实测）。根因不是收得慢，是**站位**：母版这条路上有三个插入点
+// —— 激活请求（不带呈现）、建 scene（还没上屏）、绑 presenter —— 我们一个都没有。
+//
+// 这一版只装第①段：两个方法都挂上、都原样尾调、**一个字的行为都不改**，只写读数。
+//
+// 为什么必须只读：presenter 绑的是 scene，而「激活那一拍」scene 还不存在。能同时
+// 拿到 scene、又还没上屏的那一格是 `_createSceneWithDefinition:…completion:`。
+// 但两件事静态读不出来 —— `createPresenterWithIdentifier:` 的 identifier 是不是
+// `scene.identifier`、completion 能不能延后回调。这两条是第②段能否成立的全部依据，
+// 只能在真机上问；问的代价必须为零，否则就是拿开机赌。
+
+static volatile int64_t AevonActHitAt = 0;
+static long AevonActHits = 0;
+static long AevonActSceneHits = 0;
+static long AevonActPayloadLines = 0;
+static long AevonActNearLines = 0;
+static int AevonActBooted = 0;
+
+/// 毫秒时钟。与 `AevonLinkPendingAt` 同源，两行读数才能相减。
+static int64_t AevonActMs(void) {
+    return (int64_t)(CFAbsoluteTimeGetCurrent() * 1000.0);
+}
+
+/// 按**编码串**判定形状，不数 `@`。
+///
+/// `AevonAttachShaped` 的口径是「数对象参数」，对 `v` 开头的方法够用。这两个不行：
+/// `createScene` 返回 `id`，数个数会把返回类型也算进去；`activate` 中间夹一个 BOOL。
+/// 所以这里换成整串比对 —— `exact` 给了就要求逐字节相等；只给头尾就要求总长相等、
+/// 头尾都对。任何一条不满足都不挂，并把实际编码原样打进日志。
+///
+/// 为什么头尾判定在纯尾调下是安全的：`@72` 是栈帧总长，`@?64` 是最后一位。总长 72
+/// 说明自己 @0、选择子 @8 之后的 7 个参数各占满 8 字节 —— 中间某一个的类型写错
+/// （`@`/`Q`/`d` 互换）也不影响，因为这一版只把指针原样传下去、一个都不解引用。
+/// 真正会出事的是**槽位数**不对，而槽位数由总长钉死。
+static BOOL AevonAttachShape(NSMutableString *out, AevonHookSlot *slot, Class cls,
+                             NSString *selName, const char *head, const char *tail,
+                             size_t total, const char *exact, id block) {
+    if (out == nil || slot == NULL || cls == Nil || selName == nil) return NO;
+    Method method = class_getInstanceMethod(cls, NSSelectorFromString(selName));
+    if (method == NULL) {
+        [out appendFormat:@"act: no method %@\n", selName];
+        AevonRelease(slot);
+        return NO;
+    }
+    const char *encoding = method_getTypeEncoding(method);
+    if (encoding == NULL) {
+        [out appendFormat:@"act: no encoding %@\n", selName];
+        AevonRelease(slot);
+        return NO;
+    }
+    size_t len = strlen(encoding);
+    BOOL ok = NO;
+    const char *how = "no";
+    if (exact != NULL) {
+        ok = strcmp(encoding, exact) == 0;
+        how = "exact";
+    } else if (head != NULL && tail != NULL && total > 0 && len == total) {
+        ok = strncmp(encoding, head, strlen(head)) == 0 &&
+             strcmp(encoding + len - strlen(tail), tail) == 0;
+        how = "head/tail";
+    }
+    if (!ok) {
+        [out appendFormat:@"act: shape reject cls=%@ got=%s want=%s\n",
+         NSStringFromClass(cls), encoding, exact != NULL ? exact : head];
+        AevonRelease(slot);
+        return NO;
+    }
+    [out appendFormat:@"act: shape %s cls=%@ types=%s\n",
+     how, NSStringFromClass(cls), encoding];
+    return AevonAttach(out, slot, cls, selName, block);
+}
+
+/// definition 里的 scene 身份，只读。两条守卫都是必需的：ivar 类型不是 `@` 就不读
+/// （`object_getIvar` 只对对象 ivar 有定义）；选择子不在就不调（问是免费的，调不是）。
+static NSString *AevonActIdentifierOf(id definition, NSString **clsOut) {
+    if (clsOut != NULL) *clsOut = nil;
+    if (definition == nil) return nil;
+    Ivar iv = class_getInstanceVariable(object_getClass(definition), "_identity");
+    if (iv == NULL) return nil;
+    const char *type = ivar_getTypeEncoding(iv);
+    if (type == NULL || type[0] != '@') return nil;
+    id identity = object_getIvar(definition, iv);
+    if (identity == nil) return nil;
+    if (clsOut != NULL) *clsOut = NSStringFromClass(object_getClass(identity));
+    SEL sel = NSSelectorFromString(@"identifier");
+    if (![identity respondsToSelector:sel]) return nil;
+    id got = [identity performSelector:sel];
+    return [got isKindOfClass:[NSString class]] ? got : nil;
+}
+
+/// 先按已知真名找，找不到才全类扫。
+///
+/// 全类扫要遍历近十万个类的自有方法表，开机时跑一次就是几百毫秒的代价；而这两个
+/// 方法的宿主在 0.2.87 的普查里已经点名了（`FBSystemService` / `FBSceneManager`）。
+/// 真名对了就只花一次 `class_getInstanceMethod`；名字变了仍会退到全扫，不会因为
+/// 猜错就静默不装 —— 0.1.85~0.1.87 那三次「本机没有」正是只在错误范围内找的结果。
+static int AevonActOwners(NSString *selName, NSString *hint,
+                          Class *owners, int limit) {
+    if (selName == nil || owners == NULL || limit <= 0) return 0;
+    SEL sel = NSSelectorFromString(selName);
+    if (sel == NULL) return 0;
+    Class named = hint != nil ? NSClassFromString(hint) : Nil;
+    if (named != Nil && class_getInstanceMethod(named, sel) != NULL) {
+        owners[0] = named;
+        return 1;
+    }
+    return AevonOwnersOf(sel, owners, limit);
+}
+
+/// 装两个只读探针。幂等：第二张卡不会叠第二层替换。
+static void AevonActInstall(NSMutableString *out) {
+    if (AevonActBooted) {
+        [out appendString:@"act: already installed in this process\n"];
+        return;
+    }
+    AevonActBooted = 1;
+
+    // ① 激活请求。真名在 `FBSystemService`：0.1.87 当年只在 `SBMainWorkspace`
+    //    一个类里找，把「我这一支没有」误记成「这台机器没有」；0.2.87 的全类扫
+    //    （99452 个类）推翻了它。options 是第 4 个参数（@36），URL 就装在里面。
+    NSString *actName =
+        @"_activateBundleID:requestID:isTrusted:options:source:originalSource:withResult:";
+    Class actOwners[4] = { Nil, Nil, Nil, Nil };
+    int actCount = AevonActOwners(actName, @"FBSystemService", actOwners, 4);
+    [out appendFormat:@"act: activate owners=%d\n", actCount];
+    for (int i = 0; i < actCount; i++) {
+        AevonHookSlot *slot = AevonReserve("act-activate");
+        if (slot == NULL) {
+            [out appendString:@"act: no slot\n"];
+            break;
+        }
+        AevonHookSlot *mine = slot;
+        id block = ^(id service, id bundleID, id requestID, BOOL trusted,
+                     id options, id source, id originalSource, id result) {
+            long seen = __sync_fetch_and_add(&AevonActHits, 1);
+            int64_t now = AevonActMs();
+            AevonActHitAt = now;
+            const char *optCls = "nil";
+            long keys = -1;
+            int payload = -1;
+            if (options != nil) {
+                optCls = object_getClassName(options);
+                // 只读：不是字典就只报类名，`count` 一个字节都不碰。
+                if ([options isKindOfClass:[NSDictionary class]]) {
+                    NSDictionary *dict = (NSDictionary *)options;
+                    keys = (long)[dict count];
+                    payload = [dict objectForKey:@"__PayloadURL"] != nil ? 1 : 0;
+                }
+            }
+            // 两条口径：前 6 条无条件记（普通启动这一版正好当对照组），带 payload
+            // 的再单独记 6 条 —— 那一条才是「URL 真的装进激活请求」的证词，不能
+            // 因为预算先被普通启动占满就丢掉。
+            BOOL take = seen < 6;
+            if (!take && payload == 1 &&
+                __sync_fetch_and_add(&AevonActPayloadLines, 1) < 6) {
+                take = YES;
+            }
+            if (take) {
+                const char *bundle = "-";
+                if ([bundleID isKindOfClass:[NSString class]]) {
+                    bundle = [(NSString *)bundleID UTF8String];
+                }
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"act: activate n=%ld t=%lld trusted=%d b=%s opt=%s keys=%ld payload=%d res=%s",
+                              seen + 1, (long long)(now % 1000000), trusted ? 1 : 0,
+                              bundle, optCls, keys, payload,
+                              result != nil ? object_getClassName(result) : "nil"]
+                             UTF8String]);
+            }
+            // 原样尾调。参数一个不改、返回值不改，这一版的全部行为就是「没有行为」。
+            void (*original)(id, SEL, id, id, BOOL, id, id, id, id) =
+                (void (*)(id, SEL, id, id, BOOL, id, id, id, id))mine->original;
+            if (original != NULL) {
+                original(service, mine->sel, bundleID, requestID, trusted,
+                         options, source, originalSource, result);
+            }
+        };
+        AevonAttachShape(out, slot, actOwners[i], actName, "v68@0:8", "@?60", 29,
+                         "v68@0:8@16@24B32@36@44@52@?60", block);
+    }
+
+    // ② 建 scene。这一格才是「拿到 scene、又还没上屏」的那一瞬 —— 母版 hook 了它，
+    //    我们此前只把签名问清了（`FBSceneManager`，`@72@0:8…@?64`），一次都没挂过。
+    NSString *sceneName =
+        @"_createSceneWithDefinition:settings:initialClientSettings:"
+        @"transitionContext:fromRemnant:usingClientProvider:completion:";
+    Class sceneOwners[4] = { Nil, Nil, Nil, Nil };
+    int sceneCount = AevonActOwners(sceneName, @"FBSceneManager", sceneOwners, 4);
+    [out appendFormat:@"act: createScene owners=%d\n", sceneCount];
+    for (int i = 0; i < sceneCount; i++) {
+        AevonHookSlot *slot = AevonReserve("act-scene");
+        if (slot == NULL) {
+            [out appendString:@"act: no slot\n"];
+            break;
+        }
+        AevonHookSlot *mine = slot;
+        id block = ^id(id manager, id definition, id settings, id clientSettings,
+                       id context, id remnant, id provider, id completion) {
+            long seen = __sync_fetch_and_add(&AevonActSceneHits, 1);
+            int64_t now = AevonActMs();
+            long gap = AevonActHitAt > 0 ? (long)(now - AevonActHitAt) : -1;
+            // 两条口径：紧跟一次激活之后 5 s 内的记前 10 条（那才是「为这次打开
+            // 造的」）；离得远的只留 2 条做基线 —— 开机时 SpringBoard 自己也在造
+            // scene，不分开就会把预算烧在跟本次无关的那些上。
+            BOOL near = gap >= 0 && gap < 5000;
+            BOOL take = near ? (__sync_fetch_and_add(&AevonActNearLines, 1) < 10)
+                             : (seen < 2);
+            if (take) {
+                NSString *identCls = nil;
+                NSString *ident = AevonActIdentifierOf(definition, &identCls);
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"act: scene n=%ld t=%lld gap=%ld def=%s idc=%s id=%s rem=%s prov=%s blk=%d",
+                              seen + 1, (long long)(now % 1000000), gap,
+                              definition != nil ? object_getClassName(definition) : "nil",
+                              identCls != nil ? [identCls UTF8String] : "-",
+                              ident != nil ? [ident UTF8String] : "-",
+                              remnant != nil ? object_getClassName(remnant) : "nil",
+                              provider != nil ? object_getClassName(provider) : "nil",
+                              completion != nil ? 1 : 0] UTF8String]);
+            }
+            id (*original)(id, SEL, id, id, id, id, id, id, id) =
+                (id (*)(id, SEL, id, id, id, id, id, id, id))mine->original;
+            if (original == NULL) return nil;
+            return original(manager, mine->sel, definition, settings, clientSettings,
+                            context, remnant, provider, completion);
+        };
+        // 中间参数只透传、不解引用，所以头尾 + 总长足够；总长不对就不挂。
+        AevonAttachShape(out, slot, sceneOwners[i], sceneName,
+                         "@72@0:8", "@?64", 29, NULL, block);
+    }
+}
+
 /// 开机就装。**必须是开机**：`AevonHookInstall` 是建第一张卡时才调的，而落点要
 /// 管的恰恰是「第一张卡还不存在」的那一刻（第一次授权、第一次分享）。装晚一步，
 /// `_openURLCore` 那一拍已经过去了，这一版就等于没发。
 void AevonLandingBoot(void) {
     NSMutableString *out = [NSMutableString string];
     AevonLandingInstall(out);
+    // 0.2.89 — 第①段探针。开机就装，理由同上：它要看的正是「第一张卡还不存在」
+    // 的那一次激活。两个都只读、原样尾调，装不上只会少几行读数，不影响任何行为。
+    AevonActInstall(out);
     // 一行一条：日志是按行读的，把一整段塞进一条会让下一轮的 grep 全部落空。
     for (NSString *raw in [out componentsSeparatedByString:@"\n"]) {
         NSString *line = [raw stringByTrimmingCharactersInSet:
@@ -3858,6 +4102,11 @@ NSString *AevonHookSummary(void) {
      AevonInterceptRewrote, AevonInterceptCalls,
      AevonPushWrote, AevonPushTried, AevonPushPath,
      AevonHookArmedList(), AevonURLCuts, AevonURLCalls];
+    // 0.2.89 — 第①段的两个计数单独一行。`boot=0` 表示这一版根本没跑安装函数
+    // （日志被截断或 SpringBoard 没起来），`activate=0` 表示这两个方法在这台
+    // 系统上不走 —— 三种情况要分开读，不能都念成「没生效」。
+    [out appendFormat:@"act: hits activate=%ld scene=%ld boot=%d\n",
+     AevonActHits, AevonActSceneHits, AevonActBooted];
     long total = AevonTraceCount;
     long limit = (long)(sizeof(AevonTrace) / sizeof(AevonTrace[0]));
     if (total > limit) total = limit;

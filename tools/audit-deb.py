@@ -817,6 +817,37 @@ def main():
                   #     「写进去了」，与 `suspended` 当初的判据同形。
                   b"win: act key ev=%d evflag=%d",
                   b"notify: eventbit idx=%d flag=%d read=%ld b=%s why=%s n=%d",
+                  # 0.2.89 — 起点迁移第①段：激活那一拍，**只读**。
+                  #
+                  # 这一版的行为改动是零：两个方法都只挂上、原样尾调。所以它的
+                  # 断言面只有「装没装上」和「装的是不是这两个真名」两件事，
+                  # 一行行为断言都不该有 —— 有的话就说明这一版已经不只读了。
+                  #
+                  # 两个真名都要进包：`_activateBundleID:…` 在 `FBSystemService`，
+                  # `_createSceneWithDefinition:…fromRemnant:…completion:` 在
+                  # `FBSceneManager`。0.1.85~0.1.87 三次「本机没有」都出在只在一个
+                  # 类里找，名字本身一次没写错过。
+                  b"_activateBundleID:requestID:isTrusted:options:source:originalSource:withResult:",
+                  b"_createSceneWithDefinition:settings:initialClientSettings:"
+                  b"transitionContext:fromRemnant:usingClientProvider:completion:",
+                  # 形状闸：activate 走整串相等（219 的普查给的就是这一串），
+                  # createScene 只钉头尾 + 总长（中段类型静态读不出全串）。
+                  b"v68@0:8@16@24B32@36@44@52@?60",
+                  b"act: shape %s cls=%@ types=%s",
+                  b"act: shape reject cls=%@ got=%s want=%s",
+                  b"act: activate owners=%d",
+                  b"act: createScene owners=%d",
+                  # 四行读数，第①段要回答的就是这四件事：
+                  #   `payload=1`  → URL 真的装在激活请求的 options 里（母版靠这一条
+                  #                  才不用自己投 URL）；`keys=` 是那份 options 的大小；
+                  #   `gap=`       → createScene 与它前面那次激活差多少毫秒（谁先谁后
+                  #                  由正负号直接读出来）；
+                  #   `id=` / `idc=` → scene 的身份在建 scene **之前**就拿得到吗 ——
+                  #                  这是第②段能不能先建 presenter 的唯一前提；
+                  #   `blk=1`      → completion 在第 7 位上，还是空。
+                  b"act: activate n=%ld t=%lld trusted=%d b=%s opt=%s keys=%ld payload=%d res=%s",
+                  b"act: scene n=%ld t=%lld gap=%ld def=%s idc=%s id=%s rem=%s prov=%s blk=%d",
+                  b"act: hits activate=%ld scene=%ld boot=%d",
                   # 0.2.75 — 安全闸的**运行期**复查。Aevon(207) 里用户把 G0 与 G1
                   # 都打开，`win: touch in=17 eat=3` 照样在吞 —— 原因是设置侧只写
                   # 文件/偏好不发通知，而闸本身只在加载时判定一次。这五条就是
