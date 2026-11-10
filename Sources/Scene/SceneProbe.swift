@@ -979,7 +979,6 @@ zStackParticipantDidChange:
             exists += 1
             describeCarrier(cls, name: name)
         }
-        describeLiveCarrier()
         try? FileManager.default.removeItem(atPath: Aevon.presenterStepPath)
         // 分两段拼，理由同 `gateSnapshot`：这个文件的类型检查超时丢过两次构建。
         let first = "presenter: census end classes=" + String(presenterClassNames.count)
@@ -1061,42 +1060,18 @@ zStackParticipantDidChange:
         }
     }
 
-    /// 活体只问「答不答」，一个 getter 都不调 —— 调用未知 getter 可能返回结构体，
-    /// 那正是 0.0.16 的 SpringBoard 安全模式。回答本身也是数据：前台 scene 上
-    /// 拿得到 presenter 的话，P1 就不必自己去找 manager。
-    private static func describeLiveCarrier() {
-        guard let application = sharedApplication() else {
-            censusNote("presenter: live app=none scene=none")
-            return
-        }
-        var foreground: UIWindowScene?
-        for scene in application.connectedScenes {
-            guard let windowScene = scene as? UIWindowScene else { continue }
-            if scene.activationState == .foregroundActive { foreground = windowScene; break }
-        }
-        guard let scene = foreground else {
-            censusNote("presenter: live app=1 scene=none")
-            return
-        }
-        let box = scene as NSObject
-        let pm = box.responds(to: NSSelectorFromString("_presentationManager")) ? 1 : 0
-        let pm2 = box.responds(to: NSSelectorFromString("presentationManager")) ? 1 : 0
-        let sp = box.responds(to: NSSelectorFromString("_scenePresenter")) ? 1 : 0
-        let sv = box.responds(to: NSSelectorFromString("_sceneView")) ? 1 : 0
-        // 0.2.84 — 0.2.83 那四个名字（`_presentationManager` / `presentationManager`
-        // / `_scenePresenter` / `_sceneView`）全是我猜的，于是四个零。真入口在
-        // 生产代码里天天用：`float()` 拿 `scene` 的 `uiPresentationManager`，
-        // 历史日志里 `win: presenter cls=_UIScenePresenter` 出现过几百次。
-        // 所以这一行改成问那三个**真的会用到**的名字，把「猜」换成「核」。
-        let fb = box.responds(to: NSSelectorFromString("_fbScene")) ? 1 : 0
-        let bs = box.responds(to: NSSelectorFromString("_scene")) ? 1 : 0
-        let upm = box.responds(to: NSSelectorFromString("uiPresentationManager")) ? 1 : 0
-        let cls = NSStringFromClass(type(of: scene))
-        let first = "presenter: live app=1 scene=" + cls + " pm=" + String(pm)
-        let second = " pm2=" + String(pm2) + " sp=" + String(sp) + " sv=" + String(sv)
-        let third = " fb=" + String(fb) + " bs=" + String(bs) + " upm=" + String(upm)
-        censusNote(first + second + third)
-    }
+    // 0.2.87 — **停用并删除 `describeLiveCarrier`。**
+    //
+    // 它问的七个名字没有一个能给出信息：
+    //   · `_presentationManager` / `presentationManager` / `_scenePresenter` /
+    //     `_sceneView` 四个 0.2.83 就答全零 —— 它们是我猜的；
+    //   · `_fbScene` / `_scene` 同样没有下文；
+    //   · `uiPresentationManager` 挂在 **NSObject** 上（Aevon(216) 普查实证），
+    //     所以 `responds(to:)` 恒真，`upm=1` 不是读数。
+    //
+    // 真正在用的入口写在 `FloatHost.float()` 里，日志 `win: presenter
+    // cls=_UIScenePresenter` 已经证明它天天跑通。这一格没有待验证的问题，
+    // 留着一个恒真的探针只会让 `presenter.census` 账本更难读。
 
     // MARK: - 载体 census II（0.2.84）
 
@@ -1198,6 +1173,17 @@ zStackParticipantDidChange:
         "setObject:forActivationSetting:",
         "openURL:withOptions:",
         "openSensitiveURL:withOptions:",
+        // 十一、0.2.87 —— 母版的投递口。
+        //
+        // `_activateBundleID:…` 已经在第一条里（Aevon(219) 读到它在 FBSystemService，
+        // `v68@0:8@16@24B32@36@44@52@?60`）。这三条是同一个口的另两种拼法：
+        //   · `openApplication:options:withResult:` —— FBSystemService 的公开形状，
+        //     本工程 0.1.85 就试过，当时找到的是它的另一条私有变体；
+        //   · `dictionary` / `objectForKey:` —— `FBSOpenApplicationOptions` 的取值面。
+        //     如果系统把 URL 递进来，键名一定在这两条能读到的字典里。
+        "openApplication:options:withResult:",
+        "dictionary",
+        "objectForKey:",
     ]
 
     /// 这五类要**全量**方法表 —— 上一步就该有，0.2.83 只给了名字带过滤的那几行。
@@ -1239,6 +1225,23 @@ zStackParticipantDidChange:
         "UIMutableSceneTransitionContext",
         "UISOpenURLAction",
         "LSApplicationWorkspace",
+        // 0.2.87 — 并轨母版之后，问题换成「**系统**把 URL 装在哪」。
+        //
+        // Aevon(219) 的普查已经把投递口指得很死：
+        //   `carrier: own _activateBundleID:requestID:isTrusted:options:source:
+        //    originalSource:withResult: n=1 | FBSystemService v68@0:8@16@24B32@36@44@52@?60`
+        // 拆开就是 bundleID(@16) / requestID(@24) / isTrusted(B32) / **options(@36)** /
+        // source(@44) / originalSource(@52) / withResult(@?60)。URL 装在那个 options 里。
+        //
+        // 这两个类就是 options 的正反面：`FBSOpenApplicationOptions` 是它的类型，
+        // `FBSystemService` 是唯一实现那条激活的类（母本 `FBSystemService` 字符串
+        // 命中 14 次、`FBSystemServiceHook` 一个钩子类）。
+        //
+        // 拿到的用途不是「我们自己投」（母版不投，`setActions:` 与 `_openURLCore`
+        // 都是 0 命中），而是下一版要判断「系统有没有把这条 URL 递进来」时，
+        // 知道该读哪个键、该问哪个对象。
+        "FBSystemService",
+        "FBSOpenApplicationOptions",
     ]
 
     private static var carrierHits: [String: [String]] = [:]

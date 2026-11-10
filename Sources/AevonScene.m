@@ -379,10 +379,20 @@ NSInteger AevonLaunchSuspended(id application, NSString *bundleID) {
 // 0.2.10 把「QQ 全屏后变黑」定成「那次转发」——转发把目标 App 摆成前台 App，
 // 而它的 scene 已经被我们贴进卡片，剩下的那半屏就是黑的。0.2.12 顺着这条线
 // 把挂起位写进了 `SBActivationSettings`（`pick=3 flag=1 read=1`，真机读回是 1），
-// QQ 仍然先全屏。这说明挂起位不是那一道闸：更外面的一步是
-// `launchApplicationWithIdentifier:suspended:YES` 本身——在 iOS 17 上它只负责
-// 把进程拉起来，SpringBoard 照样按「用户点了图标」把它摆成前台 App 演一遍
-// 全屏动画。我们从来都在同一个坑里：先让系统演完，再去抢。
+// QQ 仍然先全屏。
+//
+// 0.2.87 — **这一段当年的推论要拆成两半：一半成立，一半被推翻。**
+//   ✅ 成立：`launchApplicationWithIdentifier:suspended:YES` **不是**「不上屏」的
+//      开关。它不阻止随后的系统激活，SpringBoard 照样把目标摆成前台 App 演一遍
+//      全屏动画。所以拿它当「压住激活」的手段，方向就错了。
+//   ⛔ 推翻：由「它不是不上屏的开关」推出「它没用」。母本拿它做的是**预暖** ——
+//      复刻方案 P5 的原文是「场景先建好不跑，要显示时再激活」：进程与 scene 提前
+//      就绪，随后的激活只是把已经热的东西推上台，全屏那一段因此更短。
+//      0.2.87 把它接回 `AevonAuthSwapScheduleMode` 的入口（见 `AevonPrewarmCard`），
+//      分享 / 授权 / 普通深链三条路共用一处接线。
+//   ⛔ 同样被推翻的还有下面这条推论：由「预暖不压屏」推出「所以要自建 scene」。
+//      Aevon(212) 用三次失败（QQ `rsp=0`、支付宝 `timeout`、微信空壳）证明
+//      自建 scene 里没有系统那一次激活，业务全部不认。
 //
 // 开源母本 FrontBoardAppLauncher（TrollOpen 的致谢里点名的那个）走的是另一条：
 // 不经 open request、不给 SpringBoard 任何展示机会——
@@ -3354,8 +3364,20 @@ static void AevonURLCoreReplacement(id self, SEL _cmd, id url, id display,
                          AevonCardIsComingFor(target) == 1;
             int front = AevonAppFrontmost(bundleID);
             if (AevonBundleIsAuthFamily(target)) {
-                // 授权 / 支付交给分流那一支（吞掉 + 自建 + 本地投递）。
-                // 这里放回来只会让系统激活重演一次整屏。
+                // 0.2.87 — **并轨母版，这一格不再另立门户。**
+                //
+                // 0.2.5x~0.2.7x 这里写的是「授权 / 支付交给分流那一支（吞掉 +
+                // 自建 + 本地投递）。这里放回来只会让系统激活重演一次整屏」。
+                //
+                // ⛔ 前半句已被 Aevon(212) 证伪：自建 scene 里**没有系统那一次
+                //    激活**，QQ 答 `rsp=0`、支付宝 `timeout 6342ms`、微信空壳。
+                // ⛔ 后半句是**代价**，不是理由。母版也接受这一小段整屏，它的解法
+                //    是把目标提前拉热（`launchApplicationWithIdentifier:suspended:`，
+                //    复刻方案 P5 原话「场景先建好不跑，要显示时再激活」），
+                //    而不是绕开系统激活。
+                //
+                // 所以这里只负责「不让卡抢在系统前面」，放不放行仍由分流那一支
+                // 统一决定（`why=oauthpass` / `why=linkpass` 都走 `return 0`）。
                 if (seen < 6) {
                     AevonLogRaw([[NSString stringWithFormat:
                                   @"landing: url hand b=%s why=auth", target] UTF8String]);
@@ -5508,10 +5530,26 @@ void AevonNotificationOpenInstall(void) {
 //     _handleTrustedOpenRequestForApplication:options:...                                       {v56@0:8@16@24@32@40@?48}
 //     _handleUserActionRequest:options:activationSettings:origin:withResult:                    {v56@0:8@16@24@32@40@?48}
 //
-// 母本那个 `_activateBundleID:...` 确实不存在 —— 这台机器把「开一个 App」拆成了上面
-// 四条，而且**参数形状逐字相同**：5 个参数（request / options / activationSettings /
-// origin / 结果块），帧长 56，返回 void，最后一个是 `@?` 块。四条都在 SBMainWorkspace
-// 自己的方法表里（`n=16/170`），不是从父类继承来的。
+// ⛔ 0.1.87 当年在这里写的是「母本那个 `_activateBundleID:...` 确实不存在」。
+//    **这条结论是错的，0.2.87 推翻。**
+//
+// Aevon(219) 的全类普查（99452 个类 × 自有方法表）读到的是：
+//
+//   carrier: own _activateBundleID:requestID:isTrusted:options:source:originalSource:withResult:
+//            n=1 | FBSystemService v68@0:8@16@24B32@36@44@52@?60
+//
+// 它**存在**，只是不在 `SBMainWorkspace` 上，而在 **`FBSystemService`** 上；
+// 参数不是 5 个而是 7 个：bundleID(@16) / requestID(@24) / isTrusted(B32) /
+// **options(@36)** / source(@44) / originalSource(@52) / withResult(@?60)。
+// 母本二进制里这条命中 2 次，`FBSystemService` 字符串命中 14 次，还有一个
+// `FBSystemServiceHook` 钩子类 —— 三处独立证据指向同一格。
+//
+// 当年只在 SBWorkspace 那一支里找，找到的是另一族「按信任分叉」的入口，于是把
+// 「我这一支没有」误记成「这台机器没有」。这正是「探针找不到 ≠ 不存在」的样本。
+//
+// 两个层要分开：`SBMainWorkspace` 这四条是「SpringBoard 收到打开请求之后怎么办」，
+// `FBSystemService` 那条是「FrontBoard 怎么把一个 App 激活起来」。
+// **URL 装在后者的 options 里**，这就是母版从不自己投 URL 的原因 —— 系统会投。
 //
 // 为什么四条一起装：现在还说不准点通知走哪一条。`_handleOpenApplicationRequest:` 像
 // 总入口，trusted / untrusted 像按信任分叉，`_handleUserActionRequest:` 像「用户动作」
@@ -6714,6 +6752,53 @@ static int AevonAuthReturnMatched(id source) {
     return strcmp(raw, AevonAuthSeen) == 0 ? 1 : 0;
 }
 
+/// 0.2.87 — 母版 P5 的第一招：`launchApplicationWithIdentifier:suspended:`。
+///
+/// `Stheno-1比1复刻方案` 把它写成一行的用途是「**场景先建好不跑，要显示时再激活**」，
+/// 二进制侧有 cstring 命中（`Stheno.dylib` 2 次）+ 选择子面 1 条，真机侧
+/// Aevon(218) 的普查答 `own launchApplicationWithIdentifier:suspended: n=2 |
+/// UIApplication ; SpringBoard` —— `SpringBoard` 类自己就实现了它。
+///
+/// ⛔ 这与 0.2.69 在 settings 上置挂起位是**两件完全不同的事**，那一条已被证伪：
+///   挂起位让系统这次激活不上屏 ⇒ 进程不跑 ⇒ SSO 的 XPC 与 NSUserActivity 没人接。
+///   预暖是**提前**把进程准备好，随后的激活照常发生，只是目标已经热的。
+///
+/// 放在 `return 0` 之前同步调用：放行之后系统立刻开始激活，预暖必须赶在它前面。
+/// 代价是主线程多一次同步 XPC（日志里的 `ms=` 就是它的实测值）；`door=` 报
+/// 1 成功 / 2 拒绝 / 0 没有这个方法。任何值都不阻断放行。
+static void AevonPrewarmCard(const char *target) {
+    if (target == NULL || target[0] == '\0') return;
+    NSString *targetID = [NSString stringWithUTF8String:target];
+    if (targetID.length == 0) return;
+    // scene 已经登记 ⇒ 目标本来就热着，预暖只会多一次开请求。
+    if (AevonSeenSceneForBundle(targetID) != nil) return;
+    // 同一个 bundle 60 秒内只预暖一次：连击时系统自己会复用进程。
+    static char lastTarget[128] = {0};
+    static CFAbsoluteTime lastAt = 0;
+    CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
+    if (strcmp(lastTarget, target) == 0 && started - lastAt < 60.0) return;
+    snprintf(lastTarget, sizeof(lastTarget), "%s", target);
+    lastAt = started;
+
+    id app = nil;
+    Class appCls = objc_getClass("UIApplication");
+    if (appCls != Nil) {
+        SEL shared = sel_registerName("sharedApplication");
+        if ([appCls respondsToSelector:shared]) {
+            app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, shared);
+        }
+    }
+    NSInteger door = 0;
+    @try {
+        door = AevonLaunchSuspended(app, targetID);
+    } @catch (__unused NSException *exception) {
+        door = 0;
+    }
+    int elapsed = (int)((CFAbsoluteTimeGetCurrent() - started) * 1000.0);
+    AevonLogRaw([[NSString stringWithFormat:@"notify: prewarm b=%s door=%ld ms=%d",
+                  target, (long)door, elapsed] UTF8String]);
+}
+
 /// 同一个 App 在 3 秒内连来两条（untrusted / user）只排一条等待链。
 /// `build` 取 1 的那一条（落点）优先：它背后是「系统不会摆屏」，等不到就得自己建。
 static void AevonAuthSwapScheduleMode(const char *target, int build) {
@@ -6724,6 +6809,10 @@ static void AevonAuthSwapScheduleMode(const char *target, int build) {
     // 个 App 在 3 秒内已经从 0 升到 1 时，允许再排一条，反过来则忽略。
     if (strcmp(AevonAuthSwapTarget, target) == 0 && now - AevonAuthSwapAt < 3.0 &&
         build <= AevonAuthSwapBuild) return;
+    // 0.2.87 — 母版那一招。放在这里而不是各个 `return 0` 之前，是因为三条路
+    // （分享 / 授权 / 普通深链）最后都汇到这一个调度器上：一处接线三路受益。
+    // 必须**同步**跑完再放行 —— `return 0` 之后系统立刻开始激活，预暖要赶在它前面。
+    AevonPrewarmCard(target);
     snprintf(AevonAuthSwapTarget, sizeof(AevonAuthSwapTarget), "%s", target);
     AevonAuthSwapAt = now;
     AevonAuthSwapBuild = build;
@@ -7069,6 +7158,9 @@ static void AevonAuthCardCloseSoon(NSString *who, const char *why) {
 //
 // 为什么只做一次：这是打开请求的热路径，`class_copyMethodList` 会摊开类元数据。
 // 一次够用 —— 这四个参数的类不会因为目标 bundle 不同而变。
+// 0.2.87 — 保留但停用（调用点在 `AevonOpenDecide` 之前，已改为只写一段说明）。
+// `unused` 是为了别让编译器为它报警：它是取证工具，不是生产路径的一部分。
+__attribute__((unused))
 static void AevonOpenShapeDump(id request, id options, id settings, id origin) {
     static int done = 0;
     if (done) return;
@@ -7620,9 +7712,29 @@ static int AevonOpenDecide(id request, id options, id settings,
                         *why = "linkchain";
                         return 2;
                     }
-                    *why = (isSafari || isWebLink) ? "safari" : "oauth";
-                    AevonDivertAt = now;
-                    snprintf(AevonDivertBundle, sizeof(AevonDivertBundle), "%s", bundle);
+                    // 0.2.87 — **并轨母版：这一族不再吞掉。**
+                    //
+                    // 判据来自 Stheno 0.1.23 的二进制（`Stheno.dylib` 2,153,664 B，
+                    // 逐条计数见 `stheno-selector-surface.txt` 与 cstring 表）：
+                    //   · `_openURLCore` 命中 **0** —— 母版从不拦 URL 打开；
+                    //   · `_activateBundleID:requestID:isTrusted:options:source:
+                    //     originalSource:withResult:` 命中 **2** —— URL 装在**激活请求的
+                    //     options** 里，由系统在激活那一拍投给目标 App；
+                    //   · `setActions:` 命中 **0** —— 它不往 scene 的 transitionContext
+                    //     里塞 action，所以「definition 带 URL」「transitionContext 带 URL」
+                    //     两条路都不是它的路；
+                    //   · `createPresenterWithIdentifier:priority:` 命中 **4** ——
+                    //     承载层才是它的主场。
+                    //
+                    // 母版三条路（分享 / 授权 / 普通深链）是同一个形状：**请求原样交给
+                    // 系统**，等 scene 登记，再把那份 scene 接进浮窗。我们此前把这一族
+                    // 单独吞下来、自建 scene、再用 `AevonForwardDeliver` 本地投 URL ——
+                    // 那条路在 Aevon(212) 已证伪（QQ `rsp=0`、支付宝 `timeout 6342ms`、
+                    // 微信空壳），根因就是「自建 scene 里没有系统那一次激活」。
+                    //
+                    // 代价与 `why=oauthpass` 一致：系统会把目标整屏演一小段，我们
+                    // 15 ms 一拍盯着，scene 一登记就收卡（`AevonAuthSwapTick`）。
+                    *why = (isSafari || isWebLink) ? "safaripass" : "linkpass";
                     // 只记 scheme，不记整条 URL：授权链接里带 ticket / code，
                     // 不该落进日志。
                     char schemeText[16] = {0};
@@ -7635,11 +7747,12 @@ static int AevonOpenDecide(id request, id options, id settings,
                     // 0.2.58 — 补 `card=`：这一格把「整屏在屏上」与「在我方卡片里」
                     // 分开，也是判断上面那条判据有没有生效的唯一读数。
                     AevonLogRaw([[NSString stringWithFormat:
-                                  @"notify: link b=%s kind=%s scheme=%s front=%d card=%d",
+                                  @"notify: link native b=%s kind=%s scheme=%s front=%d card=%d",
                                   bundle, *why, schemeText[0] != '\0' ? schemeText : "-",
                                   frontNow, inCard]
                                  UTF8String]);
-                    return 1;
+                    AevonAuthSwapSchedule(bundle);
+                    return 0;
                 }
                 // 0.2.50 — 没认出来的那一次也留一份形状，下一轮不用再猜：
                 // `pay` 是 none / url / paste / payload，`cont` 是分享 action 位。
@@ -10452,16 +10565,24 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
         }
     }
 
-    // 0.2.86 —— 形状转储的闸从 `verdict == 1` 挪到「这一次打开真的带了东西」。
+    // 0.2.87 — **停用形状转储。它已经把该答的都答完了，而它问错了对象。**
     //
-    // 0.2.85 把它放在 `verdict == 1` 里面，理由是「桌面上点图标也会走这条钩子，
-    // 别把一次性预算用掉」。这条理由只对了一半：Aevon(218) 里两次分享都落在
-    // `return 0`（`why=auth` 让路 / `why=paste` 放行），于是探针一次都没跑，
-    // 上一版加的取证白装了一轮。真正要挡的是「没有 payload 的普通打开」，
-    // 那正是 `AevonOpenCarriesPayload` 回答的问题 —— 用它挡，比用分流结论挡准。
-    if (AevonOpenCarriesPayload(request, options)) {
-        AevonOpenShapeDump(request, options, settings, origin);
-    }
+    // Aevon(219) 的读数（0.2.86 唯一一次真机产出）：
+    //   shape: req cls=__NSCFString n=39 super=NSMutableString
+    //   shape: req probe … identifier=str:com.tencent.mqq
+    //   shape: payload url=#NSURL len=-1
+    //   shape: actions none
+    //
+    // 这两行把结论钉死了：这条路上 `request` 参数是**一个 bundle id 字符串**，
+    // 不是 `FBSOpenApplicationRequest` 对象 —— 所以对着它摊 14 个 URL 家族名字
+    // 必然全空，那不是「探针口径不对」，是**对象挑错了**。真正带 URL 的只有
+    // `options[@"__PayloadURL"]`，而它是一个裸 NSURL，没有伴随任何 BSAction。
+    //
+    // 再加上母版核对（`setActions:` 与 `_openURLCore` 在 Stheno.dylib 均 0 命中），
+    // 「自建 scene 带 URL」整条线关闭。留 42×4 行方法表在热路径上没有意义。
+    //
+    // 函数本体保留：换一个对象（例如 `FBSystemService` 的 options）它还能用。
+    // 启用前先把第一个参数换成真正的 options 字典，别再把 bundle id 递进去。
 
     if (verdict == 1) {
         AevonDivertCount += 1;
@@ -10528,6 +10649,13 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             // 链；区别只在失败时的收尾：分享就地销毁，链接退回系统全屏。
             // 0.2.58 — `incard`（卡里那个 App 自己发起的授权 / 深链回调）走同一条
             // 投递链：建卡这一步会被 `openCard` 认成「已经在卡里」，实际只做投递。
+            // 0.2.87 — **`safari` / `oauth` 两个值已不再产生。**
+            //
+            // 这两族在 0.2.87 一并轨母版（`return 1` → 放行 + `AevonAuthSwapSchedule`），
+            // `why` 改报 `safaripass` / `linkpass`，所以这个判据里只剩 `incard`
+            // 还活着 —— 那是「App 已经在我们的卡里、又收到一条自己的回调 URL」，
+            // 目标根本不用被激活，投进同一张卡才是对的。
+            // 两个旧值留在字符串里只为让历史日志还能对得上，别再往这里加新路径。
             int linkKind = (strcmp(why, "safari") == 0 || strcmp(why, "oauth") == 0 ||
                             strcmp(why, "incard") == 0);
             if ((strcmp(why, "share") == 0 || linkKind) &&
@@ -10562,6 +10690,12 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
                 }
             }
             if (strcmp(why, "oauth") == 0) {
+                // ⛔ 0.2.87 — **这一段已经是死代码，保留只为对照。**
+                //
+                // `why=oauth` 由「普通深链」那一支赋值，而那一支在 0.2.87 改成
+                // 放行（`why=linkpass` + `return 0`），所以这里不会再进。
+                // 它记录的 0.2.74~0.2.78 那段推理也一并作废：
+                //
                 // 0.2.74 — 授权 / 支付：**不按 Home、不切前台**，直接建卡。
                 //
                 // `AevonOpenFromNotification` 走的是 `openFromNotification`，它带

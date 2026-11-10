@@ -724,7 +724,11 @@ def main():
                   b"presenter: selector ",
                   b"presenter: ivar ",
                   b"presenter: method ",
-                  b"presenter: live app=1 scene=",
+                  # 0.2.87 — `presenter: live app=1 scene=` 与
+                  # `presenter: live app=none scene=none` 两条断言随
+                  # `describeLiveCarrier` 一起删除：那个函数问的七个名字没有一个
+                  # 能给出信息（四个是猜的，`uiPresentationManager` 挂在 NSObject
+                  # 上 ⇒ responds 恒真），留着只会让 census 账本更难读。
                   b"presenter: census end classes=",
                   b"presenter: census skip version=",
                   # 上一轮普查死在哪 —— 标记先写、普查后跑的代价由这一行补回来。
@@ -739,7 +743,6 @@ def main():
                   #   why=              boot / panel / force，三个入口分开读
                   b"presenter.census",
                   b"presenter.force",
-                  b"presenter: live app=none scene=none",
                   # 0.2.84 — 第二轮普查：按选择子反查归属类。第一轮只回答「类在不在」，
                   # 而写调用需要的是「这一步定义在哪个类上、编码是什么」。三条字面量
                   # 就是这一轮真的跑过、并且自己收尾了的证词：
@@ -787,6 +790,20 @@ def main():
                   b"shape: payload url=#%s len=%d",
                   b"shape: actions cls=%s n=%lu",
                   b"shape: act[%lu] cls=%s vars=%s",
+                  # 0.2.87 — 三路并轨母版。这一版唯一的**行为改动**是「普通深链
+                  # 不再吞掉」，两个新日志行就是它的判据面：
+                  #   · `notify: link native` —— 这一族改报 `linkpass` /
+                  #     `safaripass` 并放行（旧行 `notify: link b=` 不再出现）；
+                  #   · `notify: prewarm`     —— 母版第一招，`door=` 报挂起启动的结果
+                  #     （1 成功 / 2 拒绝 / 0 没有这个方法），`ms=` 是那次同步 XPC 的耗时。
+                  # 两个新类名补上「系统怎么把 URL 递进来」这一格：
+                  #   `FBSystemService` 只有 15 B（不写断言），
+                  #   `FBSOpenApplicationOptions` + `openApplication:options:withResult:`
+                  #   是它的正反面。
+                  b"notify: link native b=%s kind=%s scheme=%s front=%d card=%d",
+                  b"notify: prewarm b=%s door=%ld ms=%d",
+                  b"FBSOpenApplicationOptions",
+                  b"openApplication:options:withResult:",
                   # 0.2.75 — 安全闸的**运行期**复查。Aevon(207) 里用户把 G0 与 G1
                   # 都打开，`win: touch in=17 eat=3` 照样在吞 —— 原因是设置侧只写
                   # 文件/偏好不发通知，而闸本身只在加载时判定一次。这五条就是
@@ -1140,7 +1157,11 @@ def main():
                   # 0.2.58 — 这条行尾补了 `front=` 与 `card=`：
                   #     `front=1 card=1` 就是「卡里的 App 被 SpringBoard 认成前台」，
                   #     旧版在这里放行成全屏，授权回调一跳全屏就是这个。
-                  b"notify: link b=%s kind=%s scheme=%s front=%d card=%d",
+                  #
+                  # 0.2.87 — 原来断言的是 `notify: link b=…`。这一族并轨母版之后
+                  # 改成放行（`return 0` + `AevonAuthSwapSchedule`），日志行也改名为
+                  # `notify: link native b=…`，词条已挪到 0.2.87 段。
+                  # 这里保留的是同一族的另外三行：卡里回调 / 建卡 / 回落。
                   b"notify: link incard b=%s scheme=%s front=%d",
                   b"notify: link card b=%@ kind=%s fwd=%d n=%d",
                   b"notify: link fallback b=%@ why=%s",
