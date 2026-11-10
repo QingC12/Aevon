@@ -749,6 +749,23 @@ def main():
                   b"carrier: pass begin why=",
                   b"carrier: pass end found=",
                   b"carrier: pass aborted, no class list",
+                  # 0.2.85 — 方案 S 的取证面。0.2.84 只回答了「谁实现了那 21 个
+                  # 选择子」，写调用还差三块，这一版一次取全：
+                  #   · URL 到底能从哪儿拿 —— `shape:` 把打开请求的四个参数
+                  #     （request / options / activationSettings / origin）摊开，
+                  #     probe 行逐个报「有没有这个名字 + 返回什么」；
+                  #   · definition / settings / manager 的全量方法表 —— carrier
+                  #     新增五个类，方法名以 `carrier: m <类> <选择子> <编码>` 落地；
+                  #   · 母本那个构造器长在哪个类上 —— 只有全类扫描能答。
+                  # 前缀全部长过 15 字节，理由同上：短的会被编成立即数搜不到。
+                  b"initWithURL:workspaceOriginatingProcess:",
+                  b"workspaceOriginatingProcess",
+                  b"parametersForSpecification:",
+                  b"shape: %s cls=%s n=%u super=%s",
+                  b"shape: %s m rest=%d",
+                  b"shape: dump finished",
+                  b"FBSMutableSceneDefinition",
+                  b"FBSMutableSceneSettings",
                   # 0.2.75 — 安全闸的**运行期**复查。Aevon(207) 里用户把 G0 与 G1
                   # 都打开，`win: touch in=17 eat=3` 照样在吞 —— 原因是设置侧只写
                   # 文件/偏好不发通知，而闸本身只在加载时判定一次。这五条就是

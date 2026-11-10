@@ -1144,6 +1144,41 @@ zStackParticipantDidChange:
         "sceneIfExists",
         // 六、收尾
         "_dismissPresentable:withReason:animated:userInfo:",
+        // 七、definition 带 URL —— 方案 S 的钥匙。
+        //
+        // 0.2.74~0.2.78 那条方案 A 与母本的实质差别只有这一处：我们先建 scene
+        // 再投 URL，母本是用 URL 建 scene。这两个名字在 Stheno 的选择子面里
+        // 相邻出现（`stheno-selector-surface.txt` 63/64 行），但**归属类未知** ——
+        // 只有全类扫描能回答它是 `FBSMutableSceneDefinition` 的构造器，还是
+        // `FBScene` 的。问不出来的话，方案 S 第一行就写不下去。
+        "initWithURL:",
+        "initWithURL:workspaceOriginatingProcess:",
+        "setURL:",
+        "URL",
+        "_setURL:",
+        "_URL",
+        "setWorkspaceOriginatingProcess:",
+        "workspaceOriginatingProcess",
+        "setInitialURL:",
+        "initialURL",
+        // 八、scene 定义与参数（definition → parameters → settings 这条链，
+        //     方案 S 第 3、4 步都要走）
+        "definition",
+        "parametersForSpecification:",
+        "setIdentity:",
+        "setClientIdentity:",
+        "setSpecification:",
+        "specification",
+        "mutableSettings",
+        "otherSettings",
+        "setForeground:",
+        "setDisplayConfiguration:",
+        // 九、presenter 生命周期（拿到 presenter 之后按这个顺序调）
+        "activate",
+        "deactivate",
+        "invalidate",
+        "isActive",
+        "isHosting",
     ]
 
     /// 这五类要**全量**方法表 —— 上一步就该有，0.2.83 只给了名字带过滤的那几行。
@@ -1153,6 +1188,16 @@ zStackParticipantDidChange:
         "_UISceneLayerHostView",
         "UIScenePresentationContext",
         "UIMutableScenePresentationContext",
+        // 0.2.85 — 方案 S 的三块地基。上一版只查了「谁实现了那几个选择子」，
+        // 这一版要的是「这个类的全部方法」，因为下一步要**组合**它们：
+        //   · definition 怎么带上 URL（构造器？setter？还是干脆在 settings 里）
+        //   · parameters → settings / clientSettings 怎么装配
+        //   · manager 除了 `sharedInstance` 还有没有别的取法
+        "FBSMutableSceneDefinition",
+        "FBSSceneDefinition",
+        "FBSSceneSettings",
+        "FBSMutableSceneSettings",
+        "FBSceneManager",
     ]
 
     private static var carrierHits: [String: [String]] = [:]
@@ -1273,13 +1318,21 @@ zStackParticipantDidChange:
         let parent = class_getSuperclass(cls).map { NSStringFromClass($0) } ?? "nil"
         let head = "carrier: class " + name + " methods=" + String(methodCount)
         censusNote(head + " ivars=" + String(ivarCount) + " super=" + parent)
+        // 上限 140：这几个类里最长的（`SBDeviceApplicationSceneViewController`）
+        // 是 110 条，140 留了余量；再长就是 UIKit 那一级的类，方法表本身不是
+        // 我们要的答案，刷满账本反而把别的行挤掉。
+        let shown = min(Int(methodCount), 140)
         if let list = methods {
             var index = 0
-            while index < Int(methodCount) {
+            while index < shown {
                 defer { index += 1 }
                 let text = NSStringFromSelector(method_getName(list[index]))
                 let enc = method_getTypeEncoding(list[index]).map { String(cString: $0) } ?? "?"
                 censusNote("carrier: m " + name + " " + text + " " + enc)
+            }
+            if shown < Int(methodCount) {
+                censusNote("carrier: m " + name + " truncated at " + String(shown)
+                           + " of " + String(methodCount))
             }
         }
         if let list = ivars {

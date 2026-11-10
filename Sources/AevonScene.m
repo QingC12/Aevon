@@ -7046,6 +7046,120 @@ static void AevonAuthCardCloseSoon(NSString *who, const char *why) {
     });
 }
 
+// MARK: - 0.2.85 方案 S 现场取证（只读，一次）
+//
+// 方案 S 的链条是：拿 URL → 建 definition → 建 scene → presenter 承载。
+// 前两步的参数全部长在**这一拍**的四个对象里：
+//
+//   request  —— 打开请求本身。`AevonOpenBundleOf` 已经从它取到 bundle，
+//               因此 URL 大概率也在这上面，只是名字未知（`url` / `_url` / `URL`）
+//   options  —— 这一层用了很久（`__PayloadURL` / `__Actions` / `__LaunchOrigin`）
+//   settings —— `activationSettings`。方案 S 第 4 步要把它变成 scene 的 settings，
+//               而「能不能直接变」只有看到它的方法表才知道
+//   origin   —— `workspaceOriginatingProcess`。母本那个构造器
+//               `initWithURL:workspaceOriginatingProcess:` 的第二个参数很可能吃它
+//
+// 打三样，**只打一次**：
+//   ① 每个参数的类名 / 自有方法数 / 父类；
+//   ② 十一个 URL 家族名字逐个问。答「有」的**先看返回类型**再决定要不要读 ——
+//      只有返回 `@` 才 `performSelector:`（这是纪律：`perform` 只用于返回对象的
+//      选择子，标量走别路）。读到 NSString / NSURL 才打值，别的一律只打类名。
+//   ③ 自有方法表，每参数最多 42 条、每行 10 条。
+//
+// 为什么只做一次：这是打开请求的热路径，`class_copyMethodList` 会摊开类元数据。
+// 一次够用 —— 这四个参数的类不会因为目标 bundle 不同而变。
+static void AevonOpenShapeDump(id request, id options, id settings, id origin) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+
+    id slots[4] = {request, options, settings, origin};
+    const char *tags[4] = {"req", "opt", "set", "org"};
+    const char *probes[] = {"url", "URL", "_url", "_URL",
+                            "initialURL", "_initialURL",
+                            "workspaceOriginatingProcess",
+                            "_workspaceOriginatingProcess",
+                            "bundleIdentifier", "identifier", "requestIdentifier"};
+    const int probeCount = (int)(sizeof(probes) / sizeof(probes[0]));
+
+    for (int index = 0; index < 4; index++) {
+        id obj = slots[index];
+        if (obj == nil) {
+            AevonLogRaw([[NSString stringWithFormat:@"shape: %s nil", tags[index]] UTF8String]);
+            continue;
+        }
+        Class cls = object_getClass(obj);
+        uint32_t count = 0;
+        Method *list = class_copyMethodList(cls, &count);
+        Class parent = class_getSuperclass(cls);
+        AevonLogRaw([[NSString stringWithFormat:@"shape: %s cls=%s n=%u super=%s",
+                      tags[index], class_getName(cls), count,
+                      parent != NULL ? class_getName(parent) : "nil"] UTF8String]);
+
+        NSMutableString *probeLine = [NSMutableString stringWithFormat:@"shape: %s probe",
+                                      tags[index]];
+        for (int slot = 0; slot < probeCount; slot++) {
+            SEL sel = sel_registerName(probes[slot]);
+            Method method = class_getInstanceMethod(cls, sel);
+            if (method == NULL) {
+                [probeLine appendFormat:@" %s=-", probes[slot]];
+                continue;
+            }
+            char *ret = method_copyReturnType(method);
+            BOOL objectReturn = (ret != NULL && ret[0] == '@');
+            if (ret != NULL) free(ret);
+            if (!objectReturn) {
+                [probeLine appendFormat:@" %s=!obj", probes[slot]];
+                continue;
+            }
+            id value = nil;
+            @try {
+                value = [obj performSelector:sel];
+            } @catch (__unused NSException *exception) {
+                value = nil;
+            }
+            if ([value isKindOfClass:[NSString class]]) {
+                const char *raw = [(NSString *)value UTF8String];
+                [probeLine appendFormat:@" %s=str:%s", probes[slot], raw != NULL ? raw : "?"];
+            } else if ([value isKindOfClass:[NSURL class]]) {
+                const char *raw = [[(NSURL *)value absoluteString] UTF8String];
+                [probeLine appendFormat:@" %s=url:%s", probes[slot], raw != NULL ? raw : "?"];
+            } else if (value == nil) {
+                [probeLine appendFormat:@" %s=nil", probes[slot]];
+            } else {
+                [probeLine appendFormat:@" %s=#%s", probes[slot], object_getClassName(value)];
+            }
+        }
+        AevonLogRaw([probeLine UTF8String]);
+
+        if (list != NULL) {
+            int shown = (int)(count < 42 ? count : 42);
+            NSMutableString *row = [NSMutableString string];
+            int inRow = 0;
+            for (int i = 0; i < shown; i++) {
+                if (inRow == 0) {
+                    [row setString:[NSString stringWithFormat:@"shape: %s m", tags[index]]];
+                }
+                const char *name = sel_getName(method_getName(list[i]));
+                const char *enc = method_getTypeEncoding(list[i]);
+                [row appendFormat:@" %s=%s", name != NULL ? name : "?",
+                                   enc != NULL ? enc : "?"];
+                inRow++;
+                if (inRow == 10 || i == shown - 1) {
+                    AevonLogRaw([row UTF8String]);
+                    inRow = 0;
+                }
+            }
+            if (shown < (int)count) {
+                AevonLogRaw([[NSString stringWithFormat:@"shape: %s m rest=%d",
+                              tags[index], (int)count - shown] UTF8String]);
+            }
+            free(list);
+        }
+    }
+    AevonLogRaw("shape: dump finished");
+}
+
 /// 分流决定。
 ///   返回 1 → 吞掉，开卡片；
 ///   返回 2 → 吞掉，不再开（同一次点击的后续链）；
@@ -10294,6 +10408,9 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
 
     if (verdict == 1) {
         AevonDivertCount += 1;
+        // 0.2.85 — 只在「真的要分走这一拍」时摊一次参数形状。放在这里而不是
+        // 钩子入口：桌面上普通的点图标也会走这条钩子，那会把一次性预算白白用掉。
+        AevonOpenShapeDump(request, options, settings, origin);
         // 0.2.77 — 连击账本。只记「真的分走了」的那些。
         AevonLoopNote(bundle);
         // `unlock=1` 表示这一拍 SpringBoard 还带着「要不要顺手解锁」的意图。
