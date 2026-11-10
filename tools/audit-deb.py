@@ -874,7 +874,11 @@ def main():
                   b"birth:immutable",
                   b"birth:enter",
                   b"birth:wrote",
-                  b"(INTERRUPTED)",
+                  # 0.2.91 把正常收尾写成空串，等于自己擦掉断点；这一串证明
+                  # 「收尾有名字」而不是一片空白。Swift 侧的 `(settled)` /
+                  # `(INTERRUPTED)` 是插值出来的，二进制里没有独立字面量，
+                  # 不能拿来断言 —— 能在产物里查到的是这个 C 字面量。
+                  b"sig:done",
                   # `_Block_signature` 用 dlsym 取，所以这串必须进二进制；取不到就
                   # 是这一格空着，不是这条断言该消失。
                   b"_Block_signature",
