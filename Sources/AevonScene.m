@@ -1873,6 +1873,9 @@ static int AevonSeenCount = 0;
 /// 0.3.1 — 三条取证线的前向声明。`AevonSeenNote` 在文件很靠前的位置，
 /// 而线 C 的实现跟着 `AevonActFrameBirth` 一起放（那里才有 scene 相关的上下文）。
 static void AevonProbePresenterBirth(id scene);
+// 0.3.9 — P1 落地探针（定义在 `AevonProbeP1Carrier` 旁边）。`AevonSeenNote`
+// 在文件很靠前的位置，所以要先声明。
+static void AevonProbeP1Landing(id scene);
 static void AevonProbeActOptions(id options);
 static void AevonProbeTransitionContext(id context, id settings);
 
@@ -1910,6 +1913,9 @@ static void AevonSeenNote(id scene) {
     // 我们只在钩子里见过它的指针，包装它等于改行为；而 `AevonSeenNote` 是
     // 系统自己把 scene 交出来的第一个只读窗口，足够回答「presenter 能不能建」。
     AevonProbePresenterBirth(scene);
+    // 0.3.9 — P1 落地前的最后一问：`newSceneViewController` 能不能真拿到 VC。
+    // 挂在「scene 第一次被看见」这一拍 —— 正是母版 P1 要动手的时机。
+    AevonProbeP1Landing(scene);
 }
 
 /// 拦截点记过的、名字含这个 bundle 的 scene。没有就返回 nil。
@@ -3901,6 +3907,7 @@ static long AevonProbePayloadDump = 0;
 static long AevonProbeCarrier = 0;
 static long AevonProbeDismiss = 0;
 static long AevonProbeSceneVC = 0;
+static long AevonProbeP1Land = 0;
 
 /// 0.3.1 — 一个对象的**可写方法名 + 编码**，最多 `limit` 条，写进一行。
 ///
@@ -4132,6 +4139,165 @@ static void AevonProbeSceneController(void) {
 }
 
 /// 三条线的总入口。开机跑一次，全部只读。
+// ============================================================================
+// 0.3.9 — P1 落地前的最后一道取证：`newSceneViewController` 能不能真拿到东西
+//
+// 0.3.8 的线 F 已经答了「这个选择子在不在」：
+//   F3  SBDeviceApplicationSceneHandle new* = n=147
+//         |newSceneViewController                                          @16@0:8
+//         |newSceneViewWithReferenceSize:contentOrientation:containerOrientation:hostRequester:
+//
+// 但「选择子在」不等于「能拿到一个能挂的 VC」。母版 P1 第③步要的是后一件事。
+// 所以这一版只问三个问题，**一个字节都不改行为**：
+//
+//   G1  我手上的 scene 对象，能不能拿到它的 `SBDeviceApplicationSceneHandle`？
+//   G2  拿到 handle 之后，`newSceneViewController` 返回的是不是
+//       `SBDeviceApplicationSceneViewController`？它的 `view` 有没有尺寸？
+//   G3  那个 VC 上 `setSceneResizesHostedContext:` / `setBackgroundView:` 收不收？
+//
+// 造型上沿用 0.3.8 的 `AevonProbe*` 家族：开机跑一次、只读、失败只记一行。
+// 与母版的对应关系：这三问答完，P1 第③步就只剩「把取到的东西挂起来」这一件机械活。
+// ============================================================================
+
+/// 0.3.9 — 从 `FBScene` 反查它的 `SBDeviceApplicationSceneHandle`。
+///
+/// 母版 P1 第②步说「取 App 已有的主 scene handle」。而 `SBDeviceApplicationSceneHandle`
+/// 是 SpringBoard 侧的包装类：`FBScene` 本身不带它，得从 scene 的
+/// `SBSceneManager` 那边问。
+///
+/// 这里依次试四条（从便宜到贵），拿到一个就停：
+///   ① scene 自己有 `sceneHandle` / `_sceneHandle` 这类只读属性
+///   ② scene 的 `settings` / `clientSettings` 上带 handle（少数版本）
+///   ③ `SBSceneManagerCoordinator` → 各 manager → `sceneHandleForScene:`
+///   ④ 全部失败 ⇒ 记 `none`，P1 第②步改走 `SBApplication` 的 sceneHandle
+///
+/// 只读：只调 getter，不写、不建。
+static id AevonProbeSceneHandleFor(id scene) {
+    if (scene == nil) return nil;
+    @try {
+        // ① scene 自己
+        const char *ownSel[] = {"sceneHandle", "_sceneHandle", "handle"};
+        for (int i = 0; i < 3; i++) {
+            SEL s = NSSelectorFromString([NSString stringWithUTF8String:ownSel[i]]);
+            if (![scene respondsToSelector:s]) continue;
+            id v = ((id (*)(id, SEL))objc_msgSend)(scene, s);
+            if (v != nil) {
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"probe: G1 scene.%s -> %s",
+                              ownSel[i], object_getClassName(v)] UTF8String]);
+                return v;
+            }
+        }
+        AevonLogRaw("probe: G1 scene handle none (no getter answered)");
+    } @catch (NSException *e) {
+        AevonLogRaw("probe: G1 threw");
+    }
+    return nil;
+}
+
+/// 0.3.9 — 探一个 handle 上的 `newSceneViewController`。
+///
+/// 返回 1 = 拿到了 VC 且有尺寸；0 = 拿不到 / 是 nil / view 尺寸为 0。
+/// **不挂载、不 activate** —— 只回答「能不能拿到」。
+static int AevonProbeSceneVCFrom(id handle, const char *tag) {
+    if (handle == nil) return 0;
+    @try {
+        SEL makeSel = NSSelectorFromString(@"newSceneViewController");
+        if (![handle respondsToSelector:makeSel]) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"probe: G2 %s no newSceneViewController", tag] UTF8String]);
+            return 0;
+        }
+        id vc = ((id (*)(id, SEL))objc_msgSend)(handle, makeSel);
+        if (vc == nil) {
+            AevonLogRaw([[NSString stringWithFormat:@"probe: G2 %s vc=nil", tag] UTF8String]);
+            return 0;
+        }
+        // view 是 `UIViewController` 的公开属性；问它是为了确认这个 VC 真能出画面。
+        id view = nil;
+        SEL viewSel = NSSelectorFromString(@"view");
+        if ([vc respondsToSelector:viewSel]) {
+            view = ((id (*)(id, SEL))objc_msgSend)(vc, viewSel);
+        }
+        CGRect bounds = CGRectZero;
+        if (view != nil) {
+            SEL bSel = NSSelectorFromString(@"bounds");
+            if ([view respondsToSelector:bSel]) {
+                bounds = ((CGRect (*)(id, SEL))objc_msgSend)(view, bSel);
+            }
+        }
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: G2 %s vc=%s view=%s size=%.0fx%.0f",
+                      tag, object_getClassName(vc),
+                      view != nil ? object_getClassName(view) : "nil",
+                      bounds.size.width, bounds.size.height] UTF8String]);
+        return (view != nil && bounds.size.width > 1.0) ? 1 : 0;
+    } @catch (NSException *e) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: G2 %s threw %s", tag,
+                      e.reason != nil ? [e.reason UTF8String] : "-"] UTF8String]);
+        return 0;
+    }
+}
+
+/// 0.3.9 — 那个 VC 收不收这两刀（只问 `respondsToSelector:`，不调）。
+///
+///   `setSceneResizesHostedContext:` —— 0.3.5 在线 F1 里见过（`v20@0:8B16`），
+///     与 presenter 上那条同名，但写在场景 VC 上时语义是「scene 的图缩到承载尺寸」。
+///   `setBackgroundView:` —— 如果按 P1 挂完仍有残留黑底，这一条是补背景的入口。
+static void AevonProbeSceneVCShape(id vc, const char *tag) {
+    if (vc == nil) return;
+    @try {
+        int canResize = [vc respondsToSelector:NSSelectorFromString(@"setSceneResizesHostedContext:")] ? 1 : 0;
+        int canBg = [vc respondsToSelector:NSSelectorFromString(@"setBackgroundView:")] ? 1 : 0;
+        int canMode = [vc respondsToSelector:
+                       NSSelectorFromString(@"setDisplayMode:animationFactory:completion:")] ? 1 : 0;
+        int canGrabber = [vc respondsToSelector:NSSelectorFromString(@"setHomeGrabberDisplayMode:")] ? 1 : 0;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: G3 %s resize=%d bg=%d mode=%d grabber=%d",
+                      tag, canResize, canBg, canMode, canGrabber] UTF8String]);
+    } @catch (NSException *e) {
+        AevonLogRaw("probe: G3 threw");
+    }
+}
+
+/// 0.3.9 — 总入口：对一个**真实存在的** App scene 走一遍 ①②③。
+///
+/// 挂在 `AevonSeenNote`（scene 第一次被看见那一刻）：那时 scene 已建、还没上屏，
+/// 正是母版 P1 要动手的时机。只挑第一个非 SpringBoard 的 scene 做一次，
+/// 免得把日志预算烧在几十个系统 scene 上。
+static void AevonProbeP1Landing(id scene) {
+    if (scene == nil) return;
+    if (__sync_fetch_and_add(&AevonProbeP1Land, 1) > 0) return;
+    // 只挑自己的 App（sceneID: 前缀且不是 springboard / systemaperture）。
+    const char *name = AevonSceneName(scene);
+    if (name == NULL || strncmp(name, "sceneID:", 8) != 0) return;
+    if (strstr(name, "springboard") != NULL) return;
+    if (strstr(name, "SystemAperture") != NULL) return;
+
+    AevonActStep("probe:p1land");
+    @try {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: G0 scene=%s", name] UTF8String]);
+        id handle = AevonProbeSceneHandleFor(scene);
+        if (handle == nil) return;
+        int ok = AevonProbeSceneVCFrom(handle, "G2");
+        if (ok == 0) return;
+        // 拿第二次只为问形状（`newSceneViewController` 每次给一个新的，不能复用
+        // 前一次那个 —— 但这里只问 respondsToSelector，用第二次也没副作用）。
+        id again = nil;
+        @try {
+            SEL s = NSSelectorFromString(@"newSceneViewController");
+            if ([handle respondsToSelector:s]) {
+                again = ((id (*)(id, SEL))objc_msgSend)(handle, s);
+            }
+        } @catch (__unused NSException *e) {}
+        AevonProbeSceneVCShape(again, "G3");
+    } @catch (NSException *e) {
+        AevonLogRaw("probe: G0 threw");
+    }
+}
+
 static void AevonProbeP1Carrier(void) {
     AevonProbeCarrierSymbols();
     AevonProbeDismissChain();

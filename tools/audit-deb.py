@@ -1200,6 +1200,12 @@ def main():
                   b"probe: D4 _UIContextLayerHostView initWithSceneLayer = %@",
                   b"probe: E%d %s dismiss=%s deactivate=%s",
                   b"probe: F1 SBDeviceApplicationSceneViewController set* = %@",
+                  # 0.3.9 — P1 落地前三问：sceneHandle 拿不拿得到、newSceneViewController
+                  # 出不出 VC、那个 VC 收不收 resize/background 两刀。
+                  # 线 F 只答了「选择子在」，这三条答「能不能拿到能挂的东西」。
+                  b"probe: G1 scene.%s -> %s",
+                  b"probe: G2 %s vc=%s view=%s size=%.0fx%.0f",
+                  b"probe: G3 %s resize=%d bg=%d mode=%d grabber=%d",
                   b"presenter: birth fail b=%s why=nil id=%s",
                   b"presenter: birth skip b=%s why=nopm",
                   b"presenter: birth threw b=%s why=%s",
