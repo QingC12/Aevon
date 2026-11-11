@@ -1006,14 +1006,28 @@ def main():
                   # 五串分别是：启动那一拍的系统应答（how/ret）/ 参数不成形 /
                   # 我们那一发启动要放行（否则自己拒自己）/ 已经跟着启动走了就别再补投 /
                   # 闸的符号与文件名。
-                  b"act: launch url how=%s ret=%d n=%ld b=%s url=%.80s",
+                  # 0.3.32 — 这一版把试错搬进**孩子进程**（0.3.31 主进程里崩了：
+                  # `_splitOptionsIntoApplicationOptionsAndRealOptions +64` →
+                  # `objc_retain` 拿到 0x1，两份 .ips 完全一样）。所以读数从「一次
+                  # 结果」变成「一条链」：起手 / 成功 / 孩子崩了 / 孩子超时 /
+                  # waitpid 出错 / 两种全败 / fork 都没成 / 退回纯挂起 / 自封闸。
+                  b"act: launch try how=%s n=%ld b=%s url=%.80s",
+                  b"act: launch url how=%s ret=0 n=%ld b=%s url=%.80s",
+                  b"act: launch child bad how=%s rc=%d sig=%d b=%s",
+                  b"act: launch child timeout how=%s",
+                  b"act: launch child wait err",
+                  b"act: launch all failed why=timeout",
+                  b"act: launch all failed why=bad",
+                  b"act: launch fork failed",
+                  b"act: launch fallback door=%ld b=%s",
+                  b"act: launch breaker wrote=1",
                   b"act: launch url=0 why=badurl",
                   b"act: pass why=carry sync=%d b=%s",
                   b"act: deliver skip why=launch b=%s",
                   b"act: tctx skip why=launch",
                   b"AevonURLLaunchOff",
                   b"/var/mobile/Library/Logs/Aevon/url.launch.off",
-                  b"win: own launch url=1 door=%ld b=%@",
+                  b"win: own launch url async=1 b=",
                   # 两把闸自己的路径常量 —— 文件名写错就等于没有闸。
                   b"/var/mobile/Library/Logs/Aevon/url.deny.off",
                   b"/var/mobile/Library/Logs/Aevon/url.redeliver.off",

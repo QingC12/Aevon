@@ -1826,10 +1826,15 @@ zStackParticipantDidChange:
         var urlBuf = [CChar](repeating: 0, count: 1024)
         var door: Int = 0
         if AevonLaunchURLForBundle(bundleID, &urlBuf, Int32(urlBuf.count)) == 1 {
+            // 0.3.32 — 这一句是**异步**的：真正的启动发生在 fork 出来的孩子进程里
+            // （见 `AevonLaunchSuspendedWithURL` 上面的长注）。返回 1 只代表「已经在
+            // 试」，成败看 `act: launch url how=…` / `act: launch child bad …`。
+            // 失败时 C 侧自己会退回纯挂起启动并补投，所以这里照常往下等 scene。
             let asked = AevonLaunchSuspendedWithURL(bundleID, &urlBuf)
-            if asked == 1 { door = 1 }
-            Log.write(String(format: "win: own launch url=1 door=%ld b=%@",
-                             door, bundleID))
+            if asked == 1 {
+                door = 1
+                Log.write("win: own launch url async=1 b=" + bundleID)
+            }
         }
         if door != 1 {
             door = AevonLaunchSuspended(sharedApplication(), bundleID)
