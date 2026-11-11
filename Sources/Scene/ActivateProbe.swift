@@ -147,6 +147,30 @@ public func AevonURLCardSwitchOff() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlCardOffPath) ? 1 : 0
 }
 
+/// 0.3.26 — 「分享型激活要不要拒答」。
+///
+/// 返回 1 = 拒答（**默认**）：`_activateBundleID:…withResult:` 里不调原函数，
+/// 系统因此不会提交激活事务，也就没有那个 430×932 的全屏窗口。目标 App 改由
+/// 我们自己的挂起启动拉起、scene 进我们自己的卡 —— 这条路圆盘已经走了一年。
+///
+/// 返回 0 = 建了 `url.deny.off`：行为退回 0.3.25（放行 → 出生改尺寸 → 卡）。
+/// 方向与 `birth.off` / `url.card.off` 一致：**存在即不做**。
+@_cdecl("AevonURLDenyOn")
+public func AevonURLDenyOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlDenyOffPath) ? 0 : 1
+}
+
+/// 0.3.26 — 卡片起来之后要不要把 URL 补投一次。
+///
+/// 返回 1 = 投（默认）。拒答让 QQ 由我们拉起，但 URL 没有跟着进 scene，
+/// 所以它可能停在首页；补投一次把它带到分享页。补投可能触发新激活，
+/// 所以调用方会在 3 秒窗口内放行一次，避免自己把自己再拒一遍。
+/// 建了 `url.redeliver.off` 就完全不投。
+@_cdecl("AevonURLRedeliverOn")
+public func AevonURLRedeliverOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlRedeliverOffPath) ? 0 : 1
+}
+
 /// 0.3.5 — 在 presenter 的 `presentationContext` 上写 `setResizesHostedContext:`。
 ///
 /// `setResizesHostedContext:` 的 owner 是 `UIMutableScenePresentationContext`

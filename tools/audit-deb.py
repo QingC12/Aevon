@@ -929,6 +929,24 @@ def main():
                   # （圆盘路不经过这个入口，所以出现即等于 URL 路走到了 home-first）。
                   b"AevonOpenCardURL",
                   b"win: url card via home-first b=",
+                  # 0.3.26 — **拒答：0.3.8 之后第一次在「问句」那一拍改答案。**
+                  #
+                  # 之前每一版都是「答开 → 系统提交 → 我们去撤」；全屏那扇窗在
+                  # 我们代码跑起来之前就存在，所以撤得再早也看得见（0.3.21 是
+                  # 最早可写的一拍，它仍然看得见）。这一版不调原函数 ⇒ 没有激活
+                  # 事务 ⇒ 没有那扇窗。
+                  #
+                  # 四串分别是：拒了（带 URL 与 `reply=none`）/ 旧路让位 /
+                  # 自己开卡 / 补投一次。少任何一串都说明这一支没进包。
+                  b"act: deny b=%s kind=%d n=%ld reply=none url=%.140s",
+                  b"act: url card skip why=deny b=%s",
+                  b"act: deny card b=%s",
+                  b"act: deny redeliver ok=1 n=%ld how=%s b=%s url=%.100s",
+                  # 补投会再触发一次激活，那一次必须放行，否则自己拒自己、打转。
+                  b"act: pass why=redeliver b=%s",
+                  # 两把闸自己的路径常量 —— 文件名写错就等于没有闸。
+                  b"/var/mobile/Library/Logs/Aevon/url.deny.off",
+                  b"/var/mobile/Library/Logs/Aevon/url.redeliver.off",
                   # 反向闸自己的路径常量 —— 文件闸写错文件名就等于没有闸。
                   b"/var/mobile/Library/Logs/Aevon/url.card.off",
                   # 分享那次 transitionContext 里装了 action（`n=1`），可从来没看过

@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.25"
+    public static let version = "0.3.26"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -221,6 +221,32 @@ public enum Aevon {
     /// 就留一个反向闸：这个文件在 ⇒ 只落一行 `act: url card skip`，不开卡，
     /// 行为退回 0.3.23。语义与 `birth.off` / `notify.off` 一致：**存在即不做**。
     public static let urlCardOffPath   = "/var/mobile/Library/Logs/Aevon/url.card.off"
+
+    /// 0.3.26 — **在激活那一拍答「不开」**的总闸（`url.deny.off` 存在 = 不拒答）。
+    ///
+    /// 0.3.8 之后所有版本（含 0.3.21–0.3.25）都是在系统已经答了「开」之后再去改：
+    /// 改 scene 尺寸、建卡、发 Home。全屏那一帧来自 FrontBoard 提交激活时建的那个
+    /// 窗口，**它在我们的代码跑起来之前就存在**，所以撤销永远看得见 —— 0.3.21 已经
+    /// 是这条路能写的最早一拍（scene 出生），它仍然看得见。
+    ///
+    /// 0.3.26 换了问法：不让系统提交。在 `_activateBundleID:…withResult:` 里对
+    /// 「分享型」激活（带 `__PayloadURL` + `__PasteSharingToken`）**不调原函数**，
+    /// 于是没有激活事务 ⇒ 没有全屏窗口 ⇒ 那一帧在原理上不存在。
+    ///
+    /// 反悔只需一个空文件：`touch …/url.deny.off` 再重启桌面，行为退回 0.3.25。
+    /// 语义与 `birth.off` 一致：**存在即不做**。
+    public static let urlDenyOffPath   = "/var/mobile/Library/Logs/Aevon/url.deny.off"
+
+    /// 0.3.26 — 卡片起来之后「把 URL 补投一次」的关闸（存在 = 不投）。
+    ///
+    /// 拒答之后 QQ 的进程由我们自己的挂起启动拉起（`AevonLaunchSuspended`，
+    /// 圆盘那条路一直在用），scene 进我们的卡 —— 但 **URL 没有跟着进去**，
+    /// 所以它可能停在 QQ 首页而不是分享页。这一位负责在卡上屏之后补投一次。
+    ///
+    /// 补投本身可能触发一次新的激活（那就又是全屏）。所以：补投窗口内来的
+    /// 那一次激活我们**放行一次**（`act: pass why=redeliver`），避免自锁打转；
+    /// 如果日志里看到放行之后整屏又出现了，`touch …/url.redeliver.off` 去掉补投。
+    public static let urlRedeliverOffPath = "/var/mobile/Library/Logs/Aevon/url.redeliver.off"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"

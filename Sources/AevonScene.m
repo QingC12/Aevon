@@ -65,6 +65,10 @@ extern int AevonURLWriteOn(void);
 // 0.3.24 — URL 路「把 scene 收进卡」的**关**闸（`url.card.off`）。
 // 语义与 `birth.off` 一致：存在即不做（只落一行 skip），行为退回 0.3.23。
 extern int AevonURLCardSwitchOff(void);
+// 0.3.26 — 拒答那两把闸。第一位默认「拒」（`url.deny.off` 存在才退回 0.3.25），
+// 第二位默认「补投」（`url.redeliver.off` 存在才不投）。
+extern int AevonURLDenyOn(void);
+extern int AevonURLRedeliverOn(void);
 // 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
 // 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
 extern int AevonCardYieldForFullscreen(const char *bundle);
@@ -3799,6 +3803,18 @@ static int64_t AevonActMs(void);
 /// 0.3.24 — 把一条 URL 分享的落点从「系统全屏窗」挪到「我们的卡窗口」。
 static void AevonURLCardSchedule(const char *bundle);
 
+// 0.3.26 — **拒答**那条路的状态。一次分享只记最近一条：拒答是同一次调用里
+// 做的决定，排队没有意义；被覆盖只说明「又来了一条新的」。
+static char AevonDenyBundle[160] = {0};
+static char AevonDenyURL[512] = {0};
+static volatile int64_t AevonDenyAt = 0;
+static long AevonDenyCalls = 0;
+// 补投之后那一次激活要放行的截止时刻（ms）。见 `AevonURLRedeliver`。
+static volatile int64_t AevonRedeliverUntil = 0;
+static long AevonRedeliverCalls = 0;
+static void AevonURLRedeliver(const char *bundle);
+static int AevonURLDenyTake(const char *bundle, const char *url, int kind);
+
 /// 0.3.20 — 记下「接下来要进卡的是这个 bundle」。
 ///
 /// 调用方是 Swift 侧的 `SceneProbe.openCard`，时机在它启动/接管 App 之前。
@@ -3912,6 +3928,14 @@ static int64_t AevonActMs(void) {
 /// 一直在用，URL 路从没调用过。代价是有意接受的：屏幕上多一次「整屏 → 桌面 → 卡」。
 static void AevonURLCardSchedule(const char *bundle) {
     if (bundle == NULL || bundle[0] == '\0') return;
+    // 0.3.26 — 这次分享已经被「拒答」那条路接管了，旧路不要再排一次。
+    // 两条路都会叫 `AevonOpenCardURL`，同时排就是两次 `openCard` 抢同一张 scene。
+    if (AevonDenyAt > 0 && AevonActMs() - AevonDenyAt < 4000 &&
+        strcmp(bundle, AevonDenyBundle) == 0) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: url card skip why=deny b=%s", bundle] UTF8String]);
+        return;
+    }
     if (AevonURLCardSwitchOff() == 1) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"act: url card skip why=off b=%s", bundle] UTF8String]);
@@ -3974,6 +3998,123 @@ static void AevonURLCardSchedule(const char *bundle) {
         // 代价是有意接受的：屏幕上多一次「全屏 → 桌面 → 卡」，约 0.7 s。
         AevonOpenCardURL(cb);
     });
+}
+
+/// 0.3.26 — 卡上屏之后把 URL 补投一次。
+///
+/// 拒答之后 QQ 的进程由我们自己的挂起启动拉起（`AevonOpenCardURL` → `openCard`
+/// → `AevonLaunchSuspended`，圆盘路一直在用），scene 进我们的卡 —— 但 **URL 没有
+/// 跟着进去**，所以它可能停在 QQ 首页而不是分享页。这一投就是补那一步。
+///
+/// 两条路都试：先 `openSensitiveURL:withOptions:`（通用链接 / 分享落地页走它），
+/// 没有再退 `openURL:withOptions:`。两次都只在主线程上调 —— 这两个方法会走 XPC，
+/// 但目标进程已经在跑、scene 已经连上，实测那条路是毫秒级。
+///
+/// **补投可能触发一次新的激活**，而新的激活又是分享形状（payload 里还带着
+/// `__PasteSharingToken`），会被我们自己的拒答再吃掉，于是打转。所以投之前先立
+/// 一个 3 秒的窗口（`AevonRedeliverUntil`），激活钩子看到窗口内的同 bundle 请求
+/// 就放行一次（`act: pass why=redeliver`）。放行的那一次如果又整屏了，日志里能
+/// 直接看到，`touch url.redeliver.off` 关掉补投即可 —— 拒答和承载都不受影响。
+static void AevonURLRedeliver(const char *bundle) {
+    if (AevonURLRedeliverOn() != 1) {
+        AevonLogRaw("act: deny redeliver skip why=off");
+        return;
+    }
+    if (bundle == NULL || bundle[0] == '\0' || AevonDenyURL[0] == '\0') {
+        AevonLogRaw("act: deny redeliver skip why=nourl");
+        return;
+    }
+    NSString *us = [NSString stringWithUTF8String:AevonDenyURL];
+    NSURL *u = us != nil ? [NSURL URLWithString:us] : nil;
+    if (u == nil) {
+        AevonLogRaw("act: deny redeliver skip why=badurl");
+        return;
+    }
+    Class wsCls = NSClassFromString(@"LSApplicationWorkspace");
+    SEL wsSel = NSSelectorFromString(@"defaultWorkspace");
+    id ws = nil;
+    if (wsCls != Nil && [wsCls respondsToSelector:wsSel]) {
+        ws = ((id (*)(id, SEL))objc_msgSend)(wsCls, wsSel);
+    }
+    if (ws == nil) {
+        AevonLogRaw("act: deny redeliver skip why=nows");
+        return;
+    }
+    SEL sel = NSSelectorFromString(@"openSensitiveURL:withOptions:");
+    const char *how = "sensitive";
+    if (![ws respondsToSelector:sel]) {
+        sel = NSSelectorFromString(@"openURL:withOptions:");
+        how = "plain";
+    }
+    if (![ws respondsToSelector:sel]) {
+        AevonLogRaw("act: deny redeliver skip why=nosel");
+        return;
+    }
+    long n = __sync_fetch_and_add(&AevonRedeliverCalls, 1) + 1;
+    AevonRedeliverUntil = AevonActMs() + 3000;
+    @try {
+        ((void (*)(id, SEL, id, id))objc_msgSend)(ws, sel, u, nil);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: deny redeliver ok=1 n=%ld how=%s b=%s url=%.100s",
+                      n, how, bundle, AevonDenyURL] UTF8String]);
+    } @catch (NSException *e) {
+        AevonRedeliverUntil = 0;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: deny redeliver ok=0 n=%ld why=threw", n] UTF8String]);
+    }
+}
+
+/// 0.3.26 — **拒答**：记 URL、排一次我们自己的开卡、再排一次补投。
+///
+/// 返回 1 = 这次激活不调原函数。语义要读清楚：我们不是在「撤销」激活，而是
+/// **根本不提交**它 —— FrontBoard 因此不会为这个 App 建那个 430×932 的全屏窗，
+/// 那一帧在原理上就不存在。返回 0 = 照原样放行（总闸关着 / 已经在卡里 / 参数不全）。
+///
+/// 三件事都不在钩子里同步做：
+///   · 开卡推到 150 ms —— 拒答之后来源 App 的分享面板正在收，抢前台会打架；
+///   · 补投推到 2.6 s —— 卡首帧实测 105–107 ms，但挂起启动到 scene 出现最慢
+///     见过 3.3 s（Filza 4789 ms 那次是 URL 激活的路，不同口径，不拿来定这一拍）。
+static int AevonURLDenyTake(const char *bundle, const char *url, int kind) {
+    if (bundle == NULL || bundle[0] == '\0') return 0;
+    if (AevonActivateSwitchOff() == 1) return 0;
+    if (AevonCardIsUpFor(bundle) == 1) return 0;
+    strlcpy(AevonDenyBundle, bundle, sizeof(AevonDenyBundle));
+    if (url != NULL && url[0] != '\0') {
+        strlcpy(AevonDenyURL, url, sizeof(AevonDenyURL));
+    } else {
+        AevonDenyURL[0] = '\0';
+    }
+    AevonDenyAt = AevonActMs();
+    long n = __sync_fetch_and_add(&AevonDenyCalls, 1) + 1;
+    // `reply=none` 是这一版最要紧的读数之一：`withResult:` 那个块的签名一次都
+    // 没读到（0.3.24/0.3.25 的日志里全是 `rsig=-`），盲调就是又一次 0.2.91。
+    // 所以拒答之后**不回调**它 —— 分享扩展会等超时，但不会崩。
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"act: deny b=%s kind=%d n=%ld reply=none url=%.140s",
+                  bundle, kind, n,
+                  AevonDenyURL[0] != '\0' ? AevonDenyURL : "-"] UTF8String]);
+    NSString *held = [NSString stringWithUTF8String:bundle];
+    if (held == nil) return 1;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        const char *cb = [held UTF8String];
+        if (cb == NULL || cb[0] == '\0') return;
+        if (AevonCardIsUpFor(cb) == 1) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: deny card skip why=up b=%s", cb] UTF8String]);
+            return;
+        }
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: deny card b=%s", cb] UTF8String]);
+        // `homed: false`：这一刻来源 App 还在屏上（我们刚把目标拒掉），
+        // 目标并没占屏，`openCard` 会直接走挂起启动 + 建卡，不发 Home。
+        AevonOpenCardURL(cb);
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonURLRedeliver(AevonDenyBundle);
+    });
+    return 1;
 }
 
 /// 按**编码串**判定形状，不数 `@`。
@@ -5198,8 +5339,15 @@ static int AevonActFrameBirth(id settings, NSString *ident,
             if (cur.size.width < 400.0 || cur.size.height < 900.0) {
                 AevonActStep("birth:small");
                 result = 2;
-            } else if (AevonActCardSrc == 2 && AevonURLWriteOn() != 1) {
-                // 0.3.23 — **URL 路：干跑。**
+            } else if (AevonActCardSrc == 2 && AevonURLWriteOn() != 1 &&
+                       !(AevonDenyAt > 0 && AevonActMs() - AevonDenyAt < 15000)) {
+                // 0.3.26 — 上面那个 `!(…AevonDenyAt…)` 是这一版唯一的判断改动：
+                // **拒答之后，这张 scene 是我们自己起的，没有激活事务可覆盖它**。
+                // 干跑当时防的是「系统激活事务在出生尺寸之后又把 scene 摆回整屏」，
+                // 那个风险随拒答一起消失了 —— 所以拒答窗口内一律真写，不看
+                // `url.write`。否则用户删掉一个文件，卡里就会装一张整屏高度的场景。
+                //
+                // 剩下的解释是 0.3.23 原文，保留：
                 //
                 // 走到这里说明四道门全过了：扳机在 10 s 内、scene 身份含目标 bundle、
                 // 首帧是整屏、可变副本拿得到（或本来就是可变的）。剩下唯一没验过的
@@ -5312,6 +5460,11 @@ static void AevonActInstall(NSMutableString *out) {
             int sceneless = -1;
             int susp = -1;
             int via = 0;
+            // 0.3.26 — 3 = 不是分享也不是深链（没进来过），1 = 普通深链，2 = 分享。
+            // 提到这个作用域是为了让下面「拒答」那一段能看见它 —— 它在 0.3.23 里
+            // 是 `if` 里的一块局部量，外面拿不到。
+            int shareKind = 0;
+            NSString *shareURL = nil;
             NSString *keyList = nil;
             if (options != nil) {
                 optCls = object_getClassName(options);
@@ -5399,6 +5552,9 @@ static void AevonActInstall(NSMutableString *out) {
                     if (payload == 1 && [bundleID isKindOfClass:[NSString class]] &&
                         [(NSString *)bundleID length] > 2) {
                         int kind = ([dict objectForKey:@"__PasteSharingToken"] != nil) ? 2 : 1;
+                        shareKind = kind;
+                        id pu = [dict objectForKey:@"__PayloadURL"];
+                        if ([pu isKindOfClass:[NSString class]]) shareURL = (NSString *)pu;
                         AevonCardTargetArmURL([(NSString *)bundleID UTF8String], kind);
                     }
                 }
@@ -5435,6 +5591,34 @@ static void AevonActInstall(NSMutableString *out) {
             // 0.3.1 — 线 A：先把 options 摊开看一眼（只读，前 3 拍）。
             // 这一格是 Stheno 唯一动手的地方，它改了什么我们从来不知道。
             AevonProbeActOptions(options);
+            // 0.3.26 — **拒答**。放在这里而不是更早，是因为上面 `act: activate`
+            // 那一行必须留下来：「请求真的来过」和「我们没让它落地」是两条分开的证词，
+            // 少了前一条，日志里就只剩一个 App 没打开。
+            //
+            // 这一段是 0.3.8 之后第一次在「问句」那一拍改变答案，而不是在答完之后
+            // 去改结果。只对分享（kind=2）做：普通深链是 App 自己的 scheme 跳转，
+            // 拒掉会变成「点了没反应」。
+            //
+            // 补投窗口内放行一次：我们自己补投的那一下也会走到这里，不放行就是
+            // 自己拒自己，永远投不进去。
+            if (payload == 1 && shareKind == 2 &&
+                [bundleID isKindOfClass:[NSString class]]) {
+                const char *denyBundle = [(NSString *)bundleID UTF8String];
+                if (AevonRedeliverUntil > 0 && AevonActMs() < AevonRedeliverUntil &&
+                    strcmp(denyBundle, AevonDenyBundle) == 0) {
+                    AevonRedeliverUntil = 0;
+                    AevonLogRaw([[NSString stringWithFormat:
+                                  @"act: pass why=redeliver b=%s", denyBundle] UTF8String]);
+                } else if (AevonURLDenyOn() == 1) {
+                    const char *us = shareURL != nil && shareURL.length > 0
+                        ? [shareURL UTF8String] : NULL;
+                    if (AevonURLDenyTake(denyBundle, us, shareKind) == 1) {
+                        // 关键的一行：不调原函数。没有激活事务，就没有 FrontBoard
+                        // 那个 430×932 的全屏窗口 —— 不是「撤得快」，是「没发生」。
+                        return;
+                    }
+                }
+            }
             // 原样尾调。参数一个不改、返回值不改，这一版的全部行为就是「没有行为」。
             void (*original)(id, SEL, id, id, BOOL, id, id, id, id) =
                 (void (*)(id, SEL, id, id, BOOL, id, id, id, id))mine->original;
