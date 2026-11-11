@@ -176,6 +176,7 @@ static id AevonActRead(id object, NSString *key);
 // 判据只有一条：QQ 侧 `app: openurl` 的 `dlg=` 从 `-` 翻成类名。
 extern int AevonColdHoldOn(void);          ///< 闸（`url.cold.hold.off` 存在 = 关）
 extern int AevonColdBridgeOn(void);        ///< 闸（`url.cold.bridge.on` 存在 = 就绪先问桥）
+extern int AevonColdSuspOn(void);          ///< 闸（`url.cold.susp.off` 存在 = 不写挂起位）
 static int AevonColdPending(void);         ///< 一次性：这一次接管要不要扣请求
 static void AevonColdWantNote(void);       ///< `AevonURLDenyTake` 里置位
 static int AevonColdHolds(const char *bundle);  ///< 扣着的是不是这个 App
@@ -5628,8 +5629,18 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
                       bundle, pid, run, liveScene, alive, aliveAge, 2000,
                       AevonDenyURL] UTF8String]);
     }
-    if (coldHold == 0 && swallow == 1 && AevonDenyCold == 1 && AevonDenyURL[0] != '\0' &&
-        AevonURLBridgeOn() == 1 && AevonBridgeable(bundle) == 1) {
+    // 0.3.48 — 桥的入口不再只看冷/热，看「目标有没有一张收得下 action 的活 scene」。
+    //
+    // Aevon(269) 20:53:47 那一格是反例：`act: bridge skip why=hot b=com.tencent.mqq
+    // alive=1 age=2.0`，可同一份日志里 `act: float cold=0 … live=0`、前台是 Files。
+    // 心跳只能证明**进程活着**，证明不了它的 scene 处于前台活跃态；scene action
+    // 投给一张不可见的 scene 就是「排队」，QQ 一个页面都没换（那一段 applog 里
+    // 只有 `page alive` 和 `band miss`），用户看到的是卡里一张首页 —— 这就是
+    // 「热启动有时悬浮窗、有时全屏」的那一半。所以只有 `liveScene=1`（真的有一张
+    // 能收 action 的活 scene）才允许跳过桥。
+    int hotReady = (AevonDenyCold == 0 && liveScene == 1) ? 1 : 0;
+    if (coldHold == 0 && swallow == 1 && AevonDenyURL[0] != '\0' &&
+        AevonURLBridgeOn() == 1 && AevonBridgeable(bundle) == 1 && hotReady == 0) {
         NSString *bu = [NSString stringWithUTF8String:bundle];
         NSString *us = [NSString stringWithUTF8String:AevonDenyURL];
         // 0.3.39 — 桥必须带上**来源 App**。
@@ -5660,12 +5671,12 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
                       bundle, sent, AevonDenyBridgeOnly,
                       srcApp != nil ? [srcApp UTF8String] : "-",
                       AevonDenyURL] UTF8String]);
-    } else if (swallow == 1 && AevonDenyCold == 0) {
-        // 热启动：走 0.3.37 验过的 scene action（`deliver ok=1 send=sendActions`）。
-        // 这一行是下一份日志的第一判据 —— 它出现，说明冷/热终于分开了。
+    } else if (swallow == 1 && hotReady == 1) {
+        // 真热（有一张前台活跃 scene）：走 0.3.37 验过的 scene action
+        // （`deliver ok=1 send=sendActions`）。这一行出现 = 冷/热这一次分对了。
         AevonLogRaw([[NSString stringWithFormat:
-                      @"act: bridge skip why=hot b=%s alive=%d age=%.1f",
-                      bundle, alive, aliveAge] UTF8String]);
+                      @"act: bridge skip why=hot b=%s alive=%d age=%.1f live=%d",
+                      bundle, alive, aliveAge, liveScene] UTF8String]);
     } else if (coldHold == 0 && swallow == 1 && AevonDenyCold == 1 &&
                AevonDenyURL[0] != '\0' && AevonURLBridgeOn() == 1) {
         // 0.3.40 — 名单外的 App：不排桥，直接走 scene action。
@@ -15476,52 +15487,52 @@ static void AevonColdWantNote(void) { AevonColdWant = 1; }
 /// `__LaunchIntent,__LaunchSceneless,__ActivateSuspended,…`。
 static NSString *AevonColdSuspKey(void) { return @"__ActivateSuspended"; }
 
-/// 把挂起位写进 options 的 payload，返回**新的一份** options（原对象不动）。
+/// 0.3.48 — **就地**给原件写上挂起位，然后把同一个对象交回去。
 ///
-/// 三条路依次试，全失败就返回 nil（调用方用原始那份，行为回到 0.3.44）：
-///   ① `+optionsWithDictionary:` —— `FBSOpenApplicationOptions` 的正门；
-///   ② `-init` + `-setDictionary:` —— 0.3.6 量到的唯一写入口；
-///   ③ 放弃。
-/// 0.3.46 — **停用**（保留函数体是为下一版留正门，不是还在用）。
+/// 这是 Aevon(269) 逼出来的唯一改动，也是 0.3.46 那次「停用」的翻案：
 ///
-/// 0.3.45 的 `act: cold replay … susp=-2 boxed=1` 说明这条路造出来的副本
-/// 读不到 `__ActivateSuspended`：`+optionsWithDictionary:` 认这个字典，但
-/// 这份字典经过 `setDictionary:` 之后**不保留**系统原件里的 `__PayloadOptions`
-/// 结构。为一个不生效的挂起位去换系统的原件，是拿「QQ 认不认」去赌，
-/// 这一版改成原件直交（见 `AevonColdReplay`）。函数留着，是因为「将来真要
-/// 加挂起位，唯一正门在这里」，而且审计靠它的两条选择子名字盯着私有面。
-static __attribute__((unused)) id AevonColdOptionsWithSuspended(id options, int *readOut) {
-    if (readOut != NULL) *readOut = -1;
-    if (options == nil) return nil;
-    id dict = AevonActRead(options, @"dictionary");
-    if (![dict isKindOfClass:[NSDictionary class]]) return nil;
-    NSMutableDictionary *box = [dict mutableCopy];
-    if (box == nil) return nil;
+/// Aevon(269) 20:54:09 的冷分享把因果写全了 ——
+///   act: cold ready    at=857ms            ← 卡已出帧（107 ms 首帧）
+///   act: cold replay   why=hosted          ← 交回原件（一个字节没改）
+///   win: card yield seen now=430x932 want=430x717
+///   act: cold replay done
+///   win: scene frame after=430x932          ← FrontBoard 提交它自己的全屏事务
+///   win: card yielded to fullscreen         ← 卡让位
+///   win: card closed by fullscreen launch   ← 卡关闭
+/// 也就是说**只要调用原实现、请求里没有挂起位，这次激活就一定是全屏**：卡不是
+/// 「没长好」，是被这次激活事务顶掉的。0.3.45/0.3.47 两版把时机从 100 ms 调到
+/// 1 s，读数的这一半一点没变 —— 时机不是瓶颈，`__ActivateSuspended` 才是。
+///
+/// 0.3.45 的 `susp=-2` 不是「写不进去」，是**读错了层**：`FBSOpenApplicationOptions`
+/// 只有一个 ivar `_payload`（`probe: actopt … ivars=n=1 _payload n=16`），
+/// `__ActivateSuspended` 是那份 **dictionary 里的键**，不在对象上。
+/// 0.3.45 用 `AevonActRead(made, @"__ActivateSuspended")` 去读对象，当然 nil ⇒ -2。
+/// 这一版读回走 `dictionary` 再取键，并且**不造副本**（副本会丢 `__PayloadOptions`
+/// 结构，那才是 0.3.45 真正踩的坑）：`setDictionary:` 换掉原对象的 `_payload`，
+/// 指针不变，FrontBoard 拿到的是同一个 options。
+///
+/// 返回：1 = 挂起位已在（系统本来就带 / 这一版写进去了且读得回）；
+///       0 = 写了但读回是 NO；-1 = 没写成（没有 dictionary 或没有 setDictionary:）；
+///       -2 = 写了但读不回（字典里取不到）。判据只认 1。
+static int AevonColdSuspendInPlace(id options) {
+    if (options == nil) return -1;
     NSString *key = AevonColdSuspKey();
-    [box setObject:[NSNumber numberWithBool:YES] forKey:key];
-    Class cls = object_getClass(options);
-    id made = nil;
-    SEL factory = NSSelectorFromString(@"optionsWithDictionary:");
+    id dict = AevonActRead(options, @"dictionary");
+    if (![dict isKindOfClass:[NSDictionary class]]) return -1;
+    // 系统自己发的请求本来就带挂起位（相册那种），一个字节都不要动它。
+    id had = [(NSDictionary *)dict objectForKey:key];
+    if ([had isKindOfClass:[NSNumber class]] && [(NSNumber *)had boolValue]) return 1;
+    if (AevonColdSuspOn() != 1) return -1;
     SEL setter = NSSelectorFromString(@"setDictionary:");
-    if (cls != Nil && [cls respondsToSelector:factory]) {
-        made = ((id (*)(id, SEL, id))objc_msgSend)((id)cls, factory, box);
-    }
-    if (made == nil && cls != Nil) {
-        id fresh = [[cls alloc] init];
-        if (fresh != nil && [fresh respondsToSelector:setter]) {
-            ((void (*)(id, SEL, id))objc_msgSend)(fresh, setter, box);
-            made = fresh;
-        } else {
-            [fresh release];
-        }
-    }
+    if (![options respondsToSelector:setter]) return -1;
+    NSMutableDictionary *box = [(NSDictionary *)dict mutableCopy];
+    if (box == nil) return -1;
+    [box setObject:[NSNumber numberWithBool:YES] forKey:key];
+    ((void (*)(id, SEL, id))objc_msgSend)(options, setter, box);
     [box release];
-    if (made == nil) return nil;
-    id got = AevonActRead(made, key);
-    if (readOut != NULL) {
-        *readOut = [got isKindOfClass:[NSNumber class]] ? [(NSNumber *)got intValue] : -2;
-    }
-    return made;
+    id back = [(NSDictionary *)AevonActRead(options, @"dictionary") objectForKey:key];
+    if (![back isKindOfClass:[NSNumber class]]) return -2;
+    return [(NSNumber *)back boolValue] ? 1 : 0;
 }
 
 static void AevonColdReplay(const char *why) {
@@ -15564,21 +15575,16 @@ static void AevonColdReplay(const char *why) {
     AevonColdTrusted = 0;
     AevonColdAt = 0;
 
-    // 0.3.46 — **交回的是系统原来那一份 options，一个字节都不改。**
+    // 0.3.48 — **交回的仍是原件，但先给它写上挂起位。**
     //
-    // 0.3.45 在这里构造过一份带 `__ActivateSuspended` 的副本
-    // （`AevonColdOptionsWithSuspended`），日志读数 `susp=-2 boxed=1` 说明它
-    // 根本没被认：`+optionsWithDictionary:` 造出来的对象读不到那个键。也就是
-    // 说我们为了一个「不存在」的挂起位，把系统给的原件换成了一份自己拼的 ——
-    // 而原件里除了 URL 还有 `__PayloadOptions` / `__PasteSharingToken`
-    // （分享的内容在通用剪贴板上，全靠这个令牌），伪造版一旦少一格，QQ 就
-    // 只会在首页站着。ScreenCore 的说明书 .12-25 写的是「保留原始文件分享请求
-    // 的文件 URL / Actions / 沙盒授权 / 来源 / 激活参数 / 完成回调」，不是
-    // 「重造一份」。
-    //
-    // 只读一次 `susp=`：原件的 dictionary 里本来就带挂起位时（相册那种系统
-    // 自己发的请求），这一格是 1，日志里看得见，不用改它。
-    int suspRead = AevonActRead(options, AevonColdSuspKey()) != nil ? 1 : -1;
+    // 0.3.46 的「一个字节都不改」只对了一半：不动 `__PayloadOptions` /
+    // `__PayloadURL` / `__PasteSharingToken` 是对的（那三格是 QQ 认不认的全部），
+    // 但**不写挂起位就是全屏**（Aevon(269) 20:53:19 与 20:54:09 两次都是
+    // `replay → card yield seen now=430x932 → card closed by fullscreen launch`）。
+    // 这一版只加这一个键，方式和 0.3.45 不同：不改对象、不造副本，`setDictionary:`
+    // 换掉 `_payload` 再读回。读回照 `dictionary` 取键 —— 0.3.45 的 `susp=-2`
+    // 就是在对象上找这个键，找错了层。
+    int suspRead = AevonColdSuspendInPlace(options);
     // 桥那一路如果还挂着同一个 App，一并收掉：这条分享已经由原始请求接手了。
     // 不收的话它会在 0.45 s 后再投一次，那就是把同一条 URL 开两遍。
     if (AevonAppOpenBundle != nil) {

@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.47"
+    public static let version = "0.3.48"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -411,6 +411,22 @@ public enum Aevon {
     /// 删掉它，就绪即 `act: cold replay why=hosted`（这一版的默认）。
     public static let urlColdBridgeOnPath =
         "/var/mobile/Library/Logs/Aevon/url.cold.bridge.on"
+
+    /// 0.3.48 — 「交回原件时写挂起位」的关闸（存在 = 不写，回到 0.3.47 的纯原件）。
+    ///
+    /// Aevon(269) 两次冷分享把因果钉死了：`act: cold replay why=hosted` 之后
+    /// 紧跟 `win: card yield seen now=430x932 want=430x717` → `card yielded to
+    /// fullscreen` → `card closed by fullscreen launch`。卡在 107 ms 就出了首帧、
+    /// 1 s 后才交回，所以不是「没长好」—— 是这次激活本身提交了系统自己的全屏
+    /// 事务。ScreenCore 与 floatingView 两家都在请求里带
+    /// `__ActivateSuspended`（前者 `sc_launchApplicationWithBundleIdentifier:
+    /// suspended:`，后者用公开常量 `FBSOpenApplicationOptionKeyActivateSuspended`），
+    /// 这一版只补这一个键。
+    ///
+    /// 手建这个文件 ⇒ 交回的是**一个字节没改的原件**（0.3.47 的形状，用于对照）；
+    /// 删掉它（默认）⇒ 交回前 `setDictionary:` 写上挂起位。
+    public static let urlColdSuspOffPath =
+        "/var/mobile/Library/Logs/Aevon/url.cold.susp.off"
 
     /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
     ///

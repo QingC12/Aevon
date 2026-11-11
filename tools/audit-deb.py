@@ -1054,7 +1054,7 @@ def main():
                   # `bridge skip why=hot` 是「热启动走回 scene action」的正证；
                   # `bridge fallback` 是「桥没送到、链接/支付补一发」的正证。
                   b"act: bridge b=%s send=%d bonly=%d src=%s u=%.60s",
-                  b"act: bridge skip why=hot b=%s alive=%d age=%.1f",
+                  b"act: bridge skip why=hot b=%s alive=%d age=%.1f live=%d",
                   b"act: bridge fallback b=%s kind=%d weak=%d why=%s",
                   b"AevonFrontBundleCopy",
                   b"aevon-alive",
@@ -1201,6 +1201,18 @@ def main():
                   # 这三条字面量一起（0.3.46 第一次构建就是这样失败的两条）。
                   b"AevonColdBridgeOn",
                   b"/var/mobile/Library/Logs/Aevon/url.cold.bridge.on",
+                  # 0.3.48 — **交回原件前写挂起位**的闸与符号。
+                  #
+                  # Aevon(269) 两次冷分享的因果是完整的：`act: cold replay why=hosted`
+                  # 之后紧跟 `win: card yield seen now=430x932` → `card yielded to
+                  # fullscreen` → `card closed by fullscreen launch`。卡在 107 ms
+                  # 就出了首帧、1 s 后才交回，所以**不是时机**：这次激活本身提交了
+                  # 系统自己的全屏事务。ScreenCore 与 floatingView 两家都在请求里带
+                  # `__ActivateSuspended`，这一版只补这一个键（`setDictionary:` 就地
+                  # 改原件，不造副本 —— 副本会丢 `__PayloadOptions`）。
+                  # `susp=` 的四个值：1 就位 / 0 写了读回 NO / -1 没写成 / -2 读不回。
+                  b"AevonColdSuspOn",
+                  b"/var/mobile/Library/Logs/Aevon/url.cold.susp.off",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`

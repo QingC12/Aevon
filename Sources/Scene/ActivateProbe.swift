@@ -295,6 +295,18 @@ public func AevonColdBridgeOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlColdBridgeOnPath) ? 1 : 0
 }
 
+/// 0.3.48 — 1 = 交回原件之前写 `__ActivateSuspended`（默认），
+/// 0 = 一个字节都不改（0.3.47 的形状，A/B 对照）。
+///
+/// 判定只认日志里的 `susp=`：1 = 挂起位就在字典里；0 = 写了读回是 NO；
+/// -1 = 没写成（没有 `dictionary` 或没有 `setDictionary:`）；-2 = 写了读不回。
+/// 紧接着的那行 `win: card yield seen now=430x932` 是它生效与否的第二证据：
+/// 挂起位真的被 FrontBoard 认了，这次激活就不会把 scene 撑到 932。
+@_cdecl("AevonColdSuspOn")
+public func AevonColdSuspOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlColdSuspOffPath) ? 0 : 1
+}
+
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
 ///
 /// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、
