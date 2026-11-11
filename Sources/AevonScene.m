@@ -5072,9 +5072,19 @@ static void AevonHInstall(NSMutableString *out) {
         }
         return ret;
     };
-    // `@44` 头 + 尾部第 4 个对象在偏移 36。三个对象 + 一个 BOOL：
-    // `AevonAttachShape` 的数对象口径（头 @44 / 总长 44 / 尾对象）对这条够用。
-    AevonAttachShape(out, slot, cls, selName, "@44@0:8", NULL, 44, NULL, block);
+    // ⛔ 0.3.12 — **必须用 `exact`，不能用 head/tail。**
+    //
+    // 0.3.11 传的是 `head="@44@0:8", tail=NULL, total=44`，而 `AevonAttachShape`
+    // 的 head/tail 分支要求 `head != NULL && tail != NULL`，tail 为 NULL 时直接
+    // 走 reject。Aevon(237) 的现场：
+    //   probe: H1 owner=SBMainWorkspace enc=@44@0:8@16@24B32@36
+    //   act: shape reject cls=SBMainWorkspace got=@44@0:8@16@24B32@36 want=@44@0:8
+    // 于是钩子一次都没装上、H2 一行都没有。
+    //
+    // 改成 `exact`：整串逐字比对。这条编码已经在真机复核过三次（0.3.11 的 H1、
+    // 0.3.10 的 surf 普查、0.3.11 的安装日志），钉死它最安全。
+    AevonAttachShape(out, slot, cls, selName, NULL, NULL, 0,
+                     "@44@0:8@16@24B32@36", block);
 }
 
 
