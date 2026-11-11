@@ -5168,7 +5168,6 @@ static void AevonCensusAll(NSMutableString *out) {
                 if (hit) { owner = c; break; }
             }
             const char *enc = method_getTypeEncoding(m);
-            out = out;  // 保持参数被使用
             [out appendFormat:@"census: %s owner=%s ret=%c argc=%d enc=%s\n",
                               t->tag,
                               owner != NULL ? class_getName(owner) : "?",
