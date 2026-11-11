@@ -944,9 +944,9 @@ def main():
                   #
                   # 四串分别是：拒了（带 URL 与 `reply=none`）/ 旧路让位 /
                   # 自己开卡 / 补投一次。少任何一串都说明这一支没进包。
-                  b"act: deny b=%s kind=%d n=%ld reply=none url=%.140s",
+                  # 0.3.36 — 前三串换成了 `act: float …`（见下面 0.3.36 那一组），
+                  # 这一支剩下的只有「旧路让位」与「补投成功」两条读数。
                   b"act: url card skip why=deny b=%s",
-                  b"act: deny card b=%s",
                   b"act: deny redeliver ok=1 n=%ld how=%s b=%s url=%.100s",
                   # 0.3.27 — **补投改成 scene action（不再提交激活事务）。**
                   #
@@ -980,7 +980,8 @@ def main():
                   #
                   # 三串分别是：冷/热判定（下一份日志的第一判据）/ 投出去了还是被补发 /
                   # 补发的关闸。少任何一串都说明这一版没进包。
-                  b"act: deny cold=%d pid=%d run=%d seen=%d shots=%d b=%s",
+                  # 0.3.36 — 冷/热那一串换成 `act: float cold=… live=… sw=…`
+                  # （见下面 0.3.36 那一组），这里只留投递链自己的两串。
                   b"act: deliver done tick=%d cold=%d left=%d b=%s",
                   b"AevonURLShotOff",
                   b"/var/mobile/Library/Logs/Aevon/url.shot.off",
@@ -1025,6 +1026,31 @@ def main():
                   b"probe: po n=%ld b=%s |%s",
                   b"AevonURLActOn",
                   b"/var/mobile/Library/Logs/Aevon/url.act.on",
+                  # 0.3.36 — **放行式接管**：不再吞掉激活，让 FrontBoard 自己把
+                  # URL / activity 写进新 scene 的 connection options。
+                  #
+                  # Aevon(260) 是这一刀的依据，两条读数：
+                  #   ① 四次冷启动分享，每发 `deliver ok=1`（含 5.0 s 晚发
+                  #      `deliver late r=1 age=5156`，落在 QQ 自己 `geom late` 之后），
+                  #      QQ 四次全停首页 ⇒「自己造 action 投进去」这条路对冷启动无效，
+                  #      不是时机问题。
+                  #   ② 授权（`b=com.tencent.mqq`）与支付（`b=com.alipay.iphoneclient`）
+                  #      两次激活 `payload=0` + `__Actions[0]=UIActivityContinuationAction`
+                  #      ⇒ 连接管条件都不满足 ⇒ 原样放行 ⇒ 全屏。
+                  #
+                  # 所以这一版：接管条件补上 activity 族，接管动作改成「放行 + 抢 scene」。
+                  # `act: float sw=` 是分流读数（0 = 放行 / 1 = 强制回退吞掉），
+                  # `act: float card` 是建卡，`win: own pass wait` 是「不发启动请求、
+                  # 只等系统那张 scene」。后两个文件名是两把新闸。
+                  b"act: float sw=%d b=%s kind=%d n=%ld live=%d reply=none url=%.140s",
+                  b"act: float cold=%d pid=%d run=%d seen=%d live=%d shots=%d sw=%d b=%s",
+                  b"act: float card b=%s sw=%d",
+                  b"act: float card skip why=up b=%s",
+                  b"win: own pass wait %@ t=%ldms wait=%ldms",
+                  b"AevonURLSwallowOn",
+                  b"AevonURLActivityOn",
+                  b"/var/mobile/Library/Logs/Aevon/url.swallow.on",
+                  b"/var/mobile/Library/Logs/Aevon/url.activity.off",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`
@@ -1643,7 +1669,16 @@ def main():
                  # 0.3.35 — 深挖那一行加上了 `src=po`（来源要能区分是
                  # `__PayloadOptions` 还是 `__Actions` 挖出来的）。旧形状还在，
                  # 就说明新的那两层取证没进包。
-                 b"act: url deep k=%s b=%s url=%.100s"):   # gone
+                 b"act: url deep k=%s b=%s url=%.100s",   # gone
+                 # 0.3.36 — 接管从「拒答（吞掉）」改成「放行 + 抢 scene」，
+                 # `act: deny …` 这四条整套换成 `act: float …`。它们还在，
+                 # 就说明旧分支没被替换掉（两条路并存会各建一次卡、各投一次 URL）。
+                 # `act: deny skip why=global / why=scheme` 仍在新代码里，那是
+                 # 接管**之前**的拒绝理由，不在这四条里。
+                 b"act: deny b=%s kind=%d n=%ld reply=none url=%.140s",      # gone
+                 b"act: deny cold=%d pid=%d run=%d seen=%d shots=%d b=%s",   # gone
+                 b"act: deny card b=%s",                                     # gone
+                 b"act: deny card skip why=up b=%s"):                        # gone
         if gone in dylib_early:
             bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "
                 "back (hot zone 0.1.18 / summon bar 0.1.24 / cover lock gate 0.1.90)")

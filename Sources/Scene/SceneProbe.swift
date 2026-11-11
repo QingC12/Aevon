@@ -1595,6 +1595,17 @@ zStackParticipantDidChange:
         // 全屏兜底的 `ring: launch`、等 scene 的 40 ms 轮询、以及建卡里的系统调用。
         // 三个时间戳（本函数的 `wait=`、`t=`、`scene up after`）就是用来把它分开的。
         let openedAt = CFAbsoluteTimeGetCurrent()
+        // 0.3.36 — **「这一拍是系统自己开的」。**
+        //
+        // 放行式接管里 `_openURLCore` 原样尾调，激活事务归系统：URL / activity
+        // 由 FrontBoard 写进新 scene 的 connection options（Aevon(260) 之后这是
+        // 唯一被 QQ 认的通道）。这样一来，下面两道门在这一拍都是错的：
+        //   · 「目标就是屏上那个全屏页 ⇒ 先回桌面」—— 目标确实在上屏，但那正是
+        //     系统刚提交的激活，发一次 Home 就等于把它按回去，用户看到卡前一闪；
+        //   · `AevonLaunchSuspended` —— 系统已经替我们开了，再来一次是重复请求。
+        // 令牌读一次就清零：留着不清会被下一次无关的开卡读到。
+        let passDoor = AevonPassSkipFlag == 1
+        if passDoor { AevonPassSkipFlag = 0 }
         // 0.1.91 — 「这张卡正在建」的登记。必须在**第一个** return 之前：
         // 收面板那条路要用它区分「卡在路上，可以先收」与「根本没有卡，不许收」。
         markPending(bundleID)
@@ -1701,7 +1712,7 @@ zStackParticipantDidChange:
         // （圆盘在全屏 App 里点它自己）。那时把 scene 搬进卡片会抽空全屏页 ⇒ 黑。
         // 其余局面（来源 App 全屏、目标是另一个 App）都不该动 Home —— 卡片是
         // level 101 的独立窗口，本来就浮得在来源 App 之上，这正是用户要的效果。
-        if !homed {
+        if !homed && !passDoor {
             let front = frontSceneBundle()
             if front != bundleID {
                 Log.write("win: home first skip why=front b=" + bundleID
@@ -1788,17 +1799,28 @@ zStackParticipantDidChange:
         // `sceneFor` 用的就是下面那一步的同一个判据，所以「已经找到」等价于
         // 「下一拍会立刻贴上」。这里直接贴，一个启动请求都不发。
         let alreadyLive = sceneFor(bundleID) != nil
-        if alreadyLive {
+        // 0.3.36 — 放行模式下「还没有 scene」不是要我们启动，而是系统正在开：
+        // 一次启动请求都不发，直接进等待链（scene 由系统那次激活造出来）。
+        // `homed: true` 传下去，`pollForScene` 那道 Home 门同样跳过。
+        if alreadyLive || passDoor {
             AevonOwnClear()
-            Log.write(String(format: "win: own live attach %@ t=%ldms wait=%ldms",
-                             bundleID, Int((CFAbsoluteTimeGetCurrent() - ownAt) * 1000),
-                             Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
-            mark("OWN-live")
+            if alreadyLive {
+                Log.write(String(format: "win: own live attach %@ t=%ldms wait=%ldms",
+                                 bundleID, Int((CFAbsoluteTimeGetCurrent() - ownAt) * 1000),
+                                 Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
+                mark("OWN-live")
+            } else {
+                Log.write(String(format: "win: own pass wait %@ t=%ldms wait=%ldms",
+                                 bundleID, Int((CFAbsoluteTimeGetCurrent() - ownAt) * 1000),
+                                 Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
+                mark("OWN-pass")
+            }
             markHosted(bundleID)
             // 0.2.34 — `homed` 必须一路带下去。0.2.33 在这里丢了它：`openCard`
             // 已经等过一次 home，`pollForScene` 的老门又判一次 scene 可见、
             // 再等 1.4 秒 —— 真机日志里 QQ 那次就是连着两组 `home first …`。
-            pollForScene(bundleID, ticks: 0, start: Date(), homed: homed, fallback: fallback)
+            pollForScene(bundleID, ticks: 0, start: Date(), homed: homed || passDoor,
+                         fallback: fallback)
             return
         }
         // ⛔ 0.3.1 — **自建 scene 整条下线。**

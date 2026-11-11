@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.35"
+    public static let version = "0.3.36"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -311,6 +311,33 @@ public enum Aevon {
     ///
     /// 语义与 `url.global.off` 相反：**存在才做**。
     public static let urlActOnPath       = "/var/mobile/Library/Logs/Aevon/url.act.on"
+
+    /// 0.3.36 — **放行式接管**的关闸（存在 = 回到「吞掉 + 自己投」的 0.3.35 行为）。
+    ///
+    /// Aevon(260) 把「自己投」这条路彻底判死了：四次冷启动分享，每次都是
+    /// 3 发 scene action + 1 发 5.0 s 晚发（`deliver late r=1 age=5156`，
+    /// 落在 QQ 自己 `geom late` 之后），`sendActions` 全部 `ok=1`，
+    /// QQ 四次全停首页。也就是说这不是时机问题 —— 是我们造的 action
+    /// （`initWithURL:openURLOptions:nil workspaceOriginatingProcess:nil responder:nil`）
+    /// 冷启动那条路根本不认。
+    ///
+    /// 剩下唯一没试过的、也是系统自己的路：**别吞**。让 `_openURLCore` 原样放行，
+    /// URL 由 FrontBoard 自己写进新 scene 的 connection options —— 那正是「原生分享」
+    /// 的定义。我们要的浮窗由 `createScene` 改初始 frame + 事后把 scene 搬进
+    /// presenter 保证，与这条 URL 通道互不相干。
+    public static let urlSwallowOnPath   = "/var/mobile/Library/Logs/Aevon/url.swallow.on"
+
+    /// 0.3.36 — 「活动继续」（`UIActivityContinuationAction`）这一族要不要接管。
+    ///
+    /// Aevon(259)/(260) 的授权与支付两次激活都是 `payload=0` + 落点侧
+    /// `act=#UIActivityContinuationAction` + `url=-`：URL 根本不在 payload 上，
+    /// 被系统包成一次「继续某个 activity」。0.3.35 的 `act: url dig` 翻了
+    /// `__Actions` 也没挖到（`dig miss … shape=UIActivityContinuationAction`）。
+    ///
+    /// 挖不到 URL 不等于接管不了：bundle id 是现成的，而放行式接管**不需要**
+    /// URL —— 系统自己会把它送进 App。所以这一族也按放行接管处理，代价为零。
+    /// 建 `url.activity.off` 可以把这一族退回去（继续全屏）。
+    public static let urlActivityOffPath = "/var/mobile/Library/Logs/Aevon/url.activity.off"
 
     /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
     ///

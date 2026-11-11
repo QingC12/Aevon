@@ -496,6 +496,16 @@ void AevonNotificationCaptureInstall(void);
 /// `DateFormatter` 不是线程安全的）。`version` 只用于日志前缀。
 void AevonMainStallWatchdogStart(const char *_Nullable version);
 
+/// 0.3.36 — 「这一拍是系统自己开的」。
+///
+/// 放行式接管里 `_openURLCore` 原样尾调，激活事务是系统的；`openCard` 里那两道
+/// 门（「目标就是屏上那个 ⇒ 先回桌面」与 `AevonLaunchSuspended`）在这一拍都是
+/// 错的 —— 前者会把系统刚激活的 App 按回去，后者是重复请求。
+///
+/// C 侧在接管时分流里置 1，这里**读一次就清零**（一次性令牌，不是开关状态：
+/// 留着不清会被下一次完全无关的开卡读到，那正是「粘性全局状态 = 自锁」的老坑）。
+extern int AevonPassSkipFlag;
+
 /// Swift 侧的实现（`SceneProbe.swift`）：拿 bundle id 走圆盘同一条开卡路。
 void AevonOpenFromNotification(const char *_Nullable bundleID);
 

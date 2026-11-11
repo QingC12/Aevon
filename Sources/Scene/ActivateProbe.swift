@@ -224,6 +224,18 @@ public func AevonURLActOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlActOnPath) ? 1 : 0
 }
 
+/// 0.3.36 — 存在 = 强制回到 0.3.35 的「吞掉 + 自投」。
+@_cdecl("AevonURLSwallowOn")
+public func AevonURLSwallowOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlSwallowOnPath) ? 1 : 0
+}
+
+/// 0.3.36 — 1 = 接管「活动继续」这一族（默认），0 = 建了关闸文件。
+@_cdecl("AevonURLActivityOn")
+public func AevonURLActivityOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlActivityOffPath) ? 0 : 1
+}
+
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
 ///
 /// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、

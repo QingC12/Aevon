@@ -98,6 +98,21 @@ extern int AevonURLGlobalOn(void);
 // 「登录点不动、支付跳不了」，比「全屏」严重。挖到之后要接管，手建
 // `/var/mobile/Library/Logs/Aevon/url.act.on` 再重启桌面即可。
 extern int AevonURLActOn(void);
+// 0.3.36 — **放行式接管**的关闸（`url.swallow.on` 存在 = 回到「吞掉 + 自投」）。
+//
+// Aevon(260) 把「自投」判死了：四次冷启动分享，每发都 `deliver ok=1`（含
+// 5.0 s 晚发落在 QQ 自己 `geom late` 之后），QQ 四次全停首页。所以问题不在时机，
+// 在我们造的那份 action 冷启动这条路根本不认。
+//
+// 这一版不再吞：`_openURLCore` 原样放行，URL 由 FrontBoard 自己写进新 scene 的
+// connection options（= 原生分享的定义）。浮窗不靠这条：`createScene` 改初始
+// frame + 事后把 scene 搬进 presenter 一直是我们自己的活。
+extern int AevonURLSwallowOn(void);
+// 0.3.36 — 「活动继续」这一族（`UIActivityContinuationAction`）的接管开关。
+//
+// 授权/支付那两次激活都是 `payload=0` + `__Actions[0]` 是 `UIActivityContinuationAction`，
+// URL 挖不到，但 bundle id 是现成的 —— 放行式接管不需要 URL，系统自己会送。
+extern int AevonURLActivityOn(void);
 // 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
 // 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
 extern int AevonCardYieldForFullscreen(const char *bundle);
@@ -3850,8 +3865,14 @@ static volatile int AevonDeliverWaits = 0;
 // 1 ⇒ 不再走 scene action（那会在原生投递之外再叠一次，且冷启动本来就会丢）。
 static volatile int AevonDenyTctxOk = 0;
 static long AevonDenyTctxTries = 0;
+// 0.3.36 — 这一次接管是「吞掉」还是「放行」。
+// 1 = 吞（0.3.35 的行为，`url.swallow.on`）；0 = 放行（默认，系统自己送 URL）。
+// `AevonTctxInjectURL` 必须看这一位：放行时系统会自己把 URL 装进新 scene 的
+// transitionContext，我们再 `setActions:` 一次就是叠两份 —— 那正是「一次 openURL
+// 过两钩 ⇒ 两张卡」的老病（`AevonLandingClaim` 那一条的同类）。
+static volatile int AevonDenySwallow = 1;
 static void AevonURLRedeliver(const char *bundle);
-static int AevonURLDenyTake(const char *bundle, const char *url, int kind);
+static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int swallow);
 
 // MARK: - 0.3.33 「带 URL 的挂起启动」整条下线（真机判死）
 
@@ -4398,6 +4419,9 @@ static int AevonURLDeliverOnce(const char *bundle, NSURL *u) {
 /// 就合并（`setByAddingObject:`），不覆盖系统自己装的。
 static void AevonTctxInjectURL(NSString *ident, id context) {
     if (ident == nil || context == nil) return;
+    // 0.3.36 — 放行模式不装。系统这次会自己把 URL 装进 transitionContext，
+    // 我们再装一份就是两份 action（一次打开建两张卡的老病）。
+    if (AevonDenySwallow == 0) return;
     if (AevonDenyBundle[0] == '\0' || AevonDenyURL[0] == '\0') return;
     if (AevonDenyAt <= 0) return;
     if (AevonActMs() - AevonDenyAt > 8000) return;
@@ -4855,18 +4879,36 @@ static id AevonDigActions(NSDictionary *dict, id bundleID) {
     return found;
 }
 
-/// 0.3.26 — **拒答**：记 URL、排一次我们自己的开卡、再排一次补投。
+/// 0.3.36 — **「这一拍是系统自己开的」**。
 ///
-/// 返回 1 = 这次激活不调原函数。语义要读清楚：我们不是在「撤销」激活，而是
-/// **根本不提交**它 —— FrontBoard 因此不会为这个 App 建那个 430×932 的全屏窗，
-/// 那一帧在原理上就不存在。返回 0 = 照原样放行（总闸关着 / 已经在卡里 / 参数不全）。
+/// 放行式接管里，激活事务是系统自己的，`openCard` 那两道门都会做错事：
+///   · 「目标就是屏上那个全屏页 ⇒ 先回桌面」——目标确实在上屏，但那正是系统
+///     刚提交的激活，发一次 Home 就等于把它按回去，用户看到卡前一闪；
+///   · `AevonLaunchSuspended` —— 系统已经替我们开了，再来一次是重复请求。
+/// 所以置 1 之后 `SceneProbe.openCard` 读一次（读后立刻清零）并跳过这两步，
+/// 直接走「等 scene → 贴进卡」。非 static：Swift 侧直接读这个符号。
+int AevonPassSkipFlag = 0;
+
+/// 0.3.26 — **拒答 / 0.3.36 放行式接管**：记 URL、排一次我们自己的开卡。
+///
+/// 返回 2 = **接管但放行**（0.3.36 默认）：不 return，原函数照常尾调，系统自己
+/// 把 URL 写进新 scene 的 connection options —— 那是唯一被 QQ 认的通道
+/// （Aevon(260)：四次冷启动、每发 `deliver ok=1`，含 5.0 s 晚发，全停首页）。
+/// 返回 1 = 接管且吞掉（只有 `url.swallow.on` 存在才这样，= 0.3.35 的行为）。
+/// 返回 0 = 不接管。
+///
+/// 为什么放行还能是浮窗：URL 通道与呈现通道是两条。呈现这一侧我们一直是
+/// 「`createScene` 把初始 frame 改成 430×717，再把 scene 搬进自己的 presenter」
+/// （`act: frame birth` / `win: own retired` / `presenter cls=_UIScenePresenter`），
+/// 与系统有没有提交那次全屏事务无关。
 ///
 /// 三件事都不在钩子里同步做：
 ///   · 开卡推到 150 ms —— 拒答之后来源 App 的分享面板正在收，抢前台会打架；
 ///   · 补投推到 350 ms 起手、每 200 ms 一拍问 scene（0.3.29 改；0.3.26–0.3.28 是
 ///     固定 2.6 s）。那一版每次都要用户干等 3 秒，Aevon(252) 的
 ///     `deny → deliver done` 差值把这段等待钉在了定时器上，不是 QQ 慢。
-static int AevonURLDenyTake(const char *bundle, const char *url, int kind) {
+///     **放行模式一律不排**：URL 由系统送，再送一份就是重复打开。
+static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int swallow) {
     if (bundle == NULL || bundle[0] == '\0') return 0;
     if (AevonActivateSwitchOff() == 1) return 0;
     if (AevonCardIsUpFor(bundle) == 1) return 0;
@@ -4897,28 +4939,45 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind) {
     // scene 不在 = 这一发 URL 会落进一个刚要起来的进程。这正是要分开的两件事。
     int seenScene = (AevonSeenSceneForBundle(
         [NSString stringWithUTF8String:bundle]) != nil) ? 1 : 0;
-    AevonDenyCold = (pid > 0 || run == 1 || seenScene == 1) ? 0 : 1;
+    // 0.3.36 — 判据再换一次，这次是 Aevon(260) 逼出来的。
+    //
+    // `AevonSeenSceneForBundle` 在 Aevon(260) 里四次全答 0，其中两次（17:34:32 /
+    // 17:34:59）卡片那边明明写着 `win: listed scene all shell n=1 best=0` ——
+    // 它走的是我们自己的「见过的 scene」弱表，表里没有就交给 `AevonLiveSceneForBundle`，
+    // 而那条在空壳判定上会把一份活 scene 判掉。冷/热分错还不致命（多发两发而已），
+    // 但 0.3.36 的分流要靠它决定「吞还是放行」，必须用能对的读数：
+    // 直接枚举 `FBSceneManager` 的账本，与 `win: listed scene` 同一把尺。
+    int liveScene = (AevonLiveSceneForBundle(
+        [NSString stringWithUTF8String:bundle]) != nil) ? 1 : 0;
+    AevonDenyCold = (pid > 0 || run == 1 || seenScene == 1 || liveScene == 1) ? 0 : 1;
     AevonDeliverShots = (AevonDenyCold == 1) ? 2 : 0;
     AevonDeliverWaits = 0;
     AevonDenyTctxOk = 0;
     AevonDenyTctxTries = 0;
+    AevonDenySwallow = swallow;
+    if (swallow == 0) {
+        // 放行：URL 由系统送，投递链一条都不排。
+        AevonDeliverShots = 0;
+    }
     // `reply=none` 是这一版最要紧的读数之一：`withResult:` 那个块的签名一次都
     // 没读到（0.3.24/0.3.25 的日志里全是 `rsig=-`），盲调就是又一次 0.2.91。
-    // 所以拒答之后**不回调**它 —— 分享扩展会等超时，但不会崩。
+    // 所以接管之后**不回调**它 —— 分享扩展会等超时，但不会崩。
     AevonLogRaw([[NSString stringWithFormat:
-                  @"act: deny b=%s kind=%d n=%ld reply=none url=%.140s",
-                  bundle, kind, n,
+                  @"act: float sw=%d b=%s kind=%d n=%ld live=%d reply=none url=%.140s",
+                  swallow, bundle, kind, n, liveScene,
                   AevonDenyURL[0] != '\0' ? AevonDenyURL : "-"] UTF8String]);
     // 0.3.29 — 这一行是下一份日志的第一判据：`pid=-1` 是读不到（不是不在），
     // 与 `pid=0` 一样按冷启动处理（多发两发最多多出一个面板，少发就是停在首页）。
     AevonLogRaw([[NSString stringWithFormat:
-                  @"act: deny cold=%d pid=%d run=%d seen=%d shots=%d b=%s",
-                  AevonDenyCold, pid, run, seenScene, AevonDeliverShots,
-                  bundle] UTF8String]);
+                  @"act: float cold=%d pid=%d run=%d seen=%d live=%d shots=%d sw=%d b=%s",
+                  AevonDenyCold, pid, run, seenScene, liveScene, AevonDeliverShots,
+                  swallow, bundle] UTF8String]);
     // 0.3.35 — 冷启动在 5.0 s 再补一发（`AevonURLDeliverLate`）。
     // 排在这里而不是投递链里：投递链要等 tctx 装上才起手，而这一发要回答的
     // 问题恰恰是「App 自己的首帧布局完成（boot + 4 s）之后投，还认不认」。
-    if (AevonDenyCold == 1) {
+    // Aevon(260) 答了：四次 `deliver late r=1`，QQ 四次停首页 —— 这条只在
+    // 强制回退（`url.swallow.on`）时还排。
+    if (swallow == 1 && AevonDenyCold == 1) {
         int64_t token = AevonDenyAt;
         AevonLogRaw([[NSString stringWithFormat:
                       @"act: deliver late plan wait=5000 b=%s", bundle] UTF8String]);
@@ -4928,29 +4987,40 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind) {
         });
     }
     NSString *held = [NSString stringWithUTF8String:bundle];
-    if (held == nil) return 1;
+    if (held == nil) return swallow == 1 ? 1 : 2;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         const char *cb = [held UTF8String];
         if (cb == NULL || cb[0] == '\0') return;
         if (AevonCardIsUpFor(cb) == 1) {
             AevonLogRaw([[NSString stringWithFormat:
-                          @"act: deny card skip why=up b=%s", cb] UTF8String]);
+                          @"act: float card skip why=up b=%s", cb] UTF8String]);
             return;
         }
         AevonLogRaw([[NSString stringWithFormat:
-                      @"act: deny card b=%s", cb] UTF8String]);
-        // `homed: false`：这一刻来源 App 还在屏上（我们刚把目标拒掉），
-        // 目标并没占屏，`openCard` 会直接走挂起启动 + 建卡，不发 Home。
+                      @"act: float card b=%s sw=%d", cb, swallow] UTF8String]);
+        // `homed: false`：这一刻来源 App 还在屏上，目标并没占屏，`openCard`
+        // 会直接走挂起启动 + 建卡，不发 Home。放行模式下 `AevonPassSkipFlag`
+        // 再挡一道：那两道门在「系统自己正在开」时都是错的。
+        //
+        // 令牌**在这里才置**、调用一返回就清：`AevonOpenCardURL` 是同步进
+        // `openCard` 的，同一帧里就把标志读走了。放在前面（拒答那一刻）
+        // 会因为这家 App 已经在卡里之类的早退路径把 1 留在全局里，
+        // 下一次完全无关的开卡读到就会少发一次 Home —— 那正是「粘性全局状态 = 自锁」。
+        if (swallow == 0) AevonPassSkipFlag = 1;
         AevonOpenCardURL(cb);
+        if (swallow == 0) AevonPassSkipFlag = 0;
     });
-    // 0.3.29 — 350 ms 只是「起手」，真正的投递时刻由 scene 挂上那一拍决定
-    // （`AevonURLDeliverShot` 里每 0.2 s 问一次，最多 20 拍）。
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        AevonURLRedeliver(AevonDenyBundle);
-    });
-    return 1;
+    if (swallow == 1) {
+        // 0.3.29 — 350 ms 只是「起手」，真正的投递时刻由 scene 挂上那一拍决定
+        // （`AevonURLDeliverShot` 里每 0.2 s 问一次，最多 20 拍）。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            AevonURLRedeliver(AevonDenyBundle);
+        });
+        return 1;
+    }
+    return 2;
 }
 
 /// 按**编码串**判定形状，不数 `@`。
@@ -6300,6 +6370,10 @@ static void AevonActInstall(NSMutableString *out) {
             // 提到这个作用域是为了让下面「拒答」那一段能看见它 —— 它在 0.3.23 里
             // 是 `if` 里的一块局部量，外面拿不到。
             int shareKind = 0;
+            // 0.3.36 — `__Actions[0]` 是不是「继续某个 activity」（授权/支付那一族）。
+            // Aevon(259)/(260) 那两次激活都是 `payload=0` + 落点侧
+            // `act=#UIActivityContinuationAction` + `url=-`。
+            int activityKind = 0;
             NSString *shareURL = nil;
             // 0.3.34 — `__PayloadURL` 不在时，从 `__PayloadOptions` 里挖出来的那个。
             id deepURL = nil;
@@ -6330,6 +6404,20 @@ static void AevonActInstall(NSMutableString *out) {
                     NSDictionary *dict = (NSDictionary *)box;
                     keys = (long)[dict count];
                     payload = [dict objectForKey:@"__PayloadURL"] != nil ? 1 : 0;
+                    // 0.3.36 — `__Actions` 的第一个动作是哪一族。只看类名，不进去。
+                    // 授权/支付那两次（Aevon(259)/(260)）都是 `UIActivityContinuationAction`；
+                    // 它是系统替 App 继续一个 NSUserActivity 的形状，URL 不在 payload 上。
+                    {
+                        id acts0 = [dict objectForKey:@"__Actions"];
+                        if ([acts0 isKindOfClass:[NSArray class]] &&
+                            [(NSArray *)acts0 count] > 0) {
+                            id a0 = [(NSArray *)acts0 objectAtIndex:0];
+                            const char *cn = a0 != nil ? object_getClassName(a0) : NULL;
+                            if (cn != NULL && strstr(cn, "ActivityContinuation") != NULL) {
+                                activityKind = 1;
+                            }
+                        }
+                    }
                     // 这两格是「让系统别摆屏」的候选开关，母版在激活那一格能动的就是
                     // 这份字典。记 0/1/2（2 = 键在但不是 NSNumber），三种要分开读。
                     id sl = [dict objectForKey:@"__LaunchSceneless"];
@@ -6538,20 +6626,44 @@ static void AevonActInstall(NSMutableString *out) {
             // 边界的划法在 `AevonURLWorthDeny`：电话/短信/设置/App Store 这些
             // 「系统必须自己处理」的 scheme 原样放行，其余全接。
             // `url.global.off` 存在 = 退回 0.3.32（只接分享）。
-            if (payload == 1 && shareKind >= 1 &&
+            //
+            // 0.3.36 — **接管改成「放行 + 抢 scene」**，另外补上「活动继续」那一族。
+            //
+            // Aevon(260) 是这一刀的依据，两条：
+            //   ① 我们自己投 action 这条路对冷启动无效 —— 四次分享、每次 3 发
+            //      scene action + 1 发 5.0 s 晚发（`deliver late r=1 age=5156`，
+            //      落在 QQ 自己 `geom late` 之后），`sendActions` 全部 `ok=1`，
+            //      QQ 四次全停首页。「URL 落在首页恢复窗口里」这个假设到此为止。
+            //   ② 授权（17:35:17 QQ）与支付（17:35:52 支付宝）那两次激活
+            //      `payload=0` + `__Actions[0]` 是 `UIActivityContinuationAction`
+            //      ⇒ 连接管条件都不满足 ⇒ 原样放行 ⇒ 全屏。0.3.35 的
+            //      `act: url dig miss … shape=UIActivityContinuationAction` 说明
+            //      这一族的 URL 挖不出来，但接管本来就不需要 URL。
+            //
+            // 所以：这一族纳入接管，且**两类都默认放行**（`swallow = 0`）——
+            // URL / activity 由 FrontBoard 自己写进新 scene 的 connection options，
+            // 那是「原生分享」的定义；浮窗由 `createScene` 改初始 frame + 事后
+            // 搬进 presenter 保证，两条通道互不相干。
+            // `url.swallow.on` 存在 = 回到 0.3.35 的「吞掉 + 自投」，一键回退。
+            int shareTake = (payload == 1 && shareKind >= 1) ? 1 : 0;
+            // activity 族不看 payload：0.3.34 的深挖有可能把 `payload` 写成 1
+            // 而 `shareKind` 仍是 0，那种「挖到但没归族」的半截状态不该让接管落空。
+            int actTake = (activityKind == 1 && shareKind == 0 &&
+                           AevonURLActivityOn() == 1) ? 1 : 0;
+            if ((shareTake == 1 || actTake == 1) &&
                 [bundleID isKindOfClass:[NSString class]]) {
                 const char *denyBundle = [(NSString *)bundleID UTF8String];
                 const char *us = shareURL != nil && shareURL.length > 0
                     ? [shareURL UTF8String] : NULL;
                 int global = (shareKind == 2 || AevonURLGlobalOn() == 1) ? 1 : 0;
-                if (global == 0) {
+                if (shareTake == 1 && global == 0) {
                     if (AevonDenySkipLines < 8) {
                         __sync_fetch_and_add(&AevonDenySkipLines, 1);
                         AevonLogRaw([[NSString stringWithFormat:
                                       @"act: deny skip why=global k=%d b=%s",
                                       shareKind, denyBundle] UTF8String]);
                     }
-                } else if (AevonURLWorthDeny(us) != 1) {
+                } else if (shareTake == 1 && AevonURLWorthDeny(us) != 1) {
                     if (__sync_fetch_and_add(&AevonDenySkipLines, 1) < 8) {
                         AevonLogRaw([[NSString stringWithFormat:
                                       @"act: deny skip why=scheme k=%d u=%.60s",
@@ -6564,8 +6676,15 @@ static void AevonActInstall(NSMutableString *out) {
                     AevonLogRaw([[NSString stringWithFormat:
                                   @"act: pass why=redeliver b=%s", denyBundle] UTF8String]);
                 } else if (AevonURLDenyOn() == 1) {
-                    if (AevonURLDenyTake(denyBundle, us, shareKind) == 1) {
-                        // 关键的一行：不调原函数。没有激活事务，就没有 FrontBoard
+                    // 0.3.36 — 吞还是放行。强制回退优先；其余一律放行。
+                    // 热启动那一种本来就已经「秒出」，放行对它同样成立（系统自己
+                    // 送 URL，比我们造 action 更原生），所以不按冷热分流了 ——
+                    // 分流只会多一条要维护的边界。
+                    int swallow = (AevonURLSwallowOn() == 1) ? 1 : 0;
+                    int r = AevonURLDenyTake(denyBundle, us,
+                                             shareTake == 1 ? shareKind : 0, swallow);
+                    if (r == 1) {
+                        // 强制回退那一支：不调原函数。没有激活事务，就没有 FrontBoard
                         // 那个 430×932 的全屏窗口 —— 不是「撤得快」，是「没发生」。
                         return;
                     }
