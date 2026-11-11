@@ -12423,7 +12423,7 @@ static id AevonDeckSceneOf(id handle) {
 
 // 0 idle / 1 等 scene / 2 已挂进卡
 static int AevonDeckPhase = 0;
-static int AevonDeckTick = 0;
+static int AevonDeckTicks = 0;
 static int AevonDeckSent = 0;
 static int AevonDeckBusy = 0;
 static id AevonDeckEntity = nil;
@@ -12449,13 +12449,13 @@ static void AevonDeckEnd(const char *why) {
     if (AevonDeckNotes < 24) {
         AevonDeckNotes += 1;
         AevonLogRaw([[NSString stringWithFormat:@"deck: end why=%s b=%s tick=%d",
-                      why != NULL ? why : "-", AevonDeckBundle, AevonDeckTick] UTF8String]);
+                      why != NULL ? why : "-", AevonDeckBundle, AevonDeckTicks] UTF8String]);
     }
     if (AevonDeckEntity != nil) { [(id)AevonDeckEntity release]; AevonDeckEntity = nil; }
     if (AevonDeckHandle != nil) { [(id)AevonDeckHandle release]; AevonDeckHandle = nil; }
     AevonDeckPhase = 0;
     AevonDeckBusy = 0;
-    AevonDeckTick = 0;
+    AevonDeckTicks = 0;
     AevonDeckSent = 0;
     AevonDeckBundle[0] = '\0';
     AevonDeckURL[0] = '\0';
@@ -12481,20 +12481,20 @@ static void AevonDeckDeliver(void) {
                  bundleID, sent, srcApp != nil ? srcApp : @"-", AevonDeckURL);
 }
 
-static void AevonDeckTick(void);
+static void AevonDeckSpin(void);
 
 /// 一拍 80 ms 地等 `[handle scene]` 变成非 nil。上限 28 拍 ≈ 2.24 s，
 /// 与 ScreenCore 的 `SCWSShareDelivery.deadline`（2 s）同量级。
 static void AevonDeckAfter(double gap) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(gap * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        AevonDeckTick();
+        AevonDeckSpin();
     });
 }
 
-static void AevonDeckTick(void) {
+static void AevonDeckSpin(void) {
     if (AevonDeckPhase != 1) return;
-    AevonDeckTick += 1;
+    AevonDeckTicks += 1;
     id scene = nil;
     @try {
         scene = AevonDeckSceneOf(AevonDeckHandle);
@@ -12507,7 +12507,7 @@ static void AevonDeckTick(void) {
         NSString *bundleID = [NSString stringWithUTF8String:AevonDeckBundle];
         int floated = AevonOwnFloatScene(AevonDeckBundle, (void *)scene);
         AevonDeckLog(@"deck: scene up b=%@ tick=%d cls=%@ float=%d",
-                     bundleID != nil ? bundleID : @"-", AevonDeckTick,
+                     bundleID != nil ? bundleID : @"-", AevonDeckTicks,
                      NSStringFromClass([scene class]), floated);
         if (floated == 1) {
             AevonDeckPhase = 2;
@@ -12538,8 +12538,8 @@ static void AevonDeckTick(void) {
         AevonDeckEnd("float failed");
         return;
     }
-    if (AevonDeckTick >= 28) {
-        AevonDeckLog(@"deck: scene timeout b=%s tick=%d", AevonDeckBundle, AevonDeckTick);
+    if (AevonDeckTicks >= 28) {
+        AevonDeckLog(@"deck: scene timeout b=%s tick=%d", AevonDeckBundle, AevonDeckTicks);
         // 退路：让系统按老路把它开起来（这一次是全屏），URL 仍走桥。
         // 顺序不能反 —— 先开进程才会有容器读那一份 plist。
         AevonDeckStrike("timeout");
@@ -12622,7 +12622,7 @@ static int AevonDeckStart(const char *bundle, const char *url, const char *from)
 
     AevonDeckBusy = 1;
     AevonDeckPhase = 1;
-    AevonDeckTick = 0;
+    AevonDeckTicks = 0;
     AevonDeckSent = 0;
     AevonDeckEntity = entity;              // 已经是 +1
     AevonDeckHandle = [handle retain];
