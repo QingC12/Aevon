@@ -4544,6 +4544,21 @@ static void AevonProbeTransitionContext(id context, id settings) {
     if (context == nil) return;
     if (__sync_fetch_and_add(&AevonProbeTctx, 1) >= 8) return;
     AevonActStep("probe:tctx");
+    // 0.3.20 — **先落类名，再干活。**
+    //
+    // Aevon(246) 的第一行是 `boot: last act step=probe:tctx (INTERRUPTED)` —— 上一次
+    // 进程死在这一步，可那一份日志被装包清空了，唯一活下来的是 step 标记。于是
+    // 「死在哪个类上」这个问题谁也答不了：`AevonProbeMethodList` 那两个调用在
+    // @try 里，异常能兜住，兜不住的是 trap（0.2.92 / Safari 那次就是 trap）——
+    // 一 trap 就什么都不写了。
+    //
+    // 所以这一行必须排在 @try 之前、并且排在两个 `AevonProbeMethodList` 之前。
+    // 它限流在同一个 `>= 8` 计数器内，不会刷屏；作用是把「剩下那一格」补上：
+    // 下次若还断在这里，日志里至少有 context / settings 的类名。
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"probe: tctx enter ctx=%s set=%s",
+                  object_getClassName(context),
+                  settings != nil ? object_getClassName(settings) : "nil"] UTF8String]);
     @try {
         NSString *ctxList = context != nil ? AevonProbeMethodList(context, 24) : @"-";
         NSString *setList = settings != nil ? AevonProbeMethodList(settings, 12) : @"-";

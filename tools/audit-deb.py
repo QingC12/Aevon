@@ -885,6 +885,10 @@ def main():
                   b"act: frame birth idle why=%s card=%s id=%s set=%s",
                   # 0.3.20 — 这条写路自己的闸。语义与 notify.off 不同：关的是「写」。
                   b"birth:off",
+                  # 0.3.20 — `probe:tctx` 是 Aevon(246) 记录的上一次死因，可那一份日志
+                  # 被装包清空了，死了都不知道死在哪一类上。这一行排在 @try 之前、
+                  # 方法表之前，trap 也能留下类名。
+                  b"probe: tctx enter ctx=%s set=%s",
                   # 0.2.91 把正常收尾写成空串，等于自己擦掉断点；这一串证明
                   # 「收尾有名字」而不是一片空白。Swift 侧的 `(settled)` /
                   # `(INTERRUPTED)` 是插值出来的，二进制里没有独立字面量，
