@@ -3867,6 +3867,23 @@ void AevonCardTargetArmURL(const char *bundle, int kind) {
     if (bundle == NULL || bundle[0] == '\0') return;
     size_t n = strlen(bundle);
     if (n < 3 || n >= sizeof(AevonActCardBundle)) return;
+    // 0.3.28 — 普通深链（kind=1）**不上扳机**。
+    //
+    // 0.3.23 把它和分享一起 arm，于是 Aevon(3) 里出现了一条自相矛盾的读数：
+    //   act: arm src=url b=com.apple.mobilesafari kind=1
+    //   act: frame birth dry=1 b=com.apple.mobilesafari
+    // 深链不拒答、不排卡、也不该进 birth —— 它根本不在 URL 路上被接管。
+    // 留着它只会让「哪一次是 URL 路」这件事在日志里说不清。
+    // 静态量一个都不动：safari 那次 birth 会因为 bundle 不匹配落 `why=no-target`，
+    // 一样清楚；而 QQ 那边还在进行的 10 s 窗口不会被这次深链踩掉。
+    if (kind != 2) {
+        if (__sync_fetch_and_add(&AevonActArmURLCalls, 1) < 6) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: arm skip why=link b=%s kind=%d n=%ld",
+                          bundle, kind, AevonActArmURLCalls] UTF8String]);
+        }
+        return;
+    }
     memcpy(AevonActCardBundle, bundle, n + 1);
     AevonActCardAt = AevonActMs();
     AevonActCardSrc = 2;
@@ -4025,6 +4042,38 @@ static void AevonURLCardSchedule(const char *bundle) {
 /// 猜选择子是 0.2.91 那种崩法的来源，所以先让它自己报菜单：
 /// 类方法只报名字里带 `URL` / `action` 的，实例方法只报带 `URL` 的和 `init…`。
 /// 名字限定在 180 字节内，不会把整张方法表灌进日志。
+/// 0.3.28 — 兜底：如果按真名造出来的对象描述里仍然没有 url，就直接写这一格。
+/// 名字不猜，由 census 从 ivar 表里挑：类型必须是 `@`、名字含 `URL`（不分大小写）
+/// 且不含 `Options`（那一格装的是 token，不是地址）。挑不到就一位都不写。
+static char AevonURLIvarName[64] = {0};
+
+static void AevonURLIvarPick(Ivar iv) {
+    if (iv == NULL || AevonURLIvarName[0] != '\0') return;
+    const char *nm = ivar_getName(iv);
+    const char *tp = ivar_getTypeEncoding(iv);
+    if (nm == NULL || tp == NULL || tp[0] != '@') return;
+    if (strcasestr(nm, "url") == NULL) return;
+    if (strcasestr(nm, "option") != NULL) return;
+    size_t n = strlen(nm);
+    if (n == 0 || n >= sizeof(AevonURLIvarName)) return;
+    memcpy(AevonURLIvarName, nm, n + 1);
+}
+
+/// 返回 1 = 写进去了。**只在 action 的描述里读不到 url 时调用** —— 写 ivar 绕过了
+/// 类自己的 setter，语义上没有保证；能不用就不用，用了就说清楚是哪一格。
+static int AevonForceSetURL(id action, NSURL *u) {
+    if (action == nil || u == nil || AevonURLIvarName[0] == '\0') return 0;
+    @try {
+        Ivar iv = class_getInstanceVariable(object_getClass(action), AevonURLIvarName);
+        if (iv == NULL) return 0;
+        object_setIvar(action, iv, u);
+        return 1;
+    } @catch (NSException *e) {
+        AevonLogRaw("act: deliver act threw iv");
+        return 0;
+    }
+}
+
 static void AevonURLClassCensus(void) {
     Class c = NSClassFromString(@"UIOpenURLAction");
     if (c == Nil) {
@@ -4052,19 +4101,83 @@ static void AevonURLClassCensus(void) {
         [im appendFormat:@"%s|", name];
     }
     if (list != NULL) free(list);
-    AevonLogRaw([[NSString stringWithFormat:@"act: deliver census cls=%s cm=%@ im=%@",
+    // 0.3.28 — 连同 ivar 名单一起报。如果这一版按真名造出来的对象描述里仍然
+    // 没有 url，下一步只能直接写 ivar（`object_setIvar`），所以名字与类型编码
+    // 必须现在就拿到手 —— 再一次开机就少一轮。
+    NSMutableString *iv = [NSMutableString string];
+    unsigned int vn = 0;
+    Ivar *ivars = class_copyIvarList(c, &vn);
+    for (unsigned int i = 0; ivars != NULL && i < vn; i++) {
+        const char *nm = ivar_getName(ivars[i]);
+        const char *tp = ivar_getTypeEncoding(ivars[i]);
+        if (nm == NULL || tp == NULL) continue;
+        AevonURLIvarPick(ivars[i]);
+        if ([iv length] > 160) continue;
+        [iv appendFormat:@"%s:%s|", nm, tp];
+    }
+    if (ivars != NULL) free(ivars);
+    AevonLogRaw([[NSString stringWithFormat:@"act: deliver census cls=%s cm=%@ im=%@ iv=%@",
                   class_getName(c),
                   [cm length] > 0 ? cm : @"-",
-                  [im length] > 0 ? im : @"-"] UTF8String]);
+                  [im length] > 0 ? im : @"-",
+                  [iv length] > 0 ? iv : @"-"] UTF8String]);
 }
 
-/// 造一个 `UIOpenURLAction`。候选按「最可能」排：类工厂 → 带 origin 的工厂 → 实例 init。
+/// 0.3.28 — 真构造器。名字是 0.3.27 的 census 自己报出来的，不是猜的：
+///
+///   act: deliver census cls=UIOpenURLAction cm=- im=initWithURL:openURLOptions:
+///        workspaceOriginatingProcess:responder:|localOpenURLOptions|
+///
+/// `cm=-` ⇒ 这一类**没有**类工厂（`actionWithURL:` 那两条永远走不到），
+/// `im` 里也**没有** `initWithURL:`。0.3.27 之所以还打了 `act=i:url`，是因为
+/// `respondsToSelector:` 问到了父类那一支 —— 造出来的是**半个对象**：类名对、
+/// url 空。`sendActions:` 收得下（不抛），App 认不出来，于是 QQ 停在首页。
+///
+/// 参数按「能 nil 就 nil」排，两组：三 nil，和 options 给空字典。每次重新
+/// `alloc`：一次 init 失败过的对象状态未知，复用它是 0.2.91 那类死法的近亲。
+static id AevonOpenURLAlloc(void) {
+    Class c = NSClassFromString(@"UIOpenURLAction");
+    if (c == Nil) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)((id)c, NSSelectorFromString(@"alloc"));
+}
+
+static id AevonMakeOpenURLActionReal(NSURL *u, const char **how) {
+    if (u == nil) return nil;
+    Class c = NSClassFromString(@"UIOpenURLAction");
+    if (c == Nil) return nil;
+    SEL s = NSSelectorFromString(
+        @"initWithURL:openURLOptions:workspaceOriginatingProcess:responder:");
+    if (![c instancesRespondToSelector:s]) return nil;
+    // ① url + 三个 nil
+    id o = AevonOpenURLAlloc();
+    if (o != nil) {
+        @try {
+            id a = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)
+                (o, s, u, nil, nil, nil);
+            if (a != nil) { if (how) *how = "r:3nil"; return a; }
+        } @catch (NSException *e) { AevonLogRaw("act: deliver act threw r:3nil"); }
+    }
+    // ② url + 空字典（options 有时不许 nil）
+    o = AevonOpenURLAlloc();
+    if (o != nil) {
+        @try {
+            id a = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)
+                (o, s, u, @{}, nil, nil);
+            if (a != nil) { if (how) *how = "r:dict"; return a; }
+        } @catch (NSException *e) { AevonLogRaw("act: deliver act threw r:dict"); }
+    }
+    return nil;
+}
+
+/// 造一个 `UIOpenURLAction`。候选按「最可能」排：真名 → 类工厂 → 带 origin 的工厂 → 实例 init。
 /// 每一条都先 `respondsToSelector`，全部包在 `@try` 里 —— 造不出来只是这一版送不到，
 /// 不许变成崩溃。
 static id AevonMakeOpenURLAction(NSURL *u, const char **how) {
     if (how != NULL) *how = "-";
     Class c = NSClassFromString(@"UIOpenURLAction");
     if (c == Nil || u == nil) return nil;
+    id real = AevonMakeOpenURLActionReal(u, how);
+    if (real != nil) return real;
     SEL s1 = NSSelectorFromString(@"actionWithURL:");
     if ([c respondsToSelector:s1]) {
         @try {
@@ -4147,10 +4260,47 @@ static int AevonURLDeliverOnce(const char *bundle, NSURL *u) {
             return 2;
         }
         const char *show = "-";
+        // 0.3.28 — 送之前先问一句「这个 action 里到底有没有 url」。
+        // 0.3.27 的失败无法从读数上区分「没送到」和「送到了但是空的」，只能靠
+        // 用户说「停在首页」反推。`has` 是 desc 里出现 `url` 与 `://` 的位数：
+        // 两个都 ≥1 才算这个对象真的带着地址。这一行是下一版的判据来源。
+        int hasUrl = 0;
+        int hasScheme = 0;
+        @try {
+            NSString *d = [action description];
+            if ([d isKindOfClass:[NSString class]]) {
+                if ([d rangeOfString:@"url"].location != NSNotFound) hasUrl = 1;
+                if ([d rangeOfString:@"://"].location != NSNotFound) hasScheme = 1;
+            }
+        } @catch (NSException *e) { }
+        int fixed = 0;
+        if (hasUrl == 0 || hasScheme == 0) {
+            fixed = AevonForceSetURL(action, u);
+            if (fixed == 1) {
+                hasUrl = 0;
+                hasScheme = 0;
+                @try {
+                    NSString *d2 = [action description];
+                    if ([d2 isKindOfClass:[NSString class]]) {
+                        if ([d2 rangeOfString:@"url"].location != NSNotFound) hasUrl = 1;
+                        if ([d2 rangeOfString:@"://"].location != NSNotFound) hasScheme = 1;
+                    }
+                } @catch (NSException *e) { }
+            }
+        }
+        if (hasUrl == 0 || hasScheme == 0) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: deliver act empty how=%s fix=%d b=%s",
+                          ahow, fixed, bundle] UTF8String]);
+        }
         int sent = AevonSceneSendAction(scene, action, &show);
+        // `cls=` 是「造出来的是不是那个类」的唯一读数：0.3.27 走到的是父类的
+        // `-initWithURL:`，类名看着对、内容为空，光看 `act=i:url` 分不出来。
         AevonLogRaw([[NSString stringWithFormat:
-                      @"act: deliver ok=%d act=%s send=%s b=%s url=%.100s",
-                      sent, ahow, show, bundle,
+                      @"act: deliver ok=%d act=%s send=%s cls=%s has=%d/%d fix=%d iv=%s b=%s url=%.100s",
+                      sent, ahow, show, class_getName(object_getClass(action)),
+                      hasUrl, hasScheme, fixed,
+                      AevonURLIvarName[0] != '\0' ? AevonURLIvarName : "-", bundle,
                       [u absoluteString].UTF8String != NULL
                           ? [u absoluteString].UTF8String : "-"] UTF8String]);
         return sent == 1 ? 1 : 2;

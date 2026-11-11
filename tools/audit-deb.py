@@ -904,6 +904,12 @@ def main():
                   # 出生尺寸在 URL 路上一次没跑过。这两串证明扳机真的接进了激活钩子
                   # （`src=url` 与圆盘的 `act: arm b=` 是两条独立读数，不能互相顶替）。
                   b"act: arm src=url b=%s kind=%d n=%ld write=%d",
+                  # 0.3.28 — 普通深链（kind=1）不再上扳机。Aevon(3) 里
+                  # `act: arm src=url b=com.apple.mobilesafari kind=1` 后面紧跟
+                  # `act: frame birth dry=1 b=com.apple.mobilesafari` —— 深链、
+                  # 不拒答、不排卡，却进了 birth 的干跑分支，只因 0.3.23 把两种
+                  # kind 一起 arm。这一串是「它真的被排除」的唯一读数。
+                  b"act: arm skip why=link b=%s kind=%d n=%ld",
                   # 干跑那一行：默认不写，只记「本来要写成什么、走副本还是直写」。
                   # 唯一能证明「四道门全过、只差按下开关」的读数。
                   b"act: frame birth dry=1 b=%s before=%.0fx%.0f want=%.0fx%.0f via=%s",
@@ -953,8 +959,9 @@ def main():
                   # 五串分别是：类的方法表（下一版据此定名字）/ 送到或没送到 /
                   # 等 scene（0 = 还没登记）/ 硬路径不可用时的唯一读数 /
                   # 软路径自己的闸。缺任何一串都说明这一支没进包。
-                  b"act: deliver census cls=%s cm=%@ im=%@",
-                  b"act: deliver ok=%d act=%s send=%s b=%s url=%.100s",
+                  b"act: deliver census cls=%s cm=%@ im=%@ iv=%@",
+                  b"act: deliver ok=%d act=%s send=%s cls=%s has=%d/%d fix=%d iv=%s b=%s url=%.100s",
+                  b"act: deliver act empty how=%s fix=%d b=%s",
                   b"act: deliver wait why=noscene b=%s",
                   b"act: deliver skip why=soft-off",
                   b"/var/mobile/Library/Logs/Aevon/url.redeliver.soft",
