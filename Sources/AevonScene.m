@@ -175,6 +175,7 @@ static id AevonActRead(id object, NSString *key);
 // `__PasteSharingToken` / `__AppLink4LS`）连同挂起位一起交回原实现。
 // 判据只有一条：QQ 侧 `app: openurl` 的 `dlg=` 从 `-` 翻成类名。
 extern int AevonColdHoldOn(void);          ///< 闸（`url.cold.hold.off` 存在 = 关）
+extern int AevonColdBridgeOn(void);        ///< 闸（`url.cold.bridge.on` 存在 = 就绪先问桥）
 static int AevonColdPending(void);         ///< 一次性：这一次接管要不要扣请求
 static void AevonColdWantNote(void);       ///< `AevonURLDenyTake` 里置位
 static int AevonColdHolds(const char *bundle);  ///< 扣着的是不是这个 App
@@ -15644,20 +15645,28 @@ static int AevonColdBridgeSend(void);
 /// `dlg=- rsp=0` 就是这句话的十二次证词）。ScreenCore 也没有这一步 ——
 /// 它就等托管，然后把原件交回去。
 ///
-/// 所以这一版只留一条投递路径：**托管就绪 → 原件交回 → 2 s 兜底也是原件交回。**
-/// 桥的代码还在（`AevonColdBridgeSend`，标了 unused），下一版要 A/B 时再接回来。
+/// 所以这一版只留一条默认路径：**托管就绪 → 原件交回 → 2 s 兜底也是原件交回。**
+/// 桥那条路还在，但只有手建 `url.cold.bridge.on` 才会走（A/B 用）。
 void AevonColdCardReady(const char *bundle) {
     if (AevonColdOn == 0 || bundle == NULL || bundle[0] == '\0') return;
     if (strcmp(bundle, AevonColdBundle) != 0) return;
     // 一次性：`FloatHost` 的 0.25 s 那一拍与 SceneProbe 的轮询可能同时报。
     if (AevonColdBridgeSent == 1) return;
-    AevonColdBridgeSent = 1;
     double ms = AevonColdAt > 0 ? (CFAbsoluteTimeGetCurrent() - AevonColdAt) * 1000.0 : 0;
     if (AevonColdNotes < 24) {
         AevonColdNotes += 1;
         AevonLogRaw([[NSString stringWithFormat:
                       @"act: cold ready b=%s at=%.0fms", bundle, ms] UTF8String]);
     }
+    // A/B 支路：手建 `url.cold.bridge.on` 就回到 0.3.45 的形状（就绪先问桥）。
+    // 这一句不能省成编译期常量 —— CI 是 `FINALPACKAGE=1`（-O2 + dead_strip），
+    // `static` 又没人调用的函数会被整段删掉，连它的日志字面量一起消失。
+    // 0.3.46 第一次构建就是这样：包审计报 `act: cold bridge …` 两条 MISS。
+    if (AevonColdBridgeOn() == 1) {
+        AevonColdBridgeSend();
+        return;
+    }
+    AevonColdBridgeSent = 1;
     AevonColdReplay("hosted");
 }
 
@@ -15706,10 +15715,9 @@ static void AevonColdCancel(const char *why) {
 
 /// 托管就绪之后问一次桥。返回 1 = 已经问过（无论答案）。
 ///
-/// 0.3.46 — **当前无调用者**（`AevonColdCardReady` 改成直接交回原件，理由见
-/// 那里）。函数与它的四条收尾分支都留着：下一版要 A/B「桥 vs 原件」时，
-/// 唯一的开关就是在这里接一行；删掉等于把已经量过的证据一起删掉。
-static __attribute__((unused)) int AevonColdBridgeSend(void) {
+/// 0.3.46 — 只在 `url.cold.bridge.on` 存在时走（`AevonColdCardReady` 最后
+/// 那一格）。默认的那条路是「就绪即交原件」，理由见那里。
+static int AevonColdBridgeSend(void) {
     if (AevonColdOn == 0 || AevonColdBridgeSent == 1) return 0;
     AevonColdBridgeSent = 1;
     NSString *bu = [NSString stringWithUTF8String:AevonColdBundle];

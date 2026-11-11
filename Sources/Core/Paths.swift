@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.46"
+    public static let version = "0.3.47"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -398,6 +398,19 @@ public enum Aevon {
     /// 不必换包 —— 下一次真机就能用同一台机器做 A/B。
     public static let urlColdHoldOffPath =
         "/var/mobile/Library/Logs/Aevon/url.cold.hold.off"
+
+    /// 0.3.46 — 「就绪之后先问桥」的开关（**存在 = 走桥**，默认不走）。
+    ///
+    /// 0.3.45 的默认行为是先发桥、弱答案才交原件。Aevon-2 的日志把这条路判了：
+    /// 两份日志里 `act: cold bridge` 一次都没有（`win: hosted ready` 没打，
+    /// 桥那一格根本没被走到），而桥在 QQ 冷启动上的历史战绩是十二次
+    /// `dlg=- rsp=0`。0.3.46 因此收成一条路：就绪即交原件。
+    ///
+    /// 这一格留着不是为了「以后再说」，是为了能在一台机器上把两个答案并排测：
+    /// 手建这个文件，就绪那一拍会先问桥（0.3.45 的形状，`act: cold bridge`）；
+    /// 删掉它，就绪即 `act: cold replay why=hosted`（这一版的默认）。
+    public static let urlColdBridgeOnPath =
+        "/var/mobile/Library/Logs/Aevon/url.cold.bridge.on"
 
     /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
     ///

@@ -1195,6 +1195,12 @@ def main():
                   b"win: hosted probe n=",
                   b"AevonColdHoldOn",
                   b"/var/mobile/Library/Logs/Aevon/url.cold.hold.off",
+                  # 0.3.46 — 「就绪先问桥」的 A/B 闸。它必须真的是一把**运行期**
+                  # 文件闸：写成编译期常量时，CI 的 -O2 + dead_strip 会把没人
+                  # 调用的 `AevonColdBridgeSend` 整段删掉，连 `act: cold bridge`
+                  # 这三条字面量一起（0.3.46 第一次构建就是这样失败的两条）。
+                  b"AevonColdBridgeOn",
+                  b"/var/mobile/Library/Logs/Aevon/url.cold.bridge.on",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`

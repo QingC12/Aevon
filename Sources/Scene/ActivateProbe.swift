@@ -283,6 +283,18 @@ public func AevonColdHoldOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlColdHoldOffPath) ? 0 : 1
 }
 
+/// 0.3.46 — 1 = 托管就绪那一拍**先问桥**（0.3.45 的形状，A/B 用），
+/// 0 = 直接交回原始请求（默认，这一版的立场）。
+///
+/// 两条路的差别只有「投的是什么」：桥送空字典 + 来源 App（QQ 只回
+/// `via=app-src rsp=0`），交原件送的是系统自己那份 `__PayloadOptions` /
+/// `__PasteSharingToken`。日志上分得开：`act: cold bridge` vs
+/// `act: cold replay why=hosted`。
+@_cdecl("AevonColdBridgeOn")
+public func AevonColdBridgeOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlColdBridgeOnPath) ? 1 : 0
+}
+
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
 ///
 /// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、
