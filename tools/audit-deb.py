@@ -1220,6 +1220,20 @@ def main():
                   # 0.3.49 — 写挂起位降级成实验（默认不写）。Aevon(5)(2) 的
                   # `susp=1` + `card yield seen now=430x932` 证明它在这一层不起作用。
                   b"/var/mobile/Library/Logs/Aevon/url.cold.susp.on",
+                  # 0.3.50 — **冷分享「事后收卡」**。四条读数 + 闸符号 + 文件名。
+                  #
+                  # 这一版不改投递口，改的是顺序：系统原生那一发照旧放行（面板
+                  # 一定出），2.5 s 后如果目标真成了屏上那一个、并且不在卡里，
+                  # 就走圆盘路的 home-first 把它收进卡。
+                  # `plan` 一定在放行那一拍落；`go` 只在真正按 Home 之前落；
+                  # `timeout` 是「8 秒都没轮到」的唯一证据；`done` 是成败判据
+                  # （`card=1` 才算进卡，`card=0` 要去 `win: url card declined` 找原因）。
+                  b"act: cold adopt plan wait=2500ms b=%s",
+                  b"act: cold adopt go tick=%d live=%d alive=%d front=%d b=%s",
+                  b"act: cold adopt timeout tick=%d live=%d alive=%d front=%d b=%s",
+                  b"act: cold adopt done card=%d b=%s",
+                  b"AevonColdAdoptOn",
+                  b"/var/mobile/Library/Logs/Aevon/url.cold.adopt.off",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`

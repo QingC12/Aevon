@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.49"
+    public static let version = "0.3.50"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -434,6 +434,24 @@ public enum Aevon {
     /// 0.3.48 留下的强关闸（存在 = 一定不写，压过 `url.cold.susp.on`）。
     public static let urlColdSuspOffPath =
         "/var/mobile/Library/Logs/Aevon/url.cold.susp.off"
+
+    /// 0.3.50 — **冷启动分享「事后收卡」的关闸**（存在 = 不做，行为回到 0.3.49 的整屏）。
+    ///
+    /// Aevon(270) 把 0.3.49 的两条路量成了两条清楚的读数：冷分享走
+    /// `act: pass why=coldshare` 之后系统原生开、面板照出，但**整屏**；同一次分享
+    /// 热启动走我们自己的卡，`act: deliver ok=1 send=sendActions`，面板在卡里。
+    /// 也就是说「面板出得来」与「进卡」在冷启动上从来没有同时成立过：
+    /// 扣下请求（0.3.45/0.3.48）→ 面板不出，放行（0.3.44/0.3.49）→ 面板出、整屏。
+    ///
+    /// 这一版换顺序，不换投递口：先让系统把这一发**完整开完**（面板一定出），
+    /// 等目标真的成了屏上那一个、并且不在卡里，再走圆盘路验过的 home-first
+    /// （按 Home → 等桌面 → 把**已经在后台**的那张 scene 收进卡）。用户看到的是
+    /// 「整屏 → 桌面 → 卡」，不是 0.2.46 那种「卡浮在黑屏上」。
+    ///
+    /// 手建这个文件 ⇒ 一个字都不做。它是这一版唯一的退路：如果事后收卡在真机上
+    /// 把分享页弄丢或弄黑，删掉/建上它就能回到 0.3.49 的确切行为，不必换包。
+    public static let urlColdAdoptOffPath =
+        "/var/mobile/Library/Logs/Aevon/url.cold.adopt.off"
 
     /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
     ///

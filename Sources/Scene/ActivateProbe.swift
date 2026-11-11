@@ -311,6 +311,17 @@ public func AevonColdSuspOn() -> Int32 {
     return fm.fileExists(atPath: Aevon.urlColdSuspOnPath) ? 1 : 0
 }
 
+/// 0.3.50 — 1 = 冷启动分享放行之后「事后收卡」（默认），0 = 不做
+/// （手建 `url.cold.adopt.off`）。
+///
+/// 这一位不改投递口，只改**顺序**：先让系统原生把这一发开完（面板一定出），
+/// 等目标成了屏上那一个、并且不在卡里，再按 Home 把它收进卡。依据与退路都写在
+/// `Paths.urlColdAdoptOffPath` 上；Aevon(270) 的两条读数是这一版的起点。
+@_cdecl("AevonColdAdoptOn")
+public func AevonColdAdoptOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlColdAdoptOffPath) ? 0 : 1
+}
+
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
 ///
 /// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、

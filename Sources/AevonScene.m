@@ -177,6 +177,9 @@ static id AevonActRead(id object, NSString *key);
 extern int AevonColdHoldOn(void);          ///< 闸（`url.cold.hold.off` 存在 = 关）
 extern int AevonColdBridgeOn(void);        ///< 闸（`url.cold.bridge.on` 存在 = 就绪先问桥）
 extern int AevonColdSuspOn(void);          ///< 闸（`url.cold.susp.off` 存在 = 不写挂起位）
+// 0.3.50 — 冷分享放行之后的「事后收卡」闸（`url.cold.adopt.off` 存在 = 不做）。
+// 这一位不改投递口，只决定「系统开完之后要不要按 Home 把它收进卡」。
+extern int AevonColdAdoptOn(void);
 static int AevonColdPending(void);         ///< 一次性：这一次接管要不要扣请求
 static void AevonColdWantNote(void);       ///< `AevonURLDenyTake` 里置位
 static int AevonColdHolds(const char *bundle);  ///< 扣着的是不是这个 App
@@ -5376,6 +5379,125 @@ static int AevonAuthishURL(const char *u) {
     return 0;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 0.3.50 — 冷启动分享「事后收卡」。
+//
+// 起点是 Aevon(270) 的两条读数，它们把 0.3.49 的边界画得非常干净：
+//   · 冷分享 `act: pass why=coldshare` → 系统原生开、面板照出，但**整屏**；
+//   · 同一次分享热启动 → 我们自己的卡，`act: deliver ok=1 send=sendActions`，
+//     面板就在卡里（`applog: page sheet … box=717`）。
+// 也就是说「面板出得来」和「进卡」这两件事在冷启动上从来没有同时成立过：
+// 扣下请求（0.3.45/0.3.48）→ 面板不出；放行（0.3.44/0.3.49）→ 面板出、整屏。
+//
+// 这一版换的是**顺序**，不是投递口：先让系统把这一发完整开完（面板一定出，
+// 这是十三份日志换来的结论），等目标真成了屏上那一个、并且不在卡里，再走
+// 圆盘路验过的 home-first —— 按 Home、等桌面在屏、把**已经在后台**的那张
+// scene 收进卡。用户看到的是「整屏 → 桌面 → 卡」；0.2.46 那种「卡浮在黑屏上」
+// 是 `homed: true` 在目标正上屏时抢 scene 的形状，不是这一条。
+//
+// 判据只有一条真的在把关：「这一刻它就是屏上那个」(`AevonFrontBundleCopy`
+// 走的是 scene 的 `settings.isForeground`，与 `openCard` 的 home-first 同一把尺)。
+// `live` / `alive` 只进日志，不参与拦截：`AevonLiveSceneForBundle` 在 QQ 上
+// 历史上多次答 0（0.3.39 起分流已经不敢只靠它），拿它当门只会让这一版永远
+// 不触发。`AevonCardIsUpFor` 是另一条：已经在卡里就不该再排一次。
+//
+// 关闸 `url.cold.adopt.off`：存在 = 一个字都不做，行为回到 0.3.49。
+// ═══════════════════════════════════════════════════════════════════════════
+static long AevonColdAdoptSeq = 0;
+static long AevonColdAdoptPlans = 0;
+static long AevonColdAdoptRuns = 0;
+static long AevonColdAdoptSkip = 0;
+
+static void AevonColdAdoptTick(char *bundle, long seq, int tick);
+
+/// 收卡那一发打完之后的结果，只报一次。这一行是「到底进没进卡」的唯一判据：
+/// `card=1` = 目标已经在卡里；`card=0` = `openCard` 中途放弃（它会自己落
+/// `win: own did not come up` / `win: url card declined`，两处都有原因）。
+static void AevonColdAdoptReport(const char *bundle, long seq) {
+    if (bundle == NULL || seq != AevonColdAdoptSeq) return;
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"act: cold adopt done card=%d b=%s",
+                  AevonCardIsUpFor(bundle), bundle] UTF8String]);
+}
+
+static void AevonColdAdoptGo(const char *bundle, int tick, int live, int alive, int front) {
+    if (__sync_fetch_and_add(&AevonColdAdoptRuns, 1) < 6) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: cold adopt go tick=%d live=%d alive=%d front=%d b=%s",
+                      tick, live, alive, front, bundle] UTF8String]);
+    }
+    long seq = AevonColdAdoptSeq;
+    char *copy = strdup(bundle);
+    if (copy == NULL) return;
+    // `AevonOpenCardURL` = `openCard(homed: false)`：目标正占着屏就先发 Home，
+    // 等桌面真的在屏再建卡。这一句是同步进 `openCard` 的，返回时卡还在路上，
+    // 所以要 1.8 s 后再去看一眼（`AevonCardIsUpFor` 是唯一可信的成败读数）。
+    AevonOpenCardURL(copy);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonColdAdoptReport(copy, seq);
+        free(copy);
+    });
+}
+
+/// 0.25 s 一拍。`bundle` 的所有权在这个函数里：每条出口都必须 free，
+/// 往下传的那一拍由被调用的自己 free —— 否则一次分享会漏一个 160 字节。
+static void AevonColdAdoptTick(char *bundle, long seq, int tick) {
+    if (bundle == NULL) return;
+    if (seq != AevonColdAdoptSeq) { free(bundle); return; }
+    if (AevonCardIsUpFor(bundle) == 1) { free(bundle); return; }
+    NSString *bu = [NSString stringWithUTF8String:bundle];
+    if (bu == nil) { free(bundle); return; }
+    double age = -1.0;
+    int alive = AevonTargetAlive(bu, &age);
+    int live = (AevonLiveSceneForBundle(bu) != nil) ? 1 : 0;
+    int front = 0;
+    char *fb = AevonFrontBundleCopy();
+    if (fb != NULL) {
+        front = (strcmp(fb, bundle) == 0) ? 1 : 0;
+        free(fb);
+    }
+    // 2.5 s（第 10 拍）起才动手。冷启动上「放行 → App 起来 → 面板出来」大约
+    // 1.0~2.0 s（Aevon(270) 21:25:39 放行，同一秒 `app: boot`），早于它就按
+    // Home，会把还没弹出来的面板连同这一次分享一起按进后台。
+    if (tick >= 10 && front == 1) {
+        AevonColdAdoptGo(bundle, tick, live, alive, front);
+        free(bundle);
+        return;
+    }
+    // 8 s 还没轮到（用户切走了 / 面板没出 / 目标没上屏）：放弃，什么都不做。
+    // 这一次分享就停在 0.3.49 的形状（整屏），不会比不放行更糟。
+    if (tick >= 32) {
+        if (__sync_fetch_and_add(&AevonColdAdoptSkip, 1) < 6) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: cold adopt timeout tick=%d live=%d alive=%d front=%d b=%s",
+                          tick, live, alive, front, bundle] UTF8String]);
+        }
+        free(bundle);
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonColdAdoptTick(bundle, seq, tick + 1);
+    });
+}
+
+static void AevonColdAdoptPlan(const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return;
+    if (AevonColdAdoptOn() != 1) return;
+    char *copy = strdup(bundle);
+    if (copy == NULL) return;
+    long seq = __sync_fetch_and_add(&AevonColdAdoptSeq, 1) + 1;
+    if (__sync_fetch_and_add(&AevonColdAdoptPlans, 1) < 8) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: cold adopt plan wait=2500ms b=%s", bundle] UTF8String]);
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonColdAdoptTick(copy, seq, 1);
+    });
+}
+
 /// 0.3.26 — **拒答 / 0.3.36 放行式接管**：记 URL、排一次我们自己的开卡。
 ///
 /// 返回 2 = **接管但放行**（0.3.36 的行为，`url.pass.on` 才开）：不 return，原函数照常尾调，系统自己
@@ -5499,6 +5621,10 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
         }
         AevonPassNote(bundle);
         AevonDenySrc[0] = '\0';
+        // 0.3.50 — 系统这一发照旧放行（面板一定出），但把「开完之后收进卡」
+        // 排上。这一句不改任何投递行为：它在 2.5 s 后才可能动手，而且只在
+        // 目标真成了屏上那一个、并且不在卡里时才按 Home。
+        AevonColdAdoptPlan(bundle);
         return 0;
     }
     strlcpy(AevonDenyBundle, bundle, sizeof(AevonDenyBundle));
