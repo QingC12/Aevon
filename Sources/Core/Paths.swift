@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.37"
+    public static let version = "0.3.38"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -361,6 +361,18 @@ public enum Aevon {
     ///
     /// 默认不再补发（= 0.3.32 的形状）。要再做「补发是否无害」的实验时建这个文件。
     public static let urlPlusOnPath      = "/var/mobile/Library/Logs/Aevon/url.plus.on"
+
+    /// 0.3.38 — **冷启动的投递口**：存在 = 不用进程内桥，退回 transitionContext。
+    ///
+    /// 默认用桥。依据是 Aevon(263)：同一份日志里冷启动两次都是
+    /// `tctx put ok=1 had=0` + 卡片 108 ms 出帧 + QQ 停首页，热启动两次
+    /// `deliver ok=1 send=sendActions` 秒进选好友页；Aevon(259)（0.3.34）
+    /// 冷启动在 tctx 之后补的三发 scene action（第 3/4/5 发全在首帧之后）
+    /// 同样无效。两条事后投递在冷启动上都被判死 ⇒ 换第三条：
+    /// 写目标 App 容器的 `tmp/aevon-open.plist` + Darwin 通知，由 App 进程里
+    /// 那支 dylib 直接调 `scene:openURLContexts:` / `application:openURL:options:`。
+    /// 那条桥 0.2.x 就在真机上双向验过（回执 `ok=1 via=app`）。
+    public static let urlBridgeOffPath   = "/var/mobile/Library/Logs/Aevon/url.bridge.off"
 
     /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
     ///

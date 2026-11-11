@@ -251,6 +251,16 @@ public func AevonURLPlusOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlPlusOnPath) ? 1 : 0
 }
 
+/// 0.3.38 — 1 = 冷启动走进程内桥（默认），0 = 建了 `url.bridge.off` 退回老路。
+///
+/// 「默认开」不是口味问题：0.3.37 的冷启动分享实测停在首页（Aevon(263)），
+/// 而热启动同一条 URL 就能进选好友页 —— 差别只剩投递口。桥是唯一还没在
+/// 这一族上被试过的口，所以默认交给它；它失败会自己重投 14 次，宿主不再插一层。
+@_cdecl("AevonURLBridgeOn")
+public func AevonURLBridgeOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlBridgeOffPath) ? 0 : 1
+}
+
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
 ///
 /// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、

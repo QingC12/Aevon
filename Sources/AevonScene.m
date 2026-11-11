@@ -122,6 +122,7 @@ extern int AevonURLActivityOn(void);
 // 与 0.3.25 一模一样。这不是新缺陷，是把已经判死过的形状又走了一遍。
 extern int AevonURLPassOn(void);
 extern int AevonURLPlusOn(void);
+extern int AevonURLBridgeOn(void);
 // 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
 // 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
 extern int AevonCardYieldForFullscreen(const char *bundle);
@@ -3880,8 +3881,26 @@ static long AevonDenyTctxTries = 0;
 // transitionContext，我们再 `setActions:` 一次就是叠两份 —— 那正是「一次 openURL
 // 过两钩 ⇒ 两张卡」的老病（`AevonLandingClaim` 那一条的同类）。
 static volatile int AevonDenySwallow = 1;
+// 0.3.38 — 这一次的 URL 走**进程内投递**（`AevonAppOpenSend` → App 里那支 dylib
+// 直接调 `scene:openURLContexts:`），而不是 scene action / transitionContext。
+//
+// 为什么冷启动必须换口：Aevon(263) 十八点那四次分享里，冷启动两次都是
+// `tctx put ok=1 had=0` + 卡片 108 ms 出帧 + QQ 停在首页；同一份日志里热启动
+// 两次走 `deliver ok=1 send=sendActions` 全部进选好友页。Aevon(259)（0.3.34）
+// 更狠：冷启动 tctx 装完再补三发 scene action（第 3/4/5 发分别落在首帧之后），
+// 照样停在首页。两条「事后投递」的路在冷启动上都被否掉了 —— 差别不在时机，
+// 在**投递口**：这条进程是我们自己 `launchApplicationWithIdentifier:suspended:`
+// 拉起来的，没有 launch options，URL 只能从 scene 那边进去，而 QQ 的分享路由
+// 在 scene 连接那一拍还没装好。
+//
+// 所以冷启动改走 0.2.x 就已经在真机上验证过的那条桥：写目标 App 容器的
+// `tmp/aevon-open.plist` + 一声 Darwin 通知，由 App 进程里的 dylib 直接调
+// delegate（`scene:openURLContexts:` → 退 `application:openURL:options:`）。
+// 它自己会等界面长出来（最多 4 s）、失败重投 14 次 × 0.45 s。
+static volatile int AevonDenyBridgeOnly = 0;
 static void AevonURLRedeliver(const char *bundle);
 static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int swallow);
+static int AevonAppOpenSend(NSString *bundleID, NSString *url, id options, NSString *src);
 
 // MARK: - 0.3.33 「带 URL 的挂起启动」整条下线（真机判死）
 
@@ -4431,6 +4450,9 @@ static void AevonTctxInjectURL(NSString *ident, id context) {
     // 0.3.36 — 放行模式不装。系统这次会自己把 URL 装进 transitionContext，
     // 我们再装一份就是两份 action（一次打开建两张卡的老病）。
     if (AevonDenySwallow == 0) return;
+    // 0.3.38 — 进程内投递那一支不需要 transitionContext：它的 URL 从容器文件进，
+    // 不经过 FrontBoard。两条都装就是同一份 action 两份（App 收两次）。
+    if (AevonDenyBridgeOnly == 1) return;
     if (AevonDenyBundle[0] == '\0' || AevonDenyURL[0] == '\0') return;
     if (AevonDenyAt <= 0) return;
     if (AevonActMs() - AevonDenyAt > 8000) return;
@@ -4707,6 +4729,11 @@ static void AevonURLDeliverLate(int64_t token) {
 
 static void AevonURLRedeliver(const char *bundle) {
     (void)bundle;
+    // 0.3.38 — 这一发已经交给进程内投递了，不要叠第二份。
+    if (AevonDenyBridgeOnly == 1) {
+        AevonLogRaw("act: deliver skip why=bridge");
+        return;
+    }
     if (AevonURLRedeliverOn() != 1) {
         AevonLogRaw("act: deliver skip why=off");
         return;
@@ -4822,6 +4849,194 @@ static void AevonProbePayloadOptions(id po, id bundleID) {
 ///
 /// **默认不接管**（`url.act.on` 存在才接）：这两族接错的代价是「登录点不动、
 /// 支付跳不了」，比「全屏」严重得多。等这一版日志把 URL 的形状确认下来再开。
+// MARK: - 0.3.38 深挖：活动继续那一族的 URL 到底在哪
+//
+// 0.3.35 的 `AevonDigActions` 只认一条路：`__Actions[i] -activity` →
+// `webpageURL` / `URL` / `url`。Aevon(263) 三条授权/支付全是同一个答案
+// （`act: url dig miss … at=- shape=UIActivityContinuationAction,`）——
+// `activity` 那一支根本没答出东西（`at=-`），说明动作对象自己不完全公开
+// 这个 NSUserActivity。
+//
+// 但同一份 payload 里还有两格我们从来没进去过：
+//
+//     __AppLink4LS=#_LSSharedWebCredentialsAppLink      ← 共享 Web 凭据的 App Link
+//     __PayloadOptions=#__NSDictionaryI
+//
+// `_LSSharedWebCredentialsAppLink` 是 LaunchServices 里「这条 App Link 指向哪」
+// 的对象，它内部一定有地址。这一格做的就是把对象图翻开：先问几个只读选择子，
+// 再翻 ivar（含父类两层），找到第一个带 `://` 的值就收工。
+//
+// 两条硬上限（深度 3 / 节点 48）不是装饰：对象图里遇到环，没有预算的递归会在
+// 激活那一拍把主线程走死 —— 那是「所有 App 都打不开」级别的错。
+
+/// 只读地把一张「形状卡」写进日志：类名 / 三层 ivar / 八个只读选择子在不在。
+///
+/// 挖不到 URL 的时候，这张卡就是下一版唯一的线索 —— 「哪个 ivar 是对象、
+/// 它的类是什么」比再猜一次选择子名有用得多。
+static long AevonShapeLines = 0;
+static void AevonShapeDump(id obj, const char *tag, const char *bundle) {
+    if (obj == nil || tag == NULL) return;
+    if (__sync_fetch_and_add(&AevonShapeLines, 1) >= 12) return;
+    NSMutableString *iv = [NSMutableString string];
+    Class walk = object_getClass(obj);
+    int levels = 0;
+    while (walk != Nil && walk != [NSObject class] && levels < 3) {
+        unsigned int n = 0;
+        Ivar *list = class_copyIvarList(walk, &n);
+        for (unsigned int i = 0; i < n && iv.length < 280; i++) {
+            const char *nm = ivar_getName(list[i]);
+            const char *tp = ivar_getTypeEncoding(list[i]);
+            NSString *shown = @"";
+            if (tp != NULL && tp[0] == '@') {
+                @try {
+                    id v = object_getIvar(obj, list[i]);
+                    shown = v != nil
+                        ? [NSString stringWithFormat:@"=#%s", object_getClassName(v)]
+                        : @"=nil";
+                } @catch (__unused NSException *e) { shown = @"=?"; }
+            }
+            [iv appendFormat:@" %s:%s%s;",
+             nm != NULL ? nm : "?", tp != NULL ? tp : "?", [shown UTF8String]];
+        }
+        if (list != NULL) free(list);
+        walk = class_getSuperclass(walk);
+        levels += 1;
+    }
+    NSMutableString *se = [NSMutableString string];
+    static const char *sels[] = {"activity", "activityType", "webpageURL", "URL",
+                                 "url", "payloadURL", "absoluteString", "URLString", NULL};
+    for (int i = 0; sels[i] != NULL && se.length < 150; i++) {
+        SEL s = NSSelectorFromString([NSString stringWithUTF8String:sels[i]]);
+        [se appendFormat:@" %s:%d", sels[i],
+         (s != NULL && [obj respondsToSelector:s]) ? 1 : 0];
+    }
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"act: shape %s cls=%s b=%s ivars=[%s] sels=[%s]",
+                  tag, object_getClassName(obj), bundle != NULL ? bundle : "-",
+                  [iv UTF8String], [se UTF8String]] UTF8String]);
+}
+
+/// 在一棵对象树里找第一个「像 URL」的值。只读：不改任何对象、不调写入口。
+///
+/// `path` 会累成 `__Actions._activity.webpageURL` 这样的走法，找到时把它打进
+/// 日志 —— 下一版就知道该直接读哪一格，不必再翻整棵树。
+static id AevonFindURLDeep(id root, int depth, int *budget, NSMutableString *path) {
+    if (root == nil || budget == NULL || *budget <= 0 || depth > 3) return nil;
+    *budget -= 1;
+    if ([root isKindOfClass:[NSURL class]]) return root;
+    if ([root isKindOfClass:[NSString class]]) {
+        NSString *s = (NSString *)root;
+        if (s.length > 6 && [s rangeOfString:@"://"].location != NSNotFound) return s;
+        return nil;
+    }
+    if ([root isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *d = (NSDictionary *)root;
+        NSArray *keys = [d allKeys];
+        NSInteger n = (NSInteger)[keys count];
+        if (n > 16) n = 16;
+        for (NSInteger i = 0; i < n && *budget > 0; i++) {
+            id k = [keys objectAtIndex:(NSUInteger)i];
+            id got = AevonFindURLDeep([d objectForKey:k], depth + 1, budget, path);
+            if (got != nil) {
+                if (path != nil) {
+                    [path insertString:[NSString stringWithFormat:@"%@.",
+                                        [k isKindOfClass:[NSString class]] ? (NSString *)k : @"?"]
+                               atIndex:0];
+                }
+                return got;
+            }
+        }
+        return nil;
+    }
+    if ([root isKindOfClass:[NSArray class]] || [root isKindOfClass:[NSSet class]]) {
+        NSArray *arr = [root isKindOfClass:[NSArray class]]
+            ? (NSArray *)root : [(NSSet *)root allObjects];
+        NSInteger n = (NSInteger)[arr count];
+        if (n > 8) n = 8;
+        for (NSInteger i = 0; i < n && *budget > 0; i++) {
+            id got = AevonFindURLDeep([arr objectAtIndex:(NSUInteger)i], depth + 1, budget, path);
+            if (got != nil) {
+                if (path != nil) {
+                    [path insertString:[NSString stringWithFormat:@"[%ld].", (long)i] atIndex:0];
+                }
+                return got;
+            }
+        }
+        return nil;
+    }
+    // `activity` 必须排在第一位：`UIActivityContinuationAction` 真正装着东西的
+    // 是它内部那个 NSUserActivity，`webpageURL` 在**下一层**。0.3.35 的
+    // `AevonDigActions` 只在「拿得到 activity」时才走这条 —— 而 Aevon(263) 三条
+    // 全是 `at=-`，说明那条老路根本没下去。这里直接从动作对象往下翻。
+    static const char *sels[] = {"activity", "webpageURL", "URL", "url", "_URL",
+                                 "URLString", "absoluteString", NULL};
+    for (int i = 0; sels[i] != NULL && *budget > 0; i++) {
+        SEL s = NSSelectorFromString([NSString stringWithUTF8String:sels[i]]);
+        if (s == NULL || ![root respondsToSelector:s]) continue;
+        id v = nil;
+        @try { v = [root performSelector:s]; } @catch (__unused NSException *e) { v = nil; }
+        if (v == nil) continue;
+        id got = AevonFindURLDeep(v, depth + 1, budget, path);
+        if (got != nil) {
+            if (path != nil) {
+                [path insertString:[NSString stringWithFormat:@"-%s.", sels[i]] atIndex:0];
+            }
+            return got;
+        }
+    }
+    Class walk = object_getClass(root);
+    int levels = 0;
+    while (walk != Nil && walk != [NSObject class] && levels < 3 && *budget > 0) {
+        unsigned int n = 0;
+        Ivar *list = class_copyIvarList(walk, &n);
+        for (unsigned int i = 0; i < n && *budget > 0; i++) {
+            const char *tp = ivar_getTypeEncoding(list[i]);
+            if (tp == NULL || tp[0] != '@') continue;
+            id v = nil;
+            @try { v = object_getIvar(root, list[i]); } @catch (__unused NSException *e) { v = nil; }
+            if (v == nil) continue;
+            id got = AevonFindURLDeep(v, depth + 1, budget, path);
+            if (got != nil) {
+                if (path != nil) {
+                    const char *nm = ivar_getName(list[i]);
+                    [path insertString:[NSString stringWithFormat:@"_%s.", nm != NULL ? nm : "?"]
+                               atIndex:0];
+                }
+                if (list != NULL) free(list);
+                return got;
+            }
+        }
+        if (list != NULL) free(list);
+        walk = class_getSuperclass(walk);
+        levels += 1;
+    }
+    return nil;
+}
+
+/// 活动继续那一族的「深挖」入口：按命中概率从高到低找，找到就返回字符串。
+///
+/// 返回 `NSString *`（`NSURL` 走 `absoluteString`），找不到返回 nil。
+static NSString *AevonDeepActivityURL(NSDictionary *dict, const char *bundle,
+                                      const char **fromOut, NSString **pathOut) {
+    if (dict == nil) return nil;
+    static const char *keys[] = {"__AppLink4LS", "__PayloadOptions", "__Actions", NULL};
+    for (int i = 0; keys[i] != NULL; i++) {
+        id root = [dict objectForKey:[NSString stringWithUTF8String:keys[i]]];
+        if (root == nil) continue;
+        int budget = 48;
+        NSMutableString *path = [NSMutableString string];
+        id got = AevonFindURLDeep(root, 0, &budget, path);
+        if (got == nil) continue;
+        NSString *s = [got isKindOfClass:[NSURL class]]
+            ? [(NSURL *)got absoluteString] : (NSString *)got;
+        if (s.length < 7) continue;
+        if (fromOut != NULL) *fromOut = keys[i];
+        if (pathOut != NULL) *pathOut = path;
+        return s;
+    }
+    return nil;
+}
+
 static id AevonDigActions(NSDictionary *dict, id bundleID) {
     if (dict == nil) return nil;
     id acts = [dict objectForKey:@"__Actions"];
@@ -4984,9 +5199,39 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
     AevonDenyTctxOk = 0;
     AevonDenyTctxTries = 0;
     AevonDenySwallow = swallow;
+    AevonDenyBridgeOnly = 0;
     if (swallow == 0) {
         // 放行：URL 由系统送，投递链一条都不排。
         AevonDeliverShots = 0;
+    }
+    // 0.3.38 — **冷启动换投递口**：进程内投递（App 里那支 dylib 直接调 delegate）。
+    //
+    // 依据在 Aevon(263)：同一份日志里，冷启动两次（18:10:07 / 18:12:06）都是
+    // `tctx put ok=1 had=0` + 卡片 108 ms 出帧 + QQ 停首页；热启动两次
+    // `deliver ok=1 send=sendActions` 秒进选好友页。更早的 Aevon(259)（0.3.34）
+    // 冷启动 tctx 之后又补了三发 scene action（第 3/4/5 发都在首帧之后）——
+    // 照样停首页。两条事后投递在冷启动上都被判死，所以这一版不再调时序，
+    // 直接换口：写 App 容器的 `tmp/aevon-open.plist` + Darwin 通知，让它自己在
+    // 进程里调 `scene:openURLContexts:`（退 `application:openURL:options:`）。
+    //
+    // 只在冷启动用：热启动那条 scene action 已经在真机上跑了几十版，不动它。
+    // 发不出去（拿不到容器 / 写盘失败）就退回老路 —— `AevonAppOpenSend` 自己会
+    // 回 0，这里什么都不用做。
+    if (swallow == 1 && AevonDenyCold == 1 && AevonDenyURL[0] != '\0' &&
+        AevonURLBridgeOn() == 1) {
+        NSString *bu = [NSString stringWithUTF8String:bundle];
+        NSString *us = [NSString stringWithUTF8String:AevonDenyURL];
+        int sent = 0;
+        if (bu.length > 0 && us.length > 0) {
+            sent = AevonAppOpenSend(bu, us, [NSDictionary dictionary], nil);
+        }
+        if (sent == 1) {
+            AevonDenyBridgeOnly = 1;
+            AevonDeliverShots = 0;
+        }
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: bridge b=%s send=%d bonly=%d u=%.60s",
+                      bundle, sent, AevonDenyBridgeOnly, AevonDenyURL] UTF8String]);
     }
     // `reply=none` 是这一版最要紧的读数之一：`withResult:` 那个块的签名一次都
     // 没读到（0.3.24/0.3.25 的日志里全是 `rsig=-`），盲调就是又一次 0.2.91。
@@ -5043,10 +5288,16 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
     if (swallow == 1) {
         // 0.3.29 — 350 ms 只是「起手」，真正的投递时刻由 scene 挂上那一拍决定
         // （`AevonURLDeliverShot` 里每 0.2 s 问一次，最多 20 拍）。
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            AevonURLRedeliver(AevonDenyBundle);
-        });
+        //
+        // 0.3.38 — 走进程内投递时不排这条链：那条桥自己会重投 14 次 × 0.45 s，
+        // 两边同时投就是「同一条 URL 送两遍」，App 会把授权页开两遍（0.2.35 的
+        // `openURLContexts` 那一课）。
+        if (AevonDenyBridgeOnly != 1) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                AevonURLRedeliver(AevonDenyBundle);
+            });
+        }
         return 1;
     }
     return 2;
@@ -6540,25 +6791,61 @@ static void AevonActInstall(NSMutableString *out) {
                             // 0.3.35 — `__PayloadOptions` 里没有，那就只剩 `__Actions`。
                             // Aevon(259) 的两条现场都是这个形状（`payload=0` + 落点侧
                             // `act=#UIActivityContinuationAction` + `url=-`）。
-                            id actURL = AevonDigActions(dict, bundleID);
-                            if (actURL != nil) {
-                                NSString *as = [actURL isKindOfClass:[NSURL class]]
-                                    ? [(NSURL *)actURL absoluteString] : (NSString *)actURL;
-                                int take = AevonURLActOn();
+                            //
+                            // 0.3.38 — 先翻整棵对象树（`__AppLink4LS` → `__PayloadOptions`
+                            // → `__Actions`），旧的 `AevonDigActions` 退成兜底。
+                            // 依据：Aevon(263) 三条授权/支付 `at=-`，说明动作对象自己
+                            // 不完全公开 `activity`；而同一份 payload 里还躺着
+                            // `__AppLink4LS=#_LSSharedWebCredentialsAppLink`。
+                            const char *from = "-";
+                            NSString *howPath = nil;
+                            const char *bb = [bundleID isKindOfClass:[NSString class]]
+                                ? [(NSString *)bundleID UTF8String] : "-";
+                            // 只在「这一次真的带了动作」时翻对象图：点桌面图标那种
+                            // 空 options 一个 __Actions 都没有，翻它没有意义，而
+                            // 每一次翻都在激活那一拍上花主线程时间。
+                            if ([dict objectForKey:@"__Actions"] != nil) {
+                            NSString *deep = AevonDeepActivityURL(dict, bb, &from, &howPath);
+                            if (deep == nil) {
+                                id actURL = AevonDigActions(dict, bundleID);
+                                if (actURL != nil) {
+                                    deep = [actURL isKindOfClass:[NSURL class]]
+                                        ? [(NSURL *)actURL absoluteString] : (NSString *)actURL;
+                                    from = "__Actions.activity";
+                                }
+                            }
+                            if (deep != nil && deep.length > 6) {
+                                // 只有**真的找到地址**才接管：找不到就维持 0.3.37 的
+                                // 「交回系统」（全屏，但流程通）。这条边界是这一版全部
+                                // 的风险控制 —— 没有 URL 的接管等于让 App 停在首页。
+                                deepURL = deep;
+                                payload = 1;
                                 if (__sync_fetch_and_add(&AevonDeepLines, 1) < 10) {
                                     AevonLogRaw([[NSString stringWithFormat:
-                                                  @"act: url act-would take=%d b=%s url=%.100s",
-                                                  take,
-                                                  [bundleID isKindOfClass:[NSString class]]
-                                                      ? [(NSString *)bundleID UTF8String] : "-",
-                                                  as != nil ? [as UTF8String] : "-"] UTF8String]);
+                                                  @"act: url deep2 from=%s how=%s b=%s url=%.100s",
+                                                  from,
+                                                  howPath != nil ? [howPath UTF8String] : "-",
+                                                  bb, [deep UTF8String]] UTF8String]);
                                 }
-                                // 默认不接：这两族接错的代价是「登录点不动、支付
-                                // 跳不了」，比「全屏」严重。要接得手建 `url.act.on`。
-                                if (take == 1) {
-                                    deepURL = actURL;
-                                    payload = 1;
+                            } else {
+                                // 一条都没挖到：把两格的形状照下来。下一版照着这张卡
+                                // 决定该读哪个 ivar，不再猜选择子名。
+                                AevonShapeDump([dict objectForKey:@"__AppLink4LS"],
+                                               "applink", bb);
+                                id acts = [dict objectForKey:@"__Actions"];
+                                if ([acts isKindOfClass:[NSArray class]] &&
+                                    [(NSArray *)acts count] > 0) {
+                                    AevonShapeDump([(NSArray *)acts objectAtIndex:0],
+                                                   "action0", bb);
                                 }
+                                if (__sync_fetch_and_add(&AevonDeepLines, 1) < 10) {
+                                    AevonLogRaw([[NSString stringWithFormat:
+                                                  @"act: url deep2 from=none force=%d b=%s keys=%s",
+                                                  AevonURLActOn(), bb,
+                                                  keyList != nil ? [keyList UTF8String] : "-"]
+                                                 UTF8String]);
+                                }
+                            }
                             }
                         }
                     }

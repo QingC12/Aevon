@@ -1022,7 +1022,31 @@ def main():
                   b"act: deliver late r=%d age=%lld b=%s url=%.60s",
                   b"act: url dig hit b=%s n=%ld at=%s url=%.100s",
                   b"act: url dig miss b=%s n=%ld at=%s shape=%s",
-                  b"act: url act-would take=%d b=%s url=%.100s",
+                  # 0.3.38 — **冷启动换投递口 + 活动继续族深挖。**
+                  #
+                  # Aevon(263) 同一份日志把两件事同时说清了：
+                  #   ① 冷启动两次分享都是 `tctx put ok=1 had=0` + 卡片 108 ms 出帧
+                  #      + QQ 停首页；热启动两次 `deliver ok=1 send=sendActions`
+                  #      秒进选好友页。Aevon(259) 冷启动在 tctx 之后补的三发
+                  #      scene action（第 3/4/5 发都在首帧之后）同样无效 ⇒ 事后
+                  #      投递两条路在冷启动上都判死，差别在**投递口**。
+                  #   ② 授权/支付三条全是 `payload=0` + `UIActivityContinuationAction`
+                  #      + `act: url dig miss … at=-`：老深挖只看
+                  #      `__Actions[i] -activity`，而这一族根本不答。
+                  #
+                  # `act: bridge` 是进程内投递的唯一读数（`send=1` = 容器文件写成功，
+                  # `bonly=1` = 这一次只走桥，不再叠 scene action / tctx）；
+                  # `act: deliver skip why=bridge` 是「没有叠第二份」的反证；
+                  # `act: url deep2` 是从 `__AppLink4LS` / `__PayloadOptions` /
+                  # `__Actions` 的对象图里挖到地址的证据（`how=` 是走法）；
+                  # `act: shape` 是挖不到时留下的形状卡（ivar 名/类型/值类 + 选择子表）。
+                  b"act: bridge b=%s send=%d bonly=%d u=%.60s",
+                  b"act: deliver skip why=bridge",
+                  b"act: url deep2 from=%s how=%s b=%s url=%.100s",
+                  b"act: url deep2 from=none force=%d b=%s keys=%s",
+                  b"act: shape %s cls=%s b=%s ivars=[%s] sels=[%s]",
+                  b"AevonURLBridgeOn",
+                  b"/var/mobile/Library/Logs/Aevon/url.bridge.off",
                   b"probe: po n=%ld b=%s |%s",
                   b"AevonURLActOn",
                   b"/var/mobile/Library/Logs/Aevon/url.act.on",
@@ -1698,7 +1722,8 @@ def main():
                  b"act: deny b=%s kind=%d n=%ld reply=none url=%.140s",      # gone
                  b"act: deny cold=%d pid=%d run=%d seen=%d shots=%d b=%s",   # gone
                  b"act: deny card b=%s",                                     # gone
-                 b"act: deny card skip why=up b=%s"):                        # gone
+                 b"act: deny card skip why=up b=%s",                         # gone
+                 b"act: url act-would take=%d b=%s url=%.100s"):              # gone
         if gone in dylib_early:
             bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "
                 "back (hot zone 0.1.18 / summon bar 0.1.24 / cover lock gate 0.1.90)")
