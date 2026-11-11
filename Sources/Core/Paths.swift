@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.53"
+    public static let version = "0.3.54"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -473,6 +473,15 @@ public enum Aevon {
     /// 删掉就回到「一上屏就收」。
     public static let urlColdAdoptLatePath =
         "/var/mobile/Library/Logs/Aevon/url.cold.adopt.late"
+
+    /// 0.3.54 — **自建承载的关闸**（存在 = 冷分享回到 0.3.53 的「放行 + 事后收卡」）。
+    ///
+    /// 这一版是逆向 ScreenCore 2.1.0 之后第一次真的「不让系统开」：钩子在
+    /// `_handleOpenApplicationRequest:` 里答「我接」、不调原实现，改由 SB 的
+    /// scene manager 拿一个 scene handle，自己挂进卡片。整条只在冷文件分享上生效，
+    /// 出问题 `touch` 这一个文件即可，不用换包。
+    public static let urlOwnStartOffPath =
+        "/var/mobile/Library/Logs/Aevon/url.own.start.off"
 
     /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
     ///

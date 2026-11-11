@@ -1247,6 +1247,40 @@ def main():
                   b"AevonColdAdoptLateOn",
                   b"/var/mobile/Library/Logs/Aevon/url.cold.adopt.delay",
                   b"/var/mobile/Library/Logs/Aevon/url.cold.adopt.late",
+                  # 0.3.54 — **自建承载**：逆向 ScreenCore 2.1.0 之后第一次真的
+                  # 「不让系统开」。钩子在 `_handleOpenApplicationRequest:` 答「我接」、
+                  # 不调原实现，改向 SB 的 scene manager 要一个 scene handle，
+                  # 自己挂进卡片，URL 走进程内那条桥。
+                  #
+                  # 六条读数各自回答一个问题：`gate` = 类面接不接得上（0 才敢往下调）；
+                  # `skip why=handle` = SB 那边给不出 handle（让路，行为等于 0.3.53）；
+                  # `start door=` = 挂起启动的三种结果（1 成功 / 2 拒绝 / 0 无此方法）；
+                  # `scene up tick=` = 第几拍拿到活 scene（2.24 s 上限的证据）；
+                  # `card not up` / `scene timeout` = 两条退路真的走了；
+                  # `deliver send=` = URL 有没有投进去。
+                  b"deck: gate need=%d miss=%d",
+                  b"deck: skip why=handle b=%s from=%s",
+                  b"deck: start b=%s from=%s door=%ld u=%.48s",
+                  b"deck: scene up b=%@ tick=%d cls=%@ float=%d",
+                  b"deck: card not up b=%s",
+                  b"deck: scene timeout b=%s tick=%d",
+                  b"deck: deliver b=%@ send=%d src=%@ u=%.48s",
+                  b"deck: end why=%s b=%s tick=%d",
+                  # 「一次就下线」：任何一条退路被走到都写手闸，本次开机不再尝试。
+                  # 这一行是现场唯一能区分「这条路没跑」与「跑了一次就自禁」的读数。
+                  b"deck: strike why=%s b=%s (route off until reboot)",
+                  # Swift 侧那一拍的读数：进没进建卡链、拿到的 scene 是哪一类。
+                  b"win: own deck float b=",
+                  # 闸：符号与文件名都必须在包里，否则现场关不掉这条路。
+                  b"AevonDeckOn",
+                  b"/var/mobile/Library/Logs/Aevon/url.own.start.off",
+                  # 逆向出来的四个私有名字。它们是这条路的地基：任何一个拼错，
+                  # `AevonDeckGate` 会在真机上 miss 而不是崩 —— 但那也是白跑一趟，
+                  # 所以在这里先按字面量核一遍。
+                  b"SBSceneManagerCoordinator",
+                  b"SBApplicationController",
+                  b"SBDeviceApplicationSceneEntity",
+                  b"initWithApplicationForMainDisplay:generatingNewPrimarySceneIfRequired:",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`

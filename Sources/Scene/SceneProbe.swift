@@ -2541,6 +2541,16 @@ zStackParticipantDidChange:
 
     /// The chain, in the mother ship's order, with the one step she never has to
     /// take because the system takes it for her.
+    /// 0.3.54 — 把一个**指定的** scene 挂进新卡（自建承载那条路）。
+    ///
+    /// 与 `openCard` 的唯一区别：要挂的那个 scene 由调用方给，不再从系统那张
+    /// scene 表里按 bundle 找。自建承载拿到的 handle 背后那份 scene，在按名字
+    /// 查找的那张表里可能还没有条目 —— 这正是 0.2.46 那条路「等了 3 秒、
+    /// `scene up after` 迟迟不来」的形状。
+    static func ownFloat(_ scene: NSObject, bundleID: String) {
+        float(scene, bundleID: bundleID)
+    }
+
     private static func float(_ scene: NSObject, bundleID: String? = nil,
                               holdFirst: Bool = false) {
         guard let manager = value(of: scene, "uiPresentationManager") else {
@@ -4012,6 +4022,31 @@ public func AevonOpenCardDirect(_ bundle: UnsafePointer<CChar>?) {
 ///
 /// 代价是屏幕上会多一次「全屏 → 桌面 → 卡」的过渡，约 0.7 s。这是有意的：
 /// 一次可见的过渡，比一个永远压在卡下面的黑窗口好。
+/// 0.3.54 — 自建承载的挂载入口：`AevonScene.m` 拿到 scene 之后从这里进建卡链。
+///
+/// 线程纪律：`float` 里会建 UIView、改几何、写 scene 设置，全部只能在主线程。
+/// 调用方（SpringBoard 的钩子与 80 ms 轮询）本来就在主线程上，这里仍然显式
+/// 拒绝非主线程调用 —— 跨线程搬 UIView 在这个工程里出过事，宁可返回 0 让上层
+/// 回落，也不赌「它大概在主线程」。
+@_cdecl("AevonOwnFloatScene")
+public func AevonOwnFloatScene(_ bundle: UnsafePointer<CChar>?,
+                               _ scene: UnsafeMutableRawPointer?) -> Int32 {
+    guard let bundle = bundle, let scene = scene else { return 0 }
+    let identifier = String(cString: bundle)
+    guard identifier.count > 2 else { return 0 }
+    guard Thread.isMainThread else {
+        Log.write("win: own deck float off-main b=" + identifier)
+        return 0
+    }
+    // 不 retain：这一份 scene 由 C 侧那个 entity 持有，调用期间一定活着。
+    let object = Unmanaged<AnyObject>.fromOpaque(scene).takeUnretainedValue()
+    guard let hosted = object as? NSObject else { return 0 }
+    Log.write("win: own deck float b=" + identifier
+              + " cls=" + NSStringFromClass(type(of: hosted)))
+    SceneProbe.ownFloat(hosted, bundleID: identifier)
+    return 1
+}
+
 @_cdecl("AevonOpenCardURL")
 public func AevonOpenCardURL(_ bundle: UnsafePointer<CChar>?) {
     guard let bundle = bundle else { return }

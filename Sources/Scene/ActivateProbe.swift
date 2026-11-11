@@ -350,6 +350,14 @@ public func AevonColdAdoptLateOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlColdAdoptLatePath) ? 1 : 0
 }
 
+/// 0.3.54 — 自建承载总闸（`url.own.start.off` 存在 = 整条让路，行为等于 0.3.53）。
+///
+/// 每次调用都现读文件：这条路每一步都可能出事，现场必须能**不换包**把它关掉。
+@_cdecl("AevonDeckOn")
+public func AevonDeckOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlOwnStartOffPath) ? 0 : 1
+}
+
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
 ///
 /// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、

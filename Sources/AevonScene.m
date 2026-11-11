@@ -184,6 +184,12 @@ extern int AevonColdAdoptOn(void);
 extern int AevonColdAdoptDelayMs(void);
 /// 0.3.52 — 1 = 回到 0.3.51 的固定 2.0 s（`url.cold.adopt.late` 存在）。
 extern int AevonColdAdoptLateOn(void);
+/// 0.3.54 — **自建承载**的总闸（`url.own.start.off` 存在 = 整条让路，
+/// 钩子照旧把请求交给原实现，行为等于 0.3.53）。
+extern int AevonDeckOn(void);
+/// 0.3.54 — 把一个指定的 scene 挂进新的卡片窗口（Swift 侧 `float`）。
+/// 返回 1 = 已经进了建卡链；0 = 参数 / 线程不对，调用方当场回落。
+extern int AevonOwnFloatScene(const char *bundle, void *scene);
 static int AevonColdPending(void);         ///< 一次性：这一次接管要不要扣请求
 static void AevonColdWantNote(void);       ///< `AevonURLDenyTake` 里置位
 static int AevonColdHolds(const char *bundle);  ///< 扣着的是不是这个 App
@@ -12240,6 +12246,408 @@ static void AevonAuthCardCloseSoon(NSString *who, const char *why) {
 /// 反消除：定义之后有一处 `__attribute__((used))` 的取地址引用。`-Osize`
 /// 会消除「从来没被引用」的静态函数（0.2.87 烧过一次 run），取地址比
 /// `__attribute__((unused))` 可靠 —— 后者只压警告，不挡优化。
+// MARK: - 0.3.54 自建承载：向 SpringBoard 要一个 scene，而不是等激活
+
+// 这一段的形状来自 ScreenCore 2.1.0 的 arm64e 切片（`D:\最新工作区\rev\slice\ScreenCore`，
+// capstone 逐条解码，地址是切片里的 VM 地址）：
+//
+//   SCSystemSceneDriver -sc_mainDisplaySceneHandleProvider            +0x57788
+//       NSClassFromString("SBSceneManagerCoordinator")
+//       NSSelectorFromString("mainDisplaySceneManager")               +0x976e8
+//   同上，scene 实体的构造（两个分支）                                +0x57800
+//       NSClassFromString("SBDeviceApplicationSceneEntity")           +0x97708
+//       -initWithApplication:generatingNewPrimarySceneIfRequired:
+//         sceneHandleProvider:displayIdentity:                        +0x97728
+//       -initWithApplicationForMainDisplay:generatingNewPrimarySceneIfRequired:  +0x97748
+//   [entity sceneHandle]                                              +0x96f48
+//
+// 它给的是整条链的第一件事：**不起激活事务，先把这个 App 的 scene handle 拿到手**。
+//
+// ⛔ 后面那六步（`[workspace createRequestWithOptions:displayConfiguration:]` →
+// `setSceneRequest:` → `applicationContext` → `_createApplicationSceneTransitionContext
+// FromContext:entity:` → `_createParametersFromTransitionContext:entity:` → 提交）**没有抄**。
+// 那六步要往 SB 的 workspace 事务里塞一个我们本地无法验证形状的 parameters 对象，
+// 而 0.3.1 那一次安全模式（`FBWorkspace registerHost:settings:` EXC_BREAKPOINT）
+// 就是「拿着不可验证的私有面直接提交」。这一版只走前两步：
+// 拿得到 scene 就用，拿不到就**整条让路**（钩子返回 0，行为等于 0.3.53）。
+//
+// 为什么这条不崩而 0.3.1 崩：0.3.1 是自己 `FBSMutableSceneDefinition` +
+// `FBSceneManager createSceneWithDefinition:initialParameters:`，那是**绕过 SB 的
+// scene 会话**去让 FrontBoard 注册一个 host；这里拿的是 SB 自己为这个 App 准备的
+// 那个 handle（`generatingNewPrimarySceneIfRequired:YES`），host 由 SB 的
+// scene manager 负责。差别不在「谁调」，在**谁负责注册**。
+
+/// 一条现场行，独立预算。这个文件里每一条现场行都得有自己的计数器：跟别人共用
+/// 一个，就会在几次操作之后静默，而静默和「没发生」长得一模一样。
+static int AevonDeckNotes = 0;
+static void AevonDeckLog(NSString *format, ...) {
+    if (AevonDeckNotes >= 24) return;
+    AevonDeckNotes++;
+    va_list args;
+    va_start(args, format);
+    NSString *line = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    AevonLogRaw([line UTF8String]);
+    [line release];
+}
+
+typedef struct {
+    const char *cls;
+    const char *sel;
+    int meta;
+} AevonDeckNeed;
+
+/// 自建承载需要的最小类面。比 0.2.13 那张表（35 条）短得多，因为这一版不打
+/// 算自己拼 scene definition —— 只问 SB 要一个现成的 handle。
+static const AevonDeckNeed AevonDeckNeeds[] = {
+    {"SBSceneManagerCoordinator", "mainDisplaySceneManager", 1},
+    {"SBApplicationController", "sharedInstance", 1},
+    {"SBApplicationController", "applicationWithBundleIdentifier:", 0},
+    {"SBDeviceApplicationSceneEntity",
+        "initWithApplicationForMainDisplay:generatingNewPrimarySceneIfRequired:", 0},
+};
+
+static int AevonDeckGateRan = 0;
+static int AevonDeckGateMiss = -1;
+
+/// 只问不调：返回缺失条数，0 表示这条路接得上。
+static int AevonDeckGate(void) {
+    if (AevonDeckGateRan) return AevonDeckGateMiss;
+    AevonDeckGateRan = 1;
+    int miss = 0;
+    int total = (int)(sizeof(AevonDeckNeeds) / sizeof(AevonDeckNeeds[0]));
+    for (int i = 0; i < total; i++) {
+        Class cls = NSClassFromString([NSString stringWithUTF8String:AevonDeckNeeds[i].cls]);
+        SEL sel = sel_registerName(AevonDeckNeeds[i].sel);
+        BOOL there = NO;
+        if (cls != Nil) {
+            there = AevonDeckNeeds[i].meta ? [cls respondsToSelector:sel]
+                                           : (class_getInstanceMethod(cls, sel) != NULL);
+        }
+        if (!there) {
+            miss++;
+            AevonDeckLog(@"deck: gate miss %s%s %s",
+                         cls == Nil ? "class " : "", AevonDeckNeeds[i].cls,
+                         AevonDeckNeeds[i].sel);
+        }
+    }
+    AevonDeckGateMiss = miss;
+    NSString *summary = [[NSString alloc] initWithFormat:@"deck: gate need=%d miss=%d",
+                         total, miss];
+    AevonLogRaw([summary UTF8String]);
+    [summary release];
+    return miss;
+}
+
+/// 拿这个 App 的 scene handle。成功时 `*entityOut` 带 +1 的 entity（它持有 handle）。
+/// 任何一步不成立都返回 nil —— 绝不带着半个对象往下走。
+static id AevonDeckSceneHandle(NSString *bundleID, id *entityOut) {
+    if (bundleID.length == 0) return nil;
+
+    Class coordCls = NSClassFromString(@"SBSceneManagerCoordinator");
+    if (coordCls == Nil || ![coordCls respondsToSelector:sel_registerName("mainDisplaySceneManager")]) {
+        return nil;
+    }
+    // 这一次调用本身不改任何东西：它只是把 SB 的那个单例取出来。保留它是为了
+    // 和 ScreenCore 的取值顺序一致（它先拿 manager 再拿 application）。
+    id manager = ((id (*)(id, SEL))objc_msgSend)(
+        (id)coordCls, sel_registerName("mainDisplaySceneManager"));
+    if (manager == nil) {
+        AevonDeckLog(@"deck: no scene manager b=%@", bundleID);
+        return nil;
+    }
+
+    Class ctrlCls = NSClassFromString(@"SBApplicationController");
+    if (ctrlCls == Nil || ![ctrlCls respondsToSelector:sel_registerName("sharedInstance")]) {
+        return nil;
+    }
+    id controller = ((id (*)(id, SEL))objc_msgSend)(
+        (id)ctrlCls, sel_registerName("sharedInstance"));
+    if (controller == nil ||
+        ![controller respondsToSelector:sel_registerName("applicationWithBundleIdentifier:")]) {
+        AevonDeckLog(@"deck: no application controller b=%@", bundleID);
+        return nil;
+    }
+    id application = ((id (*)(id, SEL, id))objc_msgSend)(
+        controller, sel_registerName("applicationWithBundleIdentifier:"), bundleID);
+    if (application == nil) {
+        // 这个 App 在 SB 眼里还不存在（没装 / 没登记）。让路 —— 系统自己能开它。
+        AevonDeckLog(@"deck: no sb application b=%@", bundleID);
+        return nil;
+    }
+
+    Class entCls = NSClassFromString(@"SBDeviceApplicationSceneEntity");
+    if (entCls == Nil) return nil;
+    SEL initSel = sel_registerName(
+        "initWithApplicationForMainDisplay:generatingNewPrimarySceneIfRequired:");
+    if (![entCls instancesRespondToSelector:initSel]) {
+        AevonDeckLog(@"deck: no entity init b=%@", bundleID);
+        return nil;
+    }
+    id entity = ((id (*)(id, SEL))objc_msgSend)((id)entCls, sel_registerName("alloc"));
+    if (entity == nil) return nil;
+    entity = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+        entity, initSel, application, YES);
+    if (entity == nil) {
+        AevonDeckLog(@"deck: entity nil b=%@", bundleID);
+        return nil;
+    }
+
+    SEL handleSel = sel_registerName("sceneHandle");
+    if (![entity respondsToSelector:handleSel]) {
+        [(id)entity release];
+        AevonDeckLog(@"deck: no sceneHandle b=%@", bundleID);
+        return nil;
+    }
+    id handle = ((id (*)(id, SEL))objc_msgSend)(entity, handleSel);
+    if (handle == nil) {
+        [(id)entity release];
+        AevonDeckLog(@"deck: handle nil b=%@", bundleID);
+        return nil;
+    }
+    if (entityOut != NULL) {
+        *entityOut = entity;
+    } else {
+        [(id)entity release];
+    }
+    return handle;
+}
+
+/// `[sceneHandle scene]`：这一拍这个 handle 背后有没有活的 FBScene。
+static id AevonDeckSceneOf(id handle) {
+    if (handle == nil) return nil;
+    SEL sel = sel_registerName("scene");
+    if (![handle respondsToSelector:sel]) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(handle, sel);
+}
+
+// 0 idle / 1 等 scene / 2 已挂进卡
+static int AevonDeckPhase = 0;
+static int AevonDeckTick = 0;
+static int AevonDeckSent = 0;
+static int AevonDeckBusy = 0;
+static id AevonDeckEntity = nil;
+static id AevonDeckHandle = nil;
+static char AevonDeckBundle[64] = {0};
+static char AevonDeckURL[1024] = {0};
+
+/// **一次就下线。** 任何一条退路被走到，就写关闸文件、本次开机不再尝试。
+///
+/// 理由是这个工程最贵的三次事故都来自「同一条坏路跑第二遍」：0.3.45 的
+/// SIGBUS、0.3.1 的 `registerHost:`、0.0.15 的 `_createSceneWithDefinition:`。
+/// 这条路第一次不成立，第二次也不会成立，而重复尝试只会让用户反复看到
+/// 「打开失败 → 全屏」或者更糟。写下的文件名与手闸是同一个 —— 现场
+/// `rm` 掉它就等于手动重开。
+static void AevonDeckStrike(const char *why) {
+    NSString *path = @"/var/mobile/Library/Logs/Aevon/url.own.start.off";
+    [[NSFileManager defaultManager] createFileAtPath:path contents:[NSData data] attributes:nil];
+    AevonDeckLog(@"deck: strike why=%s b=%s (route off until reboot)",
+                 why != NULL ? why : "-", AevonDeckBundle);
+}
+
+static void AevonDeckEnd(const char *why) {
+    if (AevonDeckNotes < 24) {
+        AevonDeckNotes += 1;
+        AevonLogRaw([[NSString stringWithFormat:@"deck: end why=%s b=%s tick=%d",
+                      why != NULL ? why : "-", AevonDeckBundle, AevonDeckTick] UTF8String]);
+    }
+    if (AevonDeckEntity != nil) { [(id)AevonDeckEntity release]; AevonDeckEntity = nil; }
+    if (AevonDeckHandle != nil) { [(id)AevonDeckHandle release]; AevonDeckHandle = nil; }
+    AevonDeckPhase = 0;
+    AevonDeckBusy = 0;
+    AevonDeckTick = 0;
+    AevonDeckSent = 0;
+    AevonDeckBundle[0] = '\0';
+    AevonDeckURL[0] = '\0';
+}
+
+/// 把 URL 投进已经在卡里的那个进程（同一条桥，`tmp/aevon-open.plist` +
+/// Darwin 通知）。冷启动时 App 才刚起，投早了没人读，所以由调用方错开一拍。
+static void AevonDeckDeliver(void) {
+    if (AevonDeckSent == 1) return;
+    AevonDeckSent = 1;
+    NSString *bundleID = [NSString stringWithUTF8String:AevonDeckBundle];
+    NSString *url = [NSString stringWithUTF8String:AevonDeckURL];
+    if (bundleID.length == 0 || url.length == 0) return;
+    NSString *srcApp = nil;
+    char *copy = AevonFrontBundleCopy();
+    if (copy != NULL) {
+        NSString *name = [NSString stringWithUTF8String:copy];
+        free(copy);
+        if (name.length > 0 && ![name isEqualToString:bundleID]) srcApp = name;
+    }
+    int sent = AevonAppOpenSend(bundleID, url, [NSDictionary dictionary], srcApp);
+    AevonDeckLog(@"deck: deliver b=%@ send=%d src=%@ u=%.48s",
+                 bundleID, sent, srcApp != nil ? srcApp : @"-", AevonDeckURL);
+}
+
+static void AevonDeckTick(void);
+
+/// 一拍 80 ms 地等 `[handle scene]` 变成非 nil。上限 28 拍 ≈ 2.24 s，
+/// 与 ScreenCore 的 `SCWSShareDelivery.deadline`（2 s）同量级。
+static void AevonDeckAfter(double gap) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(gap * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonDeckTick();
+    });
+}
+
+static void AevonDeckTick(void) {
+    if (AevonDeckPhase != 1) return;
+    AevonDeckTick += 1;
+    id scene = nil;
+    @try {
+        scene = AevonDeckSceneOf(AevonDeckHandle);
+    } @catch (NSException *exception) {
+        AevonDeckLog(@"deck: scene threw %@",
+                     exception.reason != nil ? exception.reason : @"-");
+        scene = nil;
+    }
+    if (scene != nil) {
+        NSString *bundleID = [NSString stringWithUTF8String:AevonDeckBundle];
+        int floated = AevonOwnFloatScene(AevonDeckBundle, (void *)scene);
+        AevonDeckLog(@"deck: scene up b=%@ tick=%d cls=%@ float=%d",
+                     bundleID != nil ? bundleID : @"-", AevonDeckTick,
+                     NSStringFromClass([scene class]), floated);
+        if (floated == 1) {
+            AevonDeckPhase = 2;
+            // 卡片挂上去之后才投 URL：冷进程刚起，早投的那一发没人读
+            // （0.3.39 的 `ack ok=1 via=app-src rsp=0` 就是这一格）。
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                // 卡片真的起来了吗 —— `float` 正常返回不等于窗在屏上
+                // （presenter / presentationView 任何一步不成立它都只是 return）。
+                // 没起来就把 App 拉回前台：用户至少还能用，而不是停在桌面。
+                if (AevonCardIsUpFor(AevonDeckBundle) != 1) {
+                    AevonDeckLog(@"deck: card not up b=%s", AevonDeckBundle);
+                    AevonDeckStrike("card");
+                    AevonLandOpenApp(AevonDeckBundle);
+                }
+                AevonDeckDeliver();
+                AevonDeckEnd("floated");
+            });
+            return;
+        }
+        // 浮不起来（Swift 侧没拿到 presenter）：当场让路，别把用户晾在桌面。
+        // 顺序：先 strike / 拉回前台 / 投 URL，**最后**才 `AevonDeckEnd` ——
+        // 它会把 `AevonDeckBundle` 与 `AevonDeckURL` 清空，反过来写就是拿空串去
+        // 拉前台（0.3.54 第一稿正是这个顺序，编译得过、真机上什么都不会开）。
+        AevonDeckStrike("float");
+        AevonLandOpenApp(AevonDeckBundle);
+        AevonDeckDeliver();
+        AevonDeckEnd("float failed");
+        return;
+    }
+    if (AevonDeckTick >= 28) {
+        AevonDeckLog(@"deck: scene timeout b=%s tick=%d", AevonDeckBundle, AevonDeckTick);
+        // 退路：让系统按老路把它开起来（这一次是全屏），URL 仍走桥。
+        // 顺序不能反 —— 先开进程才会有容器读那一份 plist。
+        AevonDeckStrike("timeout");
+        AevonLandOpenApp(AevonDeckBundle);
+        AevonDeckDeliver();
+        AevonDeckEnd("timeout");
+        return;
+    }
+    AevonDeckAfter(0.08);
+}
+
+/// 这一次打开要不要走自建承载。**只接冷启动的文件分享**：
+///   · 授权 / 支付：三次真机证伪「后台收 URL」（QQ `rsp=0`、支付宝 timeout、微信空壳），
+///     那一族必须原生激活，一个字都不碰；
+///   · 热启动：已经有 scene、桥也已经在工作（`act: deliver ok=1 send=sendActions`），
+///     没有全屏问题，不需要这条更重的路；
+///   · 有卡 / 正在建卡：让 `openCard` 自己处理。
+static int AevonDeckWanted(const char *bundle, id request, id options, NSString **urlOut) {
+    if (urlOut != NULL) *urlOut = nil;
+    if (bundle == NULL || bundle[0] == '\0') return 0;
+    if (AevonDeckOn() != 1) return 0;
+    if (strncmp(bundle, "com.apple.springboard", 21) == 0) return 0;
+    if (AevonBundleIsAuthFamily(bundle)) return 0;
+    if (AevonWindowBlacklisted(bundle)) return 0;
+
+    NSString *url = AevonOpenURLOf(request, options);
+    if (url.length == 0) return 0;
+    // **只接文件分享。** 两条判据：
+    //   · 来源是分享扩展（`AevonOpenIsShareSource`，短链 / 分享面板都算）；
+    //   · 或者这次带的是一条 `file:` URL 且不是通用链接回跳。
+    // 不放宽到「带 payload 就算」：从 A 应用点到冷启动 B 应用的普通深链也带
+    // payload，那种请求要的是**激活**（QQ SSO、支付回跳都在这一族里靠它），
+    // 把它也吞下来就是 0.2.74~0.2.78 那三次失败的复刻。
+    int isShare = AevonOpenIsShareSource(request, options) ? 1 : 0;
+    int isFile = [url hasPrefix:@"file:"] ? 1 : 0;
+    int isCont = AevonOpenIsContinuation(request, options) ? 1 : 0;
+    if (isShare == 0 && !(isFile == 1 && isCont == 0)) return 0;
+
+    NSString *targetID = [NSString stringWithUTF8String:bundle];
+    if (targetID.length == 0) return 0;
+    if (AevonCardIsUpFor(bundle) == 1 || AevonCardIsComingFor(bundle) == 1) return 0;
+    // 冷：SB 那边还没有这个 App 的 scene。有 scene 的走桥（热路）。
+    if (AevonSeenSceneForBundle(targetID) != nil) return 0;
+    if (AevonAppFrontmost(targetID) == 1) return 0;
+    if (urlOut != NULL) *urlOut = url;
+    return 1;
+}
+
+/// 开始。**同步完成的部分只有「拿 handle」**：拿到就吞掉这一条打开请求，
+/// 拿不到就返回 0（调用方照旧把请求交给原实现，行为等于 0.3.53）。
+/// 这样「吞掉之后没东西可显示」这个最坏形状不可能发生：吞掉的前提是
+/// handle 已经在手里，剩下的只是等它出 scene。
+static int AevonDeckStart(const char *bundle, const char *url, const char *from) {
+    if (bundle == NULL || bundle[0] == '\0') return 0;
+    if (url == NULL || url[0] == '\0') return 0;
+    if (AevonDeckBusy == 1) return 0;
+    if (AevonDeckGate() != 0) return 0;
+    if (strlen(bundle) >= sizeof(AevonDeckBundle)) return 0;
+    if (strlen(url) >= sizeof(AevonDeckURL)) return 0;
+
+    NSString *bundleID = [NSString stringWithUTF8String:bundle];
+    if (bundleID.length == 0) return 0;
+
+    id entity = nil;
+    id handle = nil;
+    @try {
+        handle = AevonDeckSceneHandle(bundleID, &entity);
+    } @catch (NSException *exception) {
+        AevonDeckLog(@"deck: handle threw %@",
+                     exception.reason != nil ? exception.reason : @"-");
+        handle = nil;
+        if (entity != nil) { [(id)entity release]; entity = nil; }
+    }
+    if (handle == nil || entity == nil) {
+        if (entity != nil) [(id)entity release];
+        AevonDeckLog(@"deck: skip why=handle b=%s from=%s", bundle,
+                     from != NULL ? from : "-");
+        return 0;
+    }
+
+    AevonDeckBusy = 1;
+    AevonDeckPhase = 1;
+    AevonDeckTick = 0;
+    AevonDeckSent = 0;
+    AevonDeckEntity = entity;              // 已经是 +1
+    AevonDeckHandle = [handle retain];
+    snprintf(AevonDeckBundle, sizeof(AevonDeckBundle), "%s", bundle);
+    snprintf(AevonDeckURL, sizeof(AevonDeckURL), "%s", url);
+
+    // 吞掉激活之后没有人会替我们起进程。挂起启动不请求前台，正是这里要的：
+    // 进程起来才能连上这个 handle，而它上不上屏由我们的卡片决定。
+    id app = nil;
+    Class appCls = objc_getClass("UIApplication");
+    if (appCls != Nil && [appCls respondsToSelector:sel_registerName("sharedApplication")]) {
+        app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, sel_registerName("sharedApplication"));
+    }
+    NSInteger door = 0;
+    @try {
+        door = AevonLaunchSuspended(app, bundleID);
+    } @catch (NSException *exception) {
+        door = 0;
+    }
+    AevonDeckLog(@"deck: start b=%s from=%s door=%ld u=%.48s",
+                 bundle, from != NULL ? from : "-", (long)door, url);
+    AevonDeckAfter(0.08);
+    return 1;
+}
+
 static int AevonOpenDecide(id request, id options, id settings,
                            char *bundle, size_t size, const char **why) {
     if (bundle == NULL || size == 0) return 0;
@@ -16197,8 +16605,32 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             // 现在一律放行：`verdict = 0` 之后紧跟原实现，系统按自己的方式打开，
             // 与没装插件一致。`AevonOpenDecide` 本体仍留着（下一版重建承载层时
             // 会需要它的判据函数），但不再被调用。
-            verdict = 0;
-            why = "cleared";
+            //
+            // 0.3.54 — **这一格重新接管，但只接一种请求：冷启动的文件分享。**
+            //
+            // 逆向定论（ScreenCore 2.1.0）：它的全屏之所以不存在，是因为它在
+            // 这一层答「我接」，然后**不调原实现** —— 系统的激活事务根本没有
+            // 发生，FrontBoard 没有窗可提交。它自己起进程、自己拿 scene、自己
+            // 把 URL 投给 App。三件事里前两件在 0.3.54 补上（`AevonDeck*`），
+            // 第三件本来就成立（`AevonAppOpenSend` 那条桥）。
+            //
+            // 窄口子是有意的：`AevonDeckWanted` 排掉授权 / 支付（三次真机证伪
+            // 「后台收 URL」）、热启动（没有全屏问题）、已有卡（让 openCard 处理）。
+            // 只要 `AevonDeckStart` 拿不到 scene handle，它就返回 0，这里照旧
+            // `verdict = 0` 走原实现 —— 吞掉请求却无内容可显示那个最坏形状
+            // 在结构上不可能出现。
+            if (slot == 0) {
+                NSString *deckURL = nil;
+                if (AevonDeckWanted(bundle, request, options, &deckURL) == 1 &&
+                    AevonDeckStart(bundle, [deckURL UTF8String], "open") == 1) {
+                    verdict = 2;
+                    why = "ownstart";
+                }
+            }
+            if (verdict != 2) {
+                verdict = 0;
+                why = "cleared";
+            }
         } @catch (NSException *exception) {
             verdict = 0;
             why = "threw";
