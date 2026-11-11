@@ -211,6 +211,19 @@ public func AevonURLTctxOff() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlTctxOffPath) ? 1 : 0
 }
 
+/// 0.3.35 — **授权 / 支付那两族要不要接管**（`url.act.on` 存在 = 才接）。
+///
+/// 默认 0（不接）。Aevon(259) 证明这两族的 URL 不在 `__PayloadURL` 上 ——
+/// 它们被系统包成 `UIActivityContinuationAction`，URL 在 action 的
+/// `NSUserActivity.webpageURL` 上（`act: url dig hit` 那一行是证据）。
+/// 0.3.35 先把 URL 挖出来看清形状；接管要手建 `url.act.on` 再重启桌面。
+///
+/// 语义与其它闸相反：**存在才做**。
+@_cdecl("AevonURLActOn")
+public func AevonURLActOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlActOnPath) ? 1 : 0
+}
+
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
 ///
 /// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、

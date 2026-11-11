@@ -998,9 +998,33 @@ def main():
                   # `deliver ok=1 send=sendActions` 秒进选好友页 —— 所以 tctx 之后
                   # 冷启动要晚 2.2 s 再补一发。这两串是新读数（补不补、挖没挖到）。
                   b"act: deliver tctx plus=1 cold=%d wait=%d b=%s",
-                  b"act: url deep k=%s b=%s url=%.100s",
+                  b"act: url deep k=%s b=%s src=po url=%.100s",
                   b"AevonURLTctxOff",
                   b"/var/mobile/Library/Logs/Aevon/url.tctx.off",
+                  # 0.3.35 — **冷启动第五秒那一发 + 授权/支付的 URL 在哪。**
+                  #
+                  # Aevon(259)：四次冷启动分享，投出去的每一发都落在 QQ 自己的
+                  # `app: geom late`（boot + 4 s）之前 —— 0.3.29 是 0.4/1.6/2.8 s，
+                  # 0.3.34 是 0.1/2.2/3.4 s，而 `geom late` 在 17:19:14。
+                  # 所以这一版排一发 5.0 s 的晚发，专门落在窗口关上之后：
+                  # `act: deliver late plan` 是排上了、`act: deliver late r=` 是投出去了。
+                  #
+                  # 另外两条是授权/支付那一族的唯一证据：那两次激活 `payload=0`
+                  # （URL 不在 `__PayloadURL` 上），落点侧都是
+                  # `act=#UIActivityContinuationAction url=-`。`act: url dig` 是
+                  # 把 `__Actions` 翻开的读数（hit 带 URL，miss 带 action 类名形状），
+                  # `act: url act-would` 是「挖到了但不接」的那一行。
+                  #
+                  # `probe: po` 是 `__PayloadOptions` 整层的内容 —— 0.3.34 只找
+                  # 「键名含 url」的项，一行没命中，这一版把整层照出来。
+                  b"act: deliver late plan wait=5000 b=%s",
+                  b"act: deliver late r=%d age=%lld b=%s url=%.60s",
+                  b"act: url dig hit b=%s n=%ld at=%s url=%.100s",
+                  b"act: url dig miss b=%s n=%ld at=%s shape=%s",
+                  b"act: url act-would take=%d b=%s url=%.100s",
+                  b"probe: po n=%ld b=%s |%s",
+                  b"AevonURLActOn",
+                  b"/var/mobile/Library/Logs/Aevon/url.act.on",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`
@@ -1615,7 +1639,11 @@ def main():
                  # 0.2.79 — 投递那条链在授权 / 支付上被证伪，两行日志随
                  # 代码一起删除。还能 grep 到就说明那一支又回来了。
                  b"notify: oauth swallow b=%s src=%@ scheme=%s pay=%s card=%d",  # gone
-                 b"notify: oauth pass b=%s scheme=%s pay=%s card=%d why=nourl"):   # gone
+                 b"notify: oauth pass b=%s scheme=%s pay=%s card=%d why=nourl",  # gone
+                 # 0.3.35 — 深挖那一行加上了 `src=po`（来源要能区分是
+                 # `__PayloadOptions` 还是 `__Actions` 挖出来的）。旧形状还在，
+                 # 就说明新的那两层取证没进包。
+                 b"act: url deep k=%s b=%s url=%.100s"):   # gone
         if gone in dylib_early:
             bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "
                 "back (hot zone 0.1.18 / summon bar 0.1.24 / cover lock gate 0.1.90)")

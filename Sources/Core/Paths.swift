@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.34"
+    public static let version = "0.3.35"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -297,6 +297,20 @@ public enum Aevon {
     /// 补上。装成功就**不再**走 scene action（`act: deliver skip why=tctx`）。
     /// 出问题建这个空文件即可退回 0.3.29 的行为，不必换包。
     public static let urlTctxOffPath     = "/var/mobile/Library/Logs/Aevon/url.tctx.off"
+
+    /// 0.3.35 — **授权 / 支付那两族要不要接**（`url.act.on` 存在 = 才接，默认不接）。
+    ///
+    /// Aevon(259) 的两条现场是同一个形状：`act: activate … payload=0
+    /// k=__Actions|__PayloadOptions|…`，落点侧 `act=#UIActivityContinuationAction
+    /// url=-`。也就是说这两族跳转被系统包成了「活动继续」，URL 不在 `__PayloadURL`
+    /// 上，要翻 `__Actions` 里那个 `NSUserActivity` 的 `webpageURL`。
+    ///
+    /// 0.3.35 只把 URL 挖出来记一行（`act: url dig hit`），**不接管**：授权/支付
+    /// 接错的代价是「登录点不动、支付跳不了」，比「又是全屏」严重得多。等这一版
+    /// 日志确认了 URL 的形状，手建这个文件 + 重启桌面，这两族才进入接管范围。
+    ///
+    /// 语义与 `url.global.off` 相反：**存在才做**。
+    public static let urlActOnPath       = "/var/mobile/Library/Logs/Aevon/url.act.on"
 
     /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
     ///
