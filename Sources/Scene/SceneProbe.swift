@@ -968,7 +968,40 @@ zStackParticipantDidChange:
     /// 0.2.83 — `why` 区分这一轮是谁叫起来的：`boot`（装新版本后第一次开机）、
     /// `panel`（设置页按钮）、`force`（手写了 presenter.force）。三种入口写出来
     /// 的账一模一样，但读账的人一听就知道是不是自己刚点的那一下。
+    /// 0.3.22 — 「这一版还要不要再普查一遍」。
+    ///
+    /// 理由见 `Aevon.censusDonePath`：0.3.21 的日志 1869 行里有 890 行是两轮普查，
+    /// 每次重启都重扫 99307 个类。名字第一次查出来是情报，第六十次就是噪声。
+    ///
+    /// 三种入口的待遇：
+    ///   · `boot`（装新版本后第一次开机）—— 版本号变了才查；
+    ///   · `panel`（设置页按钮）—— 操作者主动要，永远查；
+    ///   · `presenter.force` / `census.force` 存在 —— 强制查一次，查完把 force 删掉。
+    private static func censusDue(why: String) -> Bool {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: Aevon.censusForcePath) {
+            try? fm.removeItem(atPath: Aevon.censusForcePath)
+            censusNote("presenter: census forced why=" + why)
+            return true
+        }
+        if why == "panel" { return true }
+        let done = (try? String(contentsOfFile: Aevon.censusDonePath,
+                                encoding: .utf8)) ?? ""
+        if done.trimmingCharacters(in: .whitespacesAndNewlines) == Aevon.version {
+            censusNote("presenter: census skip v=" + Aevon.version
+                       + " (done earlier; touch census.force to redo)")
+            return false
+        }
+        // 标记**先写后跑**（与 0.2.75 的 `notify.armed` 同一个理由）：普查要是把
+        // 进程弄死了，下一次重启至少知道「这一版查过了」，不会无限重试。
+        try? Aevon.version.write(toFile: Aevon.censusDonePath,
+                                 atomically: true, encoding: .utf8)
+        return true
+    }
+
     static func runPresenterCensus(why: String = "boot") {
+        // 0.3.22 — 同一版只查一次，见 `censusDue`。
+        if !censusDue(why: why) { return }
         let start = Date()
         // 两段拼，理由同 `gateSnapshot`：这个文件的类型检查超时丢过两次构建，
         // 一次四段以上的 `+` 链在 Swift 里不是免费的。
@@ -2219,6 +2252,10 @@ zStackParticipantDidChange:
     /// 登记表（`sceneID:` 名字出现过、系统推过 settings，但 manager 列不出来）。
     ///
     /// Aevon(173) 把这两类分开了：高德六行现场里 manager 一个都不给，而 hook
+    /// 0.3.22 — `win: listed scene all shell` 的节流表（bundle → 上次落笔时刻）。
+    /// 只为一件事服务：把 40 ms 轮询打出来的同一句重复压成一行。见 `listedScene`。
+    private static var listedMissAt: [String: CFAbsoluteTime] = [:]
+
     /// trace 里同名 scene 被改了三次前台 —— 它存在，只是没连上客户端。用第一条
     /// 口径能保证「正常 App 拿到的永远是健康 scene」，第二条只在第一条空手时兜底，
     /// 并且把它的三项读数写进日志：`running=0 visible=0` 就是那种空壳，建出来
@@ -2290,8 +2327,16 @@ zStackParticipantDidChange:
             }
         }
         if bestScore <= 0 {
-            Log.write("win: listed scene all shell b=" + bundleID
-                      + " n=" + String(count) + " best=" + String(bestScore))
+            // 0.3.22 — 等 scene 的这段时间这里是 40 ms 一轮的轮询，同一句话会连打
+            // 八到十遍（Aevon(247) 里正好 8 行 `n=0 best=-1`）。结论只有一条，
+            // 记一次就够：同 bundle 五秒窗口内只落第一行，后面的次数从「等到了」
+            // 或「没等到」那条收尾记录上能看出来。
+            let now = CFAbsoluteTimeGetCurrent()
+            if now - (listedMissAt[bundleID] ?? 0) > 5.0 {
+                listedMissAt[bundleID] = now
+                Log.write("win: listed scene all shell b=" + bundleID
+                          + " n=" + String(count) + " best=" + String(bestScore))
+            }
             return nil
         }
         return best

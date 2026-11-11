@@ -890,6 +890,12 @@ def main():
                   # 尺寸」从 0.3.8 起一次都没跑过。这一串是 Swift `openCard` 调的
                   # `AevonCardTargetArm` 打的，它出现就说明扳机接上了。
                   b"act: arm b=%s n=%ld",
+                  # 0.3.22 — 普查一次性化。Aevon(247) 的 1869 行里 890 行是
+                  # `presenter:` / `carrier:` 两轮普查，每次重启把 99307 个类重扫一遍
+                  # 重打一遍。只把打印删掉是「永远不查」，所以要断言这两条路都进了包：
+                  # 跳过（同一版第二次起）与强制（手写 `census.force`）。
+                  b"presenter: census skip v=",
+                  b"presenter: census forced why=",
                   # 0.3.20 — `probe:tctx` 是 Aevon(246) 记录的上一次死因，可那一份日志
                   # 被装包清空了，死了都不知道死在哪一类上。这一行排在 @try 之前、
                   # 方法表之前，trap 也能留下类名。

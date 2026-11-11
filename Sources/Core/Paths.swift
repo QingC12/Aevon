@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.21"
+    public static let version = "0.3.22"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -179,6 +179,19 @@ public enum Aevon {
     /// 立刻一个字节都不写，只保留只读读数。取证阶段把这一位建上，就能在不改行为的
     /// 前提下看清「门槛过不过、副本拿不拿得到」。
     public static let birthOffPath      = "/var/mobile/Library/Logs/Aevon/birth.off"
+
+    /// 0.3.22 — 开机全量普查的「已经查过」标记（内容是查过的那一版版本号）。
+    ///
+    /// 0.3.21 的 Aevon(247) 有 1869 行，其中 890 行是 `carrier:` / `presenter:` 两轮
+    /// 普查 —— 每次重启都把 99307 个类扫一遍、把结果重打一遍。名字第一次查出来是
+    /// 情报，第六十次查出来就是噪声：真机排障的时候，真正要看的那几行（`act: frame
+    /// birth`、`win: state hosting`）被埋在一千行类名方法名中间。
+    ///
+    /// 语义：**同一版只查一次**。内容等于当前版本号就整个跳过，只留一行
+    /// `presenter: census skip`；版本一变自动重查（新版本可能有新类名要看）。
+    public static let censusDonePath    = "/var/mobile/Library/Logs/Aevon/census.done"
+    /// 想再查一遍（不改版本号）就手写这个文件：存在即强制查，查完自己删。
+    public static let censusForcePath   = "/var/mobile/Library/Logs/Aevon/census.force"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"
