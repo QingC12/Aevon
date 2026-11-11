@@ -1055,7 +1055,7 @@ def main():
                   # `bridge fallback` 是「桥没送到、链接/支付补一发」的正证。
                   b"act: bridge b=%s send=%d bonly=%d src=%s u=%.60s",
                   b"act: bridge skip why=hot b=%s alive=%d age=%.1f",
-                  b"act: bridge fallback b=%s kind=%d why=%s",
+                  b"act: bridge fallback b=%s kind=%d weak=%d why=%s",
                   b"AevonFrontBundleCopy",
                   b"aevon-alive",
                   b"act: deliver skip why=bridge",
@@ -1112,6 +1112,41 @@ def main():
                   b"AevonURLPlusOn",
                   b"/var/mobile/Library/Logs/Aevon/url.pass.on",
                   b"/var/mobile/Library/Logs/Aevon/url.plus.on",
+                  # 0.3.40 — **三处判据修正，一条一条对应 Aevon(265) 的现场。**
+                  #
+                  #   ① 桥回执分级。QQ 冷启动分享那一行是
+                  #      `app: openurl ok=1 via=app-src … dlg=- rsp=0` —— 现代选择子
+                  #      回 NO，回 YES 的是老选择子（兼容壳，不弹面板）。宿主把
+                  #      `ok=1` 当成功就销毁请求，「桥送到了」与「面板弹了」之间那
+                  #      条缝一直是隐形的。`notify: appurl weak` 是分级后的新读数，
+                  #      `weak-refused` 是「重投到用完仍然只是弱答案」的收尾。
+                  #   ② 同一次点击的连发只认第一条。支付宝支付那三条在 30 ms 内到齐
+                  #      （universal link → `alipaymatrix…` → `aliminipayauth…`），
+                  #      各自走完整条接管链：`act: activate` ×3、`act: float card` ×3、
+                  #      `win: own retired` ×3，最后投出去的是最不像支付的那一条。
+                  #      `act: float skip why=claim` 是「后续几条只吞不接」的读数。
+                  #   ③ 授权回跳认人换成「收信方 == 等待方」。旧判据拿**送信方**
+                  #      （`com.tencent.xin`）去比**承接方**（`com.midea.msmart.appstore`），
+                  #      永远不相等，于是授权一结束就把发起方拖进卡片
+                  #      （`win: demote old=com.tencent.xin side=right new=…`）。
+                  #      `act: auth wait` 记等待方，`act: float skip why=authback`
+                  #      是「回跳不接管、让它回全屏」的正证。
+                  #   ④ 通用链接里包着的自定义 scheme 先解开再投（`openURL` 语义），
+                  #      `act: unwrap` 两侧的 `from=` / `to=` 是这一步的读数。
+                  #   ⑤ 桥只给微信 / QQ：名单外的 App（支付宝）不再空等 2 秒，
+                  #      `act: bridge skip why=noapp` 是它的正证。
+                  b"notify: appurl weak b=%@ via=%@ rsp=%d n=%d",
+                  b"notify: appurl retry n=%d via=%@ weak=%d",
+                  b"weak-refused",
+                  b"act: float skip why=claim b=%s k=%d u=%.60s",
+                  b"act: auth wait b=%s src=%s",
+                  b"act: float skip why=authback b=%s sso=%@ u=%.80s",
+                  b"act: unwrap b=%s from=%.46s to=%.46s",
+                  b"act: bridge skip why=noapp b=%s cold=%d shots=%d",
+                  b"AevonAuthWaitNote",
+                  b"AevonAuthBackHit",
+                  b"AevonBridgeable",
+                  b"AevonURLUnwrapScheme",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`
