@@ -3727,6 +3727,12 @@ static void AevonLandingInstall(NSMutableString *out) {
 
 static volatile int64_t AevonActHitAt = 0;
 static long AevonActHits = 0;
+
+/// 0.3.17 — `_activateBundleID` 已经被调了几次。
+///
+/// `sysvc` 那一格用它来判断「这次与哪一次激活配对」。六次实测里两者一一对应、
+/// 间隔 1~2 行，所以两个计数应当同步递增；不同步就说明有多条子路径。
+long AevonActSeq(void) { return AevonActHits; }
 static long AevonActSceneHits = 0;
 static long AevonActPayloadLines = 0;
 static long AevonActNearLines = 0;
@@ -5210,12 +5216,30 @@ static void AevonHookSystemServiceOpen(NSMutableString *out) {
     IMP orig = method_getImplementation(m);
     id blk = ^(id ws, id service, id request, id completion) {
         @try {
+            // ⛔ 0.3.17 — **这个入口不是「最早」，它紧跟在 `_activateBundleID` 之后。**
+            //
+            // Aevon(242) 的对齐实测（六次全中、间隔 1~2 行）：
+            //   act: activate n=1 b=com.tencent.mqq          ← 我们的 _activateBundleID 钩子
+            //   h4: sysvc svc=#FBSystemService req=com.tencent.mqq
+            //   …
+            // 也就是说两者在**同一次调用链**里，`_activateBundleID` 在外层。
+            //
+            // 那么这一格的价值不在于「更早」，而在于「**它是哪条子路径**」：
+            //   · `_activateBundleID` 的 options 里有 `__PayloadURL` 等（我们已经读到）
+            //   · 这一格的 request 直接是 bundle id 字符串（比 options 干净）
+            //
+            // 所以这一版记「配对」：这次 sysvc 对应的 activate 是第几次、trusted 是几、
+            // 有没有 payload。把两条链的对应关系固定下来，下一版才有依据判断
+            // 「该在哪一条上动手」。
             if (__sync_fetch_and_add(&AevonSysvcHits, 1) < 12) {
                 char sv[140] = {0}, rq[140] = {0};
                 AevonLayDescribe(service, sv, sizeof(sv));
                 AevonLayDescribe(request, rq, sizeof(rq));
+                // 与 `AevonActHit` 的计数做差，看两者是不是一一对应。
                 AevonLogRaw([[NSString stringWithFormat:
-                              @"h4: sysvc svc=%s req=%s", sv, rq] UTF8String]);
+                              @"h4: sysvc n=%ld actseq=%ld svc=%s req=%s",
+                              (long)AevonSysvcHits, (long)AevonActSeq(),
+                              sv, rq] UTF8String]);
             }
         } @catch (__unused NSException *e) {}
         ((void (*)(id, SEL, id, id, id))orig)(ws, sel, service, request, completion);

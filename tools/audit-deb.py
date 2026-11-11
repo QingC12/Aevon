@@ -1229,7 +1229,7 @@ def main():
                   b"h4: destroy armed",
                   b"layout: add item=%s ws=%s",
                   b"layout: addC item=%s ws=%s",
-                  b"h4: sysvc svc=%s req=%s",
+                  b"h4: sysvc n=%ld actseq=%ld svc=%s req=%s",
                   b"presenter: birth fail b=%s why=nil id=%s",
                   b"presenter: birth skip b=%s why=nopm",
                   b"presenter: birth threw b=%s why=%s",
