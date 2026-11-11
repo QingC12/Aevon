@@ -5475,9 +5475,21 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
     // 让 FrontBoard 用它自己的 options 把 URL 交给刚起来的进程。
     // 代价：冷启动那一下是全屏（分享完手动返回）。热启动仍在卡里，不受影响。
     //
-    // 0.3.45 — **这一支降级成备用闸**：`AevonColdHoldOn()` 开着时走下面「扣下
-    // 原始请求、等托管就绪再交回」那条路（ScreenCore 的形状）。只有 `url.cold.hold.off`
-    // 存在时才回到这里 —— 那时行为与 0.3.44 一字不差，正好给下一次真机做 A/B。
+    // 0.3.45 — 这一支曾被降级成备用闸；**0.3.49 起它是默认**。
+    //
+    // 0.3.45/0.3.48 试的是「扣下请求 → 建卡 → 等托管就绪 → 把系统原件交回去」，
+    // 两次都失败，而且是同一种失败：
+    //   Aevon(269) `replay why=hosted susp=-1` → `card yield seen now=430x932`
+    //   Aevon(5)(2) `replay why=hosted susp=1  boxed=0` → 同一行 `card yield seen`
+    // `susp=1` 说明挂起位确实写进了 payload 并读得回来，FrontBoard 照样提交了它
+    // 自己的全屏事务；更要紧的是那之后 QQ 进程里**没有 `app: openurl`** ——
+    // 延迟 928 ms 交回的原件根本没走到 URL 处理器。所以「扣下来再交回」这条路
+    // 对 QQ 是死的，不是时机问题、也不是挂起位问题。
+    //
+    // 剩下的选项只有「不接管，让系统用原始调用栈和原始令牌去开」。这一支就是
+    // 0.3.44 写的那一段，当时因为立刻转向逆向而没有上过真机；现在它是默认。
+    // 代价照旧明说：冷启动那一下是全屏（分享完手动返回），卡片留给热启动。
+    // A/B：建 `url.cold.hold.on` 回到「扣下 + 等托管 + 交回」那条实验路。
     if (kind == 2 && AevonColdHoldOn() != 1 && AevonColdSharePassOn() == 1 &&
         AevonTargetAlive([NSString stringWithUTF8String:bundle], NULL) != 1) {
         if (__sync_fetch_and_add(&AevonDenySkipLines, 1) < 12) {
@@ -5618,6 +5630,14 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
     // （`dlg=MMMainSceneDelegate rsp=1`），推迟几百毫秒不影响它的结果；
     // QQ 那头如果 `dlg` 仍是 `-`，就说明「等托管」也不够，改由原始 options 接手。
     // 所以不是「扣下就再不投」——**只有弱答案才轮到原始请求**。
+    // 0.3.49 — **这一段现在是实验路（默认关）**：`url.cold.hold.on` 存在才走。
+    //
+    // 保留它的理由不是还指望它成，而是它已经把三种失败量得干干净净，下一次想
+    // 再试「先挂起再交回」时不用从头搭：
+    //   · 交回得太早（0.3.45，928 ms）→ FrontBoard 全屏，且 App 侧零 `app: openurl`；
+    //   · 交回带 `__ActivateSuspended=1`（0.3.48）→ 同上，一个字都没变；
+    //   · 交回时改原件（0.3.45 的副本路）→ 崩在 `objc_retain_x20`（0.3.46 已修）。
+    // 也就是说这条路的瓶颈在「我们代表系统去激活」这件事本身，不在参数。
     int coldHold = 0;
     if (swallow == 1 && kind == 2 && AevonDenyCold == 1 && AevonDenyURL[0] != '\0' &&
         AevonColdHoldOn() == 1) {
@@ -5629,16 +5649,24 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
                       bundle, pid, run, liveScene, alive, aliveAge, 2000,
                       AevonDenyURL] UTF8String]);
     }
-    // 0.3.48 — 桥的入口不再只看冷/热，看「目标有没有一张收得下 action 的活 scene」。
+    // 0.3.49 — **热启动的判据退回「不是冷启动」，0.3.48 多加的那一位撤回。**
     //
-    // Aevon(269) 20:53:47 那一格是反例：`act: bridge skip why=hot b=com.tencent.mqq
-    // alive=1 age=2.0`，可同一份日志里 `act: float cold=0 … live=0`、前台是 Files。
-    // 心跳只能证明**进程活着**，证明不了它的 scene 处于前台活跃态；scene action
-    // 投给一张不可见的 scene 就是「排队」，QQ 一个页面都没换（那一段 applog 里
-    // 只有 `page alive` 和 `band miss`），用户看到的是卡里一张首页 —— 这就是
-    // 「热启动有时悬浮窗、有时全屏」的那一半。所以只有 `liveScene=1`（真的有一张
-    // 能收 action 的活 scene）才允许跳过桥。
-    int hotReady = (AevonDenyCold == 0 && liveScene == 1) ? 1 : 0;
+    // 0.3.48 把判据改成 `cold==0 && liveScene==1`，理由是 Aevon(269) 里热分享
+    // `alive=1` 但 `live=0` 那一次没出面板。Aevon(5)(2) 把这条推翻了两遍：
+    //   · 同一份日志的 applog 开头还留着 0.3.47 的一次成功分享 ——
+    //     `21:08:51 app: page alive t=1` → `21:08:53 app: page sheet
+    //     _UIDICActivityViewController h=717 top=0 box=717`。那次 `live` 同样是 0
+    //     （0.3.47 的 `skip why=hot` 不看它），面板就是在卡片里出来的；
+    //   · 0.3.48 四次热分享全走「先问桥」，每次都收到
+    //     `ack ok=1 via=app-src dlg=- rsp=0 ready=0`，1.4 s 后才补 scene action，
+    //     而 applog 里此后再无 `app: openurl` —— 桥那一发把这条件 URL 先喂给了
+    //     `application:openURL:options:`（QQ 回 NO），随后真正的 `UIOpenURLAction`
+    //     就再没有回声。**先问桥本身就是热路径失效的原因**，不是 `live` 那一格。
+    // 所以热启动一律不问桥。判据取「不是冷启动」**或**「心跳证明它在跑」：
+    // `AevonDenyCold` 是读 scene 表算出来的，而这一拍正好是卡还没建、scene 还没被
+    // 搬进来的时候 —— 它必然倾向答「冷」；心跳（App 侧 1.8 s 一次）不受这个影响，
+    // 两个里有一个说「在跑」就按热走。桥只在「真冷且没心跳」时用一次。
+    int hotReady = (AevonDenyCold == 0 || alive == 1) ? 1 : 0;
     if (coldHold == 0 && swallow == 1 && AevonDenyURL[0] != '\0' &&
         AevonURLBridgeOn() == 1 && AevonBridgeable(bundle) == 1 && hotReady == 0) {
         NSString *bu = [NSString stringWithUTF8String:bundle];
@@ -15512,7 +15540,8 @@ static NSString *AevonColdSuspKey(void) { return @"__ActivateSuspended"; }
 /// 指针不变，FrontBoard 拿到的是同一个 options。
 ///
 /// 返回：1 = 挂起位已在（系统本来就带 / 这一版写进去了且读得回）；
-///       0 = 写了但读回是 NO；-1 = 没写成（没有 dictionary 或没有 setDictionary:）；
+///       0 = **没有动它**（闸关，0.3.49 起的默认）；
+///       2 = 写了但读回是 NO；-1 = 没写成（没有 dictionary 或没有 setDictionary:）；
 ///       -2 = 写了但读不回（字典里取不到）。判据只认 1。
 static int AevonColdSuspendInPlace(id options) {
     if (options == nil) return -1;
@@ -15522,7 +15551,9 @@ static int AevonColdSuspendInPlace(id options) {
     // 系统自己发的请求本来就带挂起位（相册那种），一个字节都不要动它。
     id had = [(NSDictionary *)dict objectForKey:key];
     if ([had isKindOfClass:[NSNumber class]] && [(NSNumber *)had boolValue]) return 1;
-    if (AevonColdSuspOn() != 1) return -1;
+    // 0.3.49 — 默认不写。改原件是要担风险的，而 Aevon(5)(2) 已经量过：
+    // `susp=1` 之后 FrontBoard 照样把 scene 撑到 932。没有证据支持的改动不做。
+    if (AevonColdSuspOn() != 1) return 0;
     SEL setter = NSSelectorFromString(@"setDictionary:");
     if (![options respondsToSelector:setter]) return -1;
     NSMutableDictionary *box = [(NSDictionary *)dict mutableCopy];
@@ -15575,15 +15606,14 @@ static void AevonColdReplay(const char *why) {
     AevonColdTrusted = 0;
     AevonColdAt = 0;
 
-    // 0.3.48 — **交回的仍是原件，但先给它写上挂起位。**
+    // 0.3.49 — **交回的就是原件**，除非有人手建了 `url.cold.susp.on`。
     //
-    // 0.3.46 的「一个字节都不改」只对了一半：不动 `__PayloadOptions` /
-    // `__PayloadURL` / `__PasteSharingToken` 是对的（那三格是 QQ 认不认的全部），
-    // 但**不写挂起位就是全屏**（Aevon(269) 20:53:19 与 20:54:09 两次都是
-    // `replay → card yield seen now=430x932 → card closed by fullscreen launch`）。
-    // 这一版只加这一个键，方式和 0.3.45 不同：不改对象、不造副本，`setDictionary:`
-    // 换掉 `_payload` 再读回。读回照 `dictionary` 取键 —— 0.3.45 的 `susp=-2`
-    // 就是在对象上找这个键，找错了层。
+    // 0.3.48 默认给它写挂起位，Aevon(5)(2) 把这一步也判了：
+    //   act: cold replay why=hosted b=com.tencent.mqq at=928ms tick=8 susp=1 boxed=0
+    //   win: card yield seen b=com.tencent.mqq now=430x932 want=430x717
+    // 位写进去了、读得回来（1），FrontBoard 照样提交全屏事务；而且 App 侧此后
+    // 没有一行 `app: openurl` —— 928 ms 才交回的原件根本没进 URL 处理器。
+    // 所以既不改原件、也不指望它：默认原样交回，`susp=0` 就是「没动过」。
     int suspRead = AevonColdSuspendInPlace(options);
     // 桥那一路如果还挂着同一个 App，一并收掉：这条分享已经由原始请求接手了。
     // 不收的话它会在 0.45 s 后再投一次，那就是把同一条 URL 开两遍。

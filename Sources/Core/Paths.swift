@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.48"
+    public static let version = "0.3.49"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -386,16 +386,18 @@ public enum Aevon {
     public static let urlColdSharePassOffPath =
         "/var/mobile/Library/Logs/Aevon/url.coldshare.pass.off"
 
-    /// 0.3.45 — **冷启动分享「扣下 + 等托管就绪 + 交回原始 options」**的关闸
-    /// （存在 = 关，退回 0.3.44 的「冷分享交回系统」）。
+    /// 0.3.49 — **冷启动分享「扣下 + 等托管就绪 + 交回原始 options」的开闸**
+    /// （存在 = 走实验路；默认不存在 = 冷分享直接交回系统）。
     ///
-    /// 这一版换的不是投递口，是**投递时机**：ScreenCore 2.1.0 的整条链是
-    /// 「挂起启动 → 建跳转窗 → 等 `hostedContentIsReady` + 入场动画 → 交原始
-    /// options」，2 秒没就绪才把完整请求交系统一次。我们的桥恰恰相反 ——
-    /// scene 一登记就投，Aevon(267) 那 12 次回执全是 `dlg=- rsp=0`：那一拍
-    /// App 连 window scene 的 delegate 都还没有。
-    /// 默认开。要回到 0.3.44 的行为（不接管、让系统全屏）时手建这个文件，
-    /// 不必换包 —— 下一次真机就能用同一台机器做 A/B。
+    /// 0.3.45 起这一支是默认，两次真机都失败，且失败方式一模一样：交回之后的
+    /// 那一拍 FrontBoard 照样提交它自己的全屏事务（`card yield seen now=430x932`），
+    /// QQ 进程里没有 `app: openurl`。0.3.48 补的 `__ActivateSuspended=1` 读回
+    /// `susp=1` 也没有任何改变 —— 瓶颈在「我们代表系统去激活」这件事，不在参数。
+    /// 所以 0.3.49 把它降级成实验路，默认回到 0.3.44 的「冷分享交回系统」。
+    public static let urlColdHoldOnPath =
+        "/var/mobile/Library/Logs/Aevon/url.cold.hold.on"
+
+    /// 0.3.45 留下的强关闸（存在 = 一定不扣留，压过 `url.cold.hold.on`）。
     public static let urlColdHoldOffPath =
         "/var/mobile/Library/Logs/Aevon/url.cold.hold.off"
 
@@ -423,8 +425,13 @@ public enum Aevon {
     /// suspended:`，后者用公开常量 `FBSOpenApplicationOptionKeyActivateSuspended`），
     /// 这一版只补这一个键。
     ///
-    /// 手建这个文件 ⇒ 交回的是**一个字节没改的原件**（0.3.47 的形状，用于对照）；
-    /// 删掉它（默认）⇒ 交回前 `setDictionary:` 写上挂起位。
+    /// 手建 `url.cold.susp.on` ⇒ 交回前 `setDictionary:` 写上挂起位（实验）；
+    /// 默认不写 ⇒ 交回的是**一个字节没改的原件**。Aevon(5)(2) 已经量过写了也没用
+    /// （`susp=1` 之后照样 `card yield seen`），所以默认关。
+    public static let urlColdSuspOnPath =
+        "/var/mobile/Library/Logs/Aevon/url.cold.susp.on"
+
+    /// 0.3.48 留下的强关闸（存在 = 一定不写，压过 `url.cold.susp.on`）。
     public static let urlColdSuspOffPath =
         "/var/mobile/Library/Logs/Aevon/url.cold.susp.off"
 

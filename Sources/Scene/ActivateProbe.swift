@@ -272,15 +272,17 @@ public func AevonColdSharePassOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlColdSharePassOffPath) ? 0 : 1
 }
 
-/// 0.3.45 — 1 = 冷启动分享走「扣下原始请求、等托管就绪再交回」（默认），
-/// 0 = 建了 `url.cold.hold.off`，回到 0.3.44 的「交回系统」（不接管）。
+/// 0.3.49 — 1 = 冷启动分享走「扣下原始请求、等托管就绪再交回」（实验路），
+/// 0 = 默认，交回系统（不接管，全屏，但面板一定会出）。
 ///
-/// 判据只有一条：QQ / 微信侧 `app: openurl` 那一行的 `dlg=` 从 `-` 翻成类名。
-/// 翻过来了 = 这次交回终于落在一个有 window scene delegate 的进程里；
-/// 还是 `-` = 窗没长好，下一次要动的就是「等什么」而不是「怎么投」。
+/// 这条实验路在 0.3.45 / 0.3.48 上过两次真机，两次都是同一行
+/// `win: card yield seen now=430x932`，QQ 侧零 `app: openurl`。所以默认关；
+/// 要再做对照时手建 `url.cold.hold.on`，`url.cold.hold.off` 是它的强关。
 @_cdecl("AevonColdHoldOn")
 public func AevonColdHoldOn() -> Int32 {
-    FileManager.default.fileExists(atPath: Aevon.urlColdHoldOffPath) ? 0 : 1
+    let fm = FileManager.default
+    if fm.fileExists(atPath: Aevon.urlColdHoldOffPath) { return 0 }
+    return fm.fileExists(atPath: Aevon.urlColdHoldOnPath) ? 1 : 0
 }
 
 /// 0.3.46 — 1 = 托管就绪那一拍**先问桥**（0.3.45 的形状，A/B 用），
@@ -295,16 +297,18 @@ public func AevonColdBridgeOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlColdBridgeOnPath) ? 1 : 0
 }
 
-/// 0.3.48 — 1 = 交回原件之前写 `__ActivateSuspended`（默认），
-/// 0 = 一个字节都不改（0.3.47 的形状，A/B 对照）。
+/// 0.3.49 — 1 = 交回原件之前写 `__ActivateSuspended`（实验，默认关），
+/// 0 = 一个字节都不改（默认）。
 ///
-/// 判定只认日志里的 `susp=`：1 = 挂起位就在字典里；0 = 写了读回是 NO；
-/// -1 = 没写成（没有 `dictionary` 或没有 `setDictionary:`）；-2 = 写了读不回。
-/// 紧接着的那行 `win: card yield seen now=430x932` 是它生效与否的第二证据：
-/// 挂起位真的被 FrontBoard 认了，这次激活就不会把 scene 撑到 932。
+/// Aevon(5)(2) 已经量过：`act: cold replay … susp=1 boxed=0` 之后紧跟
+/// `win: card yield seen now=430x932` —— 位写进去了、读得回来，FrontBoard 照样
+/// 提交它自己的全屏事务。所以这一格默认关，只作为「换一台设备/换一个系统版本
+/// 再验一次」的开关。
 @_cdecl("AevonColdSuspOn")
 public func AevonColdSuspOn() -> Int32 {
-    FileManager.default.fileExists(atPath: Aevon.urlColdSuspOffPath) ? 0 : 1
+    let fm = FileManager.default
+    if fm.fileExists(atPath: Aevon.urlColdSuspOffPath) { return 0 }
+    return fm.fileExists(atPath: Aevon.urlColdSuspOnPath) ? 1 : 0
 }
 
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。

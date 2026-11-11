@@ -1195,6 +1195,10 @@ def main():
                   b"win: hosted probe n=",
                   b"AevonColdHoldOn",
                   b"/var/mobile/Library/Logs/Aevon/url.cold.hold.off",
+                  # 0.3.49 — **冷分享扣留降级成实验路**：默认不存在这个文件，
+                  # `AevonColdHoldOn()` 回 0 ⇒ 走上面那条 `pass why=coldshare`。
+                  # 两条文件路径都要在包里：一条开、一条强关，A/B 时不换包。
+                  b"/var/mobile/Library/Logs/Aevon/url.cold.hold.on",
                   # 0.3.46 — 「就绪先问桥」的 A/B 闸。它必须真的是一把**运行期**
                   # 文件闸：写成编译期常量时，CI 的 -O2 + dead_strip 会把没人
                   # 调用的 `AevonColdBridgeSend` 整段删掉，连 `act: cold bridge`
@@ -1213,6 +1217,9 @@ def main():
                   # `susp=` 的四个值：1 就位 / 0 写了读回 NO / -1 没写成 / -2 读不回。
                   b"AevonColdSuspOn",
                   b"/var/mobile/Library/Logs/Aevon/url.cold.susp.off",
+                  # 0.3.49 — 写挂起位降级成实验（默认不写）。Aevon(5)(2) 的
+                  # `susp=1` + `card yield seen now=430x932` 证明它在这一层不起作用。
+                  b"/var/mobile/Library/Logs/Aevon/url.cold.susp.on",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`
