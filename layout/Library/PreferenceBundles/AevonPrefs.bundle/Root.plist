@@ -192,7 +192,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>Aevon 0.3.14 · 装完或改完闸门需要重启桌面。</string>
+			<string>Aevon 0.3.15 · 装完或改完闸门需要重启桌面。</string>
 			<key>label</key>
 			<string></string>
 		</dict>

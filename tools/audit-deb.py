@@ -1214,13 +1214,13 @@ def main():
                   b"probe: H1 shape skip (%s)",
                   b"probe: H2 n=%ld app=%s ret=%s",
                   b"probe: H4 app=%s cls=%s opt=%s fg=%d",
-                  # 0.3.14 — 一次装机抓全部：TrollOpen + Mango 的打开/建scene/承载入口。
-                  # 全部是纯透传壳，参数与返回值原样；结构体/浮点签名一律跳过。
-                  b"tap: armed %s %s argc=%d",
-                  b"tap: skip %s %s shape(struct/double)",
-                  b"tap: none %s",
-                  b"tap: done count=%d",
-                  b"tap: %s.%s a1=%s a2=%s n=%d",
+                  # 0.3.15 — 0.3.14 的通用透传壳已整段删除（Aevon(240) 崩在
+                  # `objc_retain_x20`，根因是统一 `void*` 壳破坏了 ARC 返回语义与
+                  # callee-saved 寄存器契约）。这里改成**纯只读普查**：
+                  # 只问 owner / 返回类型 / 参数个数 / 编码，一次 hook 都不装。
+                  b"census: %s owner=%s ret=%c argc=%d enc=%s",
+                  b"census: %s absent",
+                  b"census: done found=%d missing=%d total=%d",
                   b"presenter: birth fail b=%s why=nil id=%s",
                   b"presenter: birth skip b=%s why=nopm",
                   b"presenter: birth threw b=%s why=%s",

@@ -5016,40 +5016,104 @@ static AevonHState AevonHStat = {0, 0, 0, 0};
 // 这次用 `exact` + 统一解析，装不上的会明说原因。
 // ============================================================================
 
-/// 一条普查记录。
+// ============================================================================
+// 0.3.15 — **撤掉 0.3.14 的通用透传壳，改为纯只读普查**
+//
+// ⛔ 0.3.14 的崩溃（Aevon(240)）：
+//
+//   SpringBoard  -[SBSystemShellEmbeddedDisplayController _createSystemShellSceneWithOrientation:]
+//   Aevon.dylib  +92076
+//   FrontBoard   -[FBSceneManager createSceneWithDefinition:initialParameters:]
+//   libobjc      objc_retain_x20            ← KERN_INVALID_ADDRESS at 0x20
+//
+// 根因：我用一个统一的 `^void *(id, void*, void*, ...)` block 去透传**所有**入口，
+// 只校验了「参数个数」与「无结构体/浮点」，**没有管返回类型与寄存器契约**。
+//
+// `imp_implementationWithBlock` 的 trampoline 按 block 的签名准备返回寄存器；
+// block 声明 `void *` 时它按整数返回，而调用方（系统）按对象返回做 ARC retain。
+// 更直接的一点：`objc_retain_x20` 里的 **x20 是 callee-saved** —— 系统依赖它在
+// 调用前后不变，而我们的 block 没有义务保持它，编译器可以自由覆盖。
+//
+// 所以「通用透传」这条路在 ARC + 私有 ABI 下**不成立**。0.3.11 之所以能跑，
+// 是因为那一个壳**逐个手写、返回类型声明成 `id`**；我把它推广成通用壳就错了。
+//
+// 这一版把 tap 系统整段删掉，只留**纯只读普查**：
+//   · 只问「类在不在 / 方法在不在 / 编码是什么 / 参数几个」
+//   · 一次 `method_setImplementation` 都不做
+//   · 因此不可能因签名不符而崩
+//
+// 下一版（0.3.16）若还要装壳，必须**逐个手写**、返回类型与参数类型全对，
+// 且一次只装一个、单独验证。
+// ============================================================================
+
+/// 一条普查记录（只读，不装）。
 typedef struct {
-    char cls[56];
-    char sel[132];
-    char enc[88];
-    int  installed;   // 1 = 装上了
-    int  sampled;     // 已记几条现场
-} AevonTapRow;
+    const char *sel;
+    const char *tag;
+    const char *hosts[4];
+} AevonCensusTarget;
 
-#define AEVON_TAP_MAX 24
-static AevonTapRow AevonTapRows[AEVON_TAP_MAX];
-static int AevonTapCount = 0;
-
-/// 从 type encoding 里数「self/sel 之后还有几个参数」。
+/// 候选清单：TrollOpen 与 Mango 用到的打开 / 建 scene / 承载入口。
 ///
-/// 编码形如 `v56@0:8@16@24@32@40@?48`：`<返回><总长><类型><偏移>...`。
-/// 跳过前两个（self 的 `@0` 与 sel 的 `:8`），剩下的就是真参数。
-static int AevonTapArgCount(const char *enc) {
+/// 名字全部来自两家的字符串表（`三方逆向` 那一轮统计），不是猜的。
+static const AevonCensusTarget AevonCensusTargets[] = {
+    // ---- 打开入口 ----
+    {"systemService:handleOpenApplicationRequest:withCompletion:", "open.sysvc",
+     {"SBMainWorkspace", "FBSystemService", NULL, NULL}},
+    {"openApplication:withOptions:completion:", "mango.open1", {"SBMainWorkspace", NULL, NULL, NULL}},
+    {"openApplication:withOptions:originator:requestID:completion:", "mango.open2",
+     {"SBMainWorkspace", NULL, NULL, NULL}},
+    {"application:handleOpenURL:", "app.openurl", {"UIApplication", "SpringBoard", NULL, NULL}},
+    {"openURL:options:completionHandler:", "ls.openurl", {"LSApplicationWorkspace", NULL, NULL, NULL}},
+
+    // ---- 建 scene ----
+    {"createSceneWithDefinition:initialParameters:", "scene.create2", {"FBSceneManager", NULL, NULL, NULL}},
+    {"initWithSceneDefinition:parameters:transitionContext:", "scene.init3", {"FBScene", NULL, NULL, NULL}},
+    {"destroyScene:withTransitionContext:", "scene.destroy", {"FBSceneManager", NULL, NULL, NULL}},
+    {"sceneID:updateWithSettingsDiff:transitionContext:completion:", "scene.upd4",
+     {"SBSceneManager", "SBMainDisplaySceneManager", "SBSceneManagerCoordinator", NULL}},
+    {"_performActionsForUIScene:withUpdatedFBSScene:settingsDiff:fromSettings:transitionContext:lifecycleActionType:",
+     "scene.perform", {"SBMainWorkspace", "SpringBoard", NULL, NULL}},
+    {"amendSceneSettings:forScene:", "scene.amend", {"SpringBoard", NULL, NULL, NULL}},
+    {"_createApplicationSceneTransitionContextFromContext:entity:", "scene.ctx2",
+     {"SpringBoard", NULL, NULL, NULL}},
+    {"acceptsFullScreenTransitionFromSceneWithIdentifier:ofBundleId:", "scene.accept",
+     {"SpringBoard", NULL, NULL, NULL}},
+
+    // ---- 承载 / 窗口 ----
+    {"addAppLayoutForDisplayItem:windowScene:completion:", "layout.add",
+     {"SBMainSwitcherControllerCoordinator", "SpringBoard", NULL, NULL}},
+    {"addCenterRoleAppLayoutForDisplayItem:windowScene:completion:", "layout.addC",
+     {"SBMainSwitcherControllerCoordinator", "SpringBoard", NULL, NULL}},
+    {"_addPresentable:withTransitioningDelegate:incrementingTier:", "present.add",
+     {"SpringBoard", "SBTransientOverlayPresenter", NULL, NULL}},
+    {"_dismissPresentable:withReason:animated:userInfo:", "present.dismiss",
+     {"SpringBoard", "SBTransientOverlayPresenter", NULL, NULL}},
+    {"newSceneViewWithReferenceSize:contentOrientation:containerOrientation:hostRequester:", "host.new",
+     {"SBDeviceApplicationSceneHandle", NULL, NULL, NULL}},
+    {"initWithDeviceApplicationSceneHandle:layoutRole:", "host.init2",
+     {"SBDeviceApplicationSceneViewController", NULL, NULL, NULL}},
+    {"initWithWindowScene:role:debugName:", "win.init3", {"UIWindow", NULL, NULL, NULL}},
+    {"layoutSlotForWindow:springBoardOrientation:", "layout.slot", {"SpringBoard", NULL, NULL, NULL}},
+};
+
+#define AEVON_CENSUS_TARGETS (sizeof(AevonCensusTargets) / sizeof(AevonCensusTargets[0]))
+
+/// 从 type encoding 里数真参数个数（跳过 self / _cmd）。
+static int AevonCensusArgc(const char *enc) {
     if (enc == NULL) return -1;
     const char *p = enc;
-    // 返回类型（可能带长度前缀如 `@24`）
     while (*p != '\0' && strchr("v@*#:", *p) == NULL) p++;
     if (*p == '\0') return -1;
-    p++;                                    // 跳过返回类型
-    while (*p >= '0' && *p <= '9') p++;     // 跳过总长
-    int seen = 0;
-    int args = 0;
+    p++;
+    while (*p >= '0' && *p <= '9') p++;
+    int seen = 0, args = 0;
     while (*p != '\0') {
-        // 类型字符（可能带引号或尖括号，这里只按单字符判）
-        if (*p == '"') {                     // @"ClassName"
+        if (*p == '"') {
             p++;
             while (*p != '\0' && *p != '"') p++;
             if (*p == '"') p++;
-        } else if (*p == '{' || *p == '(') { // 结构体 / 联合体
+        } else if (*p == '{' || *p == '(') {
             int depth = 0;
             do {
                 if (*p == '{' || *p == '(') depth++;
@@ -5059,245 +5123,70 @@ static int AevonTapArgCount(const char *enc) {
         } else {
             p++;
         }
-        while (*p >= '0' && *p <= '9') p++;  // 偏移
+        while (*p >= '0' && *p <= '9') p++;
         seen++;
-        if (seen > 2) args++;                // 前两个是 self / _cmd
+        if (seen > 2) args++;
     }
     return args;
 }
 
-/// 编码是否「可以安全地用指针透传」。
-///
-/// 只有一种情况不行：参数里有结构体或浮点。arm64 上结构体可能走多个寄存器或
-/// 栈，浮点走 v 寄存器 —— 用 `void *` 声明去转发会丢数据。对象、block、SEL、
-/// BOOL、整型都是单寄存器，透传是安全的。
-static int AevonTapShapeOK(const char *enc) {
-    if (enc == NULL) return 0;
-    for (const char *p = enc; *p != '\0'; p++) {
-        if (*p == '{' || *p == '(') return 0;   // 结构体 / 联合体
-        if (*p == 'd' || *p == 'f') return 0;   // double / float
-    }
-    return 1;
+/// 返回类型字符（`@` 对象 / `v` void / `B` BOOL / `q` 整数 …）。
+static char AevonCensusRet(const char *enc) {
+    if (enc == NULL || enc[0] == '\0') return '?';
+    return enc[0];
 }
 
-/// 一个对象的安全名字：先判地址像不像用户态指针，再取类名。
-///
-/// 0.2.91 的教训：`_Block_signature` 被当成结构体读，读到签名串自身的字节，
-/// `strnlen` 踩空直接 EXC_BAD_ACCESS。这里同样的道理 —— 不确认是对象就不碰。
-static void AevonTapName(void *p, char *out, size_t size) {
-    if (out == NULL || size == 0) return;
-    out[0] = '\0';
-    if (p == NULL) { snprintf(out, size, "nil"); return; }
-    uintptr_t a = (uintptr_t)p;
-    if (a < 0x100000000ULL || a > 0x8000000000ULL) {
-        snprintf(out, size, "raw:0x%llx", (unsigned long long)a);
-        return;
-    }
-    @try {
-        const char *cn = object_getClassName((__bridge id)p);
-        if (cn == NULL) { snprintf(out, size, "?"); return; }
-        // 字符串就直接给内容（截断），其余给类名。
-        if (strcmp(cn, "__NSCFString") == 0 || strcmp(cn, "NSTaggedPointerString") == 0 ||
-            strcmp(cn, "__NSCFConstantString") == 0 || strcmp(cn, "NSMutableString") == 0 ||
-            strcmp(cn, "__NSCFString") == 0) {
-            const char *s = [(__bridge NSString *)p UTF8String];
-            if (s != NULL) {
-                snprintf(out, size, "\"%.*s\"", (int)(size > 48 ? 48 : size - 1), s);
-                return;
-            }
-        }
-        const char *bi = NULL;
-        SEL bSel = NSSelectorFromString(@"bundleIdentifier");
-        if ([(__bridge id)p respondsToSelector:bSel]) {
-            @try {
-                id b = ((id (*)(id, SEL))objc_msgSend)((__bridge id)p, bSel);
-                if ([b isKindOfClass:[NSString class]]) bi = [(NSString *)b UTF8String];
-            } @catch (__unused NSException *e) {}
-        }
-        if (bi != NULL) snprintf(out, size, "#%s(%s)", cn, bi);
-        else snprintf(out, size, "#%s", cn);
-    } @catch (__unused NSException *e) {
-        snprintf(out, size, "!");
-    }
-}
-
-
-/// 通用透传壳的安装。
-///
-/// **为什么用 `imp_implementationWithBlock` 而不是手写汇编**：block 的签名字符串
-/// 由运行时从编码里读，参数超了它会自己回退到 trampoline。我们只需要保证
-/// 「block 收到的参数个数与编码一致」—— 这一步由 `AevonTapArgCount` 决定。
-///
-/// 传参上限 **6 个真参数**（加 self/_cmd 共 8 格）。查过的目标里最多 5 个
-/// （`_openURLCore` 6 参、`_activateBundleID` 7 参 —— 后者超限，跳过）。
-static BOOL AevonTapInstall(NSMutableString *out, Class cls, const char *selName,
-                            const char *enc, const char *tag) {
-    if (cls == Nil || selName == NULL || enc == NULL) return NO;
-
-    // 结构体 / 浮点：不装。宁可少几行读数，不冒破坏寄存器的风险。
-    if (!AevonTapShapeOK(enc)) {
-        [out appendFormat:@"tap: skip %s %s shape(struct/double)\n", tag, selName];
-        return NO;
-    }
-    int argc = AevonTapArgCount(enc);
-    if (argc < 0 || argc > 6) {
-        [out appendFormat:@"tap: skip %s %s argc=%d\n", tag, selName, argc];
-        return NO;
-    }
-
-    SEL sel = sel_registerName(selName);
-    Method m = class_getInstanceMethod(cls, sel);
-    if (m == NULL) {
-        [out appendFormat:@"tap: skip %s %s nomethod\n", tag, selName];
-        return NO;
-    }
-    IMP prev = method_getImplementation(m);
-    if (prev == NULL) {
-        [out appendFormat:@"tap: skip %s %s noimp\n", tag, selName];
-        return NO;
-    }
-
-    // 记一行普查结果（不管装没装上，先让人看见编码）。
-    if (AevonTapCount < AEVON_TAP_MAX) {
-        AevonTapRow *row = &AevonTapRows[AevonTapCount++];
-        snprintf(row->cls, sizeof(row->cls), "%s", class_getName(cls));
-        snprintf(row->sel, sizeof(row->sel), "%s", selName);
-        snprintf(row->enc, sizeof(row->enc), "%s", enc);
-        row->installed = 1;
-        row->sampled = 0;
-    }
-    int rowIndex = AevonTapCount - 1;
-
-    // 统一按 6 个 void* 声明，实际用几个由 argc 决定 —— block 内部只用前 argc 个。
-    // 这是安全的：多声明的寄存器在实际调用时不会被读。
-    __block IMP orig = prev;
-    id blk = ^void *(void *self_, void *a1, void *a2, void *a3,
-                     void *a4, void *a5, void *a6) {
-        // 日志单独 @try：写日志炸了也不能影响转发。
-        @try {
-            if (rowIndex >= 0 && rowIndex < AEVON_TAP_MAX &&
-                __sync_fetch_and_add(&AevonTapRows[rowIndex].sampled, 1) < 6) {
-                char n1[112] = {0}, n2[112] = {0};
-                AevonTapName(a1, n1, sizeof(n1));
-                AevonTapName(a2, n2, sizeof(n2));
-                AevonLogRaw([[NSString stringWithFormat:
-                              @"tap: %s.%s a1=%s a2=%s n=%d",
-                              AevonTapRows[rowIndex].cls, AevonTapRows[rowIndex].sel,
-                              n1, n2, (int)AevonTapRows[rowIndex].sampled]
-                             UTF8String]);
-            }
-        } @catch (__unused NSException *e) {}
-
-        // 原样转发：按 argc 决定用几个参数。
-        typedef void *(*F0)(void *);
-        typedef void *(*F1)(void *, void *);
-        typedef void *(*F2)(void *, void *, void *);
-        typedef void *(*F3)(void *, void *, void *, void *);
-        typedef void *(*F4)(void *, void *, void *, void *, void *);
-        typedef void *(*F5)(void *, void *, void *, void *, void *, void *);
-        typedef void *(*F6)(void *, void *, void *, void *, void *, void *, void *);
-        switch (argc) {
-            case 0: return ((F0)orig)(self_);
-            case 1: return ((F1)orig)(self_, a1);
-            case 2: return ((F2)orig)(self_, a1, a2);
-            case 3: return ((F3)orig)(self_, a1, a2, a3);
-            case 4: return ((F4)orig)(self_, a1, a2, a3, a4);
-            case 5: return ((F5)orig)(self_, a1, a2, a3, a4, a5);
-            default: return ((F6)orig)(self_, a1, a2, a3, a4, a5, a6);
-        }
-    };
-    IMP repl = imp_implementationWithBlock(blk);
-    if (repl == NULL) {
-        [out appendFormat:@"tap: skip %s %s noblock\n", tag, selName];
-        if (AevonTapCount > 0) AevonTapRows[AevonTapCount-1].installed = 0;
-        return NO;
-    }
-    method_setImplementation(m, repl);
-    [out appendFormat:@"tap: armed %s %s argc=%d\n", tag, selName, argc];
-    return YES;
-}
-
-
-/// 候选清单：TrollOpen 与 Mango 实际用到的打开/建scene/承载入口。
-///
-/// 名字全部来自两家的字符串表（`三方逆向` 那一轮统计），不是猜的。
-/// `hosts` 是「可能实现它的类」，逐个试 —— 私有方法的宿主类经常与预期不同
-/// （`_activateBundleID` 在 FBSystemService 而不是 SBMainWorkspace 就是例子）。
-typedef struct {
-    const char *sel;
-    const char *tag;
-    const char *hosts[4];
-} AevonTapTarget;
-
-static const AevonTapTarget AevonTapTargets[] = {
-    // ---- 打开入口（TrollOpen 三层 + Mango 一层）----
-    {"systemService:handleOpenApplicationRequest:withCompletion:",
-     "open.sysvc", {"SBMainWorkspace", "FBSystemService", NULL, NULL}},
-    {"openApplication:withOptions:completion:", "mango.open1", {"SBMainWorkspace", NULL, NULL, NULL}},
-    {"openApplication:withOptions:originator:requestID:completion:", "mango.open2",
-     {"SBMainWorkspace", NULL, NULL, NULL}},
-    {"application:handleOpenURL:", "app.openurl", {"UIApplication", "SpringBoard", NULL, NULL}},
-
-    // ---- 激活 / 建 scene ----
-    {"createSceneWithDefinition:initialParameters:", "scene.create2", {"FBSceneManager", NULL, NULL, NULL}},
-    {"initWithSceneDefinition:parameters:transitionContext:", "scene.init3", {"FBScene", NULL, NULL, NULL}},
-    {"destroyScene:withTransitionContext:", "scene.destroy", {"FBSceneManager", NULL, NULL, NULL}},
-
-    // ---- 承载 / 窗口（TrollOpen 的 overlay 路线）----
-    {"addAppLayoutForDisplayItem:windowScene:completion:", "layout.add",
-     {"SBMainSwitcherControllerCoordinator", "SpringBoard", NULL, NULL}},
-    {"_addPresentable:withTransitioningDelegate:incrementingTier:", "present.add",
-     {"SpringBoard", "SBTransientOverlayPresenter", NULL, NULL}},
-    {"_dismissPresentable:withReason:animated:userInfo:", "present.dismiss",
-     {"SpringBoard", "SBTransientOverlayPresenter", NULL, NULL}},
-
-    // ---- 场景视图 / 宿主（Mango 路线）----
-    {"newSceneViewWithReferenceSize:contentOrientation:containerOrientation:hostRequester:",
-     "host.new", {"SBDeviceApplicationSceneHandle", NULL, NULL, NULL}},
-    {"initWithDeviceApplicationSceneHandle:layoutRole:", "host.init2",
-     {"SBDeviceApplicationSceneViewController", NULL, NULL, NULL}},
-    {"initWithWindowScene:role:debugName:", "win.init3", {"UIWindow", NULL, NULL, NULL}},
-    {"sceneID:updateWithSettingsDiff:transitionContext:completion:", "scene.upd4",
-     {"SBSceneManager", "SBMainDisplaySceneManager", NULL, NULL}},
-    {"_performActionsForUIScene:withUpdatedFBSScene:settingsDiff:fromSettings:transitionContext:lifecycleActionType:",
-     "scene.perform", {"SpringBoard", "SBMainWorkspace", NULL, NULL}},
-    {"acceptsFullScreenTransitionFromSceneWithIdentifier:ofBundleId:", "scene.accept",
-     {"SpringBoard", NULL, NULL, NULL}},
-    {"amendSceneSettings:forScene:", "scene.amend", {"SpringBoard", NULL, NULL, NULL}},
-    {"_createApplicationSceneTransitionContextFromContext:entity:", "scene.ctx2",
-     {"SpringBoard", NULL, NULL, NULL}},
-};
-
-#define AEVON_TAP_TARGETS (sizeof(AevonTapTargets) / sizeof(AevonTapTargets[0]))
-
-/// 总入口：开机装一次，幂等。
-static void AevonTapInstallAll(NSMutableString *out) {
+/// 纯只读普查：一次 `method_setImplementation` 都不做。
+static void AevonCensusAll(NSMutableString *out) {
     static int done = 0;
     if (done) return;
     done = 1;
 
-    for (size_t i = 0; i < AEVON_TAP_TARGETS; i++) {
-        const AevonTapTarget *t = &AevonTapTargets[i];
+    int found = 0, missing = 0;
+    for (size_t i = 0; i < AEVON_CENSUS_TARGETS; i++) {
+        const AevonCensusTarget *t = &AevonCensusTargets[i];
         SEL sel = NSSelectorFromString([NSString stringWithUTF8String:t->sel]);
         if (sel == NULL) continue;
 
+        // 逐个候选宿主问：这个类（或它的父类）有没有实现这个方法。
         BOOL placed = NO;
         for (int h = 0; h < 4 && t->hosts[h] != NULL && !placed; h++) {
             Class cls = objc_getClass(t->hosts[h]);
             if (cls == Nil) continue;
             Method m = class_getInstanceMethod(cls, sel);
             if (m == NULL) continue;
+            // 反查真正的实现者（沿继承链找自有实现）。
+            Class owner = NULL;
+            for (Class c = cls; c != Nil; c = class_getSuperclass(c)) {
+                unsigned int n = 0;
+                Method *own = class_copyMethodList(c, &n);
+                BOOL hit = NO;
+                for (unsigned int k = 0; own != NULL && k < n; k++) {
+                    if (method_getName(own[k]) == sel) { hit = YES; break; }
+                }
+                if (own != NULL) free(own);
+                if (hit) { owner = c; break; }
+            }
             const char *enc = method_getTypeEncoding(m);
-            if (enc == NULL) continue;
-            // 同一选择子只在**第一个**答得上来的宿主上装，避免装两层。
-            placed = AevonTapInstall(out, cls, t->sel, enc, t->tag);
+            out = out;  // 保持参数被使用
+            [out appendFormat:@"census: %s owner=%s ret=%c argc=%d enc=%s\n",
+                              t->tag,
+                              owner != NULL ? class_getName(owner) : "?",
+                              AevonCensusRet(enc),
+                              AevonCensusArgc(enc),
+                              enc != NULL ? enc : "?"];
+            placed = YES;
+            found += 1;
         }
         if (!placed) {
-            [out appendFormat:@"tap: none %s\n", t->tag];
+            [out appendFormat:@"census: %s absent\n", t->tag];
+            missing += 1;
         }
     }
-    [out appendFormat:@"tap: done count=%d\n", AevonTapCount];
+    [out appendFormat:@"census: done found=%d missing=%d total=%d\n",
+                      found, missing, (int)AEVON_CENSUS_TARGETS];
 }
+
 
 // `AevonActName` 定义在文件很靠后（激活快照那一段），这里先声明。
 static const char *AevonActName(id object, char *slot, size_t size);
@@ -5448,9 +5337,9 @@ void AevonLandingBoot(void) {
     // 0.3.11 — H 线：问 `_targetWindowSceneForApplication:…` 会不会在我们需要的
     // 那一拍被调用。装上钩子但**原样尾调**，参数与返回值一个字节都不改。
     AevonHInstall(out);
-    // 0.3.14 — 一次装机抓全部：TrollOpen / Mango 用到的打开、建 scene、承载入口
-    // 一次装齐。全部是纯透传壳，参数与返回值原样。
-    AevonTapInstallAll(out);
+    // 0.3.15 — 0.3.14 的通用透传壳已整段删除（它会崩，见文件头那段 .ips 分析）。
+    // 现在只做**纯只读普查**：问类/方法/编码/参数个数，一次 hook 都不装。
+    AevonCensusAll(out);
     // 0.3.10 — G 线：延时 6 秒自枚举一次。
     // 开机那一刻前台通常还是 SpringBoard 自己的光圈窗帘，6 秒后用户多半已经
     // 打开过一个 App —— 那时才有一个「真实存在的 App scene」可以问。
