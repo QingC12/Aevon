@@ -364,6 +364,16 @@ NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL v
 ///   0  no such method on UIApplication or LSApplicationWorkspace
 NSInteger AevonLaunchSuspended(id _Nullable application, NSString *_Nullable bundleID);
 
+/// 0.3.31 — 「带 URL 的挂起启动」。`suspended` 仍是 YES（进程起、scene 造、
+/// 不占屏），只是把 URL 交给 FrontBoard 让它自己装进新 scene 的 transitionContext。
+///   1  系统接了这次启动（URL 跟着它走）
+///   0  没有那两个符号 / 参数不成形 / 系统拒了（调用方退回纯挂起启动）
+int AevonLaunchSuspendedWithURL(const char *_Nullable bundleID, const char *_Nullable url);
+
+/// 0.3.31 — 这次启动要不要带 URL。1 = 带（`out` 里是 URL），0 = 不带。
+/// 条件：8 s 内拒答过、bundle 就是被拒那个、`url.launch.off` 不存在。
+int AevonLaunchURLForBundle(const char *_Nullable bundleID, char *_Nullable out, int cap);
+
 // MARK: - 0.2.13 自建 scene
 
 // 这一组是整条链上第一次「scene 不是系统给的」。路线来自开源母本

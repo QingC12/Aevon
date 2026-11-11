@@ -1812,11 +1812,32 @@ zStackParticipantDidChange:
         // 激活时造，我们只等、只贴。一个私有构造器都不碰。
         _ = ownAt
         let launchAt = CFAbsoluteTimeGetCurrent()
-        let door = AevonLaunchSuspended(sharedApplication(), bundleID)
-        Log.write(String(format: "win: own retired %@ door=%ld t=%ldms wait=%ldms",
-                         bundleID, door,
-                         Int((CFAbsoluteTimeGetCurrent() - launchAt) * 1000),
-                         Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
+        // 0.3.31 — 冷启动唯一没试过的投递口：把 URL 交给**启动那一拍**。
+        //
+        // 0.3.26 拒答之后 App 是我们自己拉起来的，而 `launchApplicationWithIdentifier:
+        // suspended:` 没有 URL 参数 —— 所以 URL 只能事后补。事后补的两条路现在都
+        // 有真机读数了：0.3.29 的三发 scene action 全落在启动窗口里（`deny 02` →
+        // `boot 03` → 三发 `03/04/06`、`geom late 06`），0.3.30 的 tctx 注入装上了
+        // （`put ok=1 had=0`）QQ 也不认。剩下唯一和原生分享一模一样的是让 FrontBoard
+        // 自己把 URL 装进新 scene —— 那就得让 URL 出现在**启动请求**里。
+        //
+        // `carried=1` 时后面的补投与 tctx 注入都会自己让路（C 侧 `AevonURLCarriedOk`），
+        // 不会叠出第二个面板。符号不存在或系统拒了（`door=0`）就退回原来的纯挂起启动。
+        var urlBuf = [CChar](repeating: 0, count: 1024)
+        var door: Int = 0
+        if AevonLaunchURLForBundle(bundleID, &urlBuf, Int32(urlBuf.count)) == 1 {
+            let asked = AevonLaunchSuspendedWithURL(bundleID, &urlBuf)
+            if asked == 1 { door = 1 }
+            Log.write(String(format: "win: own launch url=1 door=%ld b=%@",
+                             door, bundleID))
+        }
+        if door != 1 {
+            door = AevonLaunchSuspended(sharedApplication(), bundleID)
+            Log.write(String(format: "win: own retired %@ door=%ld t=%ldms wait=%ldms",
+                             bundleID, door,
+                             Int((CFAbsoluteTimeGetCurrent() - launchAt) * 1000),
+                             Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
+        }
         guard door == 1 else {
             AevonHookDisarm(bundleID)
             fallback("own retired door=" + String(door))

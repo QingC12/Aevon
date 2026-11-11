@@ -980,7 +980,7 @@ def main():
                   #
                   # 三串分别是：冷/热判定（下一份日志的第一判据）/ 投出去了还是被补发 /
                   # 补发的关闸。少任何一串都说明这一版没进包。
-                  b"act: deny cold=%d pid=%d run=%d shots=%d b=%s",
+                  b"act: deny cold=%d pid=%d run=%d seen=%d shots=%d b=%s",
                   b"act: deliver done tick=%d cold=%d left=%d b=%s",
                   b"AevonURLShotOff",
                   b"/var/mobile/Library/Logs/Aevon/url.shot.off",
@@ -996,6 +996,24 @@ def main():
                   b"act: deliver skip why=tctx b=%s",
                   b"AevonURLTctxOff",
                   b"/var/mobile/Library/Logs/Aevon/url.tctx.off",
+                  # 0.3.31 — **把 URL 交给启动那一拍。**
+                  #
+                  # Aevon(254)：0.3.30 的 tctx 注入在 QQ 那张 scene 出生那一拍
+                  # 真的装上了（`put ok=1 had=0 cls=UIOpenURLAction`），QQ 照样停首页；
+                  # 0.3.29 的三发 scene action 也全落在启动窗口内（deny 02 → boot 03
+                  # → 三发 03/04/06、geom late 06）。**我们装的那份它不认。**
+                  # 剩下唯一同形的做法是让 FrontBoard 自己装：URL 进启动请求。
+                  # 五串分别是：启动那一拍的系统应答（how/ret）/ 参数不成形 /
+                  # 我们那一发启动要放行（否则自己拒自己）/ 已经跟着启动走了就别再补投 /
+                  # 闸的符号与文件名。
+                  b"act: launch url how=%s ret=%d n=%ld b=%s url=%.80s",
+                  b"act: launch url=0 why=badurl",
+                  b"act: pass why=carry sync=%d b=%s",
+                  b"act: deliver skip why=launch b=%s",
+                  b"act: tctx skip why=launch",
+                  b"AevonURLLaunchOff",
+                  b"/var/mobile/Library/Logs/Aevon/url.launch.off",
+                  b"win: own launch url=1 door=%ld b=%@",
                   # 两把闸自己的路径常量 —— 文件名写错就等于没有闸。
                   b"/var/mobile/Library/Logs/Aevon/url.deny.off",
                   b"/var/mobile/Library/Logs/Aevon/url.redeliver.off",

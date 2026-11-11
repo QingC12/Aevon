@@ -200,6 +200,16 @@ public func AevonURLTctxOff() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlTctxOffPath) ? 1 : 0
 }
 
+/// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
+///
+/// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、
+/// tctx 注入）都已实测无效，而原生分享之所以「一点就进选好友页」，正是因为
+/// URL 在启动请求里、由 FrontBoard 自己装进新 scene。
+@_cdecl("AevonURLLaunchOff")
+public func AevonURLLaunchOff() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlLaunchOffPath) ? 1 : 0
+}
+
 /// 0.3.5 — 在 presenter 的 `presentationContext` 上写 `setResizesHostedContext:`。
 ///
 /// `setResizesHostedContext:` 的 owner 是 `UIMutableScenePresentationContext`

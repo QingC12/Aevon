@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.30"
+    public static let version = "0.3.31"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -284,6 +284,19 @@ public enum Aevon {
     /// 补上。装成功就**不再**走 scene action（`act: deliver skip why=tctx`）。
     /// 出问题建这个空文件即可退回 0.3.29 的行为，不必换包。
     public static let urlTctxOffPath     = "/var/mobile/Library/Logs/Aevon/url.tctx.off"
+
+    /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
+    ///
+    /// Aevon(254) 把前两条投递口都判完了：0.3.29 的三发 scene action 全部落在
+    /// 启动窗口里（`deny 02` → `boot 03` → 三发 `03/04/06`、`geom late 06`），
+    /// 0.3.30 的 tctx 注入在 QQ 那张 scene 出生那一拍装上了（`put ok=1 had=0`），
+    /// QQ 照样停首页。也就是说**我们装的那份它不认**。
+    ///
+    /// 剩下唯一和原生分享完全同形的做法，是把 URL 交给启动请求本身
+    /// （`SBSLaunchApplicationWithIdentifierAndURL[AndLaunchOptions]`）：
+    /// action 由 FrontBoard 自己装进新 scene，我们一份都不碰。成功之后补投与
+    /// tctx 注入都会自动让路（`act: deliver skip why=launch`）。
+    public static let urlLaunchOffPath   = "/var/mobile/Library/Logs/Aevon/url.launch.off"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"
