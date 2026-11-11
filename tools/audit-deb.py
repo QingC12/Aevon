@@ -1206,6 +1206,14 @@ def main():
                   b"probe: G1 scene.%s -> %s",
                   b"probe: G2 %s vc=%s view=%s size=%.0fx%.0f",
                   b"probe: G3 %s resize=%d bg=%d mode=%d grabber=%d",
+                  # 0.3.11 — H 线：`_targetWindowSceneForApplication:…` 是
+                  # 「决定 App 落到哪个 windowScene」的那一拍。四个参数全是
+                  # 对象/BOOL，返回一个对象，hook 风险低。母版没用过它，
+                  # 所以这一版只装壳、原样尾调、只记读数。
+                  b"probe: H1 owner=SBMainWorkspace enc=%s",
+                  b"probe: H1 shape skip (%s)",
+                  b"probe: H2 n=%ld app=%s ret=%s",
+                  b"probe: H4 app=%s opt=%s fg=%d",
                   b"presenter: birth fail b=%s why=nil id=%s",
                   b"presenter: birth skip b=%s why=nopm",
                   b"presenter: birth threw b=%s why=%s",

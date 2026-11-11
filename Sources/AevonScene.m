@@ -4954,6 +4954,130 @@ static void AevonActInstall(NSMutableString *out) {
     }
 }
 
+// ============================================================================
+// 0.3.11 — H 线：`_targetWindowSceneForApplication:preferringDisplay:requireForeground:options:`
+//
+// 这条是 Aevon(236) 的开机普查自己捞出来的（`surf: SBMainWorkspace~applic` 那一段）：
+//
+//   _targetWindowSceneForApplication:preferringDisplay:requireForeground:options:
+//       {@44@0:8@16@24B32@36}
+//
+// 解码：
+//   返回 @  （对象 = 目标 UIWindowScene）
+//   偏移 16 @  application            (SBApplication *)
+//   偏移 24 @  preferringDisplay      (FBSDisplayIdentity / Configuration)
+//   偏移 32 B  requireForeground      (BOOL)
+//   偏移 36 @  options
+//
+// **它在「决定 App 落到哪个 windowScene」的那一刻被调用。**
+//
+// 这是 0.2.87 以来一直找不到的位置：
+//   · options      → 已证只有 setDictionary:，payload 里无落点键
+//   · settings     → 已证 48 方法零 setter
+//   · presenter    → 能建能 resize，但消不掉系统那扇全屏窗
+//   · 这一条       → 直接**返回**目标 scene，改它就能改落点
+//
+// ⚠️ 母版没有用它（Stheno.dylib 命中 0），所以不能拿「母版这样做」背书。
+//    这条路要自己证。
+//
+// 本版**只读**：装上钩子、原样尾调、只记四行。一个参数都不改、返回值原样返回。
+// 目的是回答「它会不会在我们需要的那一拍被调用、被调几次、返回的是不是主 scene」。
+// ============================================================================
+
+/// 0.3.11 — H 线的四条读数（只在前几次记，免得刷屏）。
+typedef struct {
+    long calls;          // 总调用数
+    int  shapeLogged;    // H1 是否已记
+    int  argLogged;      // H4 是否已记
+    long shown;          // H2 已记几条
+} AevonHState;
+
+static AevonHState AevonHStat = {0, 0, 0, 0};
+
+/// 装 H 线。**只在开机装一次**，幂等。
+///
+/// 与 `AevonActInstall` 的区别：那边钩的是「激活请求」（问开不开），
+/// 这边钩的是「算目标 scene」（决定摆哪）—— 更靠里、更接近落点。
+// `AevonActName` 定义在文件很靠后（激活快照那一段），这里先声明。
+static const char *AevonActName(id object, char *slot, size_t size);
+
+static void AevonHInstall(NSMutableString *out) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+
+    Class cls = objc_getClass("SBMainWorkspace");
+    if (cls == Nil) {
+        [out appendString:@"probe: H0 no SBMainWorkspace\n"];
+        return;
+    }
+    NSString *selName =
+        @"_targetWindowSceneForApplication:preferringDisplay:requireForeground:options:";
+    SEL sel = NSSelectorFromString(selName);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (m == NULL) {
+        [out appendString:@"probe: H0 absent\n"];
+        return;
+    }
+    // H1：归属与编码。开机能答，只记一次。
+    const char *enc = method_getTypeEncoding(m);
+    [out appendFormat:@"probe: H1 owner=SBMainWorkspace enc=%s\n",
+                      enc != NULL ? enc : "?"];
+
+    // 形状闸：只认 `@44@0:8@16@24B32@36` 这一份。对不上就不装 ——
+    // 私有方法的调用约定猜不得（0.2.66 的教训：按名字以为是 BOOL，
+    // 实际是对象，装上去直接崩）。
+    if (enc == NULL || strcmp(enc, "@44@0:8@16@24B32@36") != 0) {
+        [out appendFormat:@"probe: H1 shape skip (%s)\n", enc != NULL ? enc : "?"];
+        return;
+    }
+
+    AevonHookSlot *slot = AevonReserve("h-target");
+    if (slot == NULL) {
+        [out appendString:@"probe: H0 no slot\n"];
+        return;
+    }
+    AevonHookSlot *mine = slot;
+    id block = ^id(id workspace, id application, id display, BOOL requireFg, id options) {
+        long n = __sync_fetch_and_add(&AevonHStat.calls, 1);
+        id ret = nil;
+        // 原样尾调：参数一个不改。**这就是本版的全部行为 = 没有行为。**
+        id (*orig)(id, SEL, id, id, BOOL, id) =
+            (id (*)(id, SEL, id, id, BOOL, id))mine->original;
+        if (orig != NULL) {
+            ret = orig(workspace, mine->sel, application, display, requireFg, options);
+        }
+        // H4：只记第一次的参数类名（确认 arg1 是 SBApplication、arg4 是什么）。
+        if (__sync_bool_compare_and_swap(&AevonHStat.argLogged, 0, 1)) {
+            char appSlot[96] = {0};
+            char optSlot[96] = {0};
+            AevonActName(application, appSlot, sizeof(appSlot));
+            AevonActName(options, optSlot, sizeof(optSlot));
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"probe: H4 app=%s opt=%s fg=%d",
+                          appSlot, optSlot, requireFg ? 1 : 0] UTF8String]);
+        }
+        // H2/H3：前 8 次记「第几次 / 目标 App / 返回的 scene 名」。
+        if (__sync_fetch_and_add(&AevonHStat.shown, 1) < 8) {
+            char appSlot[96] = {0};
+            AevonActName(application, appSlot, sizeof(appSlot));
+            const char *sceneName = "-";
+            if (ret != nil) {
+                const char *nm = AevonSceneName(ret);
+                if (nm != NULL) sceneName = nm;
+            }
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"probe: H2 n=%ld app=%s ret=%s",
+                          n + 1, appSlot, sceneName] UTF8String]);
+        }
+        return ret;
+    };
+    // `@44` 头 + 尾部第 4 个对象在偏移 36。三个对象 + 一个 BOOL：
+    // `AevonAttachShape` 的数对象口径（头 @44 / 总长 44 / 尾对象）对这条够用。
+    AevonAttachShape(out, slot, cls, selName, "@44@0:8", NULL, 44, NULL, block);
+}
+
+
 /// 开机就装。**必须是开机**：`AevonHookInstall` 是建第一张卡时才调的，而落点要
 /// 管的恰恰是「第一张卡还不存在」的那一刻（第一次授权、第一次分享）。装晚一步，
 /// `_openURLCore` 那一拍已经过去了，这一版就等于没发。
@@ -4967,6 +5091,9 @@ void AevonLandingBoot(void) {
     // 只问类在不在、选择子归谁、编码是什么，一次 hook 都不装、一个实例都不建。
     // 这是「照母版 P1 重做」的第一步；URL 已在同一版清零。
     AevonProbeP1Carrier();
+    // 0.3.11 — H 线：问 `_targetWindowSceneForApplication:…` 会不会在我们需要的
+    // 那一拍被调用。装上钩子但**原样尾调**，参数与返回值一个字节都不改。
+    AevonHInstall(out);
     // 0.3.10 — G 线：延时 6 秒自枚举一次。
     // 开机那一刻前台通常还是 SpringBoard 自己的光圈窗帘，6 秒后用户多半已经
     // 打开过一个 App —— 那时才有一个「真实存在的 App scene」可以问。
