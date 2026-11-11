@@ -993,7 +993,12 @@ def main():
                   # 被闸挡住 / 装好之后不再叠 scene action / 闸的文件名。
                   b"act: tctx put ok=%d had=%ld act=%s cls=%s n=%ld b=%s url=%.80s",
                   b"act: tctx skip why=off",
-                  b"act: deliver skip why=tctx b=%s",
+                  # 0.3.34 — **tctx 装上 ≠ 送达。** Aevon(258) 三次冷启动分享
+                  # 全是 `tctx put ok=1 had=0` 之后停在首页，而热启动走
+                  # `deliver ok=1 send=sendActions` 秒进选好友页 —— 所以 tctx 之后
+                  # 冷启动要晚 2.2 s 再补一发。这两串是新读数（补不补、挖没挖到）。
+                  b"act: deliver tctx plus=1 cold=%d wait=%d b=%s",
+                  b"act: url deep k=%s b=%s url=%.100s",
                   b"AevonURLTctxOff",
                   b"/var/mobile/Library/Logs/Aevon/url.tctx.off",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**

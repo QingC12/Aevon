@@ -4526,15 +4526,39 @@ static void AevonURLDeliverShot(int tick, int shotsLeft);
 static void AevonURLDeliverShot(int tick, int shotsLeft) {
     if (AevonDenyURL[0] == '\0') return;
     if (shotsLeft < 0) shotsLeft = 0;
-    // 0.3.30 — URL 已经跟着 scene 的 transitionContext 进去了，就别再往
-    // 同一个 scene 送第二份：冷启动那条 action 会丢，热启动那条会重复弹面板。
-    // （0.3.33 删掉了「启动带走 URL」那条路，这个拦截现在只剩 tctx 这一条。）
+    // 0.3.34 — **tctx 装上 ≠ 送达。**
+    //
+    // 0.3.30 起我们把「URL 进了新 scene 的 transitionContext」当成终点：装上了
+    // 就不再发 scene action。Aevon(258) 把这条判死了 —— 三次冷启动分享
+    // （17:04:18 / 17:04:36 / 17:06:49）全是 `tctx put ok=1 had=0`，紧接着
+    // QQ 停在首页；同一份日志里热启动那几次走 `deliver ok=1 send=sendActions`
+    // 全部秒进选好友页。也就是说 QQ 冷启动时**不听 transitionContext 里那份**，
+    // 只认 scene 已经连上之后 `sendActions:` 送进去的那份。
+    //
+    // 所以这里不再 return：tctx 还在装（它是原生形状，不该放弃），但冷启动要
+    // 再补一发。补的那一发**必须晚一点**：0.3.29 的三发落在启动窗口里
+    // （deny 02 → boot 03 → 三发 03/04/06）全部被「首页恢复」盖掉，而
+    // Aevon(257) 冷启动成功那几次 URL 都在 deny 之后 3 s 才到。2.2 s 就是这个
+    // 时间差；热启动不补（App 早就连上 scene，多补一发只会叠面板）。
     if (AevonDenyTctxOk == 1) {
         if (tick == 1) {
+            int wait = (AevonDenyCold == 1) ? 2200 : 0;
             AevonLogRaw([[NSString stringWithFormat:
-                          @"act: deliver skip why=tctx b=%s", AevonDenyBundle] UTF8String]);
+                          @"act: deliver tctx plus=1 cold=%d wait=%d b=%s",
+                          AevonDenyCold, wait, AevonDenyBundle] UTF8String]);
+            if (wait > 0) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * 1000)),
+                               dispatch_get_main_queue(), ^{
+                    AevonURLDeliverShot(2, 0);
+                });
+                return;
+            }
+        } else if (tick > 8) {
+            // 送出去只有一发；tick 3..8 是「scene 还没挂上」的重试窗口
+            // （0.2 s 一拍，从 2.2 s 起，最晚 3.4 s）。再往后就放弃 ——
+            // tctx 已经装过一份，不能无限叠。
+            return;
         }
-        return;
     }
     NSString *us = [NSString stringWithUTF8String:AevonDenyURL];
     NSURL *u = us != nil ? [NSURL URLWithString:us] : nil;
@@ -4582,6 +4606,7 @@ static void AevonURLRedeliver(const char *bundle) {
 }
 
 static long AevonDenySkipLines = 0;
+static long AevonDeepLines = 0;
 
 /// 0.3.33 — **哪些 URL 值得接管。**
 ///
@@ -6046,6 +6071,8 @@ static void AevonActInstall(NSMutableString *out) {
             // 是 `if` 里的一块局部量，外面拿不到。
             int shareKind = 0;
             NSString *shareURL = nil;
+            // 0.3.34 — `__PayloadURL` 不在时，从 `__PayloadOptions` 里挖出来的那个。
+            id deepURL = nil;
             NSString *keyList = nil;
             if (options != nil) {
                 optCls = object_getClassName(options);
@@ -6119,6 +6146,47 @@ static void AevonActInstall(NSMutableString *out) {
                                       (long)[dict count], via, [pairs UTF8String]]
                                      UTF8String]);
                     }
+                    // 0.3.34 — **`__PayloadURL` 不在时往下挖一层。**
+                    //
+                    // 用户报的两件事（授权时 QQ 全屏停在授权页、支付跳转全屏）
+                    // 在 Aevon(258) 里都找不到对应的 `act: deny` —— 它们根本没被
+                    // 考虑过，因为 `payload=0`。可是它们确确实实是带 URL 的跳转，
+                    // 所以只剩两种可能：URL 在另一格里，或者那一次激活压根没带 URL。
+                    // 这一格先回答第一种：把 `__PayloadOptions` 这层字典翻一遍，
+                    // 任何键名含 url（不分大小写）、值是 NSURL/NSString 的都算。
+                    // 找到就当成 payload=1 走同一条拒答路，并留一行 `act: url deep`
+                    // —— 那一行就是「授权/支付原来藏在这里」的证据。
+                    if (payload == 0) {
+                        id po = [dict objectForKey:@"__PayloadOptions"];
+                        if ([po isKindOfClass:[NSDictionary class]]) {
+                            for (id dk in (NSDictionary *)po) {
+                                if (![dk isKindOfClass:[NSString class]]) continue;
+                                if ([(NSString *)dk rangeOfString:@"url"
+                                                          options:NSCaseInsensitiveSearch].location
+                                    == NSNotFound) continue;
+                                id dv = [(NSDictionary *)po objectForKey:dk];
+                                if ([dv isKindOfClass:[NSURL class]] ||
+                                    [dv isKindOfClass:[NSString class]]) {
+                                    deepURL = dv;
+                                    break;
+                                }
+                            }
+                        }
+                        if (deepURL != nil) {
+                            payload = 1;
+                            if (__sync_fetch_and_add(&AevonDeepLines, 1) < 10) {
+                                NSString *ds = [deepURL isKindOfClass:[NSURL class]]
+                                    ? [(NSURL *)deepURL absoluteString]
+                                    : (NSString *)deepURL;
+                                AevonLogRaw([[NSString stringWithFormat:
+                                              @"act: url deep k=%s b=%s url=%.100s",
+                                              object_getClassName([dict objectForKey:@"__PayloadOptions"]),
+                                              [bundleID isKindOfClass:[NSString class]]
+                                                  ? [(NSString *)bundleID UTF8String] : "-",
+                                              ds != nil ? [ds UTF8String] : "-"] UTF8String]);
+                            }
+                        }
+                    }
                     // 0.3.23 — **URL 路的扳机，挂在唯一能看到「URL 真的装进激活请求」
                     // 的那一拍上。**
                     //
@@ -6148,6 +6216,7 @@ static void AevonActInstall(NSMutableString *out) {
                         //
                         // 两种都认：`NSURL` 走 `absoluteString`，`NSString` 原样。
                         id pu = [dict objectForKey:@"__PayloadURL"];
+                        if (pu == nil) pu = deepURL;   // 0.3.34 深挖出来的那一个
                         if ([pu isKindOfClass:[NSURL class]]) {
                             shareURL = [(NSURL *)pu absoluteString];
                         } else if ([pu isKindOfClass:[NSString class]]) {
@@ -6160,9 +6229,11 @@ static void AevonActInstall(NSMutableString *out) {
             // 两条口径：前 6 条无条件记（普通启动这一版正好当对照组），带 payload
             // 的再单独记 6 条 —— 那一条才是「URL 真的装进激活请求」的证词，不能
             // 因为预算先被普通启动占满就丢掉。
-            BOOL take = seen < 6;
+            // 0.3.34 — 预算 6 → 14：授权与支付那几次激活全落在第 7 条之后，
+            // 6 条一去就被普通启动占满，日志里连它们来过一次都看不到。
+            BOOL take = seen < 14;
             if (!take && payload == 1 &&
-                __sync_fetch_and_add(&AevonActPayloadLines, 1) < 6) {
+                __sync_fetch_and_add(&AevonActPayloadLines, 1) < 10) {
                 take = YES;
             }
             if (take) {
