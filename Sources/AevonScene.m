@@ -5290,6 +5290,141 @@ static void AevonHookFourVoid(NSMutableString *out) {
 }
 
 
+// ============================================================================
+// 0.3.18 — 只读普查 `FBSMutableSceneDefinition` / `FBSMutableSceneParameters`
+//
+// 为什么查这两个类：
+//
+// 0.3.14 崩溃前抓到的一条实参（唯一有价值的遗留数据）：
+//   tap: FBSceneManager.createSceneWithDefinition:initialParameters:
+//        a1=#FBSMutableSceneDefinition  a2=#FBSMutableSceneParameters
+//
+// **系统建 scene 时传的是「可变」的 definition 与 parameters。**
+//
+// 而 0.2.85「方案 S 判死」的依据是：
+//   FBSSceneDefinition        methods=17 ivars=3（_identity/_clientIdentity/_specification）
+//   FBSMutableSceneDefinition methods=1（只有 copyWithZone:）
+//
+// 那次查的是**不可变父类**，而实际传进来的是**可变子类**。
+// 「methods=1」这个读数还是 0.2.85 的静态扫描 —— 可能只列了类方法。
+//
+// 所以这一版只问三件事，全部只读：
+//   ① `FBSMutableSceneDefinition` 的全部实例方法 + 编码 + ivar
+//   ② `FBSMutableSceneParameters` 同上
+//   ③ 两者的父类链（确认「不可变 → 可变」的继承关系）
+//
+// **不装替身、不实例化、不碰任何实例。** 只 `class_copyMethodList` +
+// `class_copyIvarList` + `method_getTypeEncoding`。
+//
+// 母版对照：`Stheno.dylib` 里 FBSSceneDefinition / FBSMutableSceneDefinition /
+// FBSMutableSceneParameters 三个名字**全部零命中** —— 说明母版不走 definition
+// 这条路。但 Aevon 的站位与母版不同（我们钩在打开/激活层），所以这条仍值得问一次。
+// ============================================================================
+
+/// 0.3.18 — 一个类的全部方法名 + 编码，一行输出。
+///
+/// 与 `AevonProbeClassMethods` 的区别：那个按前缀过滤，这个**全量**。
+/// 因为我们要找的是「有没有某个 setter」，而它的名字未知 —— 不能预筛。
+static NSString *AevonCensusAllMethods(const char *clsName, int limit) {
+    if (clsName == NULL) return @"-";
+    Class cls = objc_getClass(clsName);
+    if (cls == Nil) return @"(absent)";
+    unsigned int count = 0;
+    Method *list = class_copyMethodList(cls, &count);
+    NSMutableString *out = [NSMutableString stringWithFormat:@"n=%u", count];
+    int shown = 0;
+    for (unsigned int i = 0; list != NULL && i < count && shown < limit; i++) {
+        const char *name = sel_getName(method_getName(list[i]));
+        const char *enc = method_getTypeEncoding(list[i]);
+        if (name == NULL) continue;
+        [out appendFormat:@" |%s %s", name, enc != NULL ? enc : "?"];
+        shown += 1;
+    }
+    if (list != NULL) free(list);
+    if (shown < (int)count) [out appendFormat:@" …+%d", (int)count - shown];
+    return out;
+}
+
+/// 0.3.18 — 一个类的全部 ivar 名 + 类型，一行输出。
+static NSString *AevonCensusAllIvars(const char *clsName, int limit) {
+    if (clsName == NULL) return @"-";
+    Class cls = objc_getClass(clsName);
+    if (cls == Nil) return @"(absent)";
+    unsigned int count = 0;
+    Ivar *list = class_copyIvarList(cls, &count);
+    NSMutableString *out = [NSMutableString stringWithFormat:@"n=%u", count];
+    int shown = 0;
+    for (unsigned int i = 0; list != NULL && i < count && shown < limit; i++) {
+        const char *name = ivar_getName(list[i]);
+        const char *type = ivar_getTypeEncoding(list[i]);
+        if (name == NULL) continue;
+        [out appendFormat:@" %s:%s", name, type != NULL ? type : "?"];
+        shown += 1;
+    }
+    if (list != NULL) free(list);
+    return out;
+}
+
+/// 0.3.18 — 父类链，确认「不可变 → 可变」的继承关系。
+static NSString *AevonCensusChain(const char *clsName) {
+    if (clsName == NULL) return @"-";
+    Class cls = objc_getClass(clsName);
+    if (cls == Nil) return @"(absent)";
+    NSMutableString *out = [NSMutableString string];
+    int depth = 0;
+    for (Class c = cls; c != Nil && depth < 6; c = class_getSuperclass(c), depth++) {
+        if (out.length > 0) [out appendString:@" > "];
+        [out appendFormat:@"%s", class_getName(c)];
+    }
+    return out;
+}
+
+/// 0.3.18 总入口：开机跑一次，全部只读。
+static void AevonCensusSceneDefinition(NSMutableString *out) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+
+    const char *classes[3] = {
+        "FBSSceneDefinition",
+        "FBSMutableSceneDefinition",
+        "FBSMutableSceneParameters",
+    };
+    for (int i = 0; i < 3; i++) {
+        const char *cn = classes[i];
+        Class cls = objc_getClass(cn);
+        if (cls == Nil) {
+            [out appendFormat:@"defn: %s absent\n", cn];
+            continue;
+        }
+        [out appendFormat:@"defn: %s chain=%@\n", cn, AevonCensusChain(cn)];
+        // 方法最多列 40 条 —— 这两个类方法数不多（父类 17 条），40 足够全量。
+        [out appendFormat:@"defn: %s methods %@\n", cn, AevonCensusAllMethods(cn, 40)];
+        [out appendFormat:@"defn: %s ivars %@\n", cn, AevonCensusAllIvars(cn, 16)];
+    }
+
+    // 关键判定：可变子类上到底有没有「能改内容」的 setter。
+    const char *probes[6] = {
+        "setURL:", "setSpecification:", "setIdentity:",
+        "setClientIdentity:", "setActions:", "mutableCopy",
+    };
+    Class mut = objc_getClass("FBSMutableSceneDefinition");
+    if (mut != Nil) {
+        for (int i = 0; i < 6; i++) {
+            SEL s = NSSelectorFromString([NSString stringWithUTF8String:probes[i]]);
+            Method m = class_getInstanceMethod(mut, s);
+            if (m == NULL) {
+                [out appendFormat:@"defn: mut.%s absent\n", probes[i]];
+            } else {
+                const char *enc = method_getTypeEncoding(m);
+                [out appendFormat:@"defn: mut.%s enc=%s\n", probes[i], enc ? enc : "?"];
+            }
+        }
+    }
+    [out appendString:@"defn: done\n"];
+}
+
+
 /// 一条普查记录（只读，不装）。
 typedef struct {
     const char *sel;
@@ -5586,6 +5721,9 @@ void AevonLandingBoot(void) {
     // 0.3.16 — 四个返回 void 的入口，逐个手写壳。与普查同一次开机，
     // 但两者独立：普查只读、这里真装。
     AevonHookFourVoid(out);
+    // 0.3.18 — 普查 `FBSMutableSceneDefinition` / `FBSMutableSceneParameters`。
+    // 系统建 scene 时传的是可变子类，而 0.2.85 查的是不可变父类。
+    AevonCensusSceneDefinition(out);
     // 0.3.10 — G 线：延时 6 秒自枚举一次。
     // 开机那一刻前台通常还是 SpringBoard 自己的光圈窗帘，6 秒后用户多半已经
     // 打开过一个 App —— 那时才有一个「真实存在的 App scene」可以问。

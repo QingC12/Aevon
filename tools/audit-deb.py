@@ -1230,6 +1230,14 @@ def main():
                   b"layout: add item=%s ws=%s",
                   b"layout: addC item=%s ws=%s",
                   b"h4: sysvc n=%ld actseq=%ld svc=%s req=%s",
+                  # 0.3.18 — 普查 FBSMutableSceneDefinition / FBSMutableSceneParameters。
+                  # 系统建 scene 传的是可变子类，而 0.2.85 查的是不可变父类。
+                  b"defn: %s chain=%@",
+                  b"defn: %s methods %@",
+                  b"defn: %s ivars %@",
+                  b"defn: mut.%s enc=%s",
+                  b"defn: mut.%s absent",
+                  b"defn: done",
                   b"presenter: birth fail b=%s why=nil id=%s",
                   b"presenter: birth skip b=%s why=nopm",
                   b"presenter: birth threw b=%s why=%s",
