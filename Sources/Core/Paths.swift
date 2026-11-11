@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.32"
+    public static let version = "0.3.33"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -236,6 +236,19 @@ public enum Aevon {
     /// 反悔只需一个空文件：`touch …/url.deny.off` 再重启桌面，行为退回 0.3.25。
     /// 语义与 `birth.off` 一致：**存在即不做**。
     public static let urlDenyOffPath   = "/var/mobile/Library/Logs/Aevon/url.deny.off"
+
+    /// 0.3.33 — **URL 接管范围**的关闸（`url.global.off` 存在 = 只接分享）。
+    ///
+    /// 0.3.26–0.3.32 的拒答只认「分享型」（带 `__PasteSharingToken` 的那一类）。
+    /// Aevon(257) 里 QQ 冷热两次分享都进了选好友页，但其他 App 的分享、以及点链接
+    /// 跳转 / 授权回跳 / 支付回跳全都还是全屏 —— 它们落在 `shareKind == 1` 上。
+    ///
+    /// 0.3.33 默认把这四类全接（边界由 `AevonURLWorthDeny` 划：电话/短信/设置/
+    /// App Store 这些系统必须自己处理的 scheme 一律放行）。这个闸是**一键退回**：
+    /// `touch …/url.global.off` + 重启桌面，行为立刻回到「只有分享进浮窗」。
+    ///
+    /// 语义与其它闸一致：**存在即不做**。
+    public static let urlGlobalOffPath = "/var/mobile/Library/Logs/Aevon/url.global.off"
 
     /// 0.3.26 — 卡片起来之后「把 URL 补投一次」的关闸（存在 = 不投）。
     ///

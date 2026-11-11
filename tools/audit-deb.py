@@ -996,38 +996,20 @@ def main():
                   b"act: deliver skip why=tctx b=%s",
                   b"AevonURLTctxOff",
                   b"/var/mobile/Library/Logs/Aevon/url.tctx.off",
-                  # 0.3.31 — **把 URL 交给启动那一拍。**
+                  # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
-                  # Aevon(254)：0.3.30 的 tctx 注入在 QQ 那张 scene 出生那一拍
-                  # 真的装上了（`put ok=1 had=0 cls=UIOpenURLAction`），QQ 照样停首页；
-                  # 0.3.29 的三发 scene action 也全落在启动窗口内（deny 02 → boot 03
-                  # → 三发 03/04/06、geom late 06）。**我们装的那份它不认。**
-                  # 剩下唯一同形的做法是让 FrontBoard 自己装：URL 进启动请求。
-                  # 五串分别是：启动那一拍的系统应答（how/ret）/ 参数不成形 /
-                  # 我们那一发启动要放行（否则自己拒自己）/ 已经跟着启动走了就别再补投 /
-                  # 闸的符号与文件名。
-                  # 0.3.32 — 这一版把试错搬进**孩子进程**（0.3.31 主进程里崩了：
-                  # `_splitOptionsIntoApplicationOptionsAndRealOptions +64` →
-                  # `objc_retain` 拿到 0x1，两份 .ips 完全一样）。所以读数从「一次
-                  # 结果」变成「一条链」：起手 / 成功 / 孩子崩了 / 孩子超时 /
-                  # waitpid 出错 / 两种全败 / fork 都没成 / 退回纯挂起 / 自封闸。
-                  b"act: launch try how=%s n=%ld b=%s url=%.80s",
-                  b"act: launch url how=%s ret=0 n=%ld b=%s url=%.80s",
-                  b"act: launch child bad how=%s rc=%d sig=%d b=%s",
-                  b"act: launch child timeout how=%s",
-                  b"act: launch child wait err",
-                  b"act: launch all failed why=timeout",
-                  b"act: launch all failed why=bad",
-                  b"act: launch fork failed",
-                  b"act: launch fallback door=%ld b=%s",
-                  b"act: launch breaker wrote=1",
-                  b"act: launch url=0 why=badurl",
-                  b"act: pass why=carry sync=%d b=%s",
-                  b"act: deliver skip why=launch b=%s",
-                  b"act: tctx skip why=launch",
-                  b"AevonURLLaunchOff",
-                  b"/var/mobile/Library/Logs/Aevon/url.launch.off",
-                  b"win: own launch url async=1 b=",
+                  # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`
+                  # （fork 之后 objc/CF 的锁与 mach port 不可用，换任何参数都崩），
+                  # 同一份日志里 `act: tctx put ok=1` 之后 QQ 冷热两次都真进了
+                  # 选好友页 —— 0.3.30 的 transitionContext 注入才是真正生效的口。
+                  # 所以这一版把那 14 条启动链断言全撤，换成「范围」与「不再回桌面」
+                  # 这两组。前两串是接管范围的两种拒绝理由（闸关 / scheme 不该管），
+                  # 第三串是新的 Home 判据读数（谁在屏上），后面是闸的符号与文件名。
+                  b"act: deny skip why=global k=%d b=%s",
+                  b"act: deny skip why=scheme k=%d u=%.60s",
+                  b"win: home first skip why=front b=",
+                  b"AevonURLGlobalOn",
+                  b"/var/mobile/Library/Logs/Aevon/url.global.off",
                   # 两把闸自己的路径常量 —— 文件名写错就等于没有闸。
                   b"/var/mobile/Library/Logs/Aevon/url.deny.off",
                   b"/var/mobile/Library/Logs/Aevon/url.redeliver.off",

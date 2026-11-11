@@ -1689,14 +1689,27 @@ zStackParticipantDidChange:
         // 位置也从函数入口挪到了这里：上面两段（已在停靠小窗 / 已经是主窗）都直接
         // return，那时目标 App 的 scene 由我们自己的窗口承载、`isForeground` 也是 1，
         // 留在入口会把「点一下已在卡片里的 App」误判成全屏而白发一次 home。
-        if !homed, AevonSpringboardActive() != 1 {
-            let target = sceneFor(bundleID)
-            let front = AevonAppFrontmost(bundleID)
-            let sceneFG = AevonSceneForeground(target)
-            if front != 1 && sceneFG != 1 {
-                Log.write(String(format: "win: home first skip b=%@ front=%ld scene_fg=%ld",
-                                 bundleID, Int(front), Int(sceneFG)))
+        // 0.3.33 — **判据换成「屏上那个全屏 App 是不是它」。**
+        //
+        // 0.2.32–0.3.32 用的是「目标 scene 报前台」（`isFrontmost` 或
+        // `settings.isForeground`）。但挂起启动出来的 scene 同样报前台 ——
+        // Aevon(257) 每一条 `deny card` 后面都紧跟 `win: home first step1 …`，
+        // 用户看到的就是「卡出现之前桌面闪一下」，而那一次的目标 App 从头到尾
+        // 没占过屏。这一下 Home 是白发的。
+        //
+        // 真正需要 Home 的只有一种局面：**目标 App 就是屏上那个全屏页**
+        // （圆盘在全屏 App 里点它自己）。那时把 scene 搬进卡片会抽空全屏页 ⇒ 黑。
+        // 其余局面（来源 App 全屏、目标是另一个 App）都不该动 Home —— 卡片是
+        // level 101 的独立窗口，本来就浮得在来源 App 之上，这正是用户要的效果。
+        if !homed {
+            let front = frontSceneBundle()
+            if front != bundleID {
+                Log.write("win: home first skip why=front b=" + bundleID
+                          + " front=" + (front ?? "-"))
             } else {
+                // 只有「目标就是屏上那个」才走到这里，它的 scene 一定在手里；
+                // 取不到也不影响（下面几个读数各自会答 -1）。
+                let target = sceneFor(bundleID)
                 let step = AevonHomeStep(1, nil)
                 Log.write("win: home first open " + (step ?? "step nil") + " b=" + bundleID)
                 var waited = 0
@@ -1812,37 +1825,24 @@ zStackParticipantDidChange:
         // 激活时造，我们只等、只贴。一个私有构造器都不碰。
         _ = ownAt
         let launchAt = CFAbsoluteTimeGetCurrent()
-        // 0.3.31 — 冷启动唯一没试过的投递口：把 URL 交给**启动那一拍**。
+        // 0.3.33 — **「带 URL 的启动」整条撤掉。**
         //
-        // 0.3.26 拒答之后 App 是我们自己拉起来的，而 `launchApplicationWithIdentifier:
-        // suspended:` 没有 URL 参数 —— 所以 URL 只能事后补。事后补的两条路现在都
-        // 有真机读数了：0.3.29 的三发 scene action 全落在启动窗口里（`deny 02` →
-        // `boot 03` → 三发 `03/04/06`、`geom late 06`），0.3.30 的 tctx 注入装上了
-        // （`put ok=1 had=0`）QQ 也不认。剩下唯一和原生分享一模一样的是让 FrontBoard
-        // 自己把 URL 装进新 scene —— 那就得让 URL 出现在**启动请求**里。
+        // 0.3.31 在主进程里调 `SBSLaunchApplicationWithIdentifierAndURLAndLaunchOptions`
+        // 直接把 SpringBoard 打进安全模式（两份 .ips 完全一样：`_splitOptions…+64` →
+        // `objc_retain` 拿到 0x1）；0.3.32 把同样的调用搬进 fork 出来的孩子进程，
+        // Aevon(257) 两个孩子都是 `sig=11` —— fork 之后 objc/CF 的锁与 port 全都
+        // 不可用，这条路换任何参数都是同一个段错误，没有第二种结果。
         //
-        // `carried=1` 时后面的补投与 tctx 注入都会自己让路（C 侧 `AevonURLCarriedOk`），
-        // 不会叠出第二个面板。符号不存在或系统拒了（`door=0`）就退回原来的纯挂起启动。
-        var urlBuf = [CChar](repeating: 0, count: 1024)
-        var door: Int = 0
-        if AevonLaunchURLForBundle(bundleID, &urlBuf, Int32(urlBuf.count)) == 1 {
-            // 0.3.32 — 这一句是**异步**的：真正的启动发生在 fork 出来的孩子进程里
-            // （见 `AevonLaunchSuspendedWithURL` 上面的长注）。返回 1 只代表「已经在
-            // 试」，成败看 `act: launch url how=…` / `act: launch child bad …`。
-            // 失败时 C 侧自己会退回纯挂起启动并补投，所以这里照常往下等 scene。
-            let asked = AevonLaunchSuspendedWithURL(bundleID, &urlBuf)
-            if asked == 1 {
-                door = 1
-                Log.write("win: own launch url async=1 b=" + bundleID)
-            }
-        }
-        if door != 1 {
-            door = AevonLaunchSuspended(sharedApplication(), bundleID)
-            Log.write(String(format: "win: own retired %@ door=%ld t=%ldms wait=%ldms",
-                             bundleID, door,
-                             Int((CFAbsoluteTimeGetCurrent() - launchAt) * 1000),
-                             Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
-        }
+        // 同一份日志也给出了真正生效的那条：`act: tctx put ok=1` 之后 QQ 冷热两次
+        // 都真进了选好友页。0.3.30 的 transitionContext 注入一直是对的，只是被
+        // 0.3.31/0.3.32 的启动路盖住了。所以现在只有一条启动：纯挂起 + 事后注入。
+        //
+        // 顺带省下 0.3.32 那两个候选的 fork/等待（冷启动实测快了约 0.7 s）。
+        let door = AevonLaunchSuspended(sharedApplication(), bundleID)
+        Log.write(String(format: "win: own retired %@ door=%ld t=%ldms wait=%ldms",
+                         bundleID, door,
+                         Int((CFAbsoluteTimeGetCurrent() - launchAt) * 1000),
+                         Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
         guard door == 1 else {
             AevonHookDisarm(bundleID)
             fallback("own retired door=" + String(door))
@@ -2128,10 +2128,12 @@ zStackParticipantDidChange:
             // 0.2.35 — 再补 scene 自己的 `settings.isForeground`：`isFrontmost` 在
             // 这台机器上对不少 App 答 -1/0（`SBApplicationController` 认不出 bundle），
             // 全屏 QQ 选自己也会被漏掉。两个读数任一为 1 即可。
-            let sceneFG = AevonSceneForeground(scene)
+            // 0.3.33 — 与 `openCard` 那道门同一个口径：只有「目标就是屏上那个
+            // 全屏页」才发 Home。`sceneFG`（scene 自己报前台）在这一格用不了 ——
+            // 挂起启动出来的 scene 一样答 1，Aevon(257) 的每一次 `deny card` 都被
+            // 它带进 Home 分支，那就是用户看到的「卡出现前桌面闪一下」。
             if !homed, AevonOwnIsOwned(bundleID) == 0,
-               AevonSpringboardActive() != 1,
-               (AevonAppFrontmost(bundleID) == 1 || sceneFG == 1) {
+               frontSceneBundle() == bundleID {
                 unmark()
                 let step = AevonHomeStep(1, nil)
                 Log.write("win: home first " + (step ?? "step nil") + " b=" + bundleID)
@@ -2329,6 +2331,46 @@ zStackParticipantDidChange:
     /// 现在给每一份打分：前台可见 4、前台运行 4、有内容 2/1、settings 前台位 2。
     /// 全部分数为 0 就是「只有空壳」—— 返回 nil，让 `openCard` 走自建那条路
     /// （那条路在 12:20:39 是成功的：`own compose ok` → `first frame 158ms`）。
+    /// 0.3.33 — **「现在屏上那个全屏 App 是谁」**（不靠 `SBApplication`）。
+    ///
+    /// 回桌面那一步（0.2.30）本来是为了「目标 App 正全屏时别把全屏页抽空 ⇒ 黑」。
+    /// 它原来的判据是「目标 scene 自己报前台」，但 `settings.isForeground` 对
+    /// **挂起启动出来的 scene 同样答 1** —— 于是每一次拒答 + 建卡都白发一次 Home，
+    /// 用户看到的正是「卡片出现之前桌面闪一下」（Aevon(257) 每条 `deny card` 后面
+    /// 紧跟 `win: home first step1 …`）。
+    ///
+    /// `SBApplication` 那条路在这台机器上根本答不出来（`isFrontmost` 对
+    /// Everything 都答 -1，`AevonAppObject` 常常空手），所以换一个不用它的口径：
+    /// 枚举 `FBSceneManager` 里 `settings.isForeground == 1` 的 scene，从
+    /// `sceneID:<bundle>-<…>` 里取 bundle。这就是「屏幕当前属于谁」，和
+    /// 「谁有 scene」是两件事。
+    ///
+    /// 返回 nil = 枚举不出来（manager 空 / 没有前台 scene），调用方按「不是目标」
+    /// 处理 —— 宁可少发一次 Home（卡片直接浮上去，这正是用户要的），也不要凭空
+    /// 把桌面叫出来。
+    private static func frontSceneBundle() -> String? {
+        guard let manager = AevonSceneManager() as? NSObject else { return nil }
+        var best: String?
+        var bestRank = -1
+        AevonEnumerateScenes(manager) { scene in
+            guard let scene = scene as? NSObject else { return }
+            let settings = value(of: scene, "settings")
+            guard (settings.map { AevonBoolOf($0, "isForeground") } ?? 0) == 1 else { return }
+            let ident = value(of: scene, "identifier").map { String(describing: $0) } ?? ""
+            var name = ident
+            if let r = name.range(of: "sceneID:") { name = String(name[r.upperBound...]) }
+            // `sceneID:com.tencent.mqq-default` / `sceneID:com.x.y-<UUID>`：bundle
+            // 一定在第一个 `-` 之前。
+            if let dash = name.firstIndex(of: "-") { name = String(name[..<dash]) }
+            guard name.contains(".") else { return }
+            var rank = 0
+            if AevonBoolOf(scene, "accessibilitySceneIsForegroundVisible") == 1 { rank += 2 }
+            if AevonContentStateOf(scene) >= 2 { rank += 1 }
+            if rank > bestRank { bestRank = rank; best = name }
+        }
+        return best
+    }
+
     private static func listedScene(_ bundleID: String) -> NSObject? {
         guard let manager = AevonSceneManager() as? NSObject else { return nil }
         var best: NSObject?

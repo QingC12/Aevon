@@ -80,11 +80,13 @@ extern int AevonURLShotOff(void);
 // 装进去是原生 URL 激活的做法（0.3.23 在 QQ 分享那次的 tctx 里亲眼看到过
 // `UIOpenURLAction`），也是冷启动唯一能跟上「启动」那一拍的投递口。
 extern int AevonURLTctxOff(void);
-// 0.3.31 — 「带着 URL 的挂起启动」的关闸（`url.launch.off` 存在 = 不带走 URL）。
-// 这一版把 URL 放进**我们自己那一次启动**的 launch options，而不是事后往 scene
-// 塞 action：Aevon(254) 证明 tctx 装上了（`put ok=1`）QQ 也不认，而 0.3.29 的
-// 三发 action 全部落在启动窗口内（deny 02 → boot 03 → 三发 03/04/06，geom late 06）。
-extern int AevonURLLaunchOff(void);
+// 0.3.33 — **URL 接管范围**的关闸（`url.global.off` 存在 = 只接分享）。
+//
+// 0.3.26 只拒 `shareKind == 2`（带 `__PasteSharingToken`），因为那最有把握。
+// 用户要的四类（点链接 / 分享 / 授权 / 支付）里后两类和大部分点链接都落在
+// `shareKind == 1`，所以 0.3.33 默认全接；这个闸是**一键退回**用的：
+// 建一个空文件、重启桌面，行为立刻回到「只有分享进浮窗」。
+extern int AevonURLGlobalOn(void);
 // 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
 // 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
 extern int AevonCardYieldForFullscreen(const char *bundle);
@@ -3840,250 +3842,32 @@ static long AevonDenyTctxTries = 0;
 static void AevonURLRedeliver(const char *bundle);
 static int AevonURLDenyTake(const char *bundle, const char *url, int kind);
 
-/// 0.3.31 — Swift 侧 `openCard` 启动 App 之前问一句：这次启动要不要带上 URL？
-///
-/// 返回 1 = 带上（`out` 里是 URL 全文），0 = 不带。三个条件同时成立才带：
-/// 8 秒内拒答过、bundle 就是被拒的那个、`url.launch.off` 不存在。
-///
-/// 为什么由 C 侧回答：URL 一直在 `AevonDenyURL` 里（拒答那一刻写的，已截到 512），
-/// 让 Swift 再从 `act: deny` 那行日志里抠出来是二次解析，多余而且会漂。
-int AevonLaunchURLForBundle(const char *bundle, char *out, int cap) {
-    if (bundle == NULL || out == NULL || cap <= 1) return 0;
-    out[0] = '\0';
-    if (AevonURLLaunchOff() == 1) return 0;
-    if (AevonDenyURL[0] == '\0' || AevonDenyAt <= 0) return 0;
-    if (AevonActMs() - AevonDenyAt > 8000) return 0;
-    if (strcmp(bundle, AevonDenyBundle) != 0) return 0;
-    strlcpy(out, AevonDenyURL, (size_t)cap);
-    return 1;
-}
+// MARK: - 0.3.33 「带 URL 的挂起启动」整条下线（真机判死）
 
-// MARK: - 0.3.32 带 URL 的挂起启动（在**孩子进程**里试）
+// Aevon(257) 把 0.3.32 的两个候选都跑了一遍，两个孩子**都是 sig=11**：
+//
+//   act: launch try how=url n=1 b=com.tencent.mqq
+//   act: launch child bad how=url rc=-1 sig=11 b=com.tencent.mqq
+//   act: launch child bad how=url+opt rc=-1 sig=11 b=com.tencent.mqq
+//   act: launch all failed why=bad
+//   act: launch breaker wrote=1
+//
+// 也就是说这不是「参数形状不对」，是 **fork + CF/objc 本身不成立**：孩子进程只
+// 拿到一份内存快照，libobjc 的锁、CF 的 mach port 全都不可用，换任何参数都是
+// 同一个 SIGSEGV。这条路没有第二种结果，整条删掉 —— 不留「下次再试」的口子。
+//
+// 同一份日志同时给出了真正生效的投递口：
+//
+//   act: tctx put ok=1 had=0 act=r:3nil cls=UIOpenURLAction n=1 b=com.tencent.mqq
+//
+// 紧跟在它后面，QQ 冷启动这一次真的进了选好友页（用户实测冷热都对）。0.3.30 的
+// transitionContext 注入**一直是有效的**，只是 0.3.31/0.3.32 的启动路把它盖住了。
+// 所以这一版：SPI 一句都不调，补投（`AevonURLDeliverShot`）与 tctx 注入照旧。
 
-// Aevon(255) 的两份 .ips 把 0.3.31 判得很干脆，两份栈完全一样：
-//
-//   EXC_BAD_ACCESS (KERN_INVALID_ADDRESS at 0x1)
-//   libobjc             objc_retain +8
-//   SpringBoardServices _splitOptionsIntoApplicationOptionsAndRealOptions +64
-//   SpringBoardServices SBSLaunchApplicationWithIdentifierAndURLAndLaunchOptions +164
-//   Aevon.dylib         AevonLaunchSuspendedWithURL +296
-//   Aevon.dylib         AevonOpenCardURL(_:) +552        ← 主线程，紧跟 `act: deny card`
-//
-// 也就是说这个 SPI 在那台机器上**存在**，但我给的参数形状它不认：0x1 正好是我
-// 那个「NULL 字典 + YES」组合被它当成对象 retain 的结果。形状猜错一次 = 一次
-// 安全模式，所以不能再在主进程里猜。
-//
-// 这一版的规矩：
-//   1 **每个候选形状都在 fork 出来的孩子进程里试**。猜错只死孩子，SpringBoard
-//     一步都不动 —— 这是唯一能让「未验证的私有 ABI」不再变成安全模式的办法。
-//   2 三参 `SBSLaunchApplicationWithIdentifierAndURL` 先试：它没有 options 字典，
-//     正好绕开崩在 `_splitOptions…` 的那个入参；四参再试，且 options 传**空字典**
-//     而不是 NULL。
-//   3 全部失败才退回「纯挂起启动 + 正常投递」，并**自动**写 `url.launch.off`
-//     把这条路封掉 —— 下次分享不再试，用户不必进安全模式去删文件。
-//
-// 孩子只做一件事：调用解析好的函数指针，然后 `_exit`。CF 对象、符号指针都在
-// fork 之前准备好（孩子继承的是现成内存），`alarm(2)` 兜住「孩子卡在 malloc 锁上」。
-
-static volatile int AevonURLCarrying = 0;   // 同步路径的旗子（现在只作日志口径）
-static volatile int AevonURLCarriedOk = 0;  // URL 已经跟着启动走了，不再补投
+static volatile int AevonURLCarrying = 0;   // 保留：日志口径，恒 0
+static volatile int AevonURLCarriedOk = 0;  // 恒 0（启动不再带走 URL）
 static volatile int64_t AevonURLCarryDue = 0;
 static long AevonURLCarryTries = 0;
-
-typedef int (*AevonSBSF3)(CFStringRef, CFURLRef, Boolean);
-typedef int (*AevonSBSF4)(CFStringRef, CFURLRef, CFDictionaryRef, Boolean);
-
-static AevonSBSF3 AevonSBSFunc3 = NULL;
-static AevonSBSF4 AevonSBSFunc4 = NULL;
-static pid_t AevonSBSChild = 0;
-static int AevonSBSVariant = 0;          // 0 = 三参，1 = 四参
-static int AevonSBSTicks = 0;
-static CFStringRef AevonSBSKeepBundle = NULL;
-static CFURLRef AevonSBSKeepURL = NULL;
-static CFDictionaryRef AevonSBSKeepOpts = NULL;
-static char AevonSBSKeepText[160] = {0};
-
-static void AevonURLDeliverShot(int tick, int shotsLeft);
-
-static void AevonSBSRelease(void) {
-    if (AevonSBSKeepOpts != NULL) { CFRelease(AevonSBSKeepOpts); AevonSBSKeepOpts = NULL; }
-    if (AevonSBSKeepURL != NULL) { CFRelease(AevonSBSKeepURL); AevonSBSKeepURL = NULL; }
-    if (AevonSBSKeepBundle != NULL) { CFRelease(AevonSBSKeepBundle); AevonSBSKeepBundle = NULL; }
-}
-
-/// 全部候选都失败之后才调：把这条路自己封掉。
-static void AevonURLBreaker(void) {
-    const char *path = "/var/mobile/Library/Logs/Aevon/url.launch.off";
-    int fd = open(path, O_CREAT | O_WRONLY, 0644);
-    if (fd >= 0) {
-        close(fd);
-        AevonLogRaw("act: launch breaker wrote=1");
-    }
-}
-
-/// 退回 0.3.30 的行为：纯挂起启动 + 正常投递（不发 URL，靠 scene action 补）。
-static void AevonSBSFallback(void) {
-    AevonURLCarryDue = 0;
-    AevonURLCarriedOk = 0;
-    NSString *b = AevonSBSKeepText[0] != '\0'
-        ? [NSString stringWithUTF8String:AevonSBSKeepText] : nil;
-    NSInteger door = AevonLaunchSuspended(nil, b);
-    AevonLogRaw([[NSString stringWithFormat:
-                  @"act: launch fallback door=%ld b=%s",
-                  (long)door, AevonSBSKeepText] UTF8String]);
-    AevonSBSRelease();
-    AevonURLDeliverShot(1, AevonDeliverShots);
-}
-
-static void AevonSBSSpawn(void);
-
-/// 每 100 ms 收一次孩子。不 wait 死等：主线程一秒都不能停（SpringBoard 看门狗）。
-static void AevonSBSTick(void) {
-    if (AevonSBSChild <= 0) return;
-    int status = 0;
-    pid_t got = waitpid(AevonSBSChild, &status, WNOHANG);
-    if (got == 0) {
-        if (++AevonSBSTicks > 12) {           // 1.2 s 还没回来 ⇒ 按失败处理
-            kill(AevonSBSChild, SIGKILL);
-            waitpid(AevonSBSChild, &status, 0);
-            AevonSBSChild = 0;
-            AevonLogRaw([[NSString stringWithFormat:
-                          @"act: launch child timeout how=%s",
-                          AevonSBSVariant == 0 ? "url" : "url+opt"] UTF8String]);
-            if (AevonSBSVariant == 0 && AevonSBSFunc4 != NULL) {
-                AevonSBSVariant = 1;
-                AevonSBSTicks = 0;
-                AevonSBSSpawn();
-                return;
-            }
-            AevonLogRaw("act: launch all failed why=timeout");
-            AevonURLBreaker();
-            AevonSBSFallback();
-            return;
-        }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonSBSTick(); });
-        return;
-    }
-    AevonSBSChild = 0;
-    if (got < 0) {
-        // waitpid 自己出错（ECHILD）：按失败处理，别卡住链子。
-        AevonLogRaw("act: launch child wait err");
-        AevonURLBreaker();
-        AevonSBSFallback();
-        return;
-    }
-    const char *how = (AevonSBSVariant == 0) ? "url" : "url+opt";
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        AevonURLCarriedOk = 1;
-        long n = __sync_fetch_and_add(&AevonURLCarryTries, 1) + 1;
-        AevonLogRaw([[NSString stringWithFormat:
-                      @"act: launch url how=%s ret=0 n=%ld b=%s url=%.80s",
-                      how, n, AevonSBSKeepText,
-                      AevonDenyURL[0] != '\0' ? AevonDenyURL : "-"] UTF8String]);
-        AevonSBSRelease();
-        return;
-    }
-    int sig = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
-    int rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    AevonLogRaw([[NSString stringWithFormat:
-                  @"act: launch child bad how=%s rc=%d sig=%d b=%s",
-                  how, rc, sig, AevonSBSKeepText] UTF8String]);
-    if (AevonSBSVariant == 0 && AevonSBSFunc4 != NULL) {
-        AevonSBSVariant = 1;
-        AevonSBSTicks = 0;
-        AevonSBSSpawn();
-        return;
-    }
-    AevonLogRaw("act: launch all failed why=bad");
-    AevonURLBreaker();
-    AevonSBSFallback();
-}
-
-static void AevonSBSSpawn(void) {
-    pid_t pid = fork();
-    if (pid < 0) {
-        AevonLogRaw("act: launch fork failed");
-        AevonURLBreaker();
-        AevonSBSFallback();
-        return;
-    }
-    if (pid == 0) {
-        // 孩子：只调用、只退出。日志一行都不写（会跟主进程的行交错）。
-        alarm(2);
-        int r = -1;
-        if (AevonSBSVariant == 0 && AevonSBSFunc3 != NULL) {
-            r = AevonSBSFunc3(AevonSBSKeepBundle, AevonSBSKeepURL, YES);
-        } else if (AevonSBSVariant == 1 && AevonSBSFunc4 != NULL) {
-            r = AevonSBSFunc4(AevonSBSKeepBundle, AevonSBSKeepURL,
-                              AevonSBSKeepOpts, YES);
-        }
-        _exit(r == 0 ? 0 : 2);
-    }
-    AevonSBSChild = pid;
-    AevonSBSTicks = 0;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ AevonSBSTick(); });
-}
-
-/// `openCard` 启动 App 之前调。返回 1 = 已经开始（异步，成功与否看日志），
-/// 0 = 这台机器上没有那两个符号，调用方直接走纯挂起启动。
-int AevonLaunchSuspendedWithURL(const char *bundle, const char *urlText) {
-    if (bundle == NULL || bundle[0] == '\0') return 0;
-    if (urlText == NULL || urlText[0] == '\0') return 0;
-    CFStringRef b = CFStringCreateWithCString(NULL, bundle, kCFStringEncodingUTF8);
-    CFStringRef us = CFStringCreateWithCString(NULL, urlText, kCFStringEncodingUTF8);
-    CFURLRef u = us != NULL ? CFURLCreateWithString(NULL, us, NULL) : NULL;
-    if (us != NULL) CFRelease(us);
-    if (b == NULL) return 0;
-    if (u == NULL) {
-        CFRelease(b);
-        AevonLogRaw("act: launch url=0 why=badurl");
-        return 0;
-    }
-
-    if (AevonSBSFunc3 == NULL && AevonSBSFunc4 == NULL) {
-        void *handle = dlopen("/System/Library/PrivateFrameworks/"
-                              "SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
-        AevonSBSFunc3 = (AevonSBSF3)dlsym(RTLD_DEFAULT,
-            "SBSLaunchApplicationWithIdentifierAndURL");
-        if (AevonSBSFunc3 == NULL && handle != NULL) {
-            AevonSBSFunc3 = (AevonSBSF3)dlsym(handle,
-                "SBSLaunchApplicationWithIdentifierAndURL");
-        }
-        AevonSBSFunc4 = (AevonSBSF4)dlsym(RTLD_DEFAULT,
-            "SBSLaunchApplicationWithIdentifierAndURLAndLaunchOptions");
-        if (AevonSBSFunc4 == NULL && handle != NULL) {
-            AevonSBSFunc4 = (AevonSBSF4)dlsym(handle,
-                "SBSLaunchApplicationWithIdentifierAndURLAndLaunchOptions");
-        }
-        if (handle != NULL) dlclose(handle);
-    }
-    if (AevonSBSFunc3 == NULL && AevonSBSFunc4 == NULL) {
-        AevonLogRaw([[NSString stringWithFormat:
-                      @"act: launch url how=- ret=-1 b=%s", bundle] UTF8String]);
-        CFRelease(u);
-        CFRelease(b);
-        return 0;
-    }
-
-    AevonSBSRelease();
-    AevonSBSKeepBundle = b;
-    AevonSBSKeepURL = u;
-    // 四参那一支要字典：`NULL` 正是 0.3.31 崩掉的那个入参，传空字典。
-    AevonSBSKeepOpts = CFDictionaryCreate(NULL, NULL, NULL, 0,
-                                          &kCFTypeDictionaryKeyCallBacks,
-                                          &kCFTypeDictionaryValueCallBacks);
-    strlcpy(AevonSBSKeepText, bundle, sizeof(AevonSBSKeepText));
-    AevonSBSVariant = (AevonSBSFunc3 != NULL) ? 0 : 1;
-    AevonURLCarryDue = AevonActMs() + 2500;
-    long n = __sync_fetch_and_add(&AevonURLCarryTries, 1) + 1;
-    AevonLogRaw([[NSString stringWithFormat:
-                  @"act: launch try how=%s n=%ld b=%s url=%.80s",
-                  AevonSBSVariant == 0 ? "url" : "url+opt", n, bundle, urlText] UTF8String]);
-    AevonSBSSpawn();
-    return 1;
-}
 
 /// 0.3.20 — 记下「接下来要进卡的是这个 bundle」。
 ///
@@ -4610,14 +4394,6 @@ static void AevonTctxInjectURL(NSString *ident, id context) {
     if (AevonActMs() - AevonDenyAt > 8000) return;
     const char *idText = [ident UTF8String];
     if (idText == NULL || strstr(idText, AevonDenyBundle) == NULL) return;
-    // 0.3.31 — URL 已经跟着启动走了，这里再装一份就是重复：同一个 scene 会拿到
-    // 两份 action（系统一份、我们一份），QQ 那边正好是「两个面板」的形状。
-    if (AevonURLCarriedOk == 1) {
-        if (__sync_fetch_and_add(&AevonDenyTctxTries, 1) < 4) {
-            AevonLogRaw("act: tctx skip why=launch");
-        }
-        return;
-    }
     SEL actSel = NSSelectorFromString(@"setActions:");
     if (![context respondsToSelector:actSel]) {
         if (__sync_fetch_and_add(&AevonDenyTctxTries, 1) < 4) {
@@ -4754,17 +4530,7 @@ static void AevonURLDeliverShot(int tick, int shotsLeft) {
     if (shotsLeft < 0) shotsLeft = 0;
     // 0.3.30 — URL 已经跟着 scene 的 transitionContext 进去了，就别再往
     // 同一个 scene 送第二份：冷启动那条 action 会丢，热启动那条会重复弹面板。
-    // 0.3.31 — URL 已经跟着**启动那一拍**走了
-    // （`SBSLaunchApplicationWithIdentifierAndURL…`，见 `AevonLaunchSuspendedWithURL`）：
-    // 一发都不要再投。FrontBoard 会把 action 自己装进新 scene，我们再补一发就是第二个面板。
-    if (AevonURLCarriedOk == 1) {
-        if (tick == 1) {
-            AevonLogRaw([[NSString stringWithFormat:
-                          @"act: deliver skip why=launch b=%s",
-                          AevonDenyBundle] UTF8String]);
-        }
-        return;
-    }
+    // （0.3.33 删掉了「启动带走 URL」那条路，这个拦截现在只剩 tctx 这一条。）
     if (AevonDenyTctxOk == 1) {
         if (tick == 1) {
             AevonLogRaw([[NSString stringWithFormat:
@@ -4815,6 +4581,37 @@ static void AevonURLRedeliver(const char *bundle) {
     }
     AevonURLClassCensus();
     AevonURLDeliverShot(1, AevonDeliverShots);
+}
+
+static long AevonDenySkipLines = 0;
+
+/// 0.3.33 — **哪些 URL 值得接管。**
+///
+/// 从「只接分享」扩到「所有带 URL 的激活」时，最大的风险不是接不住，是接错：
+/// 有些 scheme 系统自己必须处理，拒掉它们等于把功能弄成没反应（打电话、发短信、
+/// 打开「设置」里的某一页、App Store 的商品页）。这些一律原样放行，日志留一行
+/// `act: deny skip why=scheme`，下次要放开哪一条照着加就行。
+///
+/// 反过来，`http/https`、各家 App 自己的 scheme（`mqqapi:` `weixin://` `alipays://`
+/// `xiaohongshu://` …）全都要接 —— 用户要的四类（点链接 / 分享 / 授权 / 支付）
+/// 都落在这一边。
+static int AevonURLWorthDeny(const char *u) {
+    if (u == NULL || u[0] == '\0') return 0;
+    static const char *skipSchemes[] = {
+        "file:", "tel:", "telprompt:", "sms:", "mailto:", "facetime:",
+        "prefs:", "app-prefs:", "itms-apps:", "itms-services:", "itms:",
+        "x-apple-", "com.apple.", "shortcuts:", "shareddocuments:",
+        "data:", "javascript:", NULL
+    };
+    const char *colon = strchr(u, ':');
+    if (colon == NULL || colon == u) return 0;
+    size_t n = (size_t)(colon - u);
+    if (n > 24) return 0;
+    for (int i = 0; skipSchemes[i] != NULL; i++) {
+        size_t k = strlen(skipSchemes[i]);
+        if (k == n + 1 && strncasecmp(u, skipSchemes[i], k) == 0) return 0;
+    }
+    return 1;
 }
 
 /// 0.3.26 — **拒答**：记 URL、排一次我们自己的开卡、再排一次补投。
@@ -6405,33 +6202,42 @@ static void AevonActInstall(NSMutableString *out) {
             //
             // 补投窗口内放行一次：我们自己补投的那一下也会走到这里，不放行就是
             // 自己拒自己，永远投不进去。
-            if (payload == 1 && shareKind == 2 &&
+            // 0.3.33 — **从「只接分享」扩到「所有带 URL 的激活」。**
+            //
+            // 0.3.26 只拒 `shareKind == 2`（带 `__PasteSharingToken` 的那一类），
+            // 因为那是最有把握的一种。Aevon(257) 把分享这条路走通了，但用户要的
+            // 四类里（点链接 / 分享 / 授权 / 支付），后两类和大部分点链接都落在
+            // `shareKind == 1` 上 —— 只接 kind=2 等于永远只有「分享」进浮窗。
+            //
+            // 边界的划法在 `AevonURLWorthDeny`：电话/短信/设置/App Store 这些
+            // 「系统必须自己处理」的 scheme 原样放行，其余全接。
+            // `url.global.off` 存在 = 退回 0.3.32（只接分享）。
+            if (payload == 1 && shareKind >= 1 &&
                 [bundleID isKindOfClass:[NSString class]]) {
                 const char *denyBundle = [(NSString *)bundleID UTF8String];
-                // 0.3.31 — 我们自己那一发「带 URL 的挂起启动」会再走一次这里
-                // （SpringBoardServices 底下就是 FrontBoard 的 openApplication）。
-                // 那一次必须原样放行，否则是**自己拒自己**：启动没发生，URL 也没了。
-                int carryWindow = (AevonURLCarryDue > 0 && AevonActMs() < AevonURLCarryDue &&
-                                   strcmp(denyBundle, AevonDenyBundle) == 0);
-                // 比前 200 字节而不是整串：`AevonDenyURL` 只有 512 字节，长 URL
-                // 会被 `strlcpy` 截断，整串比对一个字都对不上，等于没放行。
-                size_t cmpLen = strlen(AevonDenyURL);
-                if (cmpLen > 200) cmpLen = 200;
-                int sameURL = (carryWindow == 1 && shareURL != nil && cmpLen > 0 &&
-                               strncmp([shareURL UTF8String], AevonDenyURL, cmpLen) == 0) ? 1 : 0;
-                if ((AevonURLCarrying == 1 || sameURL == 1) &&
-                    strcmp(denyBundle, AevonDenyBundle) == 0) {
-                    AevonLogRaw([[NSString stringWithFormat:
-                                  @"act: pass why=carry sync=%d b=%s",
-                                  AevonURLCarrying, denyBundle] UTF8String]);
+                const char *us = shareURL != nil && shareURL.length > 0
+                    ? [shareURL UTF8String] : NULL;
+                int global = (shareKind == 2 || AevonURLGlobalOn() == 1) ? 1 : 0;
+                if (global == 0) {
+                    if (AevonDenySkipLines < 8) {
+                        __sync_fetch_and_add(&AevonDenySkipLines, 1);
+                        AevonLogRaw([[NSString stringWithFormat:
+                                      @"act: deny skip why=global k=%d b=%s",
+                                      shareKind, denyBundle] UTF8String]);
+                    }
+                } else if (AevonURLWorthDeny(us) != 1) {
+                    if (__sync_fetch_and_add(&AevonDenySkipLines, 1) < 8) {
+                        AevonLogRaw([[NSString stringWithFormat:
+                                      @"act: deny skip why=scheme k=%d u=%.60s",
+                                      shareKind, us != NULL ? us : "-"] UTF8String]);
+                    }
                 } else if (AevonRedeliverUntil > 0 && AevonActMs() < AevonRedeliverUntil &&
                     strcmp(denyBundle, AevonDenyBundle) == 0) {
+                    // 我们自己补投的那一下也会走到这里：放行一次，否则是自己拒自己。
                     AevonRedeliverUntil = 0;
                     AevonLogRaw([[NSString stringWithFormat:
                                   @"act: pass why=redeliver b=%s", denyBundle] UTF8String]);
                 } else if (AevonURLDenyOn() == 1) {
-                    const char *us = shareURL != nil && shareURL.length > 0
-                        ? [shareURL UTF8String] : NULL;
                     if (AevonURLDenyTake(denyBundle, us, shareKind) == 1) {
                         // 关键的一行：不调原函数。没有激活事务，就没有 FrontBoard
                         // 那个 430×932 的全屏窗口 —— 不是「撤得快」，是「没发生」。

@@ -160,6 +160,17 @@ public func AevonURLDenyOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlDenyOffPath) ? 0 : 1
 }
 
+/// 0.3.33 — URL 接管范围：只接分享，还是把点链接 / 授权 / 支付也接进来。
+///
+/// 返回 1（默认）= 全接。判据在 C 侧：带 `__PayloadURL` 且 scheme 不在
+/// 「系统必须自己处理」那一组里（`file:` `tel:` `sms:` `prefs:` `itms-*` …）就拒答，
+/// 目标 App 由我们拉起、scene 进我们自己的卡 —— 和分享那条路一模一样。
+/// 返回 0 = 建了 `url.global.off`，退回 0.3.32（只有 `shareKind == 2` 才接）。
+@_cdecl("AevonURLGlobalOn")
+public func AevonURLGlobalOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlGlobalOffPath) ? 0 : 1
+}
+
 /// 0.3.26 — 卡片起来之后要不要把 URL 补投一次。
 ///
 /// 返回 1 = 投（默认）。拒答让 QQ 由我们拉起，但 URL 没有跟着进 scene，
