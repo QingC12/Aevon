@@ -1147,7 +1147,6 @@ def main():
                   # 0.3.42 — 剪贴板令牌进 transitionContext：分享的内容在剪贴板上。
                   b"act: tctx paste=1 cls=%s b=%s",
                   # 0.3.42 — QQ OpenSDK 的 App Link 拆回自定义 scheme。
-                  b"app: openurl opensdk unwrap %.48s",
                   b"act: float skip why=authback b=%s sso=%@ u=%.80s",
                   b"act: unwrap b=%s from=%.46s to=%.46s",
                   b"act: bridge skip why=noapp b=%s cold=%d shots=%d",
@@ -2297,6 +2296,9 @@ def main():
                       b"app: openurl ctx opt stub",
                       b"app: openurl no file",
                       b"app: openurl bad plist",
+                      # 0.3.42 — QQ OpenSDK 的 App Link 拆回自定义 scheme。
+                      # 这条只在 App 侧（AevonApp.dylib）出现，宿主没有它。
+                  b"app: openurl opensdk unwrap %.48s",
                       b"setContentOffset:"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")
