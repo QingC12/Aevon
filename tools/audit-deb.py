@@ -1143,10 +1143,6 @@ def main():
                   b"act: float skip why=authback b=%s sso=%@ u=%.80s",
                   b"act: unwrap b=%s from=%.46s to=%.46s",
                   b"act: bridge skip why=noapp b=%s cold=%d shots=%d",
-                  b"AevonAuthWaitNote",
-                  b"AevonAuthBackHit",
-                  b"AevonBridgeable",
-                  b"AevonURLUnwrapScheme",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`
