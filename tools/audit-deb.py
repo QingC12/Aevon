@@ -1214,6 +1214,13 @@ def main():
                   b"probe: H1 shape skip (%s)",
                   b"probe: H2 n=%ld app=%s ret=%s",
                   b"probe: H4 app=%s cls=%s opt=%s fg=%d",
+                  # 0.3.14 — 一次装机抓全部：TrollOpen + Mango 的打开/建scene/承载入口。
+                  # 全部是纯透传壳，参数与返回值原样；结构体/浮点签名一律跳过。
+                  b"tap: armed %s %s argc=%d",
+                  b"tap: skip %s %s shape(struct/double)",
+                  b"tap: none %s",
+                  b"tap: done count=%d",
+                  b"tap: %s.%s a1=%s a2=%s n=%d",
                   b"presenter: birth fail b=%s why=nil id=%s",
                   b"presenter: birth skip b=%s why=nopm",
                   b"presenter: birth threw b=%s why=%s",
