@@ -1144,6 +1144,11 @@ def main():
                   b"notify: appurl weak stop n=1 via=%@ b=%@",
                   # 0.3.42 — 支付宝那一族不接管（只认 App Link 的 App）。
                   b"act: pass why=payapp b=%s k=%d src=%@ u=%.60s",
+                  # 0.3.44 — 授权族（出发 / 回跳）与冷启动分享一律交回系统。
+                  b"act: pass why=auth b=%s k=%d src=%s u=%.70s",
+                  b"act: pass why=coldshare b=%s k=%d u=%.70s",
+                  b"act: url card skip why=pass b=%s",
+                  b"/var/mobile/Library/Logs/Aevon/url.coldshare.pass.off",
                   # 0.3.42 — 剪贴板令牌进 transitionContext：分享的内容在剪贴板上。
                   b"act: tctx paste=1 cls=%s b=%s",
                   # 0.3.42 — QQ OpenSDK 的 App Link 拆回自定义 scheme。

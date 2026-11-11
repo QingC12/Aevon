@@ -261,6 +261,17 @@ public func AevonURLBridgeOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlBridgeOffPath) ? 0 : 1
 }
 
+/// 0.3.44 — 1 = 冷启动分享不接管（默认），0 = 建了 `url.coldshare.pass.off` 退回建卡。
+///
+/// 冷启动这条路我们试过五个投递口（tctx 注入、scene action 三发、进程内桥 12 次、
+/// 桥失败后补发、延迟到 8 秒后），全部停在 QQ 首页。系统原生那一发是唯一还没被
+/// 否定过的通道 —— 它带着 `__PayloadURL` 和 `__PasteSharingToken`，而且由
+/// FrontBoard 自己写进新 scene 的 connection options。所以这一族交回系统。
+@_cdecl("AevonColdSharePassOn")
+public func AevonColdSharePassOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlColdSharePassOffPath) ? 0 : 1
+}
+
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
 ///
 /// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、

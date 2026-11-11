@@ -123,6 +123,8 @@ extern int AevonURLActivityOn(void);
 extern int AevonURLPassOn(void);
 extern int AevonURLPlusOn(void);
 extern int AevonURLBridgeOn(void);
+// 0.3.44 — 冷启动分享交回系统（`url.coldshare.pass.off` 存在 = 退回建卡）。
+extern int AevonColdSharePassOn(void);
 // 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
 // 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
 extern int AevonCardYieldForFullscreen(const char *bundle);
@@ -146,6 +148,9 @@ static void AevonAuthWaitNote(id app);
 static void AevonAuthWaitClear(void);
 static int AevonAuthBackHit(const char *bundle, id srcApp, id *ssoOut);
 static void AevonAuthCardCloseSoon(NSString *who, const char *why);
+// 0.3.44 — 授权族（出发 / 回跳）一律交回系统，定义在 `AevonAuthBackHit` 前面。
+static int AevonAuthishURL(const char *u);
+static int AevonAuthFamilyPass(const char *bundle, const char *url, const char *src);
 // 0.3.40 — 激活钩子里要读「这次打开是谁发起的」（定义在 10596 那一带）。
 static id AevonOpenSourceApp(id request, id options);
 // 0.3.42 — 激活钩子里还要读 `__PasteSharingToken`（定义在 12460 那一带）。
@@ -3850,6 +3855,33 @@ static long AevonActArmURLCalls = 0;
 static char AevonURLCardLast[160] = {0};
 static volatile int64_t AevonURLCardAt = 0;
 static long AevonURLCardQueued = 0;
+// 0.3.44 — 「这一拍已经交回系统」的短时标记。
+//
+// `AevonURLCardSchedule` 是另一条会自己建卡的路（0.3.24 的 URL 卡），它只认
+// `AevonURLWriteOn`，不知道我们刚刚把这次打开放行了。冷启动分享 / 授权族放行
+// 之后 5 秒内，同一个 bundle 一律不建卡 —— 否则「放行（系统全屏）」与
+// 「建卡（我们抢 scene）」会同时发生，那正是 0.3.25 / 0.3.36 的黑屏形状。
+static char AevonPassBundle[160] = {0};
+static CFAbsoluteTime AevonPassAt = 0;
+
+static void AevonPassNote(const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return;
+    snprintf(AevonPassBundle, sizeof(AevonPassBundle), "%s", bundle);
+    AevonPassAt = CFAbsoluteTimeGetCurrent();
+    // 放行 = 系统原生开这一次，出生帧那一刀绝不能落到它身上。
+    // `AevonActFrameBirth` 自己有 10 秒超时，但「上一次 arm 恰好在十秒内」在连续
+    // 操作里很常见（Aevon(267) 19:39:32 QQ 授权 → 19:39:43 微信授权，隔 11 秒，
+    // 差一点就撞上）。放行时主动把目标清掉，不靠那个超时兜。
+    AevonActCardBundle[0] = '\0';
+    AevonActCardAt = 0;
+}
+
+static int AevonPassRecent(const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return 0;
+    if (AevonPassAt <= 0) return 0;
+    if (CFAbsoluteTimeGetCurrent() - AevonPassAt > 5.0) return 0;
+    return strcmp(bundle, AevonPassBundle) == 0 ? 1 : 0;
+}
 static long AevonActFrameDry = 0;
 static long AevonActFrameWrote = 0;
 static long AevonActFrameSkip = 0;
@@ -4128,6 +4160,13 @@ static int64_t AevonActMs(void) {
 /// 一直在用，URL 路从没调用过。代价是有意接受的：屏幕上多一次「整屏 → 桌面 → 卡」。
 static void AevonURLCardSchedule(const char *bundle) {
     if (bundle == NULL || bundle[0] == '\0') return;
+    // 0.3.44 — 这一拍刚被放行（授权族 / 冷启动分享），系统正在用它自己的
+    // options 开目标 App。此刻再建卡就是把那份已提交的激活抢走。
+    if (AevonPassRecent(bundle) == 1) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: url card skip why=pass b=%s", bundle] UTF8String]);
+        return;
+    }
     // 0.3.26 — 这次分享已经被「拒答」那条路接管了，旧路不要再排一次。
     // 两条路都会叫 `AevonOpenCardURL`，同时排就是两次 `openCard` 抢同一张 scene。
     if (AevonDenyAt > 0 && AevonActMs() - AevonDenyAt < 4000 &&
@@ -5309,6 +5348,26 @@ static int AevonPayPassOnly(const char *bundle) {
     return 0;
 }
 
+/// 0.3.44 — **这一条 URL 是不是「去拿授权 / 拿票据」。**
+///
+/// 只看字面特征、不看 `kind`：App Link 那一族（`https://help.wechat.com/…/auth/`、
+/// `https://qm.qq.com/opensdkul/mqqOpensdkSSoLogin/…`）在激活钩子里一律被判成
+/// `kind=2`（分享），0.3.42 放宽判据之后才勉强记上等待方，分流却仍然走分享那支。
+///
+/// 判据全部来自 Aevon(267) 的真实 URL，不是猜：
+///   `https://help.wechat.com/app/wxfe4c47e7e4e7f24c/auth/?scope=snsapi_userinfo…`
+///   `https://qm.qq.com/opensdkul/mqqOpensdkSSoLogin/SSoLogin/tencent1103575946/…`
+///   `wxfe4c47e7e4e7f24c://oauth?code=083PKyFa…`（回跳）
+static int AevonAuthishURL(const char *u) {
+    if (u == NULL || u[0] == '\0') return 0;
+    if (strcasestr(u, "/auth") != NULL) return 1;
+    if (strcasestr(u, "oauth") != NULL) return 1;
+    if (strcasestr(u, "snsapi_") != NULL) return 1;
+    if (strcasestr(u, "opensdk") != NULL) return 1;
+    if (strcasestr(u, "wechat_auth_token") != NULL) return 1;
+    return 0;
+}
+
 /// 0.3.26 — **拒答 / 0.3.36 放行式接管**：记 URL、排一次我们自己的开卡。
 ///
 /// 返回 2 = **接管但放行**（0.3.36 的行为，`url.pass.on` 才开）：不 return，原函数照常尾调，系统自己
@@ -5360,6 +5419,53 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
         }
         snprintf(claim, sizeof(claim), "%s", bundle);
         claimAt = nowClaim;
+    }
+    // 0.3.44 — **授权族交回系统**（判据与理由见 `AevonAuthFamilyPass`）。
+    //
+    // 放在 `claim` 之后是有意的：同一次点击常连发两条（App Link + 自定义 scheme，
+    // Aevon(267) 19:39:43 就是 `__AppLink4LS` 与 `weixin://app/…/auth/` 前后脚），
+    // 第一条在这里 return 0 交系统原生激活，第二条被上面那句 claim 吞掉 —— 正好
+    // 只开一次。若反过来（pass 在 claim 前），两条都 return 0，系统会开两次。
+    int authFam = AevonAuthFamilyPass(bundle, url, AevonDenySrc);
+    if (authFam >= 1) {
+        if (__sync_fetch_and_add(&AevonDenySkipLines, 1) < 12) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: pass why=auth b=%s k=%d src=%s u=%.70s",
+                          bundle, kind,
+                          AevonDenySrc[0] != '\0' ? AevonDenySrc : "-",
+                          url != NULL ? url : "-"] UTF8String]);
+        }
+        // 回跳那一拍用完就清；出发那一拍刚记上，清不得。
+        if (authFam == 2) AevonAuthWaitClear();
+        AevonPassNote(bundle);
+        AevonDenySrc[0] = '\0';
+        return 0;
+    }
+    // 0.3.44 — **冷启动分享也交回系统。**
+    //
+    // 这一条是拿十三份日志换来的结论，不是猜：0.3.26 的注释里早就写着「系统自己
+    // 把 URL 写进新 scene 的 connection options —— 那是唯一被 QQ 认的通道」，而
+    // 0.3.37 之后我们一直用「吞掉 + 自己造 action」的路，冷启动就再没出过面板。
+    // Aevon(267) 19:38:18 的冷分享把细节补全了：
+    //   act: activate … payload=1 k=__PayloadOptions|__PayloadURL|__PasteSharingToken
+    //   ↓（被我们吞掉）
+    //   notify: appurl send → ack ok=1 via=app-src dlg=- rsp=0 ×12（8.2 s）
+    //   act: bridge fallback → deliver ok=1 send=sendActions tick=1
+    //   ↓ QQ 侧：无 `app: page sheet`，停在首页
+    // 系统那发**带着剪贴板令牌**（`__PasteSharingToken`）和真正的 App Link 语义，
+    // 我们仿不出来。所以冷启动这一支不再接管：不建卡、不写出生帧、不发桥，
+    // 让 FrontBoard 用它自己的 options 把 URL 交给刚起来的进程。
+    // 代价：冷启动那一下是全屏（分享完手动返回）。热启动仍在卡里，不受影响。
+    if (kind == 2 && AevonColdSharePassOn() == 1 &&
+        AevonTargetAlive([NSString stringWithUTF8String:bundle], NULL) != 1) {
+        if (__sync_fetch_and_add(&AevonDenySkipLines, 1) < 12) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: pass why=coldshare b=%s k=%d u=%.70s",
+                          bundle, kind, url != NULL ? url : "-"] UTF8String]);
+        }
+        AevonPassNote(bundle);
+        AevonDenySrc[0] = '\0';
+        return 0;
     }
     strlcpy(AevonDenyBundle, bundle, sizeof(AevonDenyBundle));
     if (url != NULL && url[0] != '\0') {
@@ -11418,6 +11524,61 @@ static void AevonAuthWaitClear(void) {
 ///
 /// 三条一起看：等待方就是收信方、30 秒内、送信方是微 / QQ。`ssoOut` 带回送信方，
 /// 调用方拿它去收那张已经用完的卡（`AevonAuthCardCloseSoon`）。
+/// 0.3.44 — **授权族「出发」与「回跳」两拍都不接管。**
+///
+/// Aevon(267) 把两条老毛病指到了同一个根上：我们把「去微 / QQ 拿授权」的这一次
+/// 打开当成普通深链，吞掉、建卡、再自己造一个 `UIOpenURLAction` 投过去。
+///
+///   · 出发那一拍是 **App Link**（`__AppLink4LS`），正确语义是
+///     `continueUserActivity`；`UIOpenURLAction` 是 `openURL` 语义，QQ 回 `rsp=0`
+///     （`applog[com.tencent.mqq]` 里连一行 `app: openurl` 都没有），微信靠自己的
+///     `MMMainSceneDelegate` 才接住（`dlg=MMMainSceneDelegate rsp=1`）。
+///   · 回跳那一拍（`wxfe…://oauth?code=…` → 美团）是「回到发起方继续用」，
+///     接管就等于把用户从他正在用的 App 里拽出来塞进 352×587 的小窗
+///     （Aevon(267) 19:39:47 `act: float card b=com.midea.msmart.appstore` +
+///     `win: demote old=com.tencent.xin side=right`）。
+///
+/// 两条都只有系统做得对，所以这一族**一律 return 0**（不接管、不建卡、不写出生帧）。
+/// 代价是那一下全屏 —— 与 0.3.43 的支付宝（`AevonPayPassOnly`）同一个取舍。
+///
+/// 返回值：0 = 不属于这一族；1 = 出发（去拿授权）；2 = 回跳（带着结果回来）。
+/// 调用方靠它决定要不要清等待方 —— 出发那一拍刚记上，清不得。
+static int AevonAuthFamilyPass(const char *bundle, const char *url, const char *src) {
+    if (bundle == NULL || bundle[0] == '\0') return 0;
+    int toSSO = (strncmp(bundle, "com.tencent.xin", 15) == 0 ||
+                 strncmp(bundle, "com.tencent.mqq", 15) == 0) ? 1 : 0;
+    if (toSSO == 1) {
+        if (AevonAuthishURL(url) != 1) return 0;
+        // 记「谁在等这次授权」：回跳那一拍靠它认人。
+        if (src != NULL && src[0] != '\0') {
+            AevonAuthWaitNote([NSString stringWithUTF8String:src]);
+        }
+        return 1;
+    }
+    // 回跳：收信方 == 刚才在等的那支 App。
+    //
+    // 送信方不必强求：Aevon(267) 19:39:47 那一拍 `act: float sw=1` 里没有任何
+    // 来源读数（App Link 激活把 `SourceApplication` 吞了，前台此刻又已经切到
+    // 微信），若非要 `src` 是微 / QQ 才认，这一支就永远进不来 —— 0.3.43 的
+    // `act: float skip why=authback` 一次都没出现过，正是这个原因。
+    // 所以补一条形状判据：URL 自己带着「这是授权结果」（`?code=` / `oauth` / `token`）
+    // 也算。误判的代价只是那一下全屏，比把用户塞进小窗轻。
+    if (AevonAuthWait[0] == '\0') return 0;
+    if (strcmp(bundle, AevonAuthWait) != 0) return 0;
+    if (CFAbsoluteTimeGetCurrent() - AevonAuthWaitAt > 30.0) {
+        AevonAuthWaitClear();
+        return 0;
+    }
+    int ssosrc = (src != NULL &&
+                  (strncmp(src, "com.tencent.xin", 15) == 0 ||
+                   strncmp(src, "com.tencent.mqq", 15) == 0)) ? 1 : 0;
+    if (ssosrc == 0 && AevonAuthishURL(url) != 1) {
+        if (url == NULL || (strcasestr(url, "code=") == NULL &&
+                            strcasestr(url, "token") == NULL)) return 0;
+    }
+    return 2;
+}
+
 static int AevonAuthBackHit(const char *bundle, id srcApp, id *ssoOut) {
     if (ssoOut != NULL) *ssoOut = nil;
     if (bundle == NULL || AevonAuthWait[0] == '\0') return 0;

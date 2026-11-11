@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.43"
+    public static let version = "0.3.44"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -373,6 +373,18 @@ public enum Aevon {
     /// 那支 dylib 直接调 `scene:openURLContexts:` / `application:openURL:options:`。
     /// 那条桥 0.2.x 就在真机上双向验过（回执 `ok=1 via=app`）。
     public static let urlBridgeOffPath   = "/var/mobile/Library/Logs/Aevon/url.bridge.off"
+
+    /// 0.3.44 — **冷启动分享交回系统**的关闸（存在 = 回到 0.3.43 的「吞掉 + 桥」）。
+    ///
+    /// Aevon(267) 19:38:18 的冷分享把结论钉死了：系统那一发激活本身就带着
+    /// `__PayloadURL` 与 `__PasteSharingToken`，被我们吞掉之后，桥问了 12 次
+    /// （`ack ok=1 via=app-src dlg=- rsp=0`，8.2 s）、补投一发 scene action，
+    /// QQ 侧仍然一行 `app: page sheet` 都没有。
+    /// 0.3.26 的注释里早就写过「系统把 URL 写进新 scene 的 connection options
+    /// 才是唯一被 QQ 认的通道」—— 这一版照那句话做：冷启动分享不接管。
+    /// 要回退成「冷启动也建卡」时手建这个文件，不必换包。
+    public static let urlColdSharePassOffPath =
+        "/var/mobile/Library/Logs/Aevon/url.coldshare.pass.off"
 
     /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
     ///
