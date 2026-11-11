@@ -1873,9 +1873,6 @@ static int AevonSeenCount = 0;
 /// 0.3.1 — 三条取证线的前向声明。`AevonSeenNote` 在文件很靠前的位置，
 /// 而线 C 的实现跟着 `AevonActFrameBirth` 一起放（那里才有 scene 相关的上下文）。
 static void AevonProbePresenterBirth(id scene);
-// 0.3.9 — P1 落地探针（定义在 `AevonProbeP1Carrier` 旁边）。`AevonSeenNote`
-// 在文件很靠前的位置，所以要先声明。
-static void AevonProbeP1Landing(id scene);
 static void AevonProbeActOptions(id options);
 static void AevonProbeTransitionContext(id context, id settings);
 
@@ -1913,9 +1910,9 @@ static void AevonSeenNote(id scene) {
     // 我们只在钩子里见过它的指针，包装它等于改行为；而 `AevonSeenNote` 是
     // 系统自己把 scene 交出来的第一个只读窗口，足够回答「presenter 能不能建」。
     AevonProbePresenterBirth(scene);
-    // 0.3.9 — P1 落地前的最后一问：`newSceneViewController` 能不能真拿到 VC。
-    // 挂在「scene 第一次被看见」这一拍 —— 正是母版 P1 要动手的时机。
-    AevonProbeP1Landing(scene);
+    // 0.3.10 — G 线**不挂在这里**了。`AevonSeenNote` 的唯一调用点是 intercept
+    // 钩子，而那只在建卡时装；URL 清除后不建卡 ⇒ 这里永远不跑（Aevon(235) 实测）。
+    // G 线改由 `AevonProbeP1Scan` 开机自枚举，见那里。
 }
 
 /// 拦截点记过的、名字含这个 bundle 的 scene。没有就返回 nil。
@@ -4261,47 +4258,59 @@ static void AevonProbeSceneVCShape(id vc, const char *tag) {
     }
 }
 
-/// 0.3.9 — 总入口：对一个**真实存在的** App scene 走一遍 ①②③。
-///
-/// 挂在 `AevonSeenNote`（scene 第一次被看见那一刻）：那时 scene 已建、还没上屏，
-/// 正是母版 P1 要动手的时机。只挑第一个非 SpringBoard 的 scene 做一次，
-/// 免得把日志预算烧在几十个系统 scene 上。
-static void AevonProbeP1Landing(id scene) {
-    if (scene == nil) return;
-    if (__sync_fetch_and_add(&AevonProbeP1Land, 1) > 0) return;
-    // 只挑自己的 App（sceneID: 前缀且不是 springboard / systemaperture）。
-    const char *name = AevonSceneName(scene);
-    if (name == NULL || strncmp(name, "sceneID:", 8) != 0) return;
-    if (strstr(name, "springboard") != NULL) return;
-    if (strstr(name, "SystemAperture") != NULL) return;
-
-    AevonActStep("probe:p1land");
-    @try {
-        AevonLogRaw([[NSString stringWithFormat:
-                      @"probe: G0 scene=%s", name] UTF8String]);
-        id handle = AevonProbeSceneHandleFor(scene);
-        if (handle == nil) return;
-        int ok = AevonProbeSceneVCFrom(handle, "G2");
-        if (ok == 0) return;
-        // 拿第二次只为问形状（`newSceneViewController` 每次给一个新的，不能复用
-        // 前一次那个 —— 但这里只问 respondsToSelector，用第二次也没副作用）。
-        id again = nil;
-        @try {
-            SEL s = NSSelectorFromString(@"newSceneViewController");
-            if ([handle respondsToSelector:s]) {
-                again = ((id (*)(id, SEL))objc_msgSend)(handle, s);
-            }
-        } @catch (__unused NSException *e) {}
-        AevonProbeSceneVCShape(again, "G3");
-    } @catch (NSException *e) {
-        AevonLogRaw("probe: G0 threw");
-    }
-}
-
 static void AevonProbeP1Carrier(void) {
     AevonProbeCarrierSymbols();
     AevonProbeDismissChain();
     AevonProbeSceneController();
+}
+
+/// 0.3.10 — G 线的新入口：**自己枚举 scene，不从钩子里拿。**
+///
+/// 0.3.9 挂在 `AevonSeenNote` 上，而它的唯一调用点是 intercept 钩子 ——
+/// 那个钩子只在建卡时装。URL 清除后不建卡，于是 G 线一次都没跑（Aevon(235)：
+/// D/E/F 16 行全在、G 0 行、`win: slot taken` 0 次）。
+///
+/// 改为开机后延时自己走一遍 `AevonSceneManager` 的 scene 表：挑第一个
+/// `sceneID:<bundle>-…` 且不是 springboard / SystemAperture 的，跑 G1→G2→G3。
+/// 只做一次、只读。
+static void AevonProbeP1Scan(void) {
+    if (__sync_fetch_and_add(&AevonProbeP1Land, 1) > 0) return;
+    AevonActStep("probe:p1scan");
+    @try {
+        id manager = AevonSceneManager();
+        if (manager == nil) {
+            AevonLogRaw("probe: G0 no scene manager");
+            return;
+        }
+        __block int picked = 0;
+        AevonEnumerateScenes(manager, ^(id scene) {
+            if (picked) return;
+            if (scene == nil) return;
+            const char *name = AevonSceneName(scene);
+            if (name == NULL || strncmp(name, "sceneID:", 8) != 0) return;
+            if (strstr(name, "springboard") != NULL) return;
+            if (strstr(name, "SystemAperture") != NULL) return;
+            picked = 1;
+            AevonLogRaw([[NSString stringWithFormat:@"probe: G0 scene=%s", name] UTF8String]);
+            id handle = AevonProbeSceneHandleFor(scene);
+            if (handle == nil) {
+                AevonLogRaw("probe: G1 give up (no handle)");
+                return;
+            }
+            int ok = AevonProbeSceneVCFrom(handle, "G2");
+            if (ok == 0) return;
+            @try {
+                SEL s = NSSelectorFromString(@"newSceneViewController");
+                if ([handle respondsToSelector:s]) {
+                    id again = ((id (*)(id, SEL))objc_msgSend)(handle, s);
+                    AevonProbeSceneVCShape(again, "G3");
+                }
+            } @catch (__unused NSException *e) {}
+        });
+        if (!picked) AevonLogRaw("probe: G0 no app scene found");
+    } @catch (NSException *e) {
+        AevonLogRaw("probe: G0 scan threw");
+    }
 }
 
 static void AevonProbeActOptions(id options) {
@@ -4958,6 +4967,14 @@ void AevonLandingBoot(void) {
     // 只问类在不在、选择子归谁、编码是什么，一次 hook 都不装、一个实例都不建。
     // 这是「照母版 P1 重做」的第一步；URL 已在同一版清零。
     AevonProbeP1Carrier();
+    // 0.3.10 — G 线：延时 6 秒自枚举一次。
+    // 开机那一刻前台通常还是 SpringBoard 自己的光圈窗帘，6 秒后用户多半已经
+    // 打开过一个 App —— 那时才有一个「真实存在的 App scene」可以问。
+    // 只做一次，`AevonProbeP1Land` 保证重入不重复。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonProbeP1Scan();
+    });
     // 一行一条：日志是按行读的，把一整段塞进一条会让下一轮的 grep 全部落空。
     for (NSString *raw in [out componentsSeparatedByString:@"\n"]) {
         NSString *line = [raw stringByTrimmingCharactersInSet:
