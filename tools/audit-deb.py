@@ -1238,6 +1238,14 @@ def main():
                   b"defn: mut.%s enc=%s",
                   b"defn: mut.%s absent",
                   b"defn: done",
+                  # 0.3.19 — 验证 updateSettingsWithBlock: 的 block 收到什么类。
+                  # 这是唯一可能「能改 settings」的入口（contra 0.3.13 的 48 方法零 setter）。
+                  b"p2: set armed",
+                  b"p2: cli armed",
+                  b"p2: set.ctx cls=%s",
+                  b"p2: cli.ctx cls=%s",
+                  b"p2: set called n=%ld blk=%s",
+                  b"p2: set shape skip (%s)",
                   b"presenter: birth fail b=%s why=nil id=%s",
                   b"presenter: birth skip b=%s why=nopm",
                   b"presenter: birth threw b=%s why=%s",

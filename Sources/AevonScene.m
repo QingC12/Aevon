@@ -5425,6 +5425,155 @@ static void AevonCensusSceneDefinition(NSMutableString *out) {
 }
 
 
+// ============================================================================
+// 0.3.19 — 验证 `updateSettingsWithBlock:` 的 block 收到什么
+//
+// Aevon(245) 的普查给出了一条新线索：
+//
+//   FBSMutableSceneParameters methods n=8
+//     |setSettings:                   v24@0:8@16
+//     |_setSpecification:            v24@0:8@16
+//     |updateSettingsWithBlock:      v24@0:8@?16   ← ★
+//     |updateClientSettingsWithBlock: v24@0:8@?16  ← ★
+//
+// 这两个方法**收一个 block，block 里能改 settings**。十八个版本以来第一次
+// 看到「可能能改 settings」的入口。
+//
+// 但它与 0.3.13 的读数冲突：
+//   set cls=UIApplicationSceneSettings n=48 |(no setter)
+// 如果 block 收到的也是这份零 setter 的对象，那 block 里照样改不了。
+//
+// 所以这一版只问一件事：**block 收到的对象，类名是什么。**
+//
+// 安全设计（照 0.3.16 的标准）：
+//   · 编码 `v24@0:8@?16` = 返回 void、1 个 block 参数，全是对象 ⇒ 可安全装壳
+//   · 壳**不替换**调用方的 block，只是**包一层**：记一行，然后原样调用它
+//   · 包出来的 block 签名 `void(^)(id)` 与原 block 一致
+//   · 壳里**只读类名，一个值都不写**
+// ============================================================================
+
+/// 0.3.19 — 被包装的原始 block 暂存。
+///
+/// 每个包装块各自捕获自己的原始块，不共用静态量 —— 并发调用时不会串。
+static long AevonSetBlkHits = 0;
+static long AevonCliBlkHits = 0;
+
+/// 0.3.19 — 给 `updateSettingsWithBlock:` / `updateClientSettingsWithBlock:` 装壳。
+///
+/// `FBSMutableSceneParameters` 是 `FBSSceneParameters` 的子类；这两个方法定义在
+/// 子类上（普查里 `methods n=8` 列出来了），所以钩子挂在子类。
+///
+/// 转发时**必须**用 `AevonSBParamsOrig` 那个 IMP —— 因为壳替换的是子类的实现，
+/// 而原实现也在子类上。
+static void AevonHookParamsBlocks(NSMutableString *out) {
+    Class cls = objc_getClass("FBSMutableSceneParameters");
+    if (cls == Nil) { [out appendString:@"p2: no class\n"]; return; }
+
+    // ---- ① updateSettingsWithBlock: ----
+    SEL selA = NSSelectorFromString(@"updateSettingsWithBlock:");
+    Method mA = class_getInstanceMethod(cls, selA);
+    if (mA != NULL) {
+        const char *enc = method_getTypeEncoding(mA);
+        if (enc != NULL && strcmp(enc, "v24@0:8@?16") == 0) {
+            IMP origA = method_getImplementation(mA);
+            id blkA = ^(id params, id block) {
+                @try {
+                    if (__sync_fetch_and_add(&AevonSetBlkHits, 1) < 8) {
+                        // 只记「有人调了」，以及原 block 的类名（判断是不是栈块）。
+                        AevonLogRaw([[NSString stringWithFormat:
+                                      @"p2: set called n=%ld blk=%s",
+                                      (long)AevonSetBlkHits,
+                                      block != nil ? object_getClassName(block) : "nil"]
+                                     UTF8String]);
+                    }
+                } @catch (__unused NSException *e) {}
+                // 包一层：记 ctx 类名，然后原样调用。
+                id wrapped = nil;
+                if (block != nil) {
+                    // ⛔ 先 copy 再包：调用方传进来的可能是**栈块**，一旦离开那一栈
+                    // 就失效。`[block copy]` 把它搬到堆上，包装块捕获的是堆副本。
+                    // 这一步不做，形如 0.2.91 的 use-after-scope 崩溃。
+                    // MRC：用 Block_copy 明确搬到堆，配一个 Block_release。
+                    void *heapBlock = Block_copy(block);
+                    wrapped = ^(id ctx) {
+                        @try {
+                            if (__sync_fetch_and_add(&AevonSetBlkHits, 1) <= 40) {
+                                AevonLogRaw([[NSString stringWithFormat:
+                                              @"p2: set.ctx cls=%s",
+                                              ctx != nil ? object_getClassName(ctx) : "nil"]
+                                             UTF8String]);
+                            }
+                        } @catch (__unused NSException *e) {}
+                        ((void (^)(id))heapBlock)(ctx);
+                    };
+                    // 包装块由系统持有；原块的堆副本在包装块被销毁前必须留着，
+                    // 这里不做 release —— 代价是一次极小的泄漏（每个 params 一份），
+                    // 换取「不会 use-after-free」。18 个版本里我已经在内存语义上
+                    // 栽过两次（0.2.91 的 strnlen、0.3.14 的 retain_x20），
+                    // 这次宁可漏一点。
+                    (void)heapBlock;
+                }
+                if (origA != NULL) {
+                    ((void (*)(id, SEL, id))origA)(params, selA, wrapped != nil ? wrapped : block);
+                }
+            };
+            method_setImplementation(mA, imp_implementationWithBlock(blkA));
+            [out appendString:@"p2: set armed\n"];
+        } else {
+            [out appendFormat:@"p2: set shape skip (%s)\n", enc ? enc : "?"];
+        }
+    } else {
+        [out appendString:@"p2: set absent\n"];
+    }
+
+    // ---- ② updateClientSettingsWithBlock: ----
+    SEL selB = NSSelectorFromString(@"updateClientSettingsWithBlock:");
+    Method mB = class_getInstanceMethod(cls, selB);
+    if (mB != NULL) {
+        const char *enc = method_getTypeEncoding(mB);
+        if (enc != NULL && strcmp(enc, "v24@0:8@?16") == 0) {
+            IMP origB = method_getImplementation(mB);
+            id blkB = ^(id params, id block) {
+                @try {
+                    if (__sync_fetch_and_add(&AevonCliBlkHits, 1) < 8) {
+                        AevonLogRaw([[NSString stringWithFormat:
+                                      @"p2: cli called n=%ld blk=%s",
+                                      (long)AevonCliBlkHits,
+                                      block != nil ? object_getClassName(block) : "nil"]
+                                     UTF8String]);
+                    }
+                } @catch (__unused NSException *e) {}
+                id wrapped = nil;
+                if (block != nil) {
+                    void *heapBlock = Block_copy(block);   // 同上
+                    wrapped = ^(id ctx) {
+                        @try {
+                            if (__sync_fetch_and_add(&AevonCliBlkHits, 1) <= 40) {
+                                AevonLogRaw([[NSString stringWithFormat:
+                                              @"p2: cli.ctx cls=%s",
+                                              ctx != nil ? object_getClassName(ctx) : "nil"]
+                                             UTF8String]);
+                            }
+                        } @catch (__unused NSException *e) {}
+                        ((void (^)(id))heapBlock)(ctx);
+                    };
+                    (void)heapBlock;   // 同上：不 release，换安全
+                }
+                if (origB != NULL) {
+                    ((void (*)(id, SEL, id))origB)(params, selB, wrapped != nil ? wrapped : block);
+                }
+            };
+            method_setImplementation(mB, imp_implementationWithBlock(blkB));
+            [out appendString:@"p2: cli armed\n"];
+        } else {
+            [out appendFormat:@"p2: cli shape skip (%s)\n", enc ? enc : "?"];
+        }
+    } else {
+        [out appendString:@"p2: cli absent\n"];
+    }
+}
+
+
 /// 一条普查记录（只读，不装）。
 typedef struct {
     const char *sel;
@@ -5724,6 +5873,9 @@ void AevonLandingBoot(void) {
     // 0.3.18 — 普查 `FBSMutableSceneDefinition` / `FBSMutableSceneParameters`。
     // 系统建 scene 时传的是可变子类，而 0.2.85 查的是不可变父类。
     AevonCensusSceneDefinition(out);
+    // 0.3.19 — 验证 `updateSettingsWithBlock:` 的 block 收到什么类。
+    // 这是唯一可能「能改 settings」的入口，必须先看清 ctx 的类名。
+    AevonHookParamsBlocks(out);
     // 0.3.10 — G 线：延时 6 秒自枚举一次。
     // 开机那一刻前台通常还是 SpringBoard 自己的光圈窗帘，6 秒后用户多半已经
     // 打开过一个 App —— 那时才有一个「真实存在的 App scene」可以问。
