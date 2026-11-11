@@ -1139,7 +1139,15 @@ def main():
                   b"notify: appurl retry n=%d via=%@ weak=%d",
                   b"weak-refused",
                   b"act: float skip why=claim b=%s k=%d u=%.60s",
-                  b"act: auth wait b=%s src=%s",
+                  b"act: auth wait b=%s k=%d src=%s",
+                  # 0.3.42 — 弱答案问一次就停，把那一发让给 scene action。
+                  b"notify: appurl weak stop n=1 via=%@ b=%@",
+                  # 0.3.42 — 支付宝那一族不接管（只认 App Link 的 App）。
+                  b"act: pass why=payapp b=%s k=%d src=%@ u=%.60s",
+                  # 0.3.42 — 剪贴板令牌进 transitionContext：分享的内容在剪贴板上。
+                  b"act: tctx paste=1 cls=%s b=%s",
+                  # 0.3.42 — QQ OpenSDK 的 App Link 拆回自定义 scheme。
+                  b"app: openurl opensdk unwrap %.48s",
                   b"act: float skip why=authback b=%s sso=%@ u=%.80s",
                   b"act: unwrap b=%s from=%.46s to=%.46s",
                   b"act: bridge skip why=noapp b=%s cold=%d shots=%d",

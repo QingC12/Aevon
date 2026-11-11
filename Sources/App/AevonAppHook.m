@@ -4919,8 +4919,15 @@ static BOOL AevonOpenURLUniversal(UIApplication *app, NSURL *url) {
     // 那不是这一版要动的东西。
     NSString *low = url.absoluteString.lowercaseString;
     if (chat) {
+        // 0.3.42 — QQ 的 OpenSDK 也走 App Link：
+        // `https://qm.qq.com/opensdkul/mqqOpensdkSSoLogin/SSoLogin/<appid>/…`。
+        // Aevon(266) 19:10:56 那一次它被判成「不是授权形状」，于是落进
+        // `application:openURL:options:`（QQ 回 `rsp=0`）⇒ 授权页一次都没出现。
+        // 系统自己送同一条链接时走的是 `continueUserActivity`，这里补齐。
         if ([low rangeOfString:@"/auth"].location == NSNotFound &&
-            [low rangeOfString:@"oauth"].location == NSNotFound) return NO;
+            [low rangeOfString:@"oauth"].location == NSNotFound &&
+            [low rangeOfString:@"opensdkul"].location == NSNotFound &&
+            [low rangeOfString:@"ssologin"].location == NSNotFound) return NO;
     } else {
         // 支付宝只认 `/ulink` 或 `scheme=alipay` 两种形状；其余 https 一律不碰
         // —— 把一条普通网页当支付递进去会开出一个内嵌浏览器，比停在首页更糟。
@@ -4965,6 +4972,30 @@ static BOOL AevonOpenURLUniversal(UIApplication *app, NSURL *url) {
 }
 
 static void AevonOpenURLApply(void);
+
+/// 0.3.42 — QQ OpenSDK 的 App Link 拆回自定义 scheme。
+///
+/// 形状：`https://qm.qq.com/opensdkul/mqqOpensdkSSoLogin/SSoLogin/<appid>/<appid>
+///        ?generalpastboard=1&sdkv=3.5.17&…`
+/// 拆法：`/opensdkul/` 之后第一段是 scheme，剩下的是路径 + 查询串。
+/// 返回 nil = 不是这个形状（其余 URL 一个字节都不动）。
+static NSString *AevonQQOpenSDKUnwrap(NSURL *url) {
+    if (url == nil) return nil;
+    NSString *raw = url.absoluteString;
+    if (raw.length < 32) return nil;
+    NSString *low = raw.lowercaseString;
+    if (![low hasPrefix:@"https://qm.qq.com/opensdkul/"]) return nil;
+    NSString *rest = [raw substringFromIndex:[@"https://qm.qq.com/opensdkul/" length]];
+    NSRange slash = [rest rangeOfString:@"/"];
+    if (slash.location == NSNotFound || slash.location < 2) return nil;
+    NSString *scheme = [rest substringToIndex:slash.location];
+    if (![scheme isEqualToString:@"mqqOpensdkSSoLogin"] &&
+        ![scheme isEqualToString:@"mqqopensdkapiV2"] &&
+        ![scheme isEqualToString:@"mqqapi"]) return nil;
+    NSString *tail = [rest substringFromIndex:slash.location + 1];
+    if (tail.length == 0) return nil;
+    return [NSString stringWithFormat:@"%@://%@", scheme, tail];
+}
 
 /// 主线程执行：读投递文件 → 调 App 自己的 open URL 入口 → 写回执。
 static void AevonOpenURLApply(void) {
@@ -5050,6 +5081,22 @@ static void AevonOpenURLApply(void) {
         ok = YES;
         via = "useractivity";
         AevonAppLogWrite("app: openurl useractivity\n");
+    }
+    // 0.3.42 — App Link 那条没被认（QQ 回 NO）时，把 `/opensdkul/` 里那段
+    // scheme 拼回来再走 openURL。这一格只对 QQ 的三种 scheme 生效，其余 URL
+    // 原样往下走。
+    if (!ok) {
+        NSString *un = AevonQQOpenSDKUnwrap(url);
+        if (un.length > 0) {
+            NSURL *alt = [NSURL URLWithString:un];
+            if (alt != nil) {
+                AevonAppLogWrite([[NSString stringWithFormat:
+                                   @"app: openurl opensdk unwrap %.48s\n",
+                                   un.UTF8String != NULL ? un.UTF8String : "-"]
+                                  UTF8String]);
+                url = alt;
+            }
+        }
     }
 
     // ① 先用 scene 的正门。QQ / 微信 / 抖音都是 scene 化的 App，系统对它们
