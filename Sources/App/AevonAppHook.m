@@ -4323,10 +4323,39 @@ static void AevonInstallCrashNotes(void) {
 ///
 /// 只在「画布比屏幕矮」（= 正被托管）时写，所以全屏运行时日志不会多一行。
 /// 上限 3600 行 ≈ 1 小时，比一张卡的寿命长得多。
+/// 0.3.39 — 心跳文件 `tmp/aevon-alive`，内容是 `pid 时间戳`，最多 1.8 s 一次。
+///
+/// 这是宿主判断「这个 App 现在有没有进程」的唯一可靠依据。原来它读
+/// `SBApplicationController` 的 `pid` / `isRunning`，而 Aevon(4)(2) 里 QQ
+/// 明明在跑（ack 自带 `pid=53883`），宿主那一侧却每一跳都是
+/// `act: float cold=1 pid=-2 run=-1 seen=0 live=0` ⇒ 0.3.38 的进程内桥把
+/// **热启动也全接了**，0.3.37 验过的 scene action 一次都没走。
+///
+/// 为什么不复用 `aevon-app.log` 的修改时间：宿主每次读完就截断，截断本身
+/// 也会刷新时间戳，于是「刚死掉的 App」看起来和「活着」一样新。单独一个文件，
+/// 只有本进程会写，语义干净。
+///
+/// 1.8 s 节流：这条链是 1 s 一拍，写一次 40 字节；不给它加节流就是每秒一次
+/// 磁盘写，对本进程和闪存都不划算。
+static void AevonAliveBeat(void) {
+    static CFAbsoluteTime last = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (last > 0 && now - last < 1.8) return;
+    last = now;
+    NSString *tmp = NSTemporaryDirectory();
+    if (tmp.length == 0) return;
+    NSString *file = [tmp stringByAppendingPathComponent:@"aevon-alive"];
+    char box[64];
+    snprintf(box, sizeof(box), "%d %.0f\n", (int)getpid(), now);
+    NSData *data = [NSData dataWithBytes:box length:strlen(box)];
+    [data writeToFile:file atomically:NO];
+}
+
 static void AevonAliveTick(void *context) {
     (void)context;
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                      dispatch_get_main_queue(), NULL, AevonAliveTick);
+    AevonAliveBeat();
     CGFloat height = AevonWindowHeight();
     UIScreen *screen = [UIScreen mainScreen];
     CGFloat full = screen != nil ? [screen bounds].size.height : 0.0;
@@ -4874,14 +4903,30 @@ static BOOL AevonOpenURLUniversal(UIApplication *app, NSURL *url) {
     NSString *scheme = url.scheme.lowercaseString;
     if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) return NO;
     NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
-    if (![bundle hasPrefix:@"com.tencent.xin"] &&
-        ![bundle hasPrefix:@"com.tencent.mqq"]) return NO;
+    BOOL chat = [bundle hasPrefix:@"com.tencent.xin"] || [bundle hasPrefix:@"com.tencent.mqq"];
+    // 0.3.39 — 支付这一族也走通用链接。
+    //
+    // Aevon(4)(2) 里支付宝拿到的是
+    // `https://render.alipay.com/p/s/ulink/?scheme=alipay%3A%2F%2Falipayclient%2F%3F…`
+    // —— 这是支付宝自己的通用链接域名，不是自定义 scheme。系统对通用链接
+    // **从不调** `application:openURL:options:`，只调
+    // `continueUserActivity:restorationHandler:`（或 scene 版）。我们一直把它当
+    // 普通 URL 递，于是它只把 App 拉到首页、支付页不出现。
+    BOOL pay = [bundle hasPrefix:@"com.alipay"];
+    if (!chat && !pay) return NO;
     // 只认登录 / 授权形状的 https。分享到微信 / QQ 的普通链接也走这条投递链，
     // 把它们当成 universal link 递进去会让「分享一个网页」变成「打开网页」——
     // 那不是这一版要动的东西。
     NSString *low = url.absoluteString.lowercaseString;
-    if ([low rangeOfString:@"/auth"].location == NSNotFound &&
-        [low rangeOfString:@"oauth"].location == NSNotFound) return NO;
+    if (chat) {
+        if ([low rangeOfString:@"/auth"].location == NSNotFound &&
+            [low rangeOfString:@"oauth"].location == NSNotFound) return NO;
+    } else {
+        // 支付宝只认 `/ulink` 或 `scheme=alipay` 两种形状；其余 https 一律不碰
+        // —— 把一条普通网页当支付递进去会开出一个内嵌浏览器，比停在首页更糟。
+        if ([low rangeOfString:@"/ulink"].location == NSNotFound &&
+            [low rangeOfString:@"scheme=alipay"].location == NSNotFound) return NO;
+    }
 
     NSUserActivity *activity = [[NSUserActivity alloc]
         initWithActivityType:@"NSUserActivityTypeBrowsingWeb"];

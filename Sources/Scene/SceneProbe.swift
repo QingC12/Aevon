@@ -2393,6 +2393,19 @@ zStackParticipantDidChange:
         return best
     }
 
+    /// 0.3.39 — 把「此刻屏上那个全屏 App 是谁」交给 C 侧。
+    ///
+    /// 为什么需要它：系统自己送 URL 时，`application:openURL:options:` 的
+    /// options 里必带 `UIApplicationOpenURLOptionsSourceApplicationKey`；
+    /// 我们走进程内桥时这一项一直是空的（Aevon(4)(2) 的 `src=0`）。而 0.3.37
+    /// 热启动走 scene action 时 QQ 能弹分享面板，那条路带的是 `UIOpenURLAction`
+    /// 的 `workspaceOriginatingProcess`。两者差的正是这一格。
+    ///
+    /// 只读、只在主线程拿一次快照，不做任何等待。
+    static func frontSceneName() -> String? {
+        return frontSceneBundle()
+    }
+
     private static func listedScene(_ bundleID: String) -> NSObject? {
         guard let manager = AevonSceneManager() as? NSObject else { return nil }
         var best: NSObject?
@@ -3956,6 +3969,19 @@ public func AevonCardIsUpFor(_ bundle: UnsafePointer<CChar>?) -> Int32 {
     if FloatHost.mainBundle == identifier { return 1 }
     if FloatHost.dockedHost(of: identifier) != nil { return 1 }
     return 0
+}
+
+/// 0.3.39 — 「此刻屏上那个全屏 App 的 bundle id」，给 `AevonScene.m` 当来源用。
+///
+/// 返回一份 malloc 出来的 C 字符串，**调用方负责 free**；读不到答 NULL。
+/// 判据的来由写在 `SceneProbe.frontSceneName()` 上：系统自己送 URL 时
+/// options 里必带 `SourceApplication`，我们的桥一直没带（`src=0`），
+/// 而 0.3.37 那条能用的 scene action 恰恰带着 `workspaceOriginatingProcess`。
+@_cdecl("AevonFrontBundleCopy")
+public func AevonFrontBundleCopy() -> UnsafeMutablePointer<CChar>? {
+    guard Thread.isMainThread else { return nil }
+    guard let name = SceneProbe.frontSceneName(), name.count > 2 else { return nil }
+    return strdup(name)
 }
 
 /// 0.1.91 — 「这张卡在路上吗」。

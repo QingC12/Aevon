@@ -3898,9 +3898,44 @@ static volatile int AevonDenySwallow = 1;
 // delegate（`scene:openURLContexts:` → 退 `application:openURL:options:`）。
 // 它自己会等界面长出来（最多 4 s）、失败重投 14 次 × 0.45 s。
 static volatile int AevonDenyBridgeOnly = 0;
+// 0.3.39 — 这一次接管的是哪一族（1 = 链接/授权/支付，2 = 分享）。
+// 桥超时之后的回落要看它：分享没投进去不能补第二发（会把分享页开两遍），
+// 链接/支付没投进去必须补 —— 不补就是「卡片里停在首页」。
+static volatile int AevonDenyKind = 0;
 static void AevonURLRedeliver(const char *bundle);
 static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int swallow);
 static int AevonAppOpenSend(NSString *bundleID, NSString *url, id options, NSString *src);
+static NSString *AevonAppOpenLeaf(NSString *bundleID, NSString *leaf);
+// 0.3.39 — 「此刻屏上那个全屏 App 的 bundle id」（`SceneProbe.frontSceneName`）。
+// 返回 malloc 出来的 C 字符串，调用方 free。
+extern char *AevonFrontBundleCopy(void);
+
+/// 0.3.39 — 「目标 App 现在有进程吗」。
+///
+/// 依据在 Aevon(4)(2)：QQ 明明在跑（ack 自带 `pid=53883`），宿主这一侧却每一跳
+/// 都是 `act: float cold=1 pid=-2 run=-1 seen=0 live=0` ⇒ 0.3.38 的进程内桥把
+/// **热启动也全接了**，0.3.37 验过的 scene action 一次都没走 —— 而那条正是热启动
+/// 「秒进选好友页」的唯一通路。冷/热判错不是「多发两发」的小事，它会把唯一有效
+/// 的通道整个关掉。
+///
+/// `SBApplicationController` 在这台机器上一律回 `pid=-2 run=-1`（QQ / Filza /
+/// 支付宝都读不出来），已经不能当判据；`AevonSeenSceneForBundle` 与
+/// `AevonLiveSceneForBundle` 对 QQ 也答 0（Aevon(254)/(260)/(4)(2) 三次都是）。
+/// 改用 App 侧那支 dylib 自己写的心跳 `tmp/aevon-alive`（1.8 s 一次，内容
+/// `pid 时间戳`）：文件在 + 时间戳新 = 进程现在还在。5 s 是容差，覆盖两次心跳。
+static int AevonTargetAlive(NSString *bundleID, double *ageOut) {
+    if (ageOut != NULL) *ageOut = -1.0;
+    if (bundleID.length == 0) return 0;
+    NSString *leaf = AevonAppOpenLeaf(bundleID, @"aevon-alive");
+    if (leaf.length == 0) return 0;
+    NSDictionary *attrs = [[NSFileManager defaultManager]
+                           attributesOfItemAtPath:leaf error:NULL];
+    NSDate *when = [attrs objectForKey:NSFileModificationDate];
+    if (![when isKindOfClass:[NSDate class]]) return 0;
+    double age = -[when timeIntervalSinceNow];
+    if (ageOut != NULL) *ageOut = age;
+    return (age >= 0.0 && age <= 5.0) ? 1 : 0;
+}
 
 // MARK: - 0.3.33 「带 URL 的挂起启动」整条下线（真机判死）
 
@@ -5193,13 +5228,21 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
     // 直接枚举 `FBSceneManager` 的账本，与 `win: listed scene` 同一把尺。
     int liveScene = (AevonLiveSceneForBundle(
         [NSString stringWithUTF8String:bundle]) != nil) ? 1 : 0;
-    AevonDenyCold = (pid > 0 || run == 1 || seenScene == 1 || liveScene == 1) ? 0 : 1;
+    // 0.3.39 — 第三条判据：App 侧那支 dylib 的心跳文件。
+    // 上面四条（pid / isRunning / seenScene / liveScene）在 QQ 与支付宝上一律答 0，
+    // 于是 `cold` 恒为 1，桥把热启动也接了。心跳是唯一在真机上证明过「进程活着」的
+    // 读数（`app: boot pid=53883` 与它同源）。
+    double aliveAge = -1.0;
+    int alive = AevonTargetAlive([NSString stringWithUTF8String:bundle], &aliveAge);
+    AevonDenyCold = (pid > 0 || run == 1 || seenScene == 1 || liveScene == 1 ||
+                     alive == 1) ? 0 : 1;
     AevonDeliverShots = (AevonDenyCold == 1) ? 2 : 0;
     AevonDeliverWaits = 0;
     AevonDenyTctxOk = 0;
     AevonDenyTctxTries = 0;
     AevonDenySwallow = swallow;
     AevonDenyBridgeOnly = 0;
+    AevonDenyKind = kind;
     if (swallow == 0) {
         // 放行：URL 由系统送，投递链一条都不排。
         AevonDeliverShots = 0;
@@ -5221,17 +5264,40 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
         AevonURLBridgeOn() == 1) {
         NSString *bu = [NSString stringWithUTF8String:bundle];
         NSString *us = [NSString stringWithUTF8String:AevonDenyURL];
+        // 0.3.39 — 桥必须带上**来源 App**。
+        //
+        // 系统自己送 URL 时 options 里必带 `SourceApplication`；我们造的这一份
+        // 一直是空的（Aevon(4)(2) 每条 `app: openurl` 都是 `src=0`），于是 QQ
+        // 的 `application:openURL:options:` 回 `rsp=0`、只对老选择子回 YES ——
+        // 而老选择子不弹分享面板。0.3.37 热启动能弹，是因为 scene action 里带着
+        // `UIOpenURLAction` 的 `workspaceOriginatingProcess`。这一格补回来。
+        NSString *srcApp = nil;
+        char *copy = AevonFrontBundleCopy();
+        if (copy != NULL) {
+            NSString *name = [NSString stringWithUTF8String:copy];
+            free(copy);
+            // 自己送给自己不算来源（全屏里点自己那一支），宁可不填。
+            if (name.length > 0 && ![name isEqualToString:bu]) srcApp = name;
+        }
         int sent = 0;
         if (bu.length > 0 && us.length > 0) {
-            sent = AevonAppOpenSend(bu, us, [NSDictionary dictionary], nil);
+            sent = AevonAppOpenSend(bu, us, [NSDictionary dictionary], srcApp);
         }
         if (sent == 1) {
             AevonDenyBridgeOnly = 1;
             AevonDeliverShots = 0;
         }
         AevonLogRaw([[NSString stringWithFormat:
-                      @"act: bridge b=%s send=%d bonly=%d u=%.60s",
-                      bundle, sent, AevonDenyBridgeOnly, AevonDenyURL] UTF8String]);
+                      @"act: bridge b=%s send=%d bonly=%d src=%s u=%.60s",
+                      bundle, sent, AevonDenyBridgeOnly,
+                      srcApp != nil ? [srcApp UTF8String] : "-",
+                      AevonDenyURL] UTF8String]);
+    } else if (swallow == 1 && AevonDenyCold == 0) {
+        // 热启动：走 0.3.37 验过的 scene action（`deliver ok=1 send=sendActions`）。
+        // 这一行是下一份日志的第一判据 —— 它出现，说明冷/热终于分开了。
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: bridge skip why=hot b=%s alive=%d age=%.1f",
+                      bundle, alive, aliveAge] UTF8String]);
     }
     // `reply=none` 是这一版最要紧的读数之一：`withResult:` 那个块的签名一次都
     // 没读到（0.3.24/0.3.25 的日志里全是 `rsig=-`），盲调就是又一次 0.2.91。
@@ -5242,10 +5308,12 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
                   AevonDenyURL[0] != '\0' ? AevonDenyURL : "-"] UTF8String]);
     // 0.3.29 — 这一行是下一份日志的第一判据：`pid=-1` 是读不到（不是不在），
     // 与 `pid=0` 一样按冷启动处理（多发两发最多多出一个面板，少发就是停在首页）。
+    // 0.3.39 — 补 `alive=` / `age=`：前四个读数在 QQ 上一律是 `pid=-2 run=-1
+    // seen=0 live=0`，看不出真假；心跳这一格才是新的判据来源。
     AevonLogRaw([[NSString stringWithFormat:
-                  @"act: float cold=%d pid=%d run=%d seen=%d live=%d shots=%d sw=%d b=%s",
-                  AevonDenyCold, pid, run, seenScene, liveScene, AevonDeliverShots,
-                  swallow, bundle] UTF8String]);
+                  @"act: float cold=%d pid=%d run=%d seen=%d live=%d alive=%d age=%.1f shots=%d sw=%d b=%s",
+                  AevonDenyCold, pid, run, seenScene, liveScene, alive, aliveAge,
+                  AevonDeliverShots, swallow, bundle] UTF8String]);
     // 0.3.35 — 冷启动在 5.0 s 再补一发（`AevonURLDeliverLate`）。
     // 排在这里而不是投递链里：投递链要等 tctx 装上才起手，而这一发要回答的
     // 问题恰恰是「App 自己的首帧布局完成（boot + 4 s）之后投，还认不认」。
@@ -14414,6 +14482,32 @@ static void AevonAppOpenGiveUp(const char *why) {
                   AevonAppOpenBundle != nil ? AevonAppOpenBundle : @"-",
                   why != NULL ? why : "-", ms] UTF8String]);
     AevonAppOpenDrop();
+    // 0.3.39 — 桥超时后的回落（只给链接 / 授权 / 支付）。
+    //
+    // Aevon(4)(2) 的支付宝三次都是 `notify: appurl give … why=timeout at=2055ms`，
+    // 卡片留着、里面只有首页。同一份日志里支付宝一侧**一行 app 日志都没有**
+    // （连 `app: boot` 都没有）—— 进程内那支 dylib 有没有进这个进程，至今没有
+    // 证据。分享（kind=2）不补：0.3.32/0.3.34 已证明冷启动补发只会让 App 回首页，
+    // 而且会把分享面板开两遍。链接/支付（kind=1）必须补：不补就是「卡里停在首页、
+    // 支付页永远不出现」，比全屏糟。
+    if (AevonDenyBridgeOnly == 1 && AevonDenyKind == 1 && AevonDenyURL[0] != '\0') {
+        NSString *bu = [NSString stringWithUTF8String:AevonDenyBundle];
+        NSString *leaf = AevonAppOpenLeaf(bu, @"aevon-open.plist");
+        // 把没被取走的那份文件删掉，否则 App 过一会儿自己醒来读到它，会把同一条
+        // URL 开第二遍。
+        if (leaf.length > 0) {
+            [[NSFileManager defaultManager] removeItemAtPath:leaf error:NULL];
+        }
+        AevonDenyBridgeOnly = 0;
+        AevonDenyCold = 0;
+        AevonDeliverShots = 2;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: bridge fallback b=%s kind=%d why=%s",
+                      AevonDenyBundle, AevonDenyKind, why != NULL ? why : "-"]
+                     UTF8String]);
+        AevonURLRedeliver(AevonDenyBundle);
+        return;
+    }
     // 0.2.17 — 这里原来是「退回老路，交回 SpringBoard」。那条路的代价 Aevon(188)
     // 拍得很清楚：SB 把这 App 的 scene 抢去全屏（`app: page transition h=717
     // last=932`），卡片随即黑屏，而用户要的是「背景停在文件分享发起页」。

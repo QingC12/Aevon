@@ -1040,7 +1040,24 @@ def main():
                   # `act: url deep2` 是从 `__AppLink4LS` / `__PayloadOptions` /
                   # `__Actions` 的对象图里挖到地址的证据（`how=` 是走法）；
                   # `act: shape` 是挖不到时留下的形状卡（ivar 名/类型/值类 + 选择子表）。
-                  b"act: bridge b=%s send=%d bonly=%d u=%.60s",
+                  # 0.3.39 — 桥带上来源 App + 冷/热分开。
+                  #
+                  # Aevon(4)(2) 三条硬读数：① 每条 `app: openurl` 都是 `src=0`
+                  # （系统自己送时这一项必带，0.3.37 那条能用的 scene action 也
+                  # 带着 `workspaceOriginatingProcess`）；② QQ 对
+                  # `application:openURL:options:` 回 `rsp=0`、只对老选择子回 YES；
+                  # ③ `act: float cold=1 pid=-2 run=-1 seen=0 live=0` 每一跳都判冷
+                  # —— 而 QQ 明明在跑（ack 自带 `pid=53883`），于是桥把热启动也
+                  # 全接了，0.3.37 验过的 scene action 一次都没走。
+                  #
+                  # `src=` 是来源 App；`alive=`/`age=` 是 App 侧心跳的判据；
+                  # `bridge skip why=hot` 是「热启动走回 scene action」的正证；
+                  # `bridge fallback` 是「桥没送到、链接/支付补一发」的正证。
+                  b"act: bridge b=%s send=%d bonly=%d src=%s u=%.60s",
+                  b"act: bridge skip why=hot b=%s alive=%d age=%.1f",
+                  b"act: bridge fallback b=%s kind=%d why=%s",
+                  b"AevonFrontBundleCopy",
+                  b"aevon-alive",
                   b"act: deliver skip why=bridge",
                   b"act: url deep2 from=%s how=%s b=%s url=%.100s",
                   b"act: url deep2 from=none force=%d b=%s keys=%s",
@@ -1067,7 +1084,7 @@ def main():
                   # `act: float card` 是建卡，`win: own pass wait` 是「不发启动请求、
                   # 只等系统那张 scene」。后两个文件名是两把新闸。
                   b"act: float sw=%d b=%s kind=%d n=%ld live=%d reply=none url=%.140s",
-                  b"act: float cold=%d pid=%d run=%d seen=%d live=%d shots=%d sw=%d b=%s",
+                  b"act: float cold=%d pid=%d run=%d seen=%d live=%d alive=%d age=%.1f shots=%d sw=%d b=%s",
                   b"act: float card b=%s sw=%d",
                   b"act: float card skip why=up b=%s",
                   b"win: own pass wait %@ t=%ldms wait=%ldms",
@@ -1723,7 +1740,9 @@ def main():
                  b"act: deny cold=%d pid=%d run=%d seen=%d shots=%d b=%s",   # gone
                  b"act: deny card b=%s",                                     # gone
                  b"act: deny card skip why=up b=%s",                         # gone
-                 b"act: url act-would take=%d b=%s url=%.100s"):              # gone
+                 b"act: url act-would take=%d b=%s url=%.100s",               # gone
+                 b"act: bridge b=%s send=%d bonly=%d u=%.60s",                # gone
+                 b"act: float cold=%d pid=%d run=%d seen=%d live=%d shots=%d sw=%d b=%s"):  # gone
         if gone in dylib_early:
             bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "
                 "back (hot zone 0.1.18 / summon bar 0.1.24 / cover lock gate 0.1.90)")
