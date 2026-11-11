@@ -1221,6 +1221,15 @@ def main():
                   b"census: %s owner=%s ret=%c argc=%d enc=%s",
                   b"census: %s absent",
                   b"census: done found=%d missing=%d total=%d",
+                  # 0.3.16 — 四个返回 void 的入口，逐个手写壳（不用通用透传）。
+                  # 选它们是因为 `v` 返回不碰返回寄存器、参数全是对象不拆寄存器。
+                  b"h4: layout.add armed",
+                  b"h4: layout.addC armed",
+                  b"h4: sysvc armed",
+                  b"h4: destroy armed",
+                  b"layout: add item=%s ws=%s",
+                  b"layout: addC item=%s ws=%s",
+                  b"h4: sysvc svc=%s req=%s",
                   b"presenter: birth fail b=%s why=nil id=%s",
                   b"presenter: birth skip b=%s why=nopm",
                   b"presenter: birth threw b=%s why=%s",

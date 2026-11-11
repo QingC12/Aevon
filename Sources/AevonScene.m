@@ -5046,6 +5046,226 @@ static AevonHState AevonHStat = {0, 0, 0, 0};
 // 且一次只装一个、单独验证。
 // ============================================================================
 
+// ============================================================================
+// 0.3.16 — 四个 `void` 入口，逐个手写壳
+//
+// 依据 Aevon(241) 的普查表。只挑**返回 `void`、参数全是对象**的四个：
+//
+//   layout.add    SBMainSwitcherControllerCoordinator
+//                 addAppLayoutForDisplayItem:windowScene:completion:
+//                 v40@0:8@16@24@?32          ← 返回 void，3 个真参数
+//
+//   layout.addC   SBMainSwitcherControllerCoordinator
+//                 addCenterRoleAppLayoutForDisplayItem:windowScene:completion:
+//                 v40@0:8@16@24@?32
+//
+//   open.sysvc    SBMainWorkspace
+//                 systemService:handleOpenApplicationRequest:withCompletion:
+//                 v40@0:8@16@24@?32
+//
+//   scene.destroy FBSceneManager
+//                 destroyScene:withTransitionContext:
+//                 v32@0:8@16@24              ← 返回 void，2 个真参数
+//
+// ⛔ **与 0.3.14 的根本区别**
+//
+// 0.3.14 用一个 `^void *(id, void*, void*, ...)` 通用块去透传 21 个入口，
+// 只校验参数个数，没管返回类型与寄存器契约，结果崩在：
+//   libobjc objc_retain_x20 ← KERN_INVALID_ADDRESS at 0x20
+//
+// 这一版每个壳都**手写、具名、返回类型与参数类型全对**：
+//   · 返回 void ⇒ 不碰返回寄存器，无 ARC 问题；
+//   · 参数全是对象 ⇒ 无结构体拆寄存器问题；
+//   · `completion` 是 block（`@?`），按 `id` 接、原样传回，不调用它。
+//
+// 四个壳都**只读**：记日志、原样转发，不改任何参数。
+// ============================================================================
+
+/// 0.3.16 — 从 item / windowScene 里尽量读出「是哪个 App、哪个窗」。
+///
+/// 只在日志里用。读不到就打类名，绝不因为读不到就不转发。
+static void AevonLayDescribe(id object, char *out, size_t size) {
+    if (out == NULL || size == 0) return;
+    out[0] = '\0';
+    if (object == nil) { snprintf(out, size, "nil"); return; }
+    @try {
+        const char *cn = object_getClassName(object);
+        // 先试 bundleIdentifier（SBDisplayItem / SBApplication 都可能有）
+        SEL bSel = NSSelectorFromString(@"bundleIdentifier");
+        if ([object respondsToSelector:bSel]) {
+            id b = ((id (*)(id, SEL))objc_msgSend)(object, bSel);
+            if ([b isKindOfClass:[NSString class]]) {
+                const char *s = [(NSString *)b UTF8String];
+                if (s != NULL) { snprintf(out, size, "%s", s); return; }
+            }
+        }
+        // 再试 identifier（windowScene / displayItem 常用）
+        SEL iSel = NSSelectorFromString(@"identifier");
+        if ([object respondsToSelector:iSel]) {
+            id v = ((id (*)(id, SEL))objc_msgSend)(object, iSel);
+            if ([v isKindOfClass:[NSString class]]) {
+                const char *s = [(NSString *)v UTF8String];
+                if (s != NULL) {
+                    snprintf(out, size, "%.*s", (int)(size - 1), s);
+                    return;
+                }
+            }
+        }
+        snprintf(out, size, "#%s", cn != NULL ? cn : "?");
+    } @catch (__unused NSException *e) {
+        snprintf(out, size, "!");
+    }
+}
+
+/// `layout.add` / `layout.addC` 的原 IMP 与 sel（安装时写入，转发时读）。
+static long AevonLayoutHits = 0;
+static long AevonSysvcHits = 0;
+static long AevonDestroyHits = 0;
+
+/// 0.3.16 — 装 `layout.add` / `layout.addC`。
+///
+/// 手写壳，返回值声明 `void`，三个参数全是对象。
+static void AevonHookLayout(NSMutableString *out) {
+    Class cls = objc_getClass("SBMainSwitcherControllerCoordinator");
+    if (cls == Nil) {
+        [out appendString:@"h4: layout no class\n"];
+        return;
+    }
+    // 先装 addCenterRole（更具体的那个），再装 add。共用一个原 IMP 会串，
+    // 所以两个都装、各自记一格的 IMP。
+    static IMP addOrig = NULL, addCOrig = NULL;
+    static SEL addSel = NULL, addCSel = NULL;
+
+    SEL selA = NSSelectorFromString(@"addAppLayoutForDisplayItem:windowScene:completion:");
+    Method mA = class_getInstanceMethod(cls, selA);
+    if (mA != NULL) {
+        const char *enc = method_getTypeEncoding(mA);
+        if (enc != NULL && strcmp(enc, "v40@0:8@16@24@?32") == 0) {
+            addOrig = method_getImplementation(mA);
+            addSel = selA;
+            id blk = ^(id coord, id item, id windowScene, id completion) {
+                @try {
+                    if (__sync_fetch_and_add(&AevonLayoutHits, 1) < 12) {
+                        char it[140] = {0}, ws[140] = {0};
+                        AevonLayDescribe(item, it, sizeof(it));
+                        AevonLayDescribe(windowScene, ws, sizeof(ws));
+                        AevonLogRaw([[NSString stringWithFormat:
+                                      @"layout: add item=%s ws=%s", it, ws] UTF8String]);
+                    }
+                } @catch (__unused NSException *e) {}
+                if (addOrig != NULL) {
+                    ((void (*)(id, SEL, id, id, id))addOrig)(
+                        coord, addSel, item, windowScene, completion);
+                }
+            };
+            method_setImplementation(mA, imp_implementationWithBlock(blk));
+            [out appendString:@"h4: layout.add armed\n"];
+        } else {
+            [out appendFormat:@"h4: layout.add shape skip (%s)\n", enc ? enc : "?"];
+        }
+    }
+
+    SEL selB = NSSelectorFromString(@"addCenterRoleAppLayoutForDisplayItem:windowScene:completion:");
+    Method mB = class_getInstanceMethod(cls, selB);
+    if (mB != NULL) {
+        const char *enc = method_getTypeEncoding(mB);
+        if (enc != NULL && strcmp(enc, "v40@0:8@16@24@?32") == 0) {
+            addCOrig = method_getImplementation(mB);
+            addCSel = selB;
+            id blk = ^(id coord, id item, id windowScene, id completion) {
+                @try {
+                    if (__sync_fetch_and_add(&AevonLayoutHits, 1) < 12) {
+                        char it[140] = {0}, ws[140] = {0};
+                        AevonLayDescribe(item, it, sizeof(it));
+                        AevonLayDescribe(windowScene, ws, sizeof(ws));
+                        AevonLogRaw([[NSString stringWithFormat:
+                                      @"layout: addC item=%s ws=%s", it, ws] UTF8String]);
+                    }
+                } @catch (__unused NSException *e) {}
+                if (addCOrig != NULL) {
+                    ((void (*)(id, SEL, id, id, id))addCOrig)(
+                        coord, addCSel, item, windowScene, completion);
+                }
+            };
+            method_setImplementation(mB, imp_implementationWithBlock(blk));
+            [out appendString:@"h4: layout.addC armed\n"];
+        }
+    }
+}
+
+/// 0.3.16 — 装 `systemService:handleOpenApplicationRequest:withCompletion:`。
+///
+/// Mango 用的打开入口，归属 `SBMainWorkspace`，编码 `v40@0:8@16@24@?32`。
+static void AevonHookSystemServiceOpen(NSMutableString *out) {
+    Class cls = objc_getClass("SBMainWorkspace");
+    if (cls == Nil) { [out appendString:@"h4: sysvc no class\n"]; return; }
+    SEL sel = NSSelectorFromString(@"systemService:handleOpenApplicationRequest:withCompletion:");
+    Method m = class_getInstanceMethod(cls, sel);
+    if (m == NULL) { [out appendString:@"h4: sysvc absent\n"]; return; }
+    const char *enc = method_getTypeEncoding(m);
+    if (enc == NULL || strcmp(enc, "v40@0:8@16@24@?32") != 0) {
+        [out appendFormat:@"h4: sysvc shape skip (%s)\n", enc ? enc : "?"];
+        return;
+    }
+    IMP orig = method_getImplementation(m);
+    id blk = ^(id ws, id service, id request, id completion) {
+        @try {
+            if (__sync_fetch_and_add(&AevonSysvcHits, 1) < 12) {
+                char sv[140] = {0}, rq[140] = {0};
+                AevonLayDescribe(service, sv, sizeof(sv));
+                AevonLayDescribe(request, rq, sizeof(rq));
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"h4: sysvc svc=%s req=%s", sv, rq] UTF8String]);
+            }
+        } @catch (__unused NSException *e) {}
+        ((void (*)(id, SEL, id, id, id))orig)(ws, sel, service, request, completion);
+    };
+    method_setImplementation(m, imp_implementationWithBlock(blk));
+    [out appendString:@"h4: sysvc armed\n"];
+}
+
+/// 0.3.16 — 装 `destroyScene:withTransitionContext:`（`FBSceneManager`，`v32@0:8@16@24`）。
+static void AevonHookDestroyScene(NSMutableString *out) {
+    Class cls = objc_getClass("FBSceneManager");
+    if (cls == Nil) { [out appendString:@"h4: destroy no class\n"]; return; }
+    SEL sel = NSSelectorFromString(@"destroyScene:withTransitionContext:");
+    Method m = class_getInstanceMethod(cls, sel);
+    if (m == NULL) { [out appendString:@"h4: destroy absent\n"]; return; }
+    const char *enc = method_getTypeEncoding(m);
+    if (enc == NULL || strcmp(enc, "v32@0:8@16@24") != 0) {
+        [out appendFormat:@"h4: destroy shape skip (%s)\n", enc ? enc : "?"];
+        return;
+    }
+    IMP orig = method_getImplementation(m);
+    id blk = ^(id mgr, id scene, id ctx) {
+        @try {
+            if (__sync_fetch_and_add(&AevonDestroyHits, 1) < 8) {
+                char sc[140] = {0};
+                AevonLayDescribe(scene, sc, sizeof(sc));
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"h4: destroy scene=%s", sc] UTF8String]);
+            }
+        } @catch (__unused NSException *e) {}
+        ((void (*)(id, SEL, id, id))orig)(mgr, sel, scene, ctx);
+    };
+    method_setImplementation(m, imp_implementationWithBlock(blk));
+    [out appendString:@"h4: destroy armed\n"];
+}
+
+/// 0.3.16 总入口：四个 void 壳一起装。
+///
+/// **与普查分开**：普查（`AevonCensusAll`）只读不装；这里才是真装。
+/// 两者都跑一次，日志用 `census:` 与 `h4:` 两个前缀区分。
+static void AevonHookFourVoid(NSMutableString *out) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    AevonHookLayout(out);
+    AevonHookSystemServiceOpen(out);
+    AevonHookDestroyScene(out);
+}
+
+
 /// 一条普查记录（只读，不装）。
 typedef struct {
     const char *sel;
@@ -5339,6 +5559,9 @@ void AevonLandingBoot(void) {
     // 0.3.15 — 0.3.14 的通用透传壳已整段删除（它会崩，见文件头那段 .ips 分析）。
     // 现在只做**纯只读普查**：问类/方法/编码/参数个数，一次 hook 都不装。
     AevonCensusAll(out);
+    // 0.3.16 — 四个返回 void 的入口，逐个手写壳。与普查同一次开机，
+    // 但两者独立：普查只读、这里真装。
+    AevonHookFourVoid(out);
     // 0.3.10 — G 线：延时 6 秒自枚举一次。
     // 开机那一刻前台通常还是 SpringBoard 自己的光圈窗帘，6 秒后用户多半已经
     // 打开过一个 App —— 那时才有一个「真实存在的 App scene」可以问。
