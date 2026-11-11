@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.23"
+    public static let version = "0.3.24"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -206,6 +206,21 @@ public enum Aevon {
     /// 记下「本来要写成什么、走的是副本还是直写」）。看完那一行确认门槛都过，
     /// 手写 `touch …/url.write` 再测一次，不用换包。
     public static let urlWritePath      = "/var/mobile/Library/Logs/Aevon/url.write"
+
+    /// 0.3.24 — URL / 分享路「把 scene 收进卡」的**关**闸。
+    ///
+    /// Aevon(250) 给出了这个项目的关键读数：`url.write` 打开后，QQ 的 scene 真的
+    /// 变成了 430×717（`act: frame birth wrote=1 … after=430x717 by=wrote-copy`），
+    /// 系统也接受了，没有回弹成 932 —— 但屏幕上看到的是「像全屏又不是全屏，
+    /// 下半屏是黑的」。原因很直接：scene 缩了，**装它的那个窗口没缩**。那个
+    /// 430×932 的窗口是 FrontBoard 为「全屏激活」发的，我们的卡从头到尾没有出现
+    /// （整份日志里 `win:` 那一段在 14:55 期间一行都没有）。
+    ///
+    /// 所以这一版补的是「承载」：分享激活之后延迟一次 `openCard`，让 QQ 的 scene
+    /// 挂到我们自己的卡窗口上。既然 0.3.8 以来第一次真的要动 URL 路的窗口，
+    /// 就留一个反向闸：这个文件在 ⇒ 只落一行 `act: url card skip`，不开卡，
+    /// 行为退回 0.3.23。语义与 `birth.off` / `notify.off` 一致：**存在即不做**。
+    public static let urlCardOffPath   = "/var/mobile/Library/Logs/Aevon/url.card.off"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"

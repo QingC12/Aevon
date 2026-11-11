@@ -59,6 +59,9 @@ extern int AevonBirthSwitchOff(void);
 // 0.3.23 — URL 路那条写路的**开**关（`url.write`）：存在才真写，不存在只干跑。
 // 方向与 `birth.off` 相反，理由见 `Paths.swift` 里的注解。
 extern int AevonURLWriteOn(void);
+// 0.3.24 — URL 路「把 scene 收进卡」的**关**闸（`url.card.off`）。
+// 语义与 `birth.off` 一致：存在即不做（只落一行 skip），行为退回 0.3.23。
+extern int AevonURLCardSwitchOff(void);
 // 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
 // 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
 extern int AevonCardYieldForFullscreen(const char *bundle);
@@ -3759,6 +3762,12 @@ static volatile int64_t AevonActCardAt = 0;
 // 前者等于回退圆盘路，后者等于拿没验过的路赌黑屏。
 static int AevonActCardSrc = 0;
 static long AevonActArmURLCalls = 0;
+// 0.3.24 — URL 路「收卡」的排期状态。一次分享会从激活钩子、通知钩子各来一遍
+// （Aevon(250) 里 `notify: hit op=user` 与 `op=untrusted` 各一行，`act: activate`
+// 又一行），所以必须去重，否则同一次分享会排三个 openCard。
+static char AevonURLCardLast[160] = {0};
+static volatile int64_t AevonURLCardAt = 0;
+static long AevonURLCardQueued = 0;
 static long AevonActFrameDry = 0;
 static long AevonActFrameWrote = 0;
 static long AevonActFrameSkip = 0;
@@ -3783,6 +3792,9 @@ static long AevonActArmCalls = 0;
 // `AevonActMs` 定义在下面几行（两个计时量要同源），这里先立一份前置声明 ——
 // 把 `AevonCardTargetArm` 挪到它后面去会让上面那两个静态量的注释和声明分家。
 static int64_t AevonActMs(void);
+
+/// 0.3.24 — 把一条 URL 分享的落点从「系统全屏窗」挪到「我们的卡窗口」。
+static void AevonURLCardSchedule(const char *bundle);
 
 /// 0.3.20 — 记下「接下来要进卡的是这个 bundle」。
 ///
@@ -3832,11 +3844,92 @@ void AevonCardTargetArmURL(const char *bundle, int kind) {
                       bundle, kind, AevonActArmURLCalls, AevonURLWriteOn()]
                      UTF8String]);
     }
+    // 0.3.24 — 分享这一族才排收卡。普通深链（kind=1）不排：那是 App 自己的
+    // scheme 跳转，用户没要求把它变成浮窗，贸然接管等于把「点链接」这个动作
+    // 改行为；分享（kind=2）本来就是「把这张图送到 QQ」，收进卡是同一件事的
+    // 更小版本，失败了也只是回到整屏，不会丢内容。
+    if (kind == 2) AevonURLCardSchedule(bundle);
 }
 
 /// 毫秒时钟。与 `AevonLinkPendingAt` 同源，两行读数才能相减。
 static int64_t AevonActMs(void) {
     return (int64_t)(CFAbsoluteTimeGetCurrent() * 1000.0);
+}
+
+/// 0.3.24 — **URL 路第一次接上「承载」。**
+///
+/// Aevon(250) 把问题夹到了一个很窄的位置上。`url.write` 打开之后：
+///
+///     act: frame birth wrote=1 b=com.tencent.mqq before=430x932 after=430x717 by=wrote-copy
+///
+/// 写进去了，`after=430x717` 也是真的（用户看到 QQ 只占上半屏，下半是黑）。
+/// 也就是说 **scene 缩了、装它的窗口没缩**：那个 430×932 的窗口是 FrontBoard
+/// 为「全屏激活」发的，从头到尾没有我们的卡（14:55:29 那一拍 `win:` 一行都没有）。
+/// 「像全屏又不是」不是显示 bug，是「scene 尺寸」和「窗口尺寸」两个变量只改了一个。
+///
+/// 补法不是再写一次 frame —— 那条路已经走到极限（写对之后系统完全接受，没有回弹）。
+/// 缺的是把 scene 挂到**我们自己的**承载上：`openCard` 建的是 430×717 的卡窗口，
+/// presenter 把 scene 画进去，系统的全屏窗随之让位。这正是圆盘那条路 0.3.21/0.3.22
+/// 连着两个 App 验通的东西，URL 路只是一直没有调用者。
+///
+/// 三个前置条件，缺一不排：
+///   · `url.write` 在 —— 没写 frame 就开卡，卡里装的是一张 932 高的场景，
+///     要等 `push door=3 wrote=N` 在上屏之后再纠，那一帧是能看见的（0.3.22 的
+///     二次打开就是 7 次写）。写与承载必须同进。
+///   · 这个 bundle 不在卡里 —— 已经在卡里再排一次，等于把用户刚放好的窗重新摆一遍。
+///   · 6 秒内没为同一个 bundle 排过 —— 一次分享会从激活钩子、两条通知钩子各来一遍。
+static void AevonURLCardSchedule(const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return;
+    if (AevonURLCardSwitchOff() == 1) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: url card skip why=off b=%s", bundle] UTF8String]);
+        return;
+    }
+    if (AevonURLWriteOn() != 1) {
+        // 没开写就不开卡：卡里那张场景还是整屏高度，承载上去只会把「整屏」
+        // 缩成「小窗里的整屏」，比现在更糟。这一行专门留给人看，免得下次
+        // 又把「没反应」当成 bug 查。
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: url card skip why=nowrite b=%s", bundle] UTF8String]);
+        return;
+    }
+    int64_t now = AevonActMs();
+    if (AevonURLCardAt > 0 && now - AevonURLCardAt < 6000 &&
+        strcmp(AevonURLCardLast, bundle) == 0) return;
+    strlcpy(AevonURLCardLast, bundle, sizeof(AevonURLCardLast));
+    AevonURLCardAt = now;
+    NSString *held = [NSString stringWithUTF8String:bundle];
+    if (held == nil) return;
+    long seq = __sync_fetch_and_add(&AevonURLCardQueued, 1);
+    if (seq < 6) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: url card queue b=%s n=%ld after=350ms",
+                      bundle, seq] UTF8String]);
+    }
+    // 350 ms：激活事务在 `act: scene gap=44` 之后还要把客户端连上、放首帧；
+    // 圆盘路实测首帧 105 ms，分享多一层 ShareExtension 的交接，留三倍余量。
+    // 投到主队列是硬要求 —— `openCard` 动的是窗口和 scene，只能在主线程跑。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        const char *cb = [held UTF8String];
+        if (cb == NULL || cb[0] == '\0') return;
+        if (AevonURLCardSwitchOff() == 1) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: url card skip why=off-late b=%s", cb] UTF8String]);
+            return;
+        }
+        if (AevonCardIsUpFor(cb) == 1) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: url card skip why=up b=%s", cb] UTF8String]);
+            return;
+        }
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: url card now b=%s", cb] UTF8String]);
+        // `homed: true` 的含义是「屏上已经没有目标的全屏页」，不是「按过 Home」。
+        // 这里目标（QQ）正在上屏，但那正是要接管的画面：它在 430×717 的
+        // scene 里、被一个 430×932 的窗口装着 —— 下半屏那 215 pt 是黑的。
+        AevonOpenCardDirect(cb);
+    });
 }
 
 /// 按**编码串**判定形状，不数 `@`。
@@ -4937,7 +5030,16 @@ static void AevonProbePresenterBirth(id scene) {
         // 没人验证过的变量（同一个 scene 两份 presenter 会不会互抢，0.3.22 的
         // 交付说明里还列在「未证伪」里）。所以干跑保持纯净，`url.write` 打开后
         // 才连同 presenter 一起测。
-        if (hasPM && hasCreate && !(AevonActCardSrc == 2 && AevonURLWriteOn() != 1)) {
+        //
+        // ⛔ 0.3.24 — **URL 路从此一律不建探针 presenter，跟 write 开没开无关。**
+        //
+        // 0.3.23 的条件是「write 关着才不建」，于是 write 一打开，这条探针就会
+        // 在同一张 scene 上和真正的承载（`float()` 建的那份 `com.aevon.float`）
+        // 并存 —— 两件事同时发生，任何读数都分不清是谁的功劳、谁的锅。而 0.3.24
+        // 起 URL 路真的要走 `openCard`，承载由生产链提供，探针那份纯属多余。
+        // 圆盘路（src=1）和来源未知（src=0）行为不变，`presenter: birth ok=1`
+        // 那些字面量仍在二进制里，审计断言照旧。
+        if (hasPM && hasCreate && AevonActCardSrc != 2) {
             (void)AevonPresenterBuild(scene, "probe");
         }
     } @catch (NSException *e) {

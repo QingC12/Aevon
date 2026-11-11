@@ -137,6 +137,16 @@ public func AevonURLWriteOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlWritePath) ? 1 : 0
 }
 
+/// 0.3.24 — URL / 分享路「把 scene 收进卡」的关闸（`url.card.off`）。
+///
+/// Aevon(250)：写 frame 成功了，系统也认了，但装 scene 的窗口还是 430×932 ——
+/// 屏幕上就是「上半是 QQ、下半是黑」。这一版补承载；把闸留成**关**的方向
+/// （存在即不开卡），出问题时一个空文件就退回 0.3.23 的干跑状态，不必换包。
+@_cdecl("AevonURLCardSwitchOff")
+public func AevonURLCardSwitchOff() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlCardOffPath) ? 1 : 0
+}
+
 /// 0.3.5 — 在 presenter 的 `presentationContext` 上写 `setResizesHostedContext:`。
 ///
 /// `setResizesHostedContext:` 的 owner 是 `UIMutableScenePresentationContext`

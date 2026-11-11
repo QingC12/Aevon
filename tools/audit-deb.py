@@ -907,6 +907,18 @@ def main():
                   # 干跑那一行：默认不写，只记「本来要写成什么、走副本还是直写」。
                   # 唯一能证明「四道门全过、只差按下开关」的读数。
                   b"act: frame birth dry=1 b=%s before=%.0fx%.0f want=%.0fx%.0f via=%s",
+                  # 0.3.24 — **URL 路第一次接上承载。**
+                  #
+                  # Aevon(250)：frame 写成功了（`after=430x717`），系统也认了，
+                  # 但装 scene 的窗口还是 430×932 —— 「像全屏又不是，下半屏黑」。
+                  # 这一版在分享激活之后排一次 `openCard`，把 scene 挂到我们的卡上。
+                  # 三串分别是：排上了 / 被闸挡住（`off` `off-late` `nowrite` `up`）/
+                  # 真的开始建卡。少任何一串都说明这条承载路没进包。
+                  b"act: url card queue b=%s n=%ld after=350ms",
+                  b"act: url card skip why=off b=%s",
+                  b"act: url card now b=%s",
+                  # 反向闸自己的路径常量 —— 文件闸写错文件名就等于没有闸。
+                  b"/var/mobile/Library/Logs/Aevon/url.card.off",
                   # 分享那次 transitionContext 里装了 action（`n=1`），可从来没看过
                   # 是哪个类。这一串是「action 本体」的唯一读数，缺了就是没进包。
                   b"probe: tctx act cls=%s d=%s",
