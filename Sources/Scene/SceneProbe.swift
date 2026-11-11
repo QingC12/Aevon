@@ -28,6 +28,15 @@ import Foundation
 import UIKit
 import ObjectiveC
 
+// 0.3.20 — `AevonScene.m` 里的 `AevonCardTargetArm`。
+//
+// 用 `@_silgen_name` 而不是加进 `Aevon-Bridging-Header.h`：桥接头里现在已经有一堆
+// 场景相关的 C 函数，而这个只有一个调用点、语义只服务 `openCard` 一处，放在用到它
+// 的文件里更好读。C 侧的签名是 `void AevonCardTargetArm(const char *bundle)`，所以
+// 这里必须是 `UnsafePointer<CChar>?` —— 类型对不上是链接期的错，不是运行期。
+@_silgen_name("AevonCardTargetArm")
+private func AevonCardTargetArmC(_ bundle: UnsafePointer<CChar>?)
+
 enum SceneProbe {
 
     // MARK: - Trigger
@@ -1556,6 +1565,16 @@ zStackParticipantDidChange:
         // 0.1.91 — 「这张卡正在建」的登记。必须在**第一个** return 之前：
         // 收面板那条路要用它区分「卡在路上，可以先收」与「根本没有卡，不许收」。
         markPending(bundleID)
+        // 0.3.20 — 把「接下来要进卡的是这个 bundle」告诉 C 侧。
+        //
+        // 这一句是 `AevonActFrameBirth`（出生即卡尺寸）唯一的扳机。0.3.8 把 URL /
+        // 打开请求接管清零之后，那个函数的第一行永远是「卡目标是空的」⇒ 直接
+        // return 0，一次都不写。Aevon(246) 那 1242 行里 `frame birth` 零行就是这么来的。
+        //
+        // 放在 `markPending` 之后、所有早退之前：早退那几条（已在卡里 / 停靠窗升主窗）
+        // 根本不会新建 scene，arm 了也命中不了，10 秒后自然失效 —— 无害。
+        // 真正启动 App 的那一条会在窗口内建 scene，那才是要处理的。
+        bundleID.withCString { AevonCardTargetArmC($0) }
         // 0.1.29 — 圆盘选中的图标**已经在停靠小窗里**：把它升回主悬浮窗，
         // 不要再开一张。
         //

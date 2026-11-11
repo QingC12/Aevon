@@ -885,6 +885,11 @@ def main():
                   b"act: frame birth idle why=%s card=%s id=%s set=%s",
                   # 0.3.20 — 这条写路自己的闸。语义与 notify.off 不同：关的是「写」。
                   b"birth:off",
+                  # 0.3.20 — **写路的扳机**。0.3.8 清零 URL 接管后 AevonActCardBundle
+                  # 永远为空，`AevonActFrameBirth` 第一行就 return 0，于是「出生即卡
+                  # 尺寸」从 0.3.8 起一次都没跑过。这一串是 Swift `openCard` 调的
+                  # `AevonCardTargetArm` 打的，它出现就说明扳机接上了。
+                  b"act: arm b=%s n=%ld",
                   # 0.3.20 — `probe:tctx` 是 Aevon(246) 记录的上一次死因，可那一份日志
                   # 被装包清空了，死了都不知道死在哪一类上。这一行排在 @try 之前、
                   # 方法表之前，trap 也能留下类名。

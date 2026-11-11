@@ -3756,6 +3756,40 @@ static long AevonActFrameSkip = 0;
 // 于是分不清「写了没生效」与「一次都没轮到」。见 `AevonActFrameBirth` 的调用点。
 static long AevonActFrameNoTarget = 0;
 static long AevonActSigTried = 0;
+// 0.3.20 — 这一版真正补的那个洞：**写路的触发器**。
+//
+// 0.3.8 把 URL / 打开请求接管清零之后，唯一写 `AevonActCardBundle` 的
+// `AevonAuthSwapSchedule` 再也没有调用者 ⇒ 变量永远是空 ⇒ `AevonActFrameBirth`
+// 第一行就 `return 0`。Aevon(246) 那 1242 行里 `frame birth` 零行不是意外，
+// 是结构决定的：**写 scene 参数这条路从 0.3.8 起就没有扳机**。
+//
+// 现在扳机接在真正决定「这个 App 要进卡」的地方 —— Swift 侧的 `SceneProbe.openCard`
+// （圆盘点图标、通知点开、分享收卡三条都走它）。它在启动/接管 App **之前**调
+// `AevonCardTargetArm`，于是 10 s 窗口内为这个 bundle 建的 scene 会被 `frame birth`
+// 认出来。已有的 scene（App 在后台跑着）不会重新建，也就不会命中 —— 那种情况
+// 仍走原来的「缩 frame」路径，行为不变。
+static long AevonActArmCalls = 0;
+
+// `AevonActMs` 定义在下面几行（两个计时量要同源），这里先立一份前置声明 ——
+// 把 `AevonCardTargetArm` 挪到它后面去会让上面那两个静态量的注释和声明分家。
+static int64_t AevonActMs(void);
+
+/// 0.3.20 — 记下「接下来要进卡的是这个 bundle」。
+///
+/// 调用方是 Swift 侧的 `SceneProbe.openCard`，时机在它启动/接管 App 之前。
+/// 只写两个静态量，不碰任何系统对象：**这一步在任何情况下都不许失败**，
+/// 因为它排在真正建卡的前面 —— 这里抛异常等于把一次正常的开窗搞砸。
+void AevonCardTargetArm(const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return;
+    size_t n = strlen(bundle);
+    if (n < 3 || n >= sizeof(AevonActCardBundle)) return;
+    memcpy(AevonActCardBundle, bundle, n + 1);
+    AevonActCardAt = AevonActMs();
+    if (__sync_fetch_and_add(&AevonActArmCalls, 1) < 8) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: arm b=%s n=%ld", bundle, AevonActArmCalls] UTF8String]);
+    }
+}
 
 /// 毫秒时钟。与 `AevonLinkPendingAt` 同源，两行读数才能相减。
 static int64_t AevonActMs(void) {
