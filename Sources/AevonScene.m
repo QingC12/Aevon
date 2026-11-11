@@ -3864,10 +3864,8 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind);
 // transitionContext 注入**一直是有效的**，只是 0.3.31/0.3.32 的启动路把它盖住了。
 // 所以这一版：SPI 一句都不调，补投（`AevonURLDeliverShot`）与 tctx 注入照旧。
 
-static volatile int AevonURLCarrying = 0;   // 保留：日志口径，恒 0
-static volatile int AevonURLCarriedOk = 0;  // 恒 0（启动不再带走 URL）
-static volatile int64_t AevonURLCarryDue = 0;
-static long AevonURLCarryTries = 0;
+// 「带 URL 的启动」留下的四个状态量一并删掉：`-Werror -Wunused-variable` 会
+// 把它们变成构建失败，而且留着只会让人以为这条路还在。
 
 /// 0.3.20 — 记下「接下来要进卡的是这个 bundle」。
 ///
@@ -4661,7 +4659,6 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind) {
     AevonDeliverWaits = 0;
     AevonDenyTctxOk = 0;
     AevonDenyTctxTries = 0;
-    AevonURLCarriedOk = 0;
     // `reply=none` 是这一版最要紧的读数之一：`withResult:` 那个块的签名一次都
     // 没读到（0.3.24/0.3.25 的日志里全是 `rsig=-`），盲调就是又一次 0.2.91。
     // 所以拒答之后**不回调**它 —— 分享扩展会等超时，但不会崩。
