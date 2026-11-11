@@ -191,6 +191,15 @@ public func AevonURLShotOff() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlShotOffPath) ? 1 : 0
 }
 
+/// 0.3.30 — 要不要把 URL 装进新 scene 的 `transitionContext`。
+///
+/// 返回 1 = 不装（建了 `url.tctx.off`）。默认 0：装。这是冷启动唯一走过的那条
+/// 原生投递口 —— 热启动用 scene action 已经「秒出」，冷启动三发全丢。
+@_cdecl("AevonURLTctxOff")
+public func AevonURLTctxOff() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlTctxOffPath) ? 1 : 0
+}
+
 /// 0.3.5 — 在 presenter 的 `presentationContext` 上写 `setResizesHostedContext:`。
 ///
 /// `setResizesHostedContext:` 的 owner 是 `UIMutableScenePresentationContext`

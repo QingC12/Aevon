@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.29"
+    public static let version = "0.3.30"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -270,6 +270,20 @@ public enum Aevon {
     /// 多发的代价是可能叠出第二个分享面板，所以留一个随时能关的空文件：
     /// 建了它 ⇒ 冷启动也只投一发，行为退回 0.3.28（除了不再等 3 s）。
     public static let urlShotOffPath     = "/var/mobile/Library/Logs/Aevon/url.shot.off"
+
+    /// 0.3.30 — 「把 URL 装进新 scene 的 transitionContext」的关闸
+    /// （`url.tctx.off` 存在 = 不装，退回 0.3.29 的 scene action）。
+    ///
+    /// Aevon(253) 把冷/热这件事说清楚了：热启动「秒出选好友页」，冷启动连发三发
+    /// （贯穿整个启动过程）一发都不认。差别不在时间，在**投递口** —— 原生 URL
+    /// 激活是把 `UIOpenURLAction` 装进新 scene 的 transitionContext 交给 App 的
+    /// （0.3.23 在 QQ 分享那次的 `createScene` 里亲眼看到 `n=1`），而 0.3.26 把
+    /// 那次激活拒掉了，所以那个「装好 URL 的 tctx」从来没被造出来。
+    ///
+    /// 这一版在 `createScene` 那一拍把同一个类、同一个容器、同一个 `setActions:`
+    /// 补上。装成功就**不再**走 scene action（`act: deliver skip why=tctx`）。
+    /// 出问题建这个空文件即可退回 0.3.29 的行为，不必换包。
+    public static let urlTctxOffPath     = "/var/mobile/Library/Logs/Aevon/url.tctx.off"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"

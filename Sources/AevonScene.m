@@ -75,6 +75,10 @@ extern int AevonURLRedeliverSoftOn(void);
 // 0.3.29 — 冷启动「补发」的关闸（`url.shot.off` 存在 = 只投一发）。
 // 冷启动那次第二发是给「App 首页恢复盖掉分享页」用的，见 `AevonURLDeliverShot`。
 extern int AevonURLShotOff(void);
+// 0.3.30 — 「装进 transitionContext」这条路的关闸（`url.tctx.off` 存在 = 不装）。
+// 装进去是原生 URL 激活的做法（0.3.23 在 QQ 分享那次的 tctx 里亲眼看到过
+// `UIOpenURLAction`），也是冷启动唯一能跟上「启动」那一拍的投递口。
+extern int AevonURLTctxOff(void);
 // 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
 // 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
 extern int AevonCardYieldForFullscreen(const char *bundle);
@@ -3823,6 +3827,10 @@ static long AevonRedeliverCalls = 0;
 static volatile int AevonDenyCold = 0;
 static volatile int AevonDeliverShots = 0;
 static volatile int AevonDeliverWaits = 0;
+// 0.3.30 — 「URL 已经装进这次 scene 的 transitionContext」。
+// 1 ⇒ 不再走 scene action（那会在原生投递之外再叠一次，且冷启动本来就会丢）。
+static volatile int AevonDenyTctxOk = 0;
+static long AevonDenyTctxTries = 0;
 static void AevonURLRedeliver(const char *bundle);
 static int AevonURLDenyTake(const char *bundle, const char *url, int kind);
 
@@ -4324,6 +4332,99 @@ static int AevonURLDeliverOnce(const char *bundle, NSURL *u) {
     }
 }
 
+/// 0.3.30 — 把这条 URL 装进**新 scene 自己的** `transitionContext`。
+///
+/// 为什么是这里：Aevon(252) 的 0.3.29 已经证明「App 已经在跑 ⇒ `sendActions:`
+/// 秒到、立刻出选好友页」，但「App 正在冷启动 ⇒ 连发三发、贯穿整个启动过程，
+/// 一发都不认」（Aevon(253)：`deny` 后 3.0 s 内 tick=3/4/5 三行 `deliver ok=1`
+/// 全中，QQ 侧一个字都没有）。差别不在时间，在**投递口**：
+///
+///   · 冷启动时 App 还没连上 scene，`sendActions:` 送进去的 action 落在
+///     「正在启动」的那一侧，QQ 的 `scene:openURLContexts:` 还没人接；
+///   · 原生 URL 激活不走那条路 —— 0.3.23 在 QQ 分享那次的 `createScene` 里
+///     亲眼看到 tctx 里装着 `UIOpenURLAction`（`now=__NSSingleObjectSetI n=1`），
+///     也就是说 **FrontBoard 是把 URL 装进 transitionContext 交给新 scene 的**。
+///
+/// 0.3.26 把激活拒掉了，所以那个「装好 action 的 tctx」根本没被造出来；我们的卡
+/// 自己拉起 App 时，`tctx` 是空的（`tctx=UIApplicationSceneTransitionContext`）。
+/// 这一版就在那一拍把它补上 —— 同一个容器、同一个类、同一个 `setActions:`，
+/// 只是装的人从 FrontBoard 换成了我们。
+///
+/// 只对「8 s 内拒答过的那一次」和「scene 身份里带这个 bundle」生效；已有 action
+/// 就合并（`setByAddingObject:`），不覆盖系统自己装的。
+static void AevonTctxInjectURL(NSString *ident, id context) {
+    if (ident == nil || context == nil) return;
+    if (AevonDenyBundle[0] == '\0' || AevonDenyURL[0] == '\0') return;
+    if (AevonDenyAt <= 0) return;
+    if (AevonActMs() - AevonDenyAt > 8000) return;
+    const char *idText = [ident UTF8String];
+    if (idText == NULL || strstr(idText, AevonDenyBundle) == NULL) return;
+    SEL actSel = NSSelectorFromString(@"setActions:");
+    if (![context respondsToSelector:actSel]) {
+        if (__sync_fetch_and_add(&AevonDenyTctxTries, 1) < 4) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: tctx put ok=0 why=nosel ctx=%s b=%s",
+                          object_getClassName(context), AevonDenyBundle] UTF8String]);
+        }
+        return;
+    }
+    if (AevonURLTctxOff() == 1) {
+        if (__sync_fetch_and_add(&AevonDenyTctxTries, 1) < 4) {
+            AevonLogRaw("act: tctx skip why=off");
+        }
+        return;
+    }
+    NSURL *u = [NSURL URLWithString:[NSString stringWithUTF8String:AevonDenyURL]];
+    if (u == nil) return;
+    const char *ahow = "-";
+    id action = AevonMakeOpenURLAction(u, &ahow);
+    if (action == nil) {
+        if (__sync_fetch_and_add(&AevonDenyTctxTries, 1) < 4) {
+            AevonLogRaw("act: tctx put ok=0 why=noaction");
+        }
+        return;
+    }
+    // 合并而不是覆盖：系统有时会自己先装一条（原生那次 `n=1` 就是它装的）。
+    id set = [NSSet setWithObject:action];
+    long had = 0;
+    @try {
+        SEL getSel = NSSelectorFromString(@"actions");
+        if ([context respondsToSelector:getSel]) {
+            id now = ((id (*)(id, SEL))objc_msgSend)(context, getSel);
+            if (now != nil) {
+                SEL cntSel = NSSelectorFromString(@"count");
+                if ([now respondsToSelector:cntSel]) {
+                    had = (long)((NSUInteger (*)(id, SEL))objc_msgSend)(now, cntSel);
+                }
+                SEL addSel = NSSelectorFromString(@"setByAddingObject:");
+                if (had > 0 && [now respondsToSelector:addSel]) {
+                    id merged = ((id (*)(id, SEL, id))objc_msgSend)(now, addSel, action);
+                    if (merged != nil) set = merged;
+                }
+            }
+        }
+    } @catch (NSException *e) {
+        AevonLogRaw("act: tctx merge threw");
+    }
+    int ok = 0;
+    @try {
+        ((void (*)(id, SEL, id))objc_msgSend)(context, actSel, set);
+        ok = 1;
+    } @catch (NSException *e) {
+        AevonLogRaw("act: tctx put threw");
+    }
+    if (ok == 1) {
+        AevonDenyTctxOk = 1;
+    }
+    long n = __sync_fetch_and_add(&AevonDenyTctxTries, 1) + 1;
+    if (n <= 4) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: tctx put ok=%d had=%ld act=%s cls=%s n=%ld b=%s url=%.80s",
+                      ok, had, ahow, object_getClassName(action), n,
+                      AevonDenyBundle, AevonDenyURL] UTF8String]);
+    }
+}
+
 /// 软路径：`openSensitiveURL:`。**会再走一次 `_activateBundleID`**，FrontBoard 因此
 /// 可能再提交一次激活事务 —— 也就是那个被反复投诉的黑底/全屏窗可能回来。
 /// 所以它默认关着，只有手建 `url.redeliver.soft` 才用。硬路径失败时它是唯一退路。
@@ -4392,6 +4493,15 @@ static void AevonURLDeliverShot(int tick, int shotsLeft);
 static void AevonURLDeliverShot(int tick, int shotsLeft) {
     if (AevonDenyURL[0] == '\0') return;
     if (shotsLeft < 0) shotsLeft = 0;
+    // 0.3.30 — URL 已经跟着 scene 的 transitionContext 进去了，就别再往
+    // 同一个 scene 送第二份：冷启动那条 action 会丢，热启动那条会重复弹面板。
+    if (AevonDenyTctxOk == 1) {
+        if (tick == 1) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: deliver skip why=tctx b=%s", AevonDenyBundle] UTF8String]);
+        }
+        return;
+    }
     NSString *us = [NSString stringWithUTF8String:AevonDenyURL];
     NSURL *u = us != nil ? [NSURL URLWithString:us] : nil;
     if (u == nil) {
@@ -4464,9 +4574,19 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind) {
     // 「这次分享的 URL 会落进一个刚起的进程吗」。`AevonAppPid` 读的是
     // SBApplication 的 `pid`（`win: pose` 那条路一直在用，可信），进程不在 ⇒ 冷。
     int pid = (int)AevonAppPid([NSString stringWithUTF8String:bundle]);
-    AevonDenyCold = (pid > 0) ? 0 : 1;
+    int run = -1;
+    @try {
+        id app = AevonAppObject([NSString stringWithUTF8String:bundle]);
+        SEL rs = NSSelectorFromString(@"isRunning");
+        if (app != nil && [app respondsToSelector:rs]) {
+            run = ((BOOL (*)(id, SEL))objc_msgSend)(app, rs) ? 1 : 0;
+        }
+    } @catch (__unused NSException *e) { }
+    AevonDenyCold = (pid > 0 || run == 1) ? 0 : 1;
     AevonDeliverShots = (AevonDenyCold == 1) ? 2 : 0;
     AevonDeliverWaits = 0;
+    AevonDenyTctxOk = 0;
+    AevonDenyTctxTries = 0;
     // `reply=none` 是这一版最要紧的读数之一：`withResult:` 那个块的签名一次都
     // 没读到（0.3.24/0.3.25 的日志里全是 `rsig=-`），盲调就是又一次 0.2.91。
     // 所以拒答之后**不回调**它 —— 分享扩展会等超时，但不会崩。
@@ -4477,8 +4597,8 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind) {
     // 0.3.29 — 这一行是下一份日志的第一判据：`pid=-1` 是读不到（不是不在），
     // 与 `pid=0` 一样按冷启动处理（多发两发最多多出一个面板，少发就是停在首页）。
     AevonLogRaw([[NSString stringWithFormat:
-                  @"act: deny cold=%d pid=%d shots=%d b=%s",
-                  AevonDenyCold, pid, AevonDeliverShots, bundle] UTF8String]);
+                  @"act: deny cold=%d pid=%d run=%d shots=%d b=%s",
+                  AevonDenyCold, pid, run, AevonDeliverShots, bundle] UTF8String]);
     NSString *held = [NSString stringWithUTF8String:bundle];
     if (held == nil) return 1;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
@@ -6095,6 +6215,10 @@ static void AevonActInstall(NSMutableString *out) {
             }
             // 0.3.1 — 线 B：transitionContext 能不能装路由（只读，前 4 拍）。
             AevonProbeTransitionContext(context, settings);
+            // 0.3.30 — 线 B 终于从「只读」变成「写一次」。写在原函数之前：
+            // 这一格是「拿到 scene、又还没上屏」的唯一时刻，冷启动的 App 要在
+            // **连接那一刻**就看见 URL 才有分享页（原生激活就是这么给的）。
+            AevonTctxInjectURL(ident, context);
             // 出生即卡尺寸 —— 这一版唯一一处写行为，并且只写一次（在第一笔提交之前）。
             // 写在**调用原函数之前**是全部要点：之后写就成了又一笔撤销，正是要停的事。
             CGRect birthBefore = CGRectZero;

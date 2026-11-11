@@ -980,10 +980,22 @@ def main():
                   #
                   # 三串分别是：冷/热判定（下一份日志的第一判据）/ 投出去了还是被补发 /
                   # 补发的关闸。少任何一串都说明这一版没进包。
-                  b"act: deny cold=%d pid=%d shots=%d b=%s",
+                  b"act: deny cold=%d pid=%d run=%d shots=%d b=%s",
                   b"act: deliver done tick=%d cold=%d left=%d b=%s",
                   b"AevonURLShotOff",
                   b"/var/mobile/Library/Logs/Aevon/url.shot.off",
+                  # 0.3.30 — **URL 装进新 scene 的 transitionContext。**
+                  #
+                  # Aevon(253)：热启动 scene action「秒出」，冷启动连发三发全丢
+                  # （tick=3/4/5 三行 `deliver ok=1`，QQ 侧一个字都没有）。差别不在
+                  # 时间，在投递口 —— 原生 URL 激活是把 action 装进 tctx 交给新 scene
+                  # 的（0.3.23 亲眼看到 `n=1`）。四串分别是：装上了（带 had/act/cls）/
+                  # 被闸挡住 / 装好之后不再叠 scene action / 闸的文件名。
+                  b"act: tctx put ok=%d had=%ld act=%s cls=%s n=%ld b=%s url=%.80s",
+                  b"act: tctx skip why=off",
+                  b"act: deliver skip why=tctx b=%s",
+                  b"AevonURLTctxOff",
+                  b"/var/mobile/Library/Logs/Aevon/url.tctx.off",
                   # 两把闸自己的路径常量 —— 文件名写错就等于没有闸。
                   b"/var/mobile/Library/Logs/Aevon/url.deny.off",
                   b"/var/mobile/Library/Logs/Aevon/url.redeliver.off",
