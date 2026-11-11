@@ -862,8 +862,8 @@ def main():
                   b"keys=%ld payload=%d sl=%d susp=%d k=%s rsig=%s",
                   b"act: scene n=%ld t=%lld gap=%ld def=%s idc=%s id=%s rem=%s prov=%s "
                   b"blk=%d set=%s frame=%d resize=%d tctx=%s act=%d icl=%s csig=%s",
-                  b"act: hits activate=%ld scene=%ld boot=%d fw=%ld fs=%ld card=%s",
-                  b"act: frame birth wrote=1 b=%s before=%.0fx%.0f after=%.0fx%.0f",
+                  b"act: hits activate=%ld scene=%ld boot=%d fw=%ld fs=%ld fi=%ld card=%s",
+                  b"act: frame birth wrote=1 b=%s before=%.0fx%.0f after=%.0fx%.0f by=%s",
                   b"act: frame birth blocked why=%s b=%s set=%s",
                   # 0.2.92 — 不可变 settings 是 trap 不是异常：写下去 FrontBoard
                   # `_setValue:forSetting:` 直接 `__builtin_trap()`，`@try` 抓不住。
@@ -872,6 +872,19 @@ def main():
                   b"birth:immutable",
                   b"birth:enter",
                   b"birth:wrote",
+                  # 0.3.20 — G1 的旁路。0.3.19 只从 `FBScene` 上找 handle，三条读法
+                  # 全不答就 give up，于是 G2/G3 一次没跑。这三串证明「换 App 那一侧」
+                  # 的代码真的进了包：fallback 起手、某一条读法答了、以及两条都断时
+                  # 把 SBApplication 的 scene 族方法名列出来。
+                  b"probe: G1 fallback b=%s",
+                  b"probe: G1 via=%s cls=%s",
+                  b"probe: G1 give up how=%s app=%s %@",
+                  # 0.3.20 — `born == 0` 的黑洞。0.2.90 起只记 1（写了）/ 2（挡住），
+                  # 「压根不是目标」一个字都不记，于是 Aevon(246) 里 `frame birth`
+                  # 零行、分不清「没生效」与「没轮到」。
+                  b"act: frame birth idle why=%s card=%s id=%s set=%s",
+                  # 0.3.20 — 这条写路自己的闸。语义与 notify.off 不同：关的是「写」。
+                  b"birth:off",
                   # 0.2.91 把正常收尾写成空串，等于自己擦掉断点；这一串证明
                   # 「收尾有名字」而不是一片空白。Swift 侧的 `(settled)` /
                   # `(INTERRUPTED)` 是插值出来的，二进制里没有独立字面量，

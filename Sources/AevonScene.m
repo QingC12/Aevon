@@ -52,6 +52,10 @@ extern int AevonCardIsComingFor(const char *bundle);
 // 0.1.92 — 分享面板那条路的独立开关（`share.off`）。`notify.off` 仍然是总闸：
 // 两个文件任一存在，分享一律不接管。
 extern int AevonShareSwitchOff(void);
+// 0.3.20 — 「出生即卡尺寸」这条写路自己的开关（`birth.off`）。
+// 与前两个不同：那两个关的是接管，这一位关的是**写 scene 参数**。
+// 它在 ⇒ 一刀都不写，只留只读读数。
+extern int AevonBirthSwitchOff(void);
 // 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
 // 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
 extern int AevonCardYieldForFullscreen(const char *bundle);
@@ -3748,6 +3752,9 @@ static char AevonActCardBundle[160] = {0};
 static volatile int64_t AevonActCardAt = 0;
 static long AevonActFrameWrote = 0;
 static long AevonActFrameSkip = 0;
+// 0.3.20 — 「压根不是这一刀的目标」的次数。0.2.90 起这一支一句话都不记，
+// 于是分不清「写了没生效」与「一次都没轮到」。见 `AevonActFrameBirth` 的调用点。
+static long AevonActFrameNoTarget = 0;
 static long AevonActSigTried = 0;
 
 /// 毫秒时钟。与 `AevonLinkPendingAt` 同源，两行读数才能相减。
@@ -4270,6 +4277,145 @@ static void AevonProbeP1Carrier(void) {
     AevonProbeSceneController();
 }
 
+// ============================================================================
+// 0.3.20 — G1 的旁路：从 `SBApplication` 拿 scene / handle
+//
+// 0.3.19 的 G1 是断的，日志三行：
+//   probe: G0 scene=sceneID:com.apple.Preferences-default
+//   probe: G1 scene handle none (no getter answered)
+//   probe: G1 give up (no handle)
+// 于是 G2 / G3 一次都没跑，P1 第③步「把 VC 挂起来」无从开始。
+//
+// 母版 P1 第②步的原文是「取 **App** 已有的主场景 handle」—— 主语是 App，不是
+// scene。0.3.9 只从 `FBScene` 上找了三条（`sceneHandle` / `_sceneHandle` / `handle`），
+// 三条都不答就放弃了，从来没问过 App 那一侧。
+//
+// 而 App 那一侧在本机是通的：`AevonAppObject`（`SBApplicationController` →
+// `applicationWithBundleIdentifier:`）从 0.2.x 起一直在生产里用，
+// Aevon(246) 的 `probe: H4 app=com.tencent.mqq cls=SBApplication` 就是它的产物。
+//
+// 所以这一版补两问：
+//   G5  `SBApplication` 上有没有 `sceneHandle` / `mainSceneHandle` / `_sceneHandle`？
+//   G6  没有的话，它有没有 `mainScene` / `_mainScene` / `scene`？拿到 scene 再走
+//       `AevonProbeSceneHandleFor` 回查一遍（scene 的名字是 `_sceneHandle` 不答，
+//       不代表别的读法也不答 —— 但这次换了对象，值得再试一遍）。
+//
+// 全都不答 ⇒ 把 `SBApplication` 上**名字含 `cene` 的实例方法**全列出来（只列名字，
+// 不带编码）。下一版照名字选，不再靠猜 —— 这是 0.3.14 那次教训的反面。
+//
+// 只读三原则不减：只调 getter、每个选择子一次、异常一律吞掉并记一行。
+// ============================================================================
+
+/// 0.3.20 — 从 `sceneID:<bundle>-<后缀>` 里解出 bundle id。
+///
+/// 后缀有两种形状，都要认：
+///   `sceneID:com.apple.Preferences-default`                           ← 无名后缀
+///   `sceneID:com.apple.mobilesafari-11273F29-B292-466F-A503-CFF2543F851C`  ← UUID
+/// 判据：`-` 之后不是 8 位十六进制 + `-`，就是后缀的起点。
+/// 都不匹配就整串当 bundle（宁可查不到，也不切错一个字符）。
+static NSString *AevonProbeBundleFromSceneName(const char *name) {
+    if (name == NULL) return nil;
+    const char *p = strstr(name, "sceneID:");
+    if (p == NULL) return nil;
+    p += 8;
+    const char *cut = NULL;
+    for (const char *q = p; *q != '\0'; q++) {
+        if (*q != '-') continue;
+        // `-` 之后跟 8 位十六进制再来一个 `-` ⇒ 这是 UUID，bundle 到此为止。
+        int hex = 1;
+        for (int i = 1; i <= 8; i++) {
+            char c = q[i];
+            int isHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!isHex) { hex = 0; break; }
+        }
+        if (hex && q[9] == '-') { cut = q; break; }
+    }
+    if (cut == NULL) cut = strstr(p, "-default");
+    if (cut == NULL) cut = p + strlen(p);
+    size_t n = (size_t)(cut - p);
+    if (n < 3 || n > 150) return nil;
+    return [[[NSString alloc] initWithBytes:p length:n encoding:NSUTF8StringEncoding] autorelease];
+}
+
+/// 0.3.20 — 一个对象上**名字含 `cene` 的全部实例方法**（只有名字）。
+///
+/// 与 `AevonProbeMethodList` 的区别：那个只列 `set*` 且带编码，用来判断「能不能写」；
+/// 这里要的是「有没有一个读法能把 scene 交出来」，名字本身才是信息，编码反而占字节。
+static NSString *AevonProbeSceneNames(id object, int limit) {
+    if (object == nil) return @"-";
+    Class cls = object_getClass(object);
+    if (cls == Nil) return @"-";
+    unsigned int count = 0;
+    Method *list = class_copyMethodList(cls, &count);
+    if (list == NULL) return @"-";
+    NSMutableString *out = [NSMutableString stringWithFormat:@"n=%u", count];
+    int shown = 0;
+    for (unsigned int i = 0; i < count && shown < limit; i++) {
+        const char *name = sel_getName(method_getName(list[i]));
+        if (name == NULL || strstr(name, "cene") == NULL) continue;
+        [out appendFormat:@" |%s", name];
+        shown += 1;
+    }
+    free(list);
+    if (shown == 0) [out appendString:@" |(none)"];
+    return out;
+}
+
+/// 0.3.20 — 从 App 那一侧拿 handle。`*howOut` 记的是「哪一条答的」。
+///
+/// 返回 nil 表示五条读法全不答（或 App 不在），此时 `*howOut` 是原因，
+/// 调用方负责把 `AevonProbeSceneNames` 打出来。
+static id AevonProbeHandleFromApp(NSString *bundleID, const char **howOut) {
+    if (howOut != NULL) *howOut = "no-app";
+    if (bundleID.length < 3) return nil;
+    @try {
+        id app = AevonAppObject(bundleID);
+        if (app == nil) {
+            if (howOut != NULL) *howOut = "app-nil";
+            return nil;
+        }
+        // ① 直接读 handle 的三条。编码全是 `@16@0:8`（无参 getter），
+        //    所以只问存在性再调，不读任何标量。
+        const char *handleSels[] = {"sceneHandle", "mainSceneHandle", "_sceneHandle"};
+        for (int i = 0; i < 3; i++) {
+            SEL s = NSSelectorFromString([NSString stringWithUTF8String:handleSels[i]]);
+            if (![app respondsToSelector:s]) continue;
+            id v = ((id (*)(id, SEL))objc_msgSend)(app, s);
+            if (v == nil) continue;
+            if (howOut != NULL) *howOut = handleSels[i];
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"probe: G5 app=%s %s -> %s",
+                          bundleID.UTF8String, handleSels[i], object_getClassName(v)] UTF8String]);
+            return v;
+        }
+        // ② 先拿 scene，再从 scene 反查 handle。`AevonProbeSceneHandleFor` 在
+        //    0.3.19 对 FBSceneManager 交出来的那个 scene 答 none，但那是**另一个**
+        //    对象；SBApplication 的主 scene 可能带不同的包装，值得再问一遍。
+        const char *sceneSels[] = {"mainScene", "_mainScene", "scene"};
+        for (int i = 0; i < 3; i++) {
+            SEL s = NSSelectorFromString([NSString stringWithUTF8String:sceneSels[i]]);
+            if (![app respondsToSelector:s]) continue;
+            id sc = ((id (*)(id, SEL))objc_msgSend)(app, s);
+            if (sc == nil) continue;
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"probe: G6 app=%s %s -> %s",
+                          bundleID.UTF8String, sceneSels[i], object_getClassName(sc)] UTF8String]);
+            id handle = AevonProbeSceneHandleFor(sc);
+            if (handle != nil) {
+                if (howOut != NULL) *howOut = sceneSels[i];
+                return handle;
+            }
+        }
+        if (howOut != NULL) *howOut = "app-no-scene";
+    } @catch (NSException *e) {
+        if (howOut != NULL) *howOut = "threw";
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"probe: G5 threw b=%s %s", bundleID.UTF8String,
+                      e.reason != nil ? [e.reason UTF8String] : "-"] UTF8String]);
+    }
+    return nil;
+}
+
 /// 0.3.10 — G 线的新入口：**自己枚举 scene，不从钩子里拿。**
 ///
 /// 0.3.9 挂在 `AevonSeenNote` 上，而它的唯一调用点是 intercept 钩子 ——
@@ -4279,6 +4425,9 @@ static void AevonProbeP1Carrier(void) {
 /// 改为开机后延时自己走一遍 `AevonSceneManager` 的 scene 表：挑第一个
 /// `sceneID:<bundle>-…` 且不是 springboard / SystemAperture 的，跑 G1→G2→G3。
 /// 只做一次、只读。
+///
+/// 0.3.20 — G1 答 none 之后**不再 give up**，改走 `AevonProbeHandleFromApp`
+/// （见上面那一段的推导）。两条路都断才算断，并且要把断在哪一条写清楚。
 static void AevonProbeP1Scan(void) {
     if (__sync_fetch_and_add(&AevonProbeP1Land, 1) > 0) return;
     AevonActStep("probe:p1scan");
@@ -4288,32 +4437,74 @@ static void AevonProbeP1Scan(void) {
             AevonLogRaw("probe: G0 no scene manager");
             return;
         }
-        __block int picked = 0;
+        // 0.3.20 — 选场景分两步：**枚举里只挑，不干活**。
+        //
+        // 0.3.10~0.3.19 是「挑到第一个就在 block 里跑全套 G1/G2/G3」。那样有两个
+        // 毛病：一是 `enumerateScenesWithBlock:` 的 block 由系统持有时，在里头再调
+        // `SBApplicationController` 等于在系统的枚举栈上又开一条查询；二是「第一个」
+        // 未必是活的（Aevon(246) 挑中的是 `com.apple.Preferences-default`，那个 App
+        // 当时可能根本没进程，`AevonAppObject` 只会答 nil，白跑一遍）。
+        //
+        // 现在先收一个候选：优先「进程在跑」的，没有才退回第一个。
+        __block id best = nil;
+        __block int bestAlive = 0;
+        __block NSString *bestName = nil;
         AevonEnumerateScenes(manager, ^(id scene) {
-            if (picked) return;
             if (scene == nil) return;
+            if (bestAlive) return;                 // 已经有活的，后面不必再看
             const char *name = AevonSceneName(scene);
             if (name == NULL || strncmp(name, "sceneID:", 8) != 0) return;
             if (strstr(name, "springboard") != NULL) return;
             if (strstr(name, "SystemAperture") != NULL) return;
-            picked = 1;
-            AevonLogRaw([[NSString stringWithFormat:@"probe: G0 scene=%s", name] UTF8String]);
-            id handle = AevonProbeSceneHandleFor(scene);
+            NSString *bundle = AevonProbeBundleFromSceneName(name);
+            int alive = (bundle.length > 0 && AevonAppPid(bundle) > 0) ? 1 : 0;
+            if (best != nil && !alive) return;      // 手上那个也不活，但这个更差
+            best = scene;
+            bestAlive = alive;
+            bestName = [NSString stringWithUTF8String:name];
+        });
+        if (best == nil || bestName == nil) {
+            AevonLogRaw("probe: G0 no app scene found");
+            return;
+        }
+        AevonLogRaw([[NSString stringWithFormat:@"probe: G0 scene=%@ alive=%d",
+                      bestName, bestAlive] UTF8String]);
+        id handle = AevonProbeSceneHandleFor(best);
+        if (handle == nil) {
+            // 0.3.20 — scene 这一侧不答，换 App 那一侧（母版第②步的主语）。
+            NSString *bundle = AevonProbeBundleFromSceneName(bestName.UTF8String);
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"probe: G1 fallback b=%s",
+                          bundle.length > 0 ? bundle.UTF8String : "-"] UTF8String]);
+            const char *how = "-";
+            handle = AevonProbeHandleFromApp(bundle, &how);
             if (handle == nil) {
-                AevonLogRaw("probe: G1 give up (no handle)");
+                // 两条路都断。把「断在哪」和「App 有哪些 scene 读法」一起写出来，
+                // 下一版照名字选，不再靠猜（0.3.14 的教训）。
+                id app = bundle.length > 0 ? AevonAppObject(bundle) : nil;
+                // ⚠️ 第三个 `%@` 而不是 `%s`：`AevonProbeSceneNames` 返回的是
+                // NSString。写成 `%s` 会把一个对象指针当 C 串读，日志里出来是
+                // 一串乱码 —— 而且这种错不会崩，只会安静地骗人。
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"probe: G1 give up how=%s app=%s %@",
+                              how != NULL ? how : "-",
+                              app != nil ? object_getClassName(app) : "nil",
+                              AevonProbeSceneNames(app, 14)] UTF8String]);
                 return;
             }
-            int ok = AevonProbeSceneVCFrom(handle, "G2");
-            if (ok == 0) return;
-            @try {
-                SEL s = NSSelectorFromString(@"newSceneViewController");
-                if ([handle respondsToSelector:s]) {
-                    id again = ((id (*)(id, SEL))objc_msgSend)(handle, s);
-                    AevonProbeSceneVCShape(again, "G3");
-                }
-            } @catch (__unused NSException *e) {}
-        });
-        if (!picked) AevonLogRaw("probe: G0 no app scene found");
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"probe: G1 via=%s cls=%s",
+                          how != NULL ? how : "-", object_getClassName(handle)] UTF8String]);
+        }
+        int ok = AevonProbeSceneVCFrom(handle, "G2");
+        if (ok == 0) return;
+        @try {
+            SEL s = NSSelectorFromString(@"newSceneViewController");
+            if ([handle respondsToSelector:s]) {
+                id again = ((id (*)(id, SEL))objc_msgSend)(handle, s);
+                AevonProbeSceneVCShape(again, "G3");
+            }
+        } @catch (__unused NSException *e) {}
     } @catch (NSException *e) {
         AevonLogRaw("probe: G0 scan threw");
     }
@@ -4623,12 +4814,24 @@ static void AevonProbePresenterBirth(id scene) {
 
 static int AevonActFrameBirth(id settings, NSString *ident,
                               CGRect *beforeOut, CGRect *afterOut,
-                              const char **whyOut) {
+                              const char **whyOut, id *outParams) {
     if (whyOut != NULL) *whyOut = "no-target";
     if (settings == nil || ident == nil || AevonActCardBundle[0] == 0) return 0;
     // 总闸优先：`notify.off` 在的时候一个字节都不许改行为，这一刀也不例外。
     if (AevonActivateSwitchOff()) {
         if (whyOut != NULL) *whyOut = "switch-off";
+        return 2;
+    }
+    // 0.3.20 — 这一条写路自己的闸（`birth.off`）。
+    //
+    // 它是全工程**唯一**一处「在建 scene 之前改系统参数」的地方，出事就是黑屏 /
+    // 安全模式（0.2.92 那次往不可变 settings 写 frame，SpringBoard 当场 trap）。
+    // 语义与 `notify.off` / `share.off` 不同：那两个关的是「接管」，这一位关的是
+    // 「写」—— 建上它，然后照常使用，就能在不改任何行为的前提下看清门槛过不过、
+    // 副本拿不拿得到（读数是 `birth:off` + `why=birth-off`）。
+    if (AevonBirthSwitchOff() == 1) {
+        if (whyOut != NULL) *whyOut = "birth-off";
+        AevonActStep("birth:off");
         return 2;
     }
     int64_t now = AevonActMs();
@@ -4638,58 +4841,117 @@ static int AevonActFrameBirth(id settings, NSString *ident,
     // 到这里就确认「这次建 scene 是为卡目标造的」，再挡就是真挡住了 —— 后面每一条
     // 都要在日志里说清是哪一条挡的，否则下一轮又只能猜。
     //
-    // ⛔ **0.2.92 — 可变闸必须排在任何一次 objc_msgSend 之前。**
+    // ⛔ **0.2.92 — 不可变对象上不许写。**
     //
-    // 这一刀 0.2.90 只数了 `respondsToSelector:` 就写，而 Aevon(224) 的 Safari 那次
+    // 0.2.90 只数了 `respondsToSelector:` 就写，而 Aevon(224) 的 Safari 那次
     // 拿到的是**不可变**的 `UIApplicationSceneSettings`：写下去 FrontBoard 内部
     // 直接 trap（崩溃报告 `EXC_BREAKPOINT / SIGTRAP`，栈顶
     // `-[FBSSettings _setValue:forSetting:]`），`@try` 抓不住，SpringBoard 当场重启。
     // 更糟的是 `frame birth wrote=` 那行是**函数返回之后**才打的 —— 崩在返回之前，
     // 于是三份日志一条证据都没有，只能从崩溃报告反推。
+    //
+    // ⛔ **0.3.20 — 但「不可变」不等于「不能改」。**
+    //
+    // 0.2.92 之后这里直接 `return 2`，于是 Aevon(230)~(233) 每一版都记
+    // `why=immutable`，四到五条，一条都没写进去 —— 因为 `_createSceneWithDefinition:`
+    // 的第 3 个参数**天生就是不可变的** `UIApplicationSceneSettings`，等它变可变是
+    // 等不到的。
+    //
+    // 而同一个文件里 `AevonPushScene` 早就在用正解：`[current mutableCopy]` 拿一份
+    // 可变副本，在副本上写，再把副本交给 scene。0.3.19 的 `p2` 探针进一步证明可变
+    // 版本**真的存在**（`UIMutableApplicationSceneSettings`，20/20）。
+    //
+    // 所以这一版把「写原对象」改成「写副本、再把副本交回去」：
+    //   · 可变 → 直接在它上面写（保持 0.2.90 的原意，少一次拷贝）
+    //   · 不可变 → `mutableCopy` 一份，在副本上写，副本经 `setSettings:` 交回
+    //   · 副本也写不了 → 照旧 `return 2`，不改行为
     if (whyOut != NULL) *whyOut = "no-frame";
     AevonActStep("birth:enter");
+
+    SEL fSel = NSSelectorFromString(@"frame");
+    SEL sSel = NSSelectorFromString(@"setFrame:");
+
+    // 第一步：确定「在哪份对象上写」。
+    //   `target` 是最终要写的那一份；`copied` 非 nil 说明走的副本路。
+    id target = settings;
+    id copied = nil;
     if (!AevonSettingsMutable(settings)) {
-        if (whyOut != NULL) *whyOut = "immutable";
-        AevonActStep("birth:immutable");
-        return 2;
+        // ⛔ 副本必须能响应 `setFrame:` 才算数 —— 只问不调，问错只是白拷一份。
+        if ([settings respondsToSelector:NSSelectorFromString(@"mutableCopy")]) {
+            @try {
+                id c = [settings mutableCopy];
+                if (c != nil && AevonSettingsMutable(c) &&
+                    [c respondsToSelector:sSel] && [c respondsToSelector:fSel]) {
+                    copied = c;
+                    target = c;
+                } else {
+                    [c release];
+                }
+            } @catch (NSException *e) {
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"act: frame birth copy threw %s cls=%s",
+                              e.reason != nil ? [e.reason UTF8String] : "-",
+                              object_getClassName(settings)] UTF8String]);
+            }
+        }
+        if (copied == nil) {
+            // 连副本都拿不到：这才是真的没门。行为与 0.2.92 一致。
+            if (whyOut != NULL) *whyOut = "immutable";
+            AevonActStep("birth:immutable");
+            return 2;
+        }
     }
-    // 闸过了才是真可变对象；剩下的异常（类簇、奇怪的 selector）用 @try 兜住。
-    // 注意 @try 挡不住 trap，所以上面那道闸才是主防线，这段只是补漏。
+
+    // 第二步：在 `target` 上写。
+    int result = 2;
     @try {
-        SEL fSel = NSSelectorFromString(@"frame");
-        SEL sSel = NSSelectorFromString(@"setFrame:");
-        if (![settings respondsToSelector:fSel]) {
+        if (![target respondsToSelector:fSel]) {
             if (whyOut != NULL) *whyOut = "no-frame";
             AevonActStep("birth:noframe");
-            return 2;
-        }
-        if (![settings respondsToSelector:sSel]) {
+            result = 2;
+        } else if (![target respondsToSelector:sSel]) {
             if (whyOut != NULL) *whyOut = "no-setframe";
             AevonActStep("birth:noset");
-            return 2;
+            result = 2;
+        } else {
+            if (whyOut != NULL) *whyOut = "screen-shape";
+            CGRect cur = ((CGRect (*)(id, SEL))objc_msgSend)(target, fSel);
+            if (cur.size.width < 400.0 || cur.size.height < 900.0) {
+                AevonActStep("birth:small");
+                result = 2;
+            } else {
+                CGRect next = CGRectMake(0.0, 0.0, cur.size.width, cur.size.height - 215.0);
+                ((void (*)(id, SEL, CGRect))objc_msgSend)(target, sSel, next);
+                CGRect back = ((CGRect (*)(id, SEL))objc_msgSend)(target, fSel);
+                if (beforeOut != NULL) *beforeOut = cur;
+                if (afterOut != NULL) *afterOut = back;
+                if (whyOut != NULL) *whyOut = copied != nil ? "wrote-copy" : "wrote";
+                AevonActStep("birth:wrote");
+                result = 1;
+            }
         }
-        if (whyOut != NULL) *whyOut = "screen-shape";
-        CGRect cur = ((CGRect (*)(id, SEL))objc_msgSend)(settings, fSel);
-        if (cur.size.width < 400.0 || cur.size.height < 900.0) {
-            AevonActStep("birth:small");
-            return 2;
-        }
-        CGRect next = CGRectMake(0.0, 0.0, cur.size.width, cur.size.height - 215.0);
-        ((void (*)(id, SEL, CGRect))objc_msgSend)(settings, sSel, next);
-        CGRect back = ((CGRect (*)(id, SEL))objc_msgSend)(settings, fSel);
-        if (beforeOut != NULL) *beforeOut = cur;
-        if (afterOut != NULL) *afterOut = back;
-        if (whyOut != NULL) *whyOut = "wrote";
-        AevonActStep("birth:wrote");
-        return 1;
     } @catch (NSException *e) {
         if (whyOut != NULL) *whyOut = "threw";
         AevonActStep("birth:threw");
         AevonLogRaw([[NSString stringWithFormat:@"act: frame birth threw %s cls=%s",
                       e.reason != nil ? [e.reason UTF8String] : "-",
-                      object_getClassName(settings)] UTF8String]);
-        return 2;
+                      object_getClassName(target)] UTF8String]);
+        result = 2;
     }
+
+    // 第三步：副本要交回去，否则写在副本上的东西随副本一起消失。
+    //   `*outParams` 给调用方：非 nil 时由 `_createSceneWithDefinition:` 那一格
+    //   替换掉第 3 个参数。这里只负责产出，不负责替换。
+    //   MRC：`mutableCopy` 是 +1；成功时直接把这份 +1 的所有权交给调用方，
+    //   失败时由这里释放。两边**只有一处**释放，不会双释放。
+    if (copied != nil) {
+        if (result == 1 && outParams != NULL) {
+            *outParams = copied;              // 所有权转移给调用方
+        } else {
+            [copied release];
+        }
+    }
+    return result;
 }
 
 /// 先按已知真名找，找不到才全类扫。
@@ -4928,14 +5190,20 @@ static void AevonActInstall(NSMutableString *out) {
             CGRect birthBefore = CGRectZero;
             CGRect birthAfter = CGRectZero;
             const char *birthWhy = "no-target";
-            int born = AevonActFrameBirth(settings, ident, &birthBefore, &birthAfter, &birthWhy);
+            // 0.3.20 — 第 6 个参数 `&birthParams`：不可变 settings 走副本路时，
+            // 副本要作为新的「第 3 个参数」交给原函数，否则写在副本上的东西
+            // 随副本一起消失（这正是 0.2.92~0.3.19 二十版没写进去的原因）。
+            id birthParams = nil;
+            int born = AevonActFrameBirth(settings, ident, &birthBefore, &birthAfter,
+                                          &birthWhy, &birthParams);
             if (born == 1) {
                 if (__sync_fetch_and_add(&AevonActFrameWrote, 1) < 6) {
                     AevonLogRaw([[NSString stringWithFormat:
-                                  @"act: frame birth wrote=1 b=%s before=%.0fx%.0f after=%.0fx%.0f",
+                                  @"act: frame birth wrote=1 b=%s before=%.0fx%.0f after=%.0fx%.0f by=%s",
                                   AevonActCardBundle,
                                   birthBefore.size.width, birthBefore.size.height,
-                                  birthAfter.size.width, birthAfter.size.height] UTF8String]);
+                                  birthAfter.size.width, birthAfter.size.height,
+                                  birthWhy] UTF8String]);
                 }
             } else if (born == 2) {
                 if (__sync_fetch_and_add(&AevonActFrameSkip, 1) < 6) {
@@ -4944,12 +5212,41 @@ static void AevonActInstall(NSMutableString *out) {
                                   birthWhy, AevonActCardBundle,
                                   settings != nil ? object_getClassName(settings) : "nil"] UTF8String]);
                 }
+            } else {
+                // 0.3.20 — **born == 0 一直是个黑洞。**
+                //
+                // 0.2.90 起这里只记 1（写了）和 2（挡住了），返回 0（「压根不是这一刀
+                // 的目标」）一个字都不记。于是 Aevon(246) 那 1242 行里 `frame birth`
+                // 零行 —— 分不清是「写了没生效」还是「一次都没轮到」，而这正是
+                // 0.3.19 该回答却没回答的那一问。
+                //
+                // 0 的原因只有一条：`AevonActCardBundle` 是空的（0.3.8 把 URL 接管
+                // 清零之后，唯一写这个变量的 `AevonAuthSwapSchedule` 再也没有调用者）。
+                // 所以这一行不是诊断噪音，它是一条**结构性结论**：写 scene 参数这条路
+                // 现在没有触发器，得先有「谁要变成卡」这件事。
+                if (__sync_fetch_and_add(&AevonActFrameNoTarget, 1) < 4) {
+                    AevonLogRaw([[NSString stringWithFormat:
+                                  @"act: frame birth idle why=%s card=%s id=%s set=%s",
+                                  birthWhy,
+                                  AevonActCardBundle[0] != 0 ? AevonActCardBundle : "-",
+                                  ident != nil ? [ident UTF8String] : "-",
+                                  settings != nil ? object_getClassName(settings) : "nil"] UTF8String]);
+                }
             }
             id (*original)(id, SEL, id, id, id, id, id, id, id) =
                 (id (*)(id, SEL, id, id, id, id, id, id, id))mine->original;
-            if (original == NULL) return nil;
-            return original(manager, mine->sel, definition, settings, clientSettings,
-                            context, remnant, provider, completion);
+            if (original == NULL) {
+                if (birthParams != nil) [birthParams release];
+                return nil;
+            }
+            // `birthParams` 非 nil 时替换第 3 个参数。MRC：`mutableCopy` 是 +1，
+            // 原函数一定会在内部 retain 它需要的那一份，所以调用返回后由我们释放
+            // 自己这一份 —— 释放放在**调用之后**，绝不放之前。
+            id passedSettings = birthParams != nil ? birthParams : settings;
+            id ret = original(manager, mine->sel, definition, passedSettings, clientSettings,
+                              context, remnant, provider, completion);
+            if (birthParams != nil) [birthParams release];
+            return ret;
         };
         // 0.2.90 起这一格不再「只透传」：`settings` 会被解引用（问 `frame`/
         // `setFrame:`、按形状写一次帧）。所以形状闸的判定范围要跟着扩大 —— 头部
@@ -6080,9 +6377,11 @@ NSString *AevonHookSummary(void) {
     // （日志被截断或 SpringBoard 没起来），`activate=0` 表示这两个方法在这台
     // 系统上不走 —— 三种情况要分开读，不能都念成「没生效」。
     // 0.2.90 加 `fw=`/`fs=`/`card=`：写了多少次、被挡了多少次、挡的时候闸上记的是谁。
-    [out appendFormat:@"act: hits activate=%ld scene=%ld boot=%d fw=%ld fs=%ld card=%s\n",
+    // 0.3.20 加 `fi=`（idle）：既没写也没挡的次数 —— 这一格非零就说明「卡目标」
+    // 是空的，写 scene 参数这条路没有触发器，比「写了没生效」更早一层。
+    [out appendFormat:@"act: hits activate=%ld scene=%ld boot=%d fw=%ld fs=%ld fi=%ld card=%s\n",
      AevonActHits, AevonActSceneHits, AevonActBooted,
-     AevonActFrameWrote, AevonActFrameSkip,
+     AevonActFrameWrote, AevonActFrameSkip, AevonActFrameNoTarget,
      AevonActCardBundle[0] != 0 ? AevonActCardBundle : "-"];
     long total = AevonTraceCount;
     long limit = (long)(sizeof(AevonTrace) / sizeof(AevonTrace[0]));

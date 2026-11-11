@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.19"
+    public static let version = "0.3.20"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -168,6 +168,17 @@ public enum Aevon {
     /// 「点了没反应」；把两条路绑在一个开关上，想收一条就得把另一条也关掉。
     /// **`notify.off` 仍然是总闸**：两个任一存在，分享一律不接管。
     public static let shareOffPath      = "/var/mobile/Library/Logs/Aevon/share.off"
+
+    /// 0.3.20 — 「出生即卡尺寸」这条写路的独立开关。
+    ///
+    /// 语义与前两个不同：`notify.off` / `share.off` 关的是**接管**，这一位关的是
+    /// **写 scene 参数**。它是整个工程里唯一一处「在建 scene 之前改系统参数」的地方，
+    /// 出事就是黑屏 / 安全模式（0.2.92 那次就是往不可变 settings 写 frame）。
+    ///
+    /// 所以它默认**不存在 = 允许写**，但操作者一旦建了它，`AevonActFrameBirth`
+    /// 立刻一个字节都不写，只保留只读读数。取证阶段把这一位建上，就能在不改行为的
+    /// 前提下看清「门槛过不过、副本拿不拿得到」。
+    public static let birthOffPath      = "/var/mobile/Library/Logs/Aevon/birth.off"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"

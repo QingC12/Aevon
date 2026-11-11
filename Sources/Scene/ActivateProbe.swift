@@ -114,6 +114,19 @@ public func AevonShareSwitchOff() -> Int32 {
     return manager.fileExists(atPath: Aevon.shareOffPath) ? 1 : 0
 }
 
+/// 0.3.20 — 「出生即卡尺寸」这条写路的独立开关。
+///
+/// 与前两位都不同：那两个关的是**接管**（吞不吞这次打开），这一位关的是
+/// **写 scene 参数**。`AevonActFrameBirth` 是整个工程里唯一一处「在建 scene 之前
+/// 改系统参数」的地方 —— 0.2.92 往不可变 settings 写 frame 直接 trap，
+/// SpringBoard 当场重启。所以它值得一个自己的开关。
+///
+/// 返回 1 = 建了 `birth.off`，这一刀不写（只留只读读数）。
+@_cdecl("AevonBirthSwitchOff")
+public func AevonBirthSwitchOff() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.birthOffPath) ? 1 : 0
+}
+
 /// 0.3.5 — 在 presenter 的 `presentationContext` 上写 `setResizesHostedContext:`。
 ///
 /// `setResizesHostedContext:` 的 owner 是 `UIMutableScenePresentationContext`
