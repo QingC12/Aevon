@@ -3387,6 +3387,40 @@ zStackParticipantDidChange:
         // 卡片在那儿露不出来；解锁后自然显现 —— 不需要我们收。
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { keep() }
 
+        // 0.3.45 — **托管就绪：这一格是冷启动分享唯一的「可以投了」信号。**
+        //
+        // ScreenCore 等的是 `sc_beginAwaitingHostedContentReadinessForHostView:`
+        // 的连续稳定采样（`startupCoverReadySamples`）加 `sc_isPresentationCompleteForSession:`；
+        // 我们等的是渲染树里那一格 —— 容器 `hostedLayers ≥ 1`，也就是「App 的画面
+        // 真的被挂进来了」。Aevon(267) 那 12 次 `dlg=- rsp=0` 说的就是这两件事
+        // 之间隔着好几秒：scene 已经登记、卡也已经建好，但 App 的 window scene
+        // 还没长到能接 URL 的程度，投早了的 URL 只能落到老兼容壳上。
+        //
+        // 每 0.1 s 一拍、最多 21 拍（0.1 + 2.0 s），与 C 侧 `AevonColdDeadline`
+        // 同一个数；到点没等到就交给 C 侧的超时兜底（它会把完整请求交系统一次），
+        // 这一格只负责报「等到了」。`bundle` 不是当前扣着的那条时 C 侧自己会忽略。
+        let readyKey = bundleID ?? hostedBundle ?? ""
+        if !readyKey.isEmpty {
+            func hostedTick(_ n: Int, _ held: UIView?) {
+                guard let held = held else { return }
+                let container = value(of: held, "hostContainerView") ?? held.subviews.first {
+                    NSStringFromClass(type(of: $0)).contains("HostContainer")
+                }
+                if count(of: container, "hostedLayers") >= 1 {
+                    Log.write("win: hosted ready b=" + readyKey + " tick=" + String(n))
+                    AevonColdCardReady(readyKey)
+                    return
+                }
+                if n >= 20 { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak held] in
+                    hostedTick(n + 1, held)
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak view] in
+                hostedTick(0, view)
+            }
+        }
+
         // Nothing on this screen is hidden any more. 0.0.24 hid one view,
         // 0.0.25 hid the wrong window, 0.0.26 emptied every app-level window and
         // the operator got a black phone that eight seconds of restoring did not

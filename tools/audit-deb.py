@@ -1151,10 +1151,32 @@ def main():
                   b"/var/mobile/Library/Logs/Aevon/url.coldshare.pass.off",
                   # 0.3.42 — 剪贴板令牌进 transitionContext：分享的内容在剪贴板上。
                   b"act: tctx paste=1 cls=%s b=%s",
-                  # 0.3.42 — QQ OpenSDK 的 App Link 拆回自定义 scheme。
                   b"act: float skip why=authback b=%s sso=%@ u=%.80s",
-                  b"act: unwrap b=%s from=%.46s to=%.46s",
                   b"act: bridge skip why=noapp b=%s cold=%d shots=%d",
+                  # 0.3.45 — **冷启动分享：扣下原始请求，等托管就绪再交回。**
+                  #
+                  # 这一段是逆向 ScreenCore 2.1.0 的直接产物（`rev` 那一轮）：
+                  # `act: cold hold` = 这条激活请求被扣住了（连同 4 个读数一起打，
+                  # 因为「冷」这件事在这台机器上从来没有一个能对的判据）；
+                  # `act: cold hold take` = 真的存下来了（`opt=` 是 options 的类名，
+                  # `keys=` 是 payload 项数 —— 交回时靠这两格确认原件没丢）；
+                  # `act: cold replay why=hosted|deadline|other` = 交回那一刻，
+                  # `susp=` 是挂起位写后回读（1 = 写进去了，-2 = 写进去了但读不出，
+                  # -1 = 一条路都没走通），`boxed=1` = 用的是一份改过的副本。
+                  # 判据：QQ / 微信侧 `app: openurl` 的 `dlg=` 从 `-` 翻成类名。
+                  b"act: cold hold b=%s pid=%d run=%d live=%d alive=%d age=%.1f wait=%dms u=%.80s",
+                  b"act: cold hold take b=%s opt=%s trusted=%d keys=%ld",
+                  b"act: cold replay why=%s b=%s at=%.0fms tick=%d susp=%d boxed=%d",
+                  # 0.3.45 — 桥被推迟到「托管就绪」之后才问（`act: cold bridge`），
+                  # 强答案就 `act: cold cancel`，弱答案才轮到 `act: cold replay`。
+                  # 三行合起来是这一版唯一的实验设计：先换时机，再换投递物。
+                  b"act: cold bridge b=%s send=%d src=%s u=%.60s",
+                  b"act: cold cancel why=%s b=%s at=%.0fms",
+                  b"act: cold bridge skip why=nourl",
+                  b"act: cold hold skip why=again b=%s",
+                  b"win: hosted ready b=",
+                  b"AevonColdHoldOn",
+                  b"/var/mobile/Library/Logs/Aevon/url.cold.hold.off",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`
@@ -1785,6 +1807,12 @@ def main():
                  b"act: deny card skip why=up b=%s",                         # gone
                  b"act: url act-would take=%d b=%s url=%.100s",               # gone
                  b"act: bridge b=%s send=%d bonly=%d u=%.60s",                # gone
+                 # 0.3.45 — **URL 改写整条删除**（宿主 `act: unwrap` 与 App 侧
+                 # `app: openurl opensdk unwrap`）。逆向结论：两家母版都不改写
+                 # URL，而拆出来的自定义 scheme 两家里没人认（支付宝只落首页、
+                 # QQ 零日志）。任何一条还能 grep 到，就说明「原样交回原始
+                 # options」这句话在代码里是假的 —— 原件又被改了一遍。
+                 b"act: unwrap b=%s from=%.46s to=%.46s",                     # gone
                  b"act: float cold=%d pid=%d run=%d seen=%d live=%d shots=%d sw=%d b=%s"):  # gone
         if gone in dylib_early:
             bad(f"host: {gone.decode()} still in Aevon.dylib — a removed layer came "
@@ -2288,7 +2316,7 @@ def main():
                       b"app: openurl ok=%d via=%s u=%d opt=%d src=%d sc=%d wsc=%d wins=%d state=%d rsp=%d dlg=%s",
                       # 0.2.18 —— 回执又加了 `wins` / `state`：区分「一条 scene 都没有」
                       # 与「有窗口但没 scene」。两个字段都不进产物就等于这版白改。
-                      b"ok=%d via=%s pid=%d sc=%d wsc=%d wins=%d state=%d dlg=%s rsp=%d",
+                      b"ok=%d via=%s pid=%d sc=%d wsc=%d wins=%d state=%d dlg=%s rsp=%d ready=%d",
                       # 0.2.17 —— AppDelegate 的两条老入口。QQ 这类老工程常常只实现
                       # 这两条；名字写错一位就等于那条路从来没存在过。
                       b"application:openURL:sourceApplication:annotation:",
@@ -2301,9 +2329,6 @@ def main():
                       b"app: openurl ctx opt stub",
                       b"app: openurl no file",
                       b"app: openurl bad plist",
-                      # 0.3.42 — QQ OpenSDK 的 App Link 拆回自定义 scheme。
-                      # 这条只在 App 侧（AevonApp.dylib）出现，宿主没有它。
-                  b"app: openurl opensdk unwrap %.48s",
                       b"setContentOffset:"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")
@@ -2325,6 +2350,10 @@ def main():
         # 里，闸门否则会把它当成「漏改的断言」拦下。
         for token in (b"_referenceBounds",                                  # gone
                       b"_boundsForInterfaceOrientation:",                   # gone
+                      # 0.3.45 — QQ OpenSDK 的 App Link 不再拆成自定义 scheme。
+                      # 拆完投过去 QQ 侧零 `app: openurl`（Aevon(266)/(267)），
+                      # 而逆向里两家母版都不改写 URL。还能 grep 到就是没删干净。
+                      b"app: openurl opensdk unwrap %.48s",                  # gone
                       # 名片：0.0.67 拿它当唯一判据。它是一次跨进程文件读，沙箱里
                       # 未必读得到；读不到就是「卡里的 App 永远不是前台」，触摸直
                       # 接失效。判据回到 scene settings（见 AevonHosted）。

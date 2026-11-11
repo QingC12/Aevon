@@ -417,6 +417,17 @@ void AevonForwardFlush(const char *_Nullable why);
 // 1.25 秒没回执才退回 `AevonForwardFlush` 那条老路，分享不会丢。
 void AevonForwardDeliver(const char *_Nullable why);
 
+/// 0.3.45 — 「这张卡的承载层真的出来了」。
+///
+/// ScreenCore 的 `sc_beginAwaitingHostedContentReadinessForHostView:` 就是我们
+/// 这句的母版：它等的不是「scene 登记」，是**画面托管完成**（连续稳定采样），
+/// 之后才交付系统原始请求。我们这边等的是渲染树那一格
+/// （容器 `hostedLayers ≥ 1`）—— 同一个意思，用我们已有的读数表达。
+///
+/// 只在主队列调用（`SceneProbe.float` 那条链本来就在主队列）。`bundle` 不是
+/// 当前扣着的那个时什么都不做。
+void AevonColdCardReady(const char *_Nullable bundle);
+
 /// 这一次卡片没有用自建的 scene（复用系统那个 / 走了老路）—— 关卡时不许销毁。
 void AevonOwnClear(void);
 

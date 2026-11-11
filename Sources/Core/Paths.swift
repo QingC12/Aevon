@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.44"
+    public static let version = "0.3.45"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -385,6 +385,19 @@ public enum Aevon {
     /// 要回退成「冷启动也建卡」时手建这个文件，不必换包。
     public static let urlColdSharePassOffPath =
         "/var/mobile/Library/Logs/Aevon/url.coldshare.pass.off"
+
+    /// 0.3.45 — **冷启动分享「扣下 + 等托管就绪 + 交回原始 options」**的关闸
+    /// （存在 = 关，退回 0.3.44 的「冷分享交回系统」）。
+    ///
+    /// 这一版换的不是投递口，是**投递时机**：ScreenCore 2.1.0 的整条链是
+    /// 「挂起启动 → 建跳转窗 → 等 `hostedContentIsReady` + 入场动画 → 交原始
+    /// options」，2 秒没就绪才把完整请求交系统一次。我们的桥恰恰相反 ——
+    /// scene 一登记就投，Aevon(267) 那 12 次回执全是 `dlg=- rsp=0`：那一拍
+    /// App 连 window scene 的 delegate 都还没有。
+    /// 默认开。要回到 0.3.44 的行为（不接管、让系统全屏）时手建这个文件，
+    /// 不必换包 —— 下一次真机就能用同一台机器做 A/B。
+    public static let urlColdHoldOffPath =
+        "/var/mobile/Library/Logs/Aevon/url.cold.hold.off"
 
     /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
     ///

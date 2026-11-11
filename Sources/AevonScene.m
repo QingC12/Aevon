@@ -156,6 +156,35 @@ static id AevonOpenSourceApp(id request, id options);
 // 0.3.42 — 激活钩子里还要读 `__PasteSharingToken`（定义在 12460 那一带）。
 static id AevonActRead(id object, NSString *key);
 
+// 0.3.45 — 冷启动分享：**扣下整条激活请求，等卡片托管就绪再原样交回**。
+//
+// 依据是 ScreenCore 2.1.0 的二进制与随包说明书（`D:\最新工作区\rev` 那一轮）：
+//   `sc_launchApplicationWithBundleIdentifier:suspended:` → 建跳转窗 →
+//   `sc_markWaitingForScene` / `sc_pollForSceneForSession:manager:context:` →
+//   `sc_beginAwaitingHostedContentReadinessForHostView:`（连续稳定采样）→
+//   `sc_isPresentationCompleteForSession:` → **交付系统原始请求**
+//   （`sc_takePendingSceneTransitionContext`，`SCWSShareDelivery.deadline` = 2 s）
+// 它和我们最大的差别不是入口，是**投递时机**：等窗真的托管上内容再交，
+// 而不是「scene 一登记就投」。Aevon(265)(266)(267) 三次冷分享都是
+// `ack ok=1 via=app-src dlg=- rsp=0` —— `dlg=-` 说明那一拍 App 连 window scene
+// 的 delegate 都还没有，投进去只能落到老兼容壳上，面板一个像素都不动。
+//
+// 所以这一版把冷分享改成：吞掉原实现（不提交系统全屏事务）→ 记下这一整条
+// 激活请求（`_Block_copy` 存完成块，说明书 .12-27 专门写这一条）→ 照常建卡 →
+// 等 Swift 侧报「承载层 ≥ 1」→ 把**原始 options**（含 `__PayloadURL` /
+// `__PasteSharingToken` / `__AppLink4LS`）连同挂起位一起交回原实现。
+// 判据只有一条：QQ 侧 `app: openurl` 的 `dlg=` 从 `-` 翻成类名。
+extern int AevonColdHoldOn(void);          ///< 闸（`url.cold.hold.off` 存在 = 关）
+static int AevonColdPending(void);         ///< 一次性：这一次接管要不要扣请求
+static void AevonColdWantNote(void);       ///< `AevonURLDenyTake` 里置位
+static int AevonColdHolds(const char *bundle);  ///< 扣着的是不是这个 App
+static void AevonColdReplay(const char *why);   ///< 把原始请求交回去（一次）
+static void AevonColdCancel(const char *why);   ///< 桥办成了，取消扣留
+static void AevonColdHoldTake(IMP imp, id service, SEL cmd, id bundleID, id requestID,
+                              BOOL trusted, id options, id source, id originalSource,
+                              id result);
+void AevonColdCardReady(const char *bundle);   ///< Swift 侧报「托管就绪」
+
 /// The scene manager is a singleton with no public door, and its spelling has
 /// changed across releases. Resolving it here keeps the class-method dispatch
 /// out of Swift, where `AnyClass` + `perform` needs casts that the compiler is
@@ -4901,41 +4930,18 @@ static long AevonDeepLines = 0;
 
 /// 0.3.40 — **通用链接里包着的自定义 scheme，先解开再投。**
 ///
-/// 投递通道决定 URL 的形态：`UIOpenURLAction` 是 `openURL` 语义，而各家 SDK 的
-/// 通用链接写法是「https 外面包一层，里面塞真正的 scheme」——
-/// Aevon(265) 18:47:54 支付宝那一条就是
-///   https://render.alipay.com/p/s/ulink/?scheme=alipay%3A%2F%2Falipayclient%2F%3F%257B…
-/// 在系统正门里这一层由 App 的 universal link 处理器拆；在我们这条通道上没人拆，
-/// 支付宝收到的就是一个 https，它只能打开首页。
+/// ⛔ 0.3.45 — **`AevonURLUnwrapScheme` 整段删除**（`act: unwrap` 一起）。
 ///
-/// 只在两条同时成立时解：外层是 http(s)、`scheme=` 的值解开后自身是一个合法
-/// scheme URL。解出来的那条还要再过一次 `AevonURLWorthDeny`（`file:` / `tel:` /
-/// `itms-*` 这些永远不接管），否则原样返回 —— 不能让一条外层 https 把系统 scheme
-/// 偷渡进来。
-static int AevonURLWorthDeny(const char *u);
+/// 0.3.40 在这里把 `?scheme=` 里包着的自定义 scheme 解出来再投，理由是「我们这条
+/// 通道上没人拆通用链接」。逆向那一轮把这条推翻了：两家母版都不改写 URL，而
+/// 拆出来的东西两家都不认 ——
+///   · 支付宝 `alipay://alipayclient/?…` 在 `openURL` 语义下只落首页；
+///   · QQ `mqqOpensdkSSoLogin://…` 投过去，QQ 侧零 `app: openurl`。
+/// 更关键的是：拆包之后 `AevonDenyURL` 就不再是系统给的那一条了，而这一版
+/// 要交回**原始 options** 给系统 —— 留着它等于一边说要原样交回、一边把原件改坏。
+/// 历史记录留在 `bak-0.3.44`（`build/bak-0.3.44/Sources/AevonScene.m`）。
 
-static NSString *AevonURLUnwrapScheme(NSString *url) {
-    if (url.length < 16) return nil;
-    NSString *low = [url lowercaseString];
-    if (![low hasPrefix:@"http://"] && ![low hasPrefix:@"https://"]) return nil;
-    NSRange key = [low rangeOfString:@"scheme="];
-    if (key.location == NSNotFound) return nil;
-    NSString *value = [url substringFromIndex:key.location + key.length];
-    NSRange amp = [value rangeOfString:@"&"];
-    if (amp.location != NSNotFound) value = [value substringToIndex:amp.location];
-    if (value.length < 8) return nil;
-    NSString *inner = [value stringByRemovingPercentEncoding];
-    if (inner.length < 8) return nil;
-    NSRange split = [inner rangeOfString:@"://"];
-    if (split.location == NSNotFound || split.location == 0) return nil;
-    if (split.location > 24) return nil;
-    const char *raw = [inner UTF8String];
-    if (raw == NULL) return nil;
-    if (AevonURLWorthDeny(raw) != 1) return nil;
-    return inner;
-}
-
-/// 0.3.33 — 上面那段判据的实现（定义在 `AevonURLUnwrapScheme` 之后，先声明）。
+/// 0.3.33 — 接管范围（`file:` / `tel:` / `prefs:` / `itms-*` 这些永远不接管）。
 static int AevonURLWorthDeny(const char *u) {
     if (u == NULL || u[0] == '\0') return 0;
     static const char *skipSchemes[] = {
@@ -5391,41 +5397,18 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
     if (bundle == NULL || bundle[0] == '\0') return 0;
     if (AevonActivateSwitchOff() == 1) return 0;
     if (AevonCardIsUpFor(bundle) == 1) return 0;
-    // 0.3.40 — **同一次点击的连发只认第一条。**
+    // 0.3.45 — **授权族排到 `claim` 之前**（0.3.44 是之后）。
     //
-    // Aevon(265) 18:47:54 的支付宝支付：联通 App 在同一秒里发了三条
-    // （universal link → `alipaymatrix…` → `aliminipayauth…`），三条各自把整条
-    // 接管链走了一遍：
-    //   act: activate n=21 / 22 / 23          ← 三次激活
-    //   notify: appurl send ×3                ← 桥的全局态被覆盖三次
-    //   act: float card ×3 + win: own retired ×3   ← 卡拆了建三次
-    // 最后留在全局里的是**第三条**（`aliminipayauth`，小程序授权族），桥超时后
-    // 补投的也是它 —— 支付宝只肯给首页。
-    //
-    // 一条 URL 一次打开：1.5 s 内同一个 bundle 的后续几条只吞不接（返回 1 =
-    // 不调原函数 = 没有激活事务），并留一行证据。第一条永远是最靠近 App 本意
-    // 的那条（各家 SDK 的降级顺序都是「通用链接 → 自定义 scheme」）。
-    {
-        static char claim[160] = {0};
-        static CFAbsoluteTime claimAt = 0;
-        CFAbsoluteTime nowClaim = CFAbsoluteTimeGetCurrent();
-        if (strcmp(claim, bundle) == 0 && nowClaim - claimAt < 1.5) {
-            if (__sync_fetch_and_add(&AevonDenySkipLines, 1) < 8) {
-                AevonLogRaw([[NSString stringWithFormat:
-                              @"act: float skip why=claim b=%s k=%d u=%.60s",
-                              bundle, kind, url != NULL ? url : "-"] UTF8String]);
-            }
-            return 1;
-        }
-        snprintf(claim, sizeof(claim), "%s", bundle);
-        claimAt = nowClaim;
-    }
-    // 0.3.44 — **授权族交回系统**（判据与理由见 `AevonAuthFamilyPass`）。
-    //
-    // 放在 `claim` 之后是有意的：同一次点击常连发两条（App Link + 自定义 scheme，
-    // Aevon(267) 19:39:43 就是 `__AppLink4LS` 与 `weixin://app/…/auth/` 前后脚），
-    // 第一条在这里 return 0 交系统原生激活，第二条被上面那句 claim 吞掉 —— 正好
-    // 只开一次。若反过来（pass 在 claim 前），两条都 return 0，系统会开两次。
+    // 0.3.44 把授权族放在 claim 之后，理由是「同一次点击连发两条，第二条该被吞掉，
+    // 否则系统开两次」。Aevon(267) 19:39:43 把那条理由推翻了：那两条不是重复，
+    // 是**互补** ——
+    //   `https://help.wechat.com/…/auth/?scope=snsapi_userinfo…`（`__AppLink4LS`，带参数）
+    //   `weixin://app/wx…/auth/…`（自定义 scheme，带 SDK 要求的那份）
+    // 第一条交系统后，第二条被 claim 吞掉，于是 QQ 那条
+    // `https://qm.qq.com/opensdkul/mqqOpensdkSSoLogin/…` 之后什么都没被送出去
+    // （用户看到的正是「QQ 授权不出授权页」）。两家母版对授权族**没有任何专门代码**，
+    // 统一按路由条件走 —— 我们这种「先挑一条、把另一条扔掉」的挑法本身就是那条 bug。
+    // 代价是可能多一次激活（同一 App 的第二次通常只是一次重定向），比缺一条 URL 轻。
     int authFam = AevonAuthFamilyPass(bundle, url, AevonDenySrc);
     if (authFam >= 1) {
         if (__sync_fetch_and_add(&AevonDenySkipLines, 1) < 12) {
@@ -5440,6 +5423,39 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
         AevonPassNote(bundle);
         AevonDenySrc[0] = '\0';
         return 0;
+    }
+    // 0.3.40 — **同一次点击的连发只认第一条。**
+    //
+    // Aevon(265) 18:47:54 的支付宝支付：联通 App 在同一秒里发了三条
+    // （universal link → `alipaymatrix…` → `aliminipayauth…`），三条各自把整条
+    // 接管链走了一遍：
+    //   act: activate n=21 / 22 / 23          ← 三次激活
+    //   notify: appurl send ×3                ← 桥的全局态被覆盖三次
+    //   act: float card ×3 + win: own retired ×3   ← 卡拆了建三次
+    // 最后留在全局里的是**第三条**（`aliminipayauth`，小程序授权族），桥超时后
+    // 补投的也是它 —— 支付宝只肯给首页。
+    //
+    // 一条 URL 一次打开：1.5 s 内同一个 bundle 的后续几条只吞不接（返回 1 =
+    // 不调原函数 = 没有激活事务），并留一行证据。第一条永远是最靠近 App 本意
+    // 的那条（各家 SDK 的降级顺序都是「通用链接 → 自定义 scheme」）。
+    //
+    // 0.3.45 — 它现在排在授权族**之后**（顺序整个翻过来了，理由见上面那段）。
+    // 支付族在钩子里就已经放行、根本进不到这里，所以这一格真正管的是
+    // 「同一个 App 在 1.5 秒内被连点两次」与「一条打开携带的多条派生请求」。
+    {
+        static char claim[160] = {0};
+        static CFAbsoluteTime claimAt = 0;
+        CFAbsoluteTime nowClaim = CFAbsoluteTimeGetCurrent();
+        if (strcmp(claim, bundle) == 0 && nowClaim - claimAt < 1.5) {
+            if (__sync_fetch_and_add(&AevonDenySkipLines, 1) < 8) {
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"act: float skip why=claim b=%s k=%d u=%.60s",
+                              bundle, kind, url != NULL ? url : "-"] UTF8String]);
+            }
+            return 1;
+        }
+        snprintf(claim, sizeof(claim), "%s", bundle);
+        claimAt = nowClaim;
     }
     // 0.3.44 — **冷启动分享也交回系统。**
     //
@@ -5456,7 +5472,11 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
     // 我们仿不出来。所以冷启动这一支不再接管：不建卡、不写出生帧、不发桥，
     // 让 FrontBoard 用它自己的 options 把 URL 交给刚起来的进程。
     // 代价：冷启动那一下是全屏（分享完手动返回）。热启动仍在卡里，不受影响。
-    if (kind == 2 && AevonColdSharePassOn() == 1 &&
+    //
+    // 0.3.45 — **这一支降级成备用闸**：`AevonColdHoldOn()` 开着时走下面「扣下
+    // 原始请求、等托管就绪再交回」那条路（ScreenCore 的形状）。只有 `url.cold.hold.off`
+    // 存在时才回到这里 —— 那时行为与 0.3.44 一字不差，正好给下一次真机做 A/B。
+    if (kind == 2 && AevonColdHoldOn() != 1 && AevonColdSharePassOn() == 1 &&
         AevonTargetAlive([NSString stringWithUTF8String:bundle], NULL) != 1) {
         if (__sync_fetch_and_add(&AevonDenySkipLines, 1) < 12) {
             AevonLogRaw([[NSString stringWithFormat:
@@ -5473,20 +5493,18 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
     } else {
         AevonDenyURL[0] = '\0';
     }
-    // 0.3.40 — 通用链接里包着的 scheme 先解开（见 `AevonURLUnwrapScheme`）。
-    // 这一格必须在**存 URL 之后、投递之前**：后面的桥、scene action、补投
-    // 三条路读的都是 `AevonDenyURL`，解开一次全线受益。
-    if (AevonDenyURL[0] != '\0') {
-        NSString *outer = [NSString stringWithUTF8String:AevonDenyURL];
-        NSString *inner = AevonURLUnwrapScheme(outer);
-        const char *innerRaw = inner.length > 0 ? [inner UTF8String] : NULL;
-        if (innerRaw != NULL && strlen(innerRaw) < sizeof(AevonDenyURL)) {
-            AevonLogRaw([[NSString stringWithFormat:
-                          @"act: unwrap b=%s from=%.46s to=%.46s",
-                          bundle, AevonDenyURL, innerRaw] UTF8String]);
-            strlcpy(AevonDenyURL, innerRaw, sizeof(AevonDenyURL));
-        }
-    }
+    // ⛔ 0.3.45 — **`ulink` / `opensdkul` 拆包整段删除。**
+    //
+    // 0.3.40 在这里把通用链接里包着的自定义 scheme 解出来再投（`act: unwrap`）。
+    // 逆向那一轮的结论是整段该删，两条证据：
+    //   · 支付宝那条 `https://render.alipay.com/p/s/ulink/?scheme=alipay…` 拆出来的
+    //     `alipay://` 在 `openURL` 语义下**永远只落首页**（收银台只认 App Link）；
+    //   · QQ 那条 `https://qm.qq.com/opensdkul/mqqOpensdkSSoLogin/…` 拆成
+    //     `mqqOpensdkSSoLogin://…` 再投，QQ 侧零日志 —— 它也不认自定义 scheme。
+    // ScreenCore 与 floatingView 两家**都没有**「scheme 改写」这一层：它们只决定
+    // 「这条请求给不给它建窗」，URL 一个字节不改。所以这一格不是修法，是噪声。
+    // 删掉之后 `AevonDenyURL` 保持系统给的那一条原样，桥 / action / 补投三条路
+    // 读到的都是原 URL。
     // 0.3.40 — 目标是微信 / QQ 且来源是第三方 App ⇒ 这是一次**授权 / 支付请求**，
     // 记下「谁在等结果」。回跳那一拍靠它认人（`AevonAuthBackHit`）。
     //
@@ -5579,7 +5597,37 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
     // 只在冷启动用：热启动那条 scene action 已经在真机上跑了几十版，不动它。
     // 发不出去（拿不到容器 / 写盘失败）就退回老路 —— `AevonAppOpenSend` 自己会
     // 回 0，这里什么都不用做。
-    if (swallow == 1 && AevonDenyCold == 1 && AevonDenyURL[0] != '\0' &&
+    // 0.3.45 — **冷启动分享：扣下原始激活请求（第六段①）。**
+    //
+    // 这一段替换 0.3.38~0.3.44 的「冷启动走进程内桥」。三条现场把它判死的：
+    //   Aevon(265) `app: openurl ok=1 via=app-src state=0 dlg=- rsp=0`（QQ）
+    //   Aevon(266) 同一份 options 问 12 次，次次 `rsp=0`，8.2 s 后才转 action
+    //   Aevon(267) 转完 action 仍无 `app: page sheet`，停在首页
+    // 也就是说**桥送到的是一份我们自己造的 options**，而 QQ 的分享入口要的是
+    // 系统那一份（`__PayloadURL` + `__PasteSharingToken` + App Link 语义）。
+    // ScreenCore 的答案是「别造，等窗长好，把系统原来那份交回去」。
+    //
+    // 这里只置一个一次性标志，真正的扣留动作在激活钩子里（那里才有 8 个参数）。
+    // 0.3.45 — **桥不取消，只推迟**：等卡片报「托管就绪」再投（见 `AevonColdBridgeSend`）。
+    //
+    // 这一格是这一版和 0.3.38 的真正分界。0.3.38 的桥在 `own scene up`（约 100 ms）
+    // 就投，那时 `dlg=-`、窗口场景还没长出来，QQ 的老壳把 URL 收下就完了；
+    // 现在桥排在同一句话的另一半：「托管就绪」之后。微信那头本来就能进
+    // （`dlg=MMMainSceneDelegate rsp=1`），推迟几百毫秒不影响它的结果；
+    // QQ 那头如果 `dlg` 仍是 `-`，就说明「等托管」也不够，改由原始 options 接手。
+    // 所以不是「扣下就再不投」——**只有弱答案才轮到原始请求**。
+    int coldHold = 0;
+    if (swallow == 1 && kind == 2 && AevonDenyCold == 1 && AevonDenyURL[0] != '\0' &&
+        AevonColdHoldOn() == 1) {
+        coldHold = 1;
+        AevonColdWantNote();
+        AevonDeliverShots = 0;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: cold hold b=%s pid=%d run=%d live=%d alive=%d age=%.1f wait=%dms u=%.80s",
+                      bundle, pid, run, liveScene, alive, aliveAge, 2000,
+                      AevonDenyURL] UTF8String]);
+    }
+    if (coldHold == 0 && swallow == 1 && AevonDenyCold == 1 && AevonDenyURL[0] != '\0' &&
         AevonURLBridgeOn() == 1 && AevonBridgeable(bundle) == 1) {
         NSString *bu = [NSString stringWithUTF8String:bundle];
         NSString *us = [NSString stringWithUTF8String:AevonDenyURL];
@@ -5617,8 +5665,8 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
         AevonLogRaw([[NSString stringWithFormat:
                       @"act: bridge skip why=hot b=%s alive=%d age=%.1f",
                       bundle, alive, aliveAge] UTF8String]);
-    } else if (swallow == 1 && AevonDenyCold == 1 && AevonDenyURL[0] != '\0' &&
-               AevonURLBridgeOn() == 1) {
+    } else if (coldHold == 0 && swallow == 1 && AevonDenyCold == 1 &&
+               AevonDenyURL[0] != '\0' && AevonURLBridgeOn() == 1) {
         // 0.3.40 — 名单外的 App：不排桥，直接走 scene action。
         // 这一行是「为什么这一版支付宝不再空等 2 秒」的唯一证据。
         AevonLogRaw([[NSString stringWithFormat:
@@ -5686,7 +5734,9 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
         // 0.3.38 — 走进程内投递时不排这条链：那条桥自己会重投 14 次 × 0.45 s，
         // 两边同时投就是「同一条 URL 送两遍」，App 会把授权页开两遍（0.2.35 的
         // `openURLContexts` 那一课）。
-        if (AevonDenyBridgeOnly != 1) {
+        // 0.3.45 — 冷分享由 `AevonColdBridgeSend` 在托管就绪那一拍投，这条 0.35 s
+        // 的链一律不排：它投的是自造 action，而这一版要试的是「等窗长好再投」。
+        if (AevonDenyBridgeOnly != 1 && coldHold == 0) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 AevonURLRedeliver(AevonDenyBundle);
@@ -7499,6 +7549,17 @@ static void AevonActInstall(NSMutableString *out) {
                     if (r == 1) {
                         // 强制回退那一支：不调原函数。没有激活事务，就没有 FrontBoard
                         // 那个 430×932 的全屏窗口 —— 不是「撤得快」，是「没发生」。
+                        //
+                        // 0.3.45 — 冷分享多一步：把这一整条激活请求扣下来。
+                        // `AevonColdPending()` 是一次性的（读即清零），它只会在
+                        // 「kind=2 + 冷启动 + 闸开」那一拍为 1。扣下来的东西在两秒
+                        // 内要么被「托管就绪」交回去，要么被 deadline 交回去 ——
+                        // 两条路都只调用一次原实现，不会把同一次分享开两遍。
+                        if (AevonColdPending() == 1) {
+                            AevonColdHoldTake(mine->original, service, mine->sel, bundleID,
+                                              requestID, trusted, options, source,
+                                              originalSource, result);
+                        }
                         return;
                     }
                 }
@@ -11565,10 +11626,16 @@ static int AevonAuthFamilyPass(const char *bundle, const char *url, const char *
     // 也算。误判的代价只是那一下全屏，比把用户塞进小窗轻。
     if (AevonAuthWait[0] == '\0') return 0;
     if (strcmp(bundle, AevonAuthWait) != 0) return 0;
-    if (CFAbsoluteTimeGetCurrent() - AevonAuthWaitAt > 30.0) {
-        AevonAuthWaitClear();
-        return 0;
-    }
+    // ⛔ 0.3.45 — **30 秒窗口删除。**
+    //
+    // 0.3.43/0.3.44 在这里加了一个「30 秒内才算刚才那次授权」的上限，理由是
+    // 怕一次没完成的授权永久污染后面的打开。逆向那一轮的结论是：这个窗口本身
+    // 就是在补一个**本来不该丢的上下文** —— ScreenCore 认人靠的是
+    // `sc_isDeliveringNativeLinkRequest` 与 session 自己的 bundle，没有时间窗，
+    // 因为它知道「谁在等」这件事只有一个来源，用一次就该清。
+    // 我们这也是一个槽（`AevonAuthWait`），回跳那一拍 `authFam == 2` 会清掉，
+    // 出发那一拍会重写 —— 窗口是多余的第二道判断，而它的代价是「慢一点回来的
+    // 授权结果被当成一次新打开，把用户从全屏拽进小窗」。
     int ssosrc = (src != NULL &&
                   (strncmp(src, "com.tencent.xin", 15) == 0 ||
                    strncmp(src, "com.tencent.mqq", 15) == 0)) ? 1 : 0;
@@ -15158,8 +15225,21 @@ static void AevonAppOpenCheck(void) {
                 rsp = [[text substringFromIndex:rspAt.location + rspAt.length] intValue];
             }
         }
+        // 0.3.45 — `ready=0` 也算弱答案（见 App 侧 `AevonOpenURLAck` 的说明）。
+        //
+        // 这是「`dlg=` 从 `-` 翻成类名」那条判据在宿主侧的落点：进程里还没有一个
+        // 带 delegate 的 window scene 时，老选择子回 YES 只说明「兼容壳收下了」，
+        // 不代表 App 会把它当成一次分享。宿主把它并入弱答案，继续等窗长好。
+        int ready = -1;
+        {
+            NSRange readyAt = [text rangeOfString:@" ready="];
+            if (readyAt.location != NSNotFound) {
+                ready = [[text substringFromIndex:readyAt.location + readyAt.length] intValue];
+            }
+        }
         int weak = (ok && ([via isEqualToString:@"app-src"] ||
                            [via isEqualToString:@"app-handle"])) ? 1 : 0;
+        if (ok && ready == 0) weak = 1;
         if (weak && AevonAppOpenNotes < 20) {
             AevonAppOpenNotes += 1;
             AevonLogRaw([[NSString stringWithFormat:
@@ -15183,6 +15263,19 @@ static void AevonAppOpenCheck(void) {
                           via,
                           AevonAppOpenBundle != nil ? AevonAppOpenBundle : @"-"]
                          UTF8String]);
+            // 0.3.45 — **冷分享：弱答案 ⇒ 换投递物，不换次数。**
+            //
+            // 走到这里说明「等托管就绪」已经做到了，桥还是在 QQ 上得了弱答案
+            // （`via=app-src rsp=0 dlg=- ready=0`）。那就不是时机问题，而是
+            // 「我们仿的那份 options 不够」——系统原来那份里有 `__PayloadURL`、
+            // `__PasteSharingToken` 和 App Link 语义，QQ 的分享入口只认那一份。
+            // 把扣着的原始请求交回去（带挂起位），这就是 ScreenCore 的落点。
+            if (AevonAppOpenBundle != nil &&
+                AevonColdHolds([AevonAppOpenBundle UTF8String]) == 1) {
+                AevonAppOpenDrop();
+                AevonColdReplay("weak");
+                return;
+            }
             // 1.2 s：这一发要落在 App 把首页恢复完之后，太早会被启动窗口吃掉。
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                          (int64_t)(1.2 * NSEC_PER_SEC)),
@@ -15194,6 +15287,13 @@ static void AevonAppOpenCheck(void) {
         if (ok && !weak) {
             // 投递成功 ⇒ 这条请求就地销毁，**绝不**交给 SpringBoard：
             // 交给它就是把 App 的 scene 抢去全屏（这一版唯一要避开的事）。
+            //
+            // 0.3.45 — 冷分享走这条时，扣着的那条原始请求也要一起取消：
+            // 桥已经把同一条 URL 送进去了，再把系统那份交回去就是开两遍。
+            if (AevonAppOpenBundle != nil &&
+                AevonColdHolds([AevonAppOpenBundle UTF8String]) == 1) {
+                AevonColdCancel("bridge");
+            }
             AevonAppOpenDrop();
             AevonAuthCardCloseMaybe();
             AevonForwardDrop("appurl ok");
@@ -15231,7 +15331,10 @@ static void AevonAppOpenCheck(void) {
             AevonAppOpenGiveUp("write");
             return;
         }
-        AevonAppOpenNext(0.45);
+        // 0.3.45 — 冷分享只等 2 秒：真正的收尾在 `AevonColdWatchTick`，
+        // 它到点会把原始请求交回去。这里多问几次只是给「App 里的 dylib 刚好
+        // 慢一拍装载」留个缝，不给 6 秒 —— 6 秒之后 QQ 早就把首页恢复完了。
+        AevonAppOpenNext(AevonColdHolds([AevonAppOpenBundle UTF8String]) == 1 ? 0.25 : 0.45);
         return;
     }
     AevonAppOpenGiveUp("timeout");
@@ -15291,6 +15394,356 @@ void AevonForwardDeliver(const char *why) {
     if (AevonAppOpenSend(bundle, url, AevonFwdHoldOptions, src) == 1) return;
     AevonForwardFlushNow("appurl no file");
 }
+
+// MARK: - 0.3.45 冷启动分享：扣下原始请求，等托管就绪再交回
+//
+// 这一段的形状整个来自 ScreenCore 2.1.0（`D:\最新工作区\rev` 那一轮逆向）：
+//
+//   系统：_activateBundleID:…（问句）
+//     ├─ 我们答「不接」──────────────► 原函数照常跑（全屏）
+//     └─ 答「接」：**把这条请求扣住**
+//           ├─ 建卡（挂起启动 → scene → 承载层）
+//           ├─ 等：卡片真的托管上内容（`hostedLayers ≥ 1`）
+//           │      ScreenCore 的对应物是 `sc_beginAwaitingHostedContentReadinessForHostView:`
+//           │      + `sc_isPresentationCompleteForSession:`
+//           ├─ 就绪 ⇒ 交回**原始 options**（URL + 剪贴板令牌 + App Link 全在里面），
+//           │      只加一个挂起位，不让这次交回把 App 重新摆成全屏
+//           └─ 2 s 内没就绪 ⇒ `sc_failPendingSession:` 的等价物：完整请求交系统一次
+//
+// 与 0.3.38~0.3.44 的桥最大的差别：**桥送的是我们自己造的 options**（空字典
+// + 来源 App），而 QQ 的分享入口要的是系统那一份。Aevon(265)(266)(267) 三次
+// 冷分享的 `dlg=- rsp=0` 就是「窗还没长好、且 options 是仿的」这件事的两半。
+
+static int AevonColdOn = 0;          ///< 有一条请求正扣在手里
+static int AevonColdWant = 0;        ///< 一次性：下一次接管要不要扣
+static int AevonColdBridgeSent = 0;  ///< 这一条已经问过桥了（只问一次）
+static char AevonColdBundle[80] = {0};
+static char AevonColdURL[1024] = {0};
+static IMP AevonColdImp = NULL;
+static SEL AevonColdCmd = NULL;
+static id AevonColdService = nil;
+static id AevonColdBundleArg = nil;
+static id AevonColdRequestID = nil;
+static id AevonColdOptions = nil;
+static id AevonColdSource = nil;
+static id AevonColdOrigin = nil;
+static id AevonColdResult = nil;
+static int AevonColdTrusted = 0;
+static CFAbsoluteTime AevonColdAt = 0;
+static int AevonColdRuns = 0;
+static int AevonColdNotes = 0;
+
+/// 2.0 秒 —— ScreenCore 的 `SCWSShareDelivery.deadline`。不是拍的：它的说明书
+/// 原文写着「目标小窗启动失败或 2 秒内始终未就绪时，撤销本次挂起启动参数，
+/// 完整请求只交给系统正常打开一次」。
+static const double AevonColdDeadline = 2.0;
+
+static int AevonColdPending(void) {
+    int want = AevonColdWant;
+    AevonColdWant = 0;
+    return want;
+}
+
+static void AevonColdWantNote(void) { AevonColdWant = 1; }
+
+/// 挂起位的键名。
+///
+/// 不用 `dlsym` 去读 `FBSOpenApplicationOptionKeyActivateSuspended` 的**值**：
+/// 那是一个导出的 `NSString * const`，arm64e 上它是带认证的指针，裸读一次
+/// 可能换来一次 PAC 失败 —— 为省一个常量赌一次崩溃不值得。键名本身有系统
+/// 自己的证词：Aevon(165) 里相册那条系统请求的 keys 逐字是
+/// `__LaunchIntent,__LaunchSceneless,__ActivateSuspended,…`。
+static NSString *AevonColdSuspKey(void) { return @"__ActivateSuspended"; }
+
+/// 把挂起位写进 options 的 payload，返回**新的一份** options（原对象不动）。
+///
+/// 三条路依次试，全失败就返回 nil（调用方用原始那份，行为回到 0.3.44）：
+///   ① `+optionsWithDictionary:` —— `FBSOpenApplicationOptions` 的正门；
+///   ② `-init` + `-setDictionary:` —— 0.3.6 量到的唯一写入口；
+///   ③ 放弃。
+static id AevonColdOptionsWithSuspended(id options, int *readOut) {
+    if (readOut != NULL) *readOut = -1;
+    if (options == nil) return nil;
+    id dict = AevonActRead(options, @"dictionary");
+    if (![dict isKindOfClass:[NSDictionary class]]) return nil;
+    NSMutableDictionary *box = [dict mutableCopy];
+    if (box == nil) return nil;
+    NSString *key = AevonColdSuspKey();
+    [box setObject:[NSNumber numberWithBool:YES] forKey:key];
+    Class cls = object_getClass(options);
+    id made = nil;
+    SEL factory = NSSelectorFromString(@"optionsWithDictionary:");
+    SEL setter = NSSelectorFromString(@"setDictionary:");
+    if (cls != Nil && [cls respondsToSelector:factory]) {
+        made = ((id (*)(id, SEL, id))objc_msgSend)((id)cls, factory, box);
+    }
+    if (made == nil && cls != Nil) {
+        id fresh = [[cls alloc] init];
+        if (fresh != nil && [fresh respondsToSelector:setter]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(fresh, setter, box);
+            made = fresh;
+        } else {
+            [fresh release];
+        }
+    }
+    [box release];
+    if (made == nil) return nil;
+    id got = AevonActRead(made, key);
+    if (readOut != NULL) {
+        *readOut = [got isKindOfClass:[NSNumber class]] ? [(NSNumber *)got intValue] : -2;
+    }
+    return made;
+}
+
+static void AevonColdReplay(const char *why) {
+    if (AevonColdOn == 0) return;
+    if (![NSThread isMainThread]) {
+        char *copy = strdup(why != NULL ? why : "-");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonColdReplay(copy);
+            if (copy != NULL) free(copy);
+        });
+        return;
+    }
+    IMP imp = AevonColdImp;
+    SEL cmd = AevonColdCmd;
+    id service = AevonColdService;
+    id bundleArg = AevonColdBundleArg;
+    id requestID = AevonColdRequestID;
+    id options = AevonColdOptions;
+    id source = AevonColdSource;
+    id origin = AevonColdOrigin;
+    id result = AevonColdResult;
+    BOOL trusted = AevonColdTrusted ? YES : NO;
+    char bundle[80];
+    memcpy(bundle, AevonColdBundle, sizeof(bundle));
+    double ms = AevonColdAt > 0 ? (CFAbsoluteTimeGetCurrent() - AevonColdAt) * 1000.0 : 0;
+    int runs = AevonColdRuns;
+
+    // 先清状态再调用：原实现会重入本文件的替身，状态必须先回到「没有待发」，
+    // 否则那次重入会以为自己还扣着一条（同 `AevonForwardFlushNow` 的写法）。
+    AevonColdOn = 0;
+    AevonColdImp = NULL;
+    AevonColdCmd = NULL;
+    AevonColdService = nil;
+    AevonColdBundleArg = nil;
+    AevonColdRequestID = nil;
+    AevonColdOptions = nil;
+    AevonColdSource = nil;
+    AevonColdOrigin = nil;
+    AevonColdResult = nil;
+    AevonColdTrusted = 0;
+    AevonColdAt = 0;
+
+    int suspRead = -1;
+    id boxed = AevonColdOptionsWithSuspended(options, &suspRead);
+    // 桥那一路如果还挂着同一个 App，一并收掉：这条分享已经由原始请求接手了。
+    // 不收的话它会在 0.45 s 后再投一次，那就是把同一条 URL 开两遍。
+    if (AevonAppOpenBundle != nil) {
+        const char *bb = [AevonAppOpenBundle UTF8String];
+        if (bb != NULL && strcmp(bb, bundle) == 0) AevonAppOpenDrop();
+    }
+    if (AevonColdNotes < 24) {
+        AevonColdNotes += 1;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: cold replay why=%s b=%s at=%.0fms tick=%d susp=%d boxed=%d",
+                      why != NULL ? why : "-", bundle, ms, runs, suspRead,
+                      boxed != nil ? 1 : 0] UTF8String]);
+    }
+    if (imp != NULL) {
+        ((void (*)(id, SEL, id, id, BOOL, id, id, id, id))imp)
+            (service, cmd, bundleArg, requestID, trusted,
+             boxed != nil ? boxed : options, source, origin, result);
+    }
+    // `boxed` 与 `result` **故意不 release**：原实现可能在这一拍之后仍然持有它们
+    // （完成块会进系统的事务表；ScreenCore 的 .12-27 专门写了「复制到堆、交付
+    // 一次后释放」，它知道自己什么时候算完，我们不知道）。一次分享漏两个对象，
+    // 换「回调不会悬空」，与文件里另外三处同一个取舍（见 `AevonForwardFlushNow`）。
+    (void)boxed;
+}
+
+/// 看门狗：卡片可能根本建不起来（黑名单 / 槽位满 / 系统界面盖着）。到点就
+/// 把完整请求交系统一次 —— 宁可全屏，也不许这次分享什么都不发生。
+static void AevonColdWatchTick(void) {
+    if (AevonColdOn == 0) return;
+    AevonColdRuns += 1;
+    double ms = AevonColdAt > 0 ? (CFAbsoluteTimeGetCurrent() - AevonColdAt) * 1000.0 : 0;
+    if (ms >= AevonColdDeadline * 1000.0) {
+        AevonColdReplay("deadline");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonColdWatchTick();
+    });
+}
+
+static int AevonColdBridgeSend(void);
+
+/// Swift 侧报「这张卡的承载层出来了」。只在主队列调用（`float` 那条链就在主队列）。
+///
+/// 0.3.45 — 到了这一拍**先问桥，不问系统**。理由：桥在微信上是验过的
+/// （`dlg=MMMainSceneDelegate rsp=1` 秒接），而它在 QQ 上失败的原因正是「问得太早」。
+/// 先把桥放到正确的时刻再问一次，答案才有意义：
+///   · 强答案 ⇒ 这条分享已经进去了，原始请求就地取消（`AevonColdCancel`）；
+///   · 弱答案 / 没有回执 ⇒ `AevonAppOpenCheck` 那边调 `AevonColdReplay`，
+///     把系统原来那份 options 交回去。
+/// 这样「换投递物」只在「换时机」失败之后才发生，微信那条好路不会被这一版动到。
+void AevonColdCardReady(const char *bundle) {
+    if (AevonColdOn == 0 || bundle == NULL || bundle[0] == '\0') return;
+    if (strcmp(bundle, AevonColdBundle) != 0) return;
+    AevonColdBridgeSend();
+}
+
+/// 把扣着的那条请求**取消**（不是交回）：桥已经把它办成了。
+static void AevonColdCancel(const char *why) {
+    if (AevonColdOn == 0) return;
+    double ms = AevonColdAt > 0 ? (CFAbsoluteTimeGetCurrent() - AevonColdAt) * 1000.0 : 0;
+    char bundle[80];
+    memcpy(bundle, AevonColdBundle, sizeof(bundle));
+    AevonColdOn = 0;
+    AevonColdImp = NULL;
+    AevonColdCmd = NULL;
+    AevonColdService = nil;
+    AevonColdBundleArg = nil;
+    AevonColdRequestID = nil;
+    AevonColdOptions = nil;
+    AevonColdSource = nil;
+    AevonColdOrigin = nil;
+    AevonColdResult = nil;
+    AevonColdTrusted = 0;
+    AevonColdAt = 0;
+    AevonColdBridgeSent = 0;
+    // 桥也一起收：这条分享已经办成了，让它继续重投就是开第二遍。
+    if (AevonAppOpenBundle != nil) {
+        const char *bb = [AevonAppOpenBundle UTF8String];
+        if (bb != NULL && strcmp(bb, bundle) == 0) AevonAppOpenDrop();
+    }
+    if (AevonColdNotes < 24) {
+        AevonColdNotes += 1;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: cold cancel why=%s b=%s at=%.0fms",
+                      why != NULL ? why : "-", bundle, ms] UTF8String]);
+    }
+}
+
+/// 托管就绪之后问一次桥。返回 1 = 已经问过（无论答案）。
+static int AevonColdBridgeSend(void) {
+    if (AevonColdOn == 0 || AevonColdBridgeSent == 1) return 0;
+    AevonColdBridgeSent = 1;
+    NSString *bu = [NSString stringWithUTF8String:AevonColdBundle];
+    NSString *us = AevonColdURL[0] != '\0' ? [NSString stringWithUTF8String:AevonColdURL] : nil;
+    if (bu.length == 0 || us.length == 0) {
+        AevonLogRaw("act: cold bridge skip why=nourl");
+        AevonColdReplay("nourl");
+        return 1;
+    }
+    // 名单外 / 闸关：不绕桥，直接交回原始请求。支付宝那种「只认 App Link」的 App
+    // 本来就进不到这一支（支付族在钩子里就放行了），这里只管名单。
+    if (AevonURLBridgeOn() != 1 || AevonBridgeable(AevonColdBundle) != 1) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: cold bridge skip why=noapp b=%s", AevonColdBundle] UTF8String]);
+        AevonColdReplay("noapp");
+        return 1;
+    }
+    NSString *srcApp = nil;
+    char *copy = AevonFrontBundleCopy();
+    if (copy != NULL) {
+        NSString *name = [NSString stringWithUTF8String:copy];
+        free(copy);
+        if (name.length > 0 && ![name isEqualToString:bu]) srcApp = name;
+    }
+    int sent = AevonAppOpenSend(bu, us, [NSDictionary dictionary], srcApp);
+    if (AevonColdNotes < 24) {
+        AevonColdNotes += 1;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: cold bridge b=%s send=%d src=%s u=%.60s",
+                      AevonColdBundle, sent, srcApp != nil ? [srcApp UTF8String] : "-",
+                      AevonColdURL] UTF8String]);
+    }
+    if (sent != 1) {
+        // 容器拿不到 / 写盘失败：桥这条路当场作废，把原始请求交回去。
+        AevonColdReplay("bridge fail");
+    }
+    return 1;
+}
+
+/// 这一条扣着的请求，是不是这个 App 的（给 `AevonAppOpenCheck` 用）。
+static int AevonColdHolds(const char *bundle) {
+    if (AevonColdOn == 0 || bundle == NULL) return 0;
+    return strcmp(bundle, AevonColdBundle) == 0 ? 1 : 0;
+}
+
+static void AevonColdHoldTake(IMP imp, id service, SEL cmd, id bundleID, id requestID,
+                              BOOL trusted, id options, id source, id originalSource,
+                              id result) {
+    if (cmd == NULL || bundleID == nil || options == nil || imp == NULL) {
+        // 扣不住就当场交出去：等价于 0.3.44 的「冷分享交回系统」。
+        AevonLogRaw("act: cold hold skip why=args");
+        if (imp != NULL && cmd != NULL && bundleID != nil) {
+            ((void (*)(id, SEL, id, id, BOOL, id, id, id, id))imp)
+                (service, cmd, bundleID, requestID, trusted, options, source,
+                 originalSource, result);
+        }
+        return;
+    }
+    const char *raw = [(NSString *)bundleID UTF8String];
+    if (raw == NULL || raw[0] == '\0' || strlen(raw) >= sizeof(AevonColdBundle)) {
+        AevonLogRaw("act: cold hold skip why=bundle");
+        ((void (*)(id, SEL, id, id, BOOL, id, id, id, id))imp)
+            (service, cmd, bundleID, requestID, trusted, options, source,
+             originalSource, result);
+        return;
+    }
+    if (AevonColdOn == 1) {
+        // 同一次点击的第二条（激活层常见：trusted / untrusted 各一拍）。
+        // 只留第一条：它带来的 options 才是系统为这次打开准备的那份。
+        if (strcmp(raw, AevonColdBundle) == 0) {
+            if (AevonColdNotes < 24) {
+                AevonColdNotes += 1;
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"act: cold hold skip why=again b=%s", raw] UTF8String]);
+            }
+            return;
+        }
+        // 另一个 App：先把上一条交出去，再扣这一条。宁可两条都全屏，不许丢。
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: cold hold flush why=other b=%s", AevonColdBundle] UTF8String]);
+        AevonColdReplay("other");
+    }
+    AevonColdOn = 1;
+    AevonColdImp = imp;
+    AevonColdCmd = cmd;
+    AevonColdService = service;
+    AevonColdBundleArg = bundleID;
+    AevonColdRequestID = requestID;
+    AevonColdOptions = options;
+    AevonColdSource = source;
+    AevonColdOrigin = originalSource;
+    // 完成块必须复制到堆：调用方返回之后栈上的那一份就失效了（说明书 .12-27
+    // 的原话是「避免访问失效的栈回调导致 SpringBoard 安全模式」）。
+    AevonColdResult = [result copy];
+    AevonColdTrusted = trusted ? 1 : 0;
+    AevonColdAt = CFAbsoluteTimeGetCurrent();
+    AevonColdRuns = 0;
+    AevonColdBridgeSent = 0;
+    snprintf(AevonColdBundle, sizeof(AevonColdBundle), "%s", raw);
+    // URL 快照：`AevonDenyURL` 是全局的，下一个分享会把它换掉；桥 / 日志读这一份。
+    strlcpy(AevonColdURL, AevonDenyURL, sizeof(AevonColdURL));
+    if (AevonColdNotes < 24) {
+        AevonColdNotes += 1;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: cold hold take b=%s opt=%s trusted=%d keys=%ld",
+                      raw, object_getClassName(options), trusted ? 1 : 0,
+                      (long)[(NSDictionary *)AevonActRead(options, @"dictionary") count]]
+                     UTF8String]);
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonColdWatchTick();
+    });
+}
+
 
 /// 替身。**顺序就是这里的全部安全设计**：
 ///   ① 快照 —— 只读，不改任何参数；

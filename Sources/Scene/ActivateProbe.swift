@@ -272,6 +272,17 @@ public func AevonColdSharePassOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlColdSharePassOffPath) ? 0 : 1
 }
 
+/// 0.3.45 — 1 = 冷启动分享走「扣下原始请求、等托管就绪再交回」（默认），
+/// 0 = 建了 `url.cold.hold.off`，回到 0.3.44 的「交回系统」（不接管）。
+///
+/// 判据只有一条：QQ / 微信侧 `app: openurl` 那一行的 `dlg=` 从 `-` 翻成类名。
+/// 翻过来了 = 这次交回终于落在一个有 window scene delegate 的进程里；
+/// 还是 `-` = 窗没长好，下一次要动的就是「等什么」而不是「怎么投」。
+@_cdecl("AevonColdHoldOn")
+public func AevonColdHoldOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlColdHoldOffPath) ? 0 : 1
+}
+
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
 ///
 /// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、

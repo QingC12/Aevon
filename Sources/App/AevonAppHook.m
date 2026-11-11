@@ -4865,11 +4865,20 @@ static void AevonOpenURLAck(BOOL ok, const char *via, int scenes, int windowScen
                             const char *dlg, int rsp, int windows, int state) {
     NSString *path = AevonOpenURLPath(@"aevon-open-ack");
     if (path == nil) return;
+    // 0.3.45 — `ready=`：**这一次投递时，这个进程有没有一个能接 URL 的 window scene。**
+    //
+    // 0.3.38~0.3.44 的宿主只看 `ok=1`，而 `ok=1` 可以有三种完全不同的来路。Aevon(267)
+    // 那 12 次 `ack ok=1 via=app-src dlg=- rsp=0` 就是最坏的一种：老选择子收下了，
+    // 现代入口和 scene delegate 都还没长出来，面板一个像素都没动，而宿主当成功销毁
+    // 请求。`ready=0` 把这一格单独写成一位，宿主从此不会再把「老壳收下」当「送到」。
+    // 判据就是 `dlg`：`-` = 这个进程里第一个 window scene 没有 delegate（或者
+    // 连 window scene 都没有）。
+    int ready = (windowScenes > 0 && dlg != NULL && dlg[0] != '-') ? 1 : 0;
     NSString *text = [NSString stringWithFormat:
-                      @"ok=%d via=%s pid=%d sc=%d wsc=%d wins=%d state=%d dlg=%s rsp=%d\n",
+                      @"ok=%d via=%s pid=%d sc=%d wsc=%d wins=%d state=%d dlg=%s rsp=%d ready=%d\n",
                       ok ? 1 : 0, via != NULL ? via : "-", (int)getpid(),
                       scenes, windowScenes, windows, state,
-                      dlg != NULL ? dlg : "-", rsp];
+                      dlg != NULL ? dlg : "-", rsp, ready];
     [text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
 }
 
@@ -4973,29 +4982,16 @@ static BOOL AevonOpenURLUniversal(UIApplication *app, NSURL *url) {
 
 static void AevonOpenURLApply(void);
 
-/// 0.3.42 — QQ OpenSDK 的 App Link 拆回自定义 scheme。
+/// ⛔ 0.3.45 — **`AevonQQOpenSDKUnwrap` 整段删除。**
 ///
-/// 形状：`https://qm.qq.com/opensdkul/mqqOpensdkSSoLogin/SSoLogin/<appid>/<appid>
-///        ?generalpastboard=1&sdkv=3.5.17&…`
-/// 拆法：`/opensdkul/` 之后第一段是 scheme，剩下的是路径 + 查询串。
-/// 返回 nil = 不是这个形状（其余 URL 一个字节都不动）。
-static NSString *AevonQQOpenSDKUnwrap(NSURL *url) {
-    if (url == nil) return nil;
-    NSString *raw = url.absoluteString;
-    if (raw.length < 32) return nil;
-    NSString *low = raw.lowercaseString;
-    if (![low hasPrefix:@"https://qm.qq.com/opensdkul/"]) return nil;
-    NSString *rest = [raw substringFromIndex:[@"https://qm.qq.com/opensdkul/" length]];
-    NSRange slash = [rest rangeOfString:@"/"];
-    if (slash.location == NSNotFound || slash.location < 2) return nil;
-    NSString *scheme = [rest substringToIndex:slash.location];
-    if (![scheme isEqualToString:@"mqqOpensdkSSoLogin"] &&
-        ![scheme isEqualToString:@"mqqopensdkapiV2"] &&
-        ![scheme isEqualToString:@"mqqapi"]) return nil;
-    NSString *tail = [rest substringFromIndex:slash.location + 1];
-    if (tail.length == 0) return nil;
-    return [NSString stringWithFormat:@"%@://%@", scheme, tail];
-}
+/// 0.3.42 在这里把 `https://qm.qq.com/opensdkul/mqqOpensdkSSoLogin/…` 拆成
+/// `mqqOpensdkSSoLogin://…` 再交给 App，理由是「通用链接没人拆、自定义 scheme
+/// 才是 QQ 认的」。Aevon(266)/(267) 两次的读数正好相反：拆完投过去，QQ 侧
+/// **零** `app: openurl` 行（连 `rsp=0` 都没有，等于根本没进这条链）。
+/// 逆向那一轮也印证了这一点 —— ScreenCore 与 floatingView 都不改写 URL，
+/// 它们只决定「这条请求给不给它建窗」，URL 原样交回系统。
+///
+/// 这一格与宿主侧 `act: unwrap` 是同一条判断的两半，一起删。
 
 /// 主线程执行：读投递文件 → 调 App 自己的 open URL 入口 → 写回执。
 static void AevonOpenURLApply(void) {
@@ -5081,22 +5077,6 @@ static void AevonOpenURLApply(void) {
         ok = YES;
         via = "useractivity";
         AevonAppLogWrite("app: openurl useractivity\n");
-    }
-    // 0.3.42 — App Link 那条没被认（QQ 回 NO）时，把 `/opensdkul/` 里那段
-    // scheme 拼回来再走 openURL。这一格只对 QQ 的三种 scheme 生效，其余 URL
-    // 原样往下走。
-    if (!ok) {
-        NSString *un = AevonQQOpenSDKUnwrap(url);
-        if (un.length > 0) {
-            NSURL *alt = [NSURL URLWithString:un];
-            if (alt != nil) {
-                AevonAppLogWrite([[NSString stringWithFormat:
-                                   @"app: openurl opensdk unwrap %.48s\n",
-                                   un.UTF8String != NULL ? un.UTF8String : "-"]
-                                  UTF8String]);
-                url = alt;
-            }
-        }
     }
 
     // ① 先用 scene 的正门。QQ / 微信 / 抖音都是 scene 化的 App，系统对它们
