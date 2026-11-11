@@ -1213,7 +1213,7 @@ def main():
                   b"probe: H1 owner=SBMainWorkspace enc=%s",
                   b"probe: H1 shape skip (%s)",
                   b"probe: H2 n=%ld app=%s ret=%s",
-                  b"probe: H4 app=%s opt=%s fg=%d",
+                  b"probe: H4 app=%s cls=%s opt=%s fg=%d",
                   b"presenter: birth fail b=%s why=nil id=%s",
                   b"presenter: birth skip b=%s why=nopm",
                   b"presenter: birth threw b=%s why=%s",

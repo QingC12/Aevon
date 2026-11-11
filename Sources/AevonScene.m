@@ -5047,28 +5047,71 @@ static void AevonHInstall(NSMutableString *out) {
         if (orig != NULL) {
             ret = orig(workspace, mine->sel, application, display, requireFg, options);
         }
-        // H4：只记第一次的参数类名（确认 arg1 是 SBApplication、arg4 是什么）。
+        // H4：第一次的参数形状。
+        //
+        // 0.3.13 — `AevonActName` 对 `SBApplication` 只答类名（`#SBApplication`），
+        // 对 scene 只答类名（因为 `AevonSceneName` 依赖 `identifier` 选择子，
+        // 而返回对象未必答它）。所以这里**先参数化地问三个东西**：
+        //   ① application 的 bundle id（`bundleIdentifier` 选择子）
+        //   ② 返回值是不是 scene、它的 `identifier`
+        //   ③ 返回值的类名
         if (__sync_bool_compare_and_swap(&AevonHStat.argLogged, 0, 1)) {
-            char appSlot[96] = {0};
-            char optSlot[96] = {0};
-            AevonActName(application, appSlot, sizeof(appSlot));
-            AevonActName(options, optSlot, sizeof(optSlot));
+            const char *appBundle = "-";
+            SEL bSel = NSSelectorFromString(@"bundleIdentifier");
+            if (application != nil && [application respondsToSelector:bSel]) {
+                id b = ((id (*)(id, SEL))objc_msgSend)(application, bSel);
+                if ([b isKindOfClass:[NSString class]]) {
+                    const char *raw = [(NSString *)b UTF8String];
+                    if (raw != NULL) appBundle = raw;
+                }
+            }
             AevonLogRaw([[NSString stringWithFormat:
-                          @"probe: H4 app=%s opt=%s fg=%d",
-                          appSlot, optSlot, requireFg ? 1 : 0] UTF8String]);
+                          @"probe: H4 app=%s cls=%s opt=%s fg=%d",
+                          appBundle,
+                          application != nil ? object_getClassName(application) : "nil",
+                          options != nil ? object_getClassName(options) : "nil",
+                          requireFg ? 1 : 0] UTF8String]);
         }
-        // H2/H3：前 8 次记「第几次 / 目标 App / 返回的 scene 名」。
+        // H2/H3：前 8 次记「第几次 / 目标 App / 返回的 scene」。
+        //
+        // 0.3.13 — `ret` 的读取改成三步兜底，不再只依赖 `identifier`：
+        //   ① `identifier` 选择子（若答字符串）
+        //   ② `_identifier` / `sceneIdentifier`（私有别名）
+        //   ③ 都不答 ⇒ 只记类名，至少能确认「它返回的是 scene 还是别的」
         if (__sync_fetch_and_add(&AevonHStat.shown, 1) < 8) {
-            char appSlot[96] = {0};
-            AevonActName(application, appSlot, sizeof(appSlot));
-            const char *sceneName = "-";
-            if (ret != nil) {
-                const char *nm = AevonSceneName(ret);
-                if (nm != NULL) sceneName = nm;
+            const char *appBundle = "-";
+            SEL bSel = NSSelectorFromString(@"bundleIdentifier");
+            if (application != nil && [application respondsToSelector:bSel]) {
+                id b = ((id (*)(id, SEL))objc_msgSend)(application, bSel);
+                if ([b isKindOfClass:[NSString class]]) {
+                    const char *raw = [(NSString *)b UTF8String];
+                    if (raw != NULL) appBundle = raw;
+                }
+            }
+            // 返回值的名字：三步兜底。
+            char retText[192] = {0};
+            if (ret == nil) {
+                snprintf(retText, sizeof(retText), "nil");
+            } else {
+                const char *picked = NULL;
+                const char *alts[3] = {"identifier", "_identifier", "sceneIdentifier"};
+                for (int i = 0; i < 3 && picked == NULL; i++) {
+                    SEL s = NSSelectorFromString([NSString stringWithUTF8String:alts[i]]);
+                    if (![ret respondsToSelector:s]) continue;
+                    id v = ((id (*)(id, SEL))objc_msgSend)(ret, s);
+                    if (![v isKindOfClass:[NSString class]]) continue;
+                    const char *raw = [(NSString *)v UTF8String];
+                    if (raw != NULL) picked = raw;
+                }
+                if (picked != NULL) {
+                    snprintf(retText, sizeof(retText), "%s", picked);
+                } else {
+                    snprintf(retText, sizeof(retText), "#%s", object_getClassName(ret));
+                }
             }
             AevonLogRaw([[NSString stringWithFormat:
                           @"probe: H2 n=%ld app=%s ret=%s",
-                          n + 1, appSlot, sceneName] UTF8String]);
+                          n + 1, appBundle, retText] UTF8String]);
         }
         return ret;
     };
