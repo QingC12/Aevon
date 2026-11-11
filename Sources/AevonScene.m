@@ -72,6 +72,9 @@ extern int AevonURLRedeliverOn(void);
 // 0.3.27 — 补投的**软**路径（`url.redeliver.soft`）：存在才用 `openSensitiveURL:`。
 // 它默认是关的，因为它会再提交一次激活事务、把那扇全屏窗装回去。
 extern int AevonURLRedeliverSoftOn(void);
+// 0.3.29 — 冷启动「补发」的关闸（`url.shot.off` 存在 = 只投一发）。
+// 冷启动那次第二发是给「App 首页恢复盖掉分享页」用的，见 `AevonURLDeliverShot`。
+extern int AevonURLShotOff(void);
 // 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
 // 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
 extern int AevonCardYieldForFullscreen(const char *bundle);
@@ -3815,6 +3818,11 @@ static long AevonDenyCalls = 0;
 // 补投之后那一次激活要放行的截止时刻（ms）。见 `AevonURLRedeliver`。
 static volatile int64_t AevonRedeliverUntil = 0;
 static long AevonRedeliverCalls = 0;
+// 0.3.29 — 冷启动判定与补发额度。`cold` 在拒答那一刻定（`pid <= 0` = 进程不在），
+// `shots` 是「这一发之后还要再补几发」。热启动 0 发，冷启动 2 发。
+static volatile int AevonDenyCold = 0;
+static volatile int AevonDeliverShots = 0;
+static volatile int AevonDeliverWaits = 0;
 static void AevonURLRedeliver(const char *bundle);
 static int AevonURLDenyTake(const char *bundle, const char *url, int kind);
 
@@ -4249,8 +4257,14 @@ static int AevonURLDeliverOnce(const char *bundle, NSURL *u) {
     @try {
         id scene = AevonSeenSceneForBundle(b);
         if (scene == nil) {
-            AevonLogRaw([[NSString stringWithFormat:
-                          @"act: deliver wait why=noscene b=%s", bundle] UTF8String]);
+            // 0.3.29 — 等 scene 改成 0.2 s 一拍（最多 20 拍），每一拍都打会把日志灌满，
+            // 所以只留头两拍与每第 6 拍。`why=noscene` 这串保留：它是「还没挂上」
+            // 的唯一读数，也是上一版判「等 6 拍够不够」的依据。
+            long w = __sync_fetch_and_add(&AevonDeliverWaits, 1) + 1;
+            if (w <= 2 || (w % 6) == 0) {
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"act: deliver wait why=noscene b=%s n=%ld", bundle, w] UTF8String]);
+            }
             return 0;
         }
         const char *ahow = "-";
@@ -4353,14 +4367,31 @@ static void AevonURLRedeliverSoft(const char *bundle, NSURL *u) {
 }
 
 /// 0.3.27 — 补投总入口：先硬（scene action）、后软（openSensitiveURL）。
+/// 0.3.29 — 改成一拍一拍问 scene，挂上就投，不再等固定 2.6 s。
 ///
-/// 硬路径不提交激活事务，是这一版的主路。软路径只在硬路径明确不可用（造不出
+/// 硬路径不提交激活事务，是这条路的主路。软路径只在硬路径明确不可用（造不出
 /// action / 没有送 action 的选择子）并且用户手建了 `url.redeliver.soft` 时才跑 ——
 /// 它会再提交一次激活，也就是把 0.3.26 刚拆掉的那扇全屏窗重新装回去。
-static void AevonURLRedeliverTick(int tick);
+///
+/// Aevon(252) 的两个读数定了这一版的形状：
+///
+/// 1. **3 秒是我们在等，不是 QQ 慢。** 每一次 `act: deny` 到 `act: deliver done`
+///    都正好差 3 s —— 那就是 0.3.26 排的那个固定 2.6 s 定时器加一拍排期。
+///    而 `act: deliver done` 之后 QQ 立刻就进选好友页了，所以这段等待纯属浪费。
+///    现在 0.35 s 起、每 0.2 s 一拍问 `AevonSeenSceneForBundle`，一挂上就投；
+///    卡首帧实测 105–107 ms，正常情况 0.5 s 内就送出去了。
+///
+/// 2. **第一发停在首页是冷启动的首页恢复盖的。** `n=1` 那次：QQ 进程
+///    16:07:36 才 `app: boot pid=50788`，我们 16:07:38 就把 action 送进 scene，
+///    它 16:07:39 才打 `geom late`（首帧布局完成）—— 也就是说 URL 落在了
+///    「还在恢复首页」的窗口里，被首页盖掉。热启动（`n=2..5`）同一个 `deliver`
+///    读数就真的进了选好友页。所以冷启动多发两发（间隔 1.2 s），让后一发落在
+///    恢复之后；热启动只发一发，多投会叠出第二个面板。
+static void AevonURLDeliverShot(int tick, int shotsLeft);
 
-static void AevonURLRedeliverTick(int tick) {
+static void AevonURLDeliverShot(int tick, int shotsLeft) {
     if (AevonDenyURL[0] == '\0') return;
+    if (shotsLeft < 0) shotsLeft = 0;
     NSString *us = [NSString stringWithUTF8String:AevonDenyURL];
     NSURL *u = us != nil ? [NSURL URLWithString:us] : nil;
     if (u == nil) {
@@ -4370,13 +4401,23 @@ static void AevonURLRedeliverTick(int tick) {
     int r = AevonURLDeliverOnce(AevonDenyBundle, u);
     if (r == 1) {
         AevonLogRaw([[NSString stringWithFormat:
-                      @"act: deliver done tick=%d b=%s", tick, AevonDenyBundle] UTF8String]);
+                      @"act: deliver done tick=%d cold=%d left=%d b=%s",
+                      tick, AevonDenyCold, shotsLeft, AevonDenyBundle] UTF8String]);
+        if (shotsLeft > 0 && AevonURLShotOff() != 1) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                AevonURLDeliverShot(tick + 1, shotsLeft - 1);
+            });
+        }
         return;
     }
-    // 0 = scene 还没登记。挂起启动到 scene 出现见过 740 ms，给到 6 拍（约 2.4 s）。
-    if (r == 0 && tick < 6) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ AevonURLRedeliverTick(tick + 1); });
+    // 0 = scene 还没登记（App 还在 boot）。0.2 s × 20 ≈ 4 s，比 0.3.28 的
+    // 6 拍 × 0.4 s 覆盖得更长、起手更早 —— 冷启动最慢那次 scene 出现在 740 ms。
+    if (r == 0 && tick < 20) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            AevonURLDeliverShot(tick + 1, shotsLeft);
+        });
         return;
     }
     AevonURLRedeliverSoft(AevonDenyBundle, u);
@@ -4393,7 +4434,7 @@ static void AevonURLRedeliver(const char *bundle) {
         return;
     }
     AevonURLClassCensus();
-    AevonURLRedeliverTick(1);
+    AevonURLDeliverShot(1, AevonDeliverShots);
 }
 
 /// 0.3.26 — **拒答**：记 URL、排一次我们自己的开卡、再排一次补投。
@@ -4404,8 +4445,9 @@ static void AevonURLRedeliver(const char *bundle) {
 ///
 /// 三件事都不在钩子里同步做：
 ///   · 开卡推到 150 ms —— 拒答之后来源 App 的分享面板正在收，抢前台会打架；
-///   · 补投推到 2.6 s —— 卡首帧实测 105–107 ms，但挂起启动到 scene 出现最慢
-///     见过 3.3 s（Filza 4789 ms 那次是 URL 激活的路，不同口径，不拿来定这一拍）。
+///   · 补投推到 350 ms 起手、每 200 ms 一拍问 scene（0.3.29 改；0.3.26–0.3.28 是
+///     固定 2.6 s）。那一版每次都要用户干等 3 秒，Aevon(252) 的
+///     `deny → deliver done` 差值把这段等待钉在了定时器上，不是 QQ 慢。
 static int AevonURLDenyTake(const char *bundle, const char *url, int kind) {
     if (bundle == NULL || bundle[0] == '\0') return 0;
     if (AevonActivateSwitchOff() == 1) return 0;
@@ -4418,6 +4460,13 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind) {
     }
     AevonDenyAt = AevonActMs();
     long n = __sync_fetch_and_add(&AevonDenyCalls, 1) + 1;
+    // 0.3.29 — 冷启动判定放在**拒答这一刻**，不是投递那一刻：我们要问的是
+    // 「这次分享的 URL 会落进一个刚起的进程吗」。`AevonAppPid` 读的是
+    // SBApplication 的 `pid`（`win: pose` 那条路一直在用，可信），进程不在 ⇒ 冷。
+    int pid = (int)AevonAppPid([NSString stringWithUTF8String:bundle]);
+    AevonDenyCold = (pid > 0) ? 0 : 1;
+    AevonDeliverShots = (AevonDenyCold == 1) ? 2 : 0;
+    AevonDeliverWaits = 0;
     // `reply=none` 是这一版最要紧的读数之一：`withResult:` 那个块的签名一次都
     // 没读到（0.3.24/0.3.25 的日志里全是 `rsig=-`），盲调就是又一次 0.2.91。
     // 所以拒答之后**不回调**它 —— 分享扩展会等超时，但不会崩。
@@ -4425,6 +4474,11 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind) {
                   @"act: deny b=%s kind=%d n=%ld reply=none url=%.140s",
                   bundle, kind, n,
                   AevonDenyURL[0] != '\0' ? AevonDenyURL : "-"] UTF8String]);
+    // 0.3.29 — 这一行是下一份日志的第一判据：`pid=-1` 是读不到（不是不在），
+    // 与 `pid=0` 一样按冷启动处理（多发两发最多多出一个面板，少发就是停在首页）。
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"act: deny cold=%d pid=%d shots=%d b=%s",
+                  AevonDenyCold, pid, AevonDeliverShots, bundle] UTF8String]);
     NSString *held = [NSString stringWithUTF8String:bundle];
     if (held == nil) return 1;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
@@ -4442,7 +4496,9 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind) {
         // 目标并没占屏，`openCard` 会直接走挂起启动 + 建卡，不发 Home。
         AevonOpenCardURL(cb);
     });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.6 * NSEC_PER_SEC)),
+    // 0.3.29 — 350 ms 只是「起手」，真正的投递时刻由 scene 挂上那一拍决定
+    // （`AevonURLDeliverShot` 里每 0.2 s 问一次，最多 20 拍）。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         AevonURLRedeliver(AevonDenyBundle);
     });

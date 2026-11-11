@@ -180,6 +180,17 @@ public func AevonURLRedeliverSoftOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlRedeliverSoftPath) ? 1 : 0
 }
 
+/// 0.3.29 — 冷启动「补发」的关闸（`url.shot.off`）。
+///
+/// 返回 1 = 只投一发（建了 `url.shot.off`）。默认 0：冷启动（拒答那一刻目标进程
+/// 不在）多发两发，间隔 1.2 s。理由是 Aevon(252) 的第一次分享 —— 进程 16:07:36
+/// 才 boot，URL 16:07:38 送进 scene，QQ 16:07:39 才打完首帧布局，首页恢复把
+/// 分享页盖掉了。热启动同一个读数就直接进选好友页，所以多发只给冷启动。
+@_cdecl("AevonURLShotOff")
+public func AevonURLShotOff() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlShotOffPath) ? 1 : 0
+}
+
 /// 0.3.5 — 在 presenter 的 `presentationContext` 上写 `setResizesHostedContext:`。
 ///
 /// `setResizesHostedContext:` 的 owner 是 `UIMutableScenePresentationContext`

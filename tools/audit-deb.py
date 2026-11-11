@@ -969,6 +969,21 @@ def main():
                   b"AevonURLRedeliverSoftOn",
                   # 补投会再触发一次激活，那一次必须放行，否则自己拒自己、打转。
                   b"act: pass why=redeliver b=%s",
+                  # 0.3.29 — **投递不再等固定 2.6 s，冷启动补发两发。**
+                  #
+                  # Aevon(252)：`act: deny` 到 `act: deliver done` 每次都正好差 3 s，
+                  # 而 deliver 之后 QQ 立刻进选好友页 —— 那 3 s 是 0.3.26 的定时器，
+                  # 不是 QQ 慢。改成 0.35 s 起手、每 0.2 s 问一次 scene（挂上就投）。
+                  #
+                  # 第一次分享停在首页则是冷启动：`app: boot pid=50788` 在投递前 2 s，
+                  # 首页恢复盖掉了分享页。所以拒答那一刻按 `pid` 定冷/热，冷的多发两发。
+                  #
+                  # 三串分别是：冷/热判定（下一份日志的第一判据）/ 投出去了还是被补发 /
+                  # 补发的关闸。少任何一串都说明这一版没进包。
+                  b"act: deny cold=%d pid=%d shots=%d b=%s",
+                  b"act: deliver done tick=%d cold=%d left=%d b=%s",
+                  b"AevonURLShotOff",
+                  b"/var/mobile/Library/Logs/Aevon/url.shot.off",
                   # 两把闸自己的路径常量 —— 文件名写错就等于没有闸。
                   b"/var/mobile/Library/Logs/Aevon/url.deny.off",
                   b"/var/mobile/Library/Logs/Aevon/url.redeliver.off",

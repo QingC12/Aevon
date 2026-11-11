@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.28"
+    public static let version = "0.3.29"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -258,6 +258,18 @@ public enum Aevon {
     /// 所以主路换成「scene action」（无事务、无窗口），软路径只在硬路径明确
     /// 不可用时、且用户手建本文件之后才跑。
     public static let urlRedeliverSoftPath = "/var/mobile/Library/Logs/Aevon/url.redeliver.soft"
+
+    /// 0.3.29 — 冷启动「补发」的关闸（`url.shot.off` 存在 = 只投一发）。
+    ///
+    /// Aevon(252) 定了两件事：后续几次分享真的进了选好友页（`has=1/1`，构造器对了），
+    /// 但每一次都要等 3 s —— 那 3 s 是 0.3.26 排的固定 2.6 s 定时器，不是 QQ 慢；
+    /// 而第一次分享停在首页是因为 QQ 那次是冷启动（`app: boot pid=50788` 在
+    /// 我们投递的前 2 s），首页恢复把分享页盖掉了。
+    ///
+    /// 所以这一版把投递改成「scene 一挂上就投」，并对冷启动多发两发（间隔 1.2 s）。
+    /// 多发的代价是可能叠出第二个分享面板，所以留一个随时能关的空文件：
+    /// 建了它 ⇒ 冷启动也只投一发，行为退回 0.3.28（除了不再等 3 s）。
+    public static let urlShotOffPath     = "/var/mobile/Library/Logs/Aevon/url.shot.off"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"
