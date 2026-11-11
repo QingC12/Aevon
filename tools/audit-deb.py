@@ -1259,6 +1259,10 @@ def main():
                   b"act: deny skip why=global k=%d b=%s",
                   b"act: deny skip why=scheme k=%d u=%.60s",
                   b"win: home first skip why=front b=",
+                  # 0.3.52 — 收卡提前到「目标刚上屏」之后，那一下 Home 正撞在激活
+                  # 过渡里，有可能被系统丢掉。丢了还继续建卡就是把还在全屏的 scene
+                  # 搬进卡（黑）。这一串是「补按了一次」的唯一证据。
+                  b"win: home first retry why=still-front b=",
                   b"AevonURLGlobalOn",
                   b"/var/mobile/Library/Logs/Aevon/url.global.off",
                   # 两把闸自己的路径常量 —— 文件名写错就等于没有闸。

@@ -1724,6 +1724,18 @@ zStackParticipantDidChange:
                 let step = AevonHomeStep(1, nil)
                 Log.write("win: home first open " + (step ?? "step nil") + " b=" + bundleID)
                 var waited = 0
+                // 0.3.52 — **这一下有可能按空。**
+                //
+                // 0.3.51 固定在 2.5 s 之后按 Home，那一次 App 的进场动画早就走完
+                // 了，`single-press-up` 一定有人接（Aevon(273) `ready waited=500ms
+                // springboard=1`）。0.3.52 把时机提到「目标刚成了屏上那一个」，
+                // 正撞在激活过渡里 —— 这一下有可能被系统当成「启动途中」丢掉。
+                // 丢掉之后如果没有兜底，1.4 s 一到就会把**还在全屏的那张 scene**
+                // 搬进卡（0.2.46 那种「卡浮在黑屏上」的形状）。
+                //
+                // 所以只在「到点了但目标仍是前台」这一格补按一次，多给 0.5 s。
+                // 补按之后仍然不成立就照旧建卡 —— 与改动前完全一致，不会更糟。
+                var homeRetried = false
                 func afterHome() {
                     let active = AevonSpringboardActive()
                     let fgNow = AevonSceneForeground(target)
@@ -1731,7 +1743,12 @@ zStackParticipantDidChange:
                     // 0.5 s = home 过渡本身走完；1.4 s = 「系统没接这一下」的上限。
                     // 任一读数说明「已经离开全屏」即可；前 0.5 秒照样不建卡 ——
                     // 那正是 0.2.30 修掉黑屏的间隔。
-                    if ((active == 1 || fgNow != 1 || frontNow != 1) && waited >= 10) || waited >= 28 {
+                    if waited >= 28 && frontNow == 1 && !homeRetried {
+                        homeRetried = true
+                        waited = 18
+                        Log.write("win: home first retry why=still-front b=" + bundleID)
+                        _ = AevonHomeStep(1, nil)
+                    } else if ((active == 1 || fgNow != 1 || frontNow != 1) && waited >= 10) || waited >= 28 {
                         Log.write(String(format: "win: home first open ready waited=%ldms springboard=%ld scene_fg=%ld front=%ld",
                                          waited * 50, Int(active), Int(fgNow), Int(frontNow)))
                         openCard(bundleID, homed: true, fallback: fallback)
