@@ -942,6 +942,24 @@ def main():
                   b"act: url card skip why=deny b=%s",
                   b"act: deny card b=%s",
                   b"act: deny redeliver ok=1 n=%ld how=%s b=%s url=%.100s",
+                  # 0.3.27 — **补投改成 scene action（不再提交激活事务）。**
+                  #
+                  # Aevon(2)：`act: deny ... url=-` 后面 2.6 s 一律
+                  # `act: deny redeliver skip why=nourl` —— `__PayloadURL` 是 `NSURL`，
+                  # 0.3.26 只认 `NSString`，于是 URL 从来没记下来，QQ 只被拉起、
+                  # 停在首页。这一版认两种类型，并且把投递从 `openSensitiveURL:`
+                  # （会再走一次激活 ⇒ 全屏窗回来）改成给目标 scene 送 action。
+                  #
+                  # 五串分别是：类的方法表（下一版据此定名字）/ 送到或没送到 /
+                  # 等 scene（0 = 还没登记）/ 硬路径不可用时的唯一读数 /
+                  # 软路径自己的闸。缺任何一串都说明这一支没进包。
+                  b"act: deliver census cls=%s cm=%@ im=%@",
+                  b"act: deliver ok=%d act=%s send=%s b=%s url=%.100s",
+                  b"act: deliver wait why=noscene b=%s",
+                  b"act: deliver skip why=soft-off",
+                  b"/var/mobile/Library/Logs/Aevon/url.redeliver.soft",
+                  # 符号本身也要在：路径常量在、函数没编进去的例子有过（0.2.87）。
+                  b"AevonURLRedeliverSoftOn",
                   # 补投会再触发一次激活，那一次必须放行，否则自己拒自己、打转。
                   b"act: pass why=redeliver b=%s",
                   # 两把闸自己的路径常量 —— 文件名写错就等于没有闸。

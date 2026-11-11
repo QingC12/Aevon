@@ -69,6 +69,9 @@ extern int AevonURLCardSwitchOff(void);
 // 第二位默认「补投」（`url.redeliver.off` 存在才不投）。
 extern int AevonURLDenyOn(void);
 extern int AevonURLRedeliverOn(void);
+// 0.3.27 — 补投的**软**路径（`url.redeliver.soft`）：存在才用 `openSensitiveURL:`。
+// 它默认是关的，因为它会再提交一次激活事务、把那扇全屏窗装回去。
+extern int AevonURLRedeliverSoftOn(void);
 // 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
 // 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
 extern int AevonCardYieldForFullscreen(const char *bundle);
@@ -4015,19 +4018,154 @@ static void AevonURLCardSchedule(const char *bundle) {
 /// 一个 3 秒的窗口（`AevonRedeliverUntil`），激活钩子看到窗口内的同 bundle 请求
 /// 就放行一次（`act: pass why=redeliver`）。放行的那一次如果又整屏了，日志里能
 /// 直接看到，`touch url.redeliver.off` 关掉补投即可 —— 拒答和承载都不受影响。
-static void AevonURLRedeliver(const char *bundle) {
-    if (AevonURLRedeliverOn() != 1) {
-        AevonLogRaw("act: deny redeliver skip why=off");
+/// 0.3.27 — 认识一下 `UIOpenURLAction`：一次一行，只打名字。
+///
+/// 这个类我们只在真机日志里见过它的**实例**（0.3.23 的
+/// `<UIOpenURLAction: 0x…> { url = mqqapi://share/… }`），构造方法一个都不知道。
+/// 猜选择子是 0.2.91 那种崩法的来源，所以先让它自己报菜单：
+/// 类方法只报名字里带 `URL` / `action` 的，实例方法只报带 `URL` 的和 `init…`。
+/// 名字限定在 180 字节内，不会把整张方法表灌进日志。
+static void AevonURLClassCensus(void) {
+    Class c = NSClassFromString(@"UIOpenURLAction");
+    if (c == Nil) {
+        AevonLogRaw("act: deliver census cls=UIOpenURLAction none");
         return;
     }
-    if (bundle == NULL || bundle[0] == '\0' || AevonDenyURL[0] == '\0') {
-        AevonLogRaw("act: deny redeliver skip why=nourl");
-        return;
+    NSMutableString *cm = [NSMutableString string];
+    NSMutableString *im = [NSMutableString string];
+    unsigned int n = 0;
+    Method *list = class_copyMethodList(object_getClass(c), &n);
+    for (unsigned int i = 0; list != NULL && i < n; i++) {
+        const char *name = sel_getName(method_getName(list[i]));
+        if (name == NULL) continue;
+        if (strstr(name, "URL") == NULL && strstr(name, "action") == NULL) continue;
+        if ([cm length] > 180) break;
+        [cm appendFormat:@"%s|", name];
     }
-    NSString *us = [NSString stringWithUTF8String:AevonDenyURL];
-    NSURL *u = us != nil ? [NSURL URLWithString:us] : nil;
-    if (u == nil) {
-        AevonLogRaw("act: deny redeliver skip why=badurl");
+    if (list != NULL) free(list);
+    list = class_copyMethodList(c, &n);
+    for (unsigned int i = 0; list != NULL && i < n; i++) {
+        const char *name = sel_getName(method_getName(list[i]));
+        if (name == NULL) continue;
+        if (strstr(name, "URL") == NULL && strncmp(name, "init", 4) != 0) continue;
+        if ([im length] > 180) break;
+        [im appendFormat:@"%s|", name];
+    }
+    if (list != NULL) free(list);
+    AevonLogRaw([[NSString stringWithFormat:@"act: deliver census cls=%s cm=%@ im=%@",
+                  class_getName(c),
+                  [cm length] > 0 ? cm : @"-",
+                  [im length] > 0 ? im : @"-"] UTF8String]);
+}
+
+/// 造一个 `UIOpenURLAction`。候选按「最可能」排：类工厂 → 带 origin 的工厂 → 实例 init。
+/// 每一条都先 `respondsToSelector`，全部包在 `@try` 里 —— 造不出来只是这一版送不到，
+/// 不许变成崩溃。
+static id AevonMakeOpenURLAction(NSURL *u, const char **how) {
+    if (how != NULL) *how = "-";
+    Class c = NSClassFromString(@"UIOpenURLAction");
+    if (c == Nil || u == nil) return nil;
+    SEL s1 = NSSelectorFromString(@"actionWithURL:");
+    if ([c respondsToSelector:s1]) {
+        @try {
+            id a = ((id (*)(id, SEL, id))objc_msgSend)(c, s1, u);
+            if (a != nil) { if (how) *how = "f:url"; return a; }
+        } @catch (NSException *e) { AevonLogRaw("act: deliver act threw f:url"); }
+    }
+    SEL s2 = NSSelectorFromString(@"actionWithURL:sceneOrigin:");
+    if ([c respondsToSelector:s2]) {
+        @try {
+            id a = ((id (*)(id, SEL, id, id))objc_msgSend)(c, s2, u, nil);
+            if (a != nil) { if (how) *how = "f:url-origin"; return a; }
+        } @catch (NSException *e) { AevonLogRaw("act: deliver act threw f:url-origin"); }
+    }
+    @try {
+        id obj = ((id (*)(id, SEL))objc_msgSend)((id)c, NSSelectorFromString(@"alloc"));
+        SEL i1 = NSSelectorFromString(@"initWithURL:");
+        if (obj != nil && [obj respondsToSelector:i1]) {
+            id a = ((id (*)(id, SEL, id))objc_msgSend)(obj, i1, u);
+            if (a != nil) { if (how) *how = "i:url"; return a; }
+        }
+        SEL i2 = NSSelectorFromString(@"initWithURL:sceneOrigin:");
+        if (obj != nil && [obj respondsToSelector:i2]) {
+            id a = ((id (*)(id, SEL, id, id))objc_msgSend)(obj, i2, u, nil);
+            if (a != nil) { if (how) *how = "i:url-origin"; return a; }
+        }
+    } @catch (NSException *e) { AevonLogRaw("act: deliver act threw i:url"); }
+    return nil;
+}
+
+/// 把 action 交给目标 scene。`sendActions:` 是宿主往客户端送 action 的那条路；
+/// 名字不确定，所以三个候选都试，谁先有就用谁。
+static int AevonSceneSendAction(id scene, id action, const char **how) {
+    if (how != NULL) *how = "-";
+    if (scene == nil || action == nil) return 0;
+    NSSet *one = [NSSet setWithObject:action];
+    SEL set1 = NSSelectorFromString(@"sendActions:");
+    if ([scene respondsToSelector:set1]) {
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(scene, set1, one);
+            if (how) *how = "sendActions";
+            return 1;
+        } @catch (NSException *e) { AevonLogRaw("act: deliver send threw set"); }
+    }
+    SEL set2 = NSSelectorFromString(@"_sendActions:");
+    if ([scene respondsToSelector:set2]) {
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(scene, set2, one);
+            if (how) *how = "_sendActions";
+            return 1;
+        } @catch (NSException *e) { AevonLogRaw("act: deliver send threw _set"); }
+    }
+    SEL one1 = NSSelectorFromString(@"sendAction:");
+    if ([scene respondsToSelector:one1]) {
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(scene, one1, action);
+            if (how) *how = "sendAction";
+            return 1;
+        } @catch (NSException *e) { AevonLogRaw("act: deliver send threw one"); }
+    }
+    return 0;
+}
+
+/// 0 = scene 还没登记（等下一拍）；1 = 送出去了；2 = 这条路不可用（别再等）。
+static int AevonURLDeliverOnce(const char *bundle, NSURL *u) {
+    if (bundle == NULL || bundle[0] == '\0' || u == nil) return 2;
+    NSString *b = [NSString stringWithUTF8String:bundle];
+    if (b.length == 0) return 2;
+    @try {
+        id scene = AevonSeenSceneForBundle(b);
+        if (scene == nil) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: deliver wait why=noscene b=%s", bundle] UTF8String]);
+            return 0;
+        }
+        const char *ahow = "-";
+        id action = AevonMakeOpenURLAction(u, &ahow);
+        if (action == nil) {
+            AevonLogRaw("act: deliver giveup why=noaction");
+            return 2;
+        }
+        const char *show = "-";
+        int sent = AevonSceneSendAction(scene, action, &show);
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: deliver ok=%d act=%s send=%s b=%s url=%.100s",
+                      sent, ahow, show, bundle,
+                      [u absoluteString].UTF8String != NULL
+                          ? [u absoluteString].UTF8String : "-"] UTF8String]);
+        return sent == 1 ? 1 : 2;
+    } @catch (NSException *e) {
+        AevonLogRaw("act: deliver threw");
+        return 2;
+    }
+}
+
+/// 软路径：`openSensitiveURL:`。**会再走一次 `_activateBundleID`**，FrontBoard 因此
+/// 可能再提交一次激活事务 —— 也就是那个被反复投诉的黑底/全屏窗可能回来。
+/// 所以它默认关着，只有手建 `url.redeliver.soft` 才用。硬路径失败时它是唯一退路。
+static void AevonURLRedeliverSoft(const char *bundle, NSURL *u) {
+    if (AevonURLRedeliverSoftOn() != 1) {
+        AevonLogRaw("act: deliver skip why=soft-off");
         return;
     }
     Class wsCls = NSClassFromString(@"LSApplicationWorkspace");
@@ -4062,6 +4200,50 @@ static void AevonURLRedeliver(const char *bundle) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"act: deny redeliver ok=0 n=%ld why=threw", n] UTF8String]);
     }
+}
+
+/// 0.3.27 — 补投总入口：先硬（scene action）、后软（openSensitiveURL）。
+///
+/// 硬路径不提交激活事务，是这一版的主路。软路径只在硬路径明确不可用（造不出
+/// action / 没有送 action 的选择子）并且用户手建了 `url.redeliver.soft` 时才跑 ——
+/// 它会再提交一次激活，也就是把 0.3.26 刚拆掉的那扇全屏窗重新装回去。
+static void AevonURLRedeliverTick(int tick);
+
+static void AevonURLRedeliverTick(int tick) {
+    if (AevonDenyURL[0] == '\0') return;
+    NSString *us = [NSString stringWithUTF8String:AevonDenyURL];
+    NSURL *u = us != nil ? [NSURL URLWithString:us] : nil;
+    if (u == nil) {
+        AevonLogRaw("act: deliver giveup why=badurl");
+        return;
+    }
+    int r = AevonURLDeliverOnce(AevonDenyBundle, u);
+    if (r == 1) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: deliver done tick=%d b=%s", tick, AevonDenyBundle] UTF8String]);
+        return;
+    }
+    // 0 = scene 还没登记。挂起启动到 scene 出现见过 740 ms，给到 6 拍（约 2.4 s）。
+    if (r == 0 && tick < 6) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ AevonURLRedeliverTick(tick + 1); });
+        return;
+    }
+    AevonURLRedeliverSoft(AevonDenyBundle, u);
+}
+
+static void AevonURLRedeliver(const char *bundle) {
+    (void)bundle;
+    if (AevonURLRedeliverOn() != 1) {
+        AevonLogRaw("act: deliver skip why=off");
+        return;
+    }
+    if (AevonDenyURL[0] == '\0') {
+        AevonLogRaw("act: deliver skip why=nourl");
+        return;
+    }
+    AevonURLClassCensus();
+    AevonURLRedeliverTick(1);
 }
 
 /// 0.3.26 — **拒答**：记 URL、排一次我们自己的开卡、再排一次补投。
@@ -5553,8 +5735,25 @@ static void AevonActInstall(NSMutableString *out) {
                         [(NSString *)bundleID length] > 2) {
                         int kind = ([dict objectForKey:@"__PasteSharingToken"] != nil) ? 2 : 1;
                         shareKind = kind;
+                        // 0.3.27 — **这里是 0.3.26 补投失效的唯一原因。**
+                        //
+                        // 0.3.26 只认 `NSString`，但真机取出来的是 `NSURL`：
+                        //
+                        //     probe: payload n=3 via=1 | __PayloadOptions=#__NSDictionaryI;
+                        //     __PayloadURL=#NSURL; __PasteSharingToken=#UISPasteSharingToken;
+                        //     act: deny b=com.tencent.mqq kind=2 n=1 reply=none url=-
+                        //
+                        // `url=-` 就是这一格的产物：判类型失败 ⇒ 什么都没记 ⇒ 2.6 s 后
+                        // `act: deny redeliver skip why=nourl` ⇒ QQ 只被拉起、没收到 URL，
+                        // 于是停在首页（用户 15:42 那次看到的正是这个）。
+                        //
+                        // 两种都认：`NSURL` 走 `absoluteString`，`NSString` 原样。
                         id pu = [dict objectForKey:@"__PayloadURL"];
-                        if ([pu isKindOfClass:[NSString class]]) shareURL = (NSString *)pu;
+                        if ([pu isKindOfClass:[NSURL class]]) {
+                            shareURL = [(NSURL *)pu absoluteString];
+                        } else if ([pu isKindOfClass:[NSString class]]) {
+                            shareURL = (NSString *)pu;
+                        }
                         AevonCardTargetArmURL([(NSString *)bundleID UTF8String], kind);
                     }
                 }

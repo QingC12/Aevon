@@ -171,6 +171,15 @@ public func AevonURLRedeliverOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlRedeliverOffPath) ? 0 : 1
 }
 
+/// 0.3.27 — 补投能不能走 `openSensitiveURL:`（软路径）。
+///
+/// 返回 1 只在用户手建 `url.redeliver.soft` 时成立。默认 0：那条路会再提交一次
+/// 激活事务，把全屏窗装回来 —— 用户已经把「出现全屏那一帧」列为禁止项。
+@_cdecl("AevonURLRedeliverSoftOn")
+public func AevonURLRedeliverSoftOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlRedeliverSoftPath) ? 1 : 0
+}
+
 /// 0.3.5 — 在 presenter 的 `presentationContext` 上写 `setResizesHostedContext:`。
 ///
 /// `setResizesHostedContext:` 的 owner 是 `UIMutableScenePresentationContext`

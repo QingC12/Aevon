@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.26"
+    public static let version = "0.3.27"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -247,6 +247,17 @@ public enum Aevon {
     /// 那一次激活我们**放行一次**（`act: pass why=redeliver`），避免自锁打转；
     /// 如果日志里看到放行之后整屏又出现了，`touch …/url.redeliver.off` 去掉补投。
     public static let urlRedeliverOffPath = "/var/mobile/Library/Logs/Aevon/url.redeliver.off"
+
+    /// 0.3.27 — 补投的**软**路径开关：`openSensitiveURL:`。
+    ///
+    /// 默认不存在 = 不走。原因在 Aevon(2) 那份日志里：0.3.26 的补投虽然因为
+    /// 读错类型（`__PayloadURL` 是 `NSURL`，不是 `NSString`）没投出去，但它要走的
+    /// 正是这条路 —— 而这条路会再触发一次 `_activateBundleID`，也就是再提交一次
+    /// 激活事务，把 0.3.26 刚刚拆掉的那扇 430×932 全屏窗装回去。
+    ///
+    /// 所以主路换成「scene action」（无事务、无窗口），软路径只在硬路径明确
+    /// 不可用时、且用户手建本文件之后才跑。
+    public static let urlRedeliverSoftPath = "/var/mobile/Library/Logs/Aevon/url.redeliver.soft"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"
