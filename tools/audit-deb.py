@@ -896,6 +896,20 @@ def main():
                   # 跳过（同一版第二次起）与强制（手写 `census.force`）。
                   b"presenter: census skip v=",
                   b"presenter: census forced why=",
+                  # 0.3.23 — **URL 路的扳机 + 干跑。**
+                  #
+                  # Aevon(248) 的两次 QQ 分享都是 `act: activate ... payload=1` 到
+                  # `act: scene id=sceneID:com.tencent.mqq-default` 只隔 39 ms，中间
+                  # 没有任何 `act: arm` —— 于是 `AevonActCardBundle` 一直是空的，
+                  # 出生尺寸在 URL 路上一次没跑过。这两串证明扳机真的接进了激活钩子
+                  # （`src=url` 与圆盘的 `act: arm b=` 是两条独立读数，不能互相顶替）。
+                  b"act: arm src=url b=%s kind=%d n=%ld write=%d",
+                  # 干跑那一行：默认不写，只记「本来要写成什么、走副本还是直写」。
+                  # 唯一能证明「四道门全过、只差按下开关」的读数。
+                  b"act: frame birth dry=1 b=%s before=%.0fx%.0f want=%.0fx%.0f via=%s",
+                  # 分享那次 transitionContext 里装了 action（`n=1`），可从来没看过
+                  # 是哪个类。这一串是「action 本体」的唯一读数，缺了就是没进包。
+                  b"probe: tctx act cls=%s d=%s",
                   # 0.3.20 — `probe:tctx` 是 Aevon(246) 记录的上一次死因，可那一份日志
                   # 被装包清空了，死了都不知道死在哪一类上。这一行排在 @try 之前、
                   # 方法表之前，trap 也能留下类名。

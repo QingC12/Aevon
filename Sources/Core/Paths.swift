@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.22"
+    public static let version = "0.3.23"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -192,6 +192,20 @@ public enum Aevon {
     public static let censusDonePath    = "/var/mobile/Library/Logs/Aevon/census.done"
     /// 想再查一遍（不改版本号）就手写这个文件：存在即强制查，查完自己删。
     public static let censusForcePath   = "/var/mobile/Library/Logs/Aevon/census.force"
+
+    /// 0.3.23 — URL / 分享激活时「真的写出生尺寸」的开关。
+    ///
+    /// 0.3.21 证明 `frame birth` 在圆盘那条路上真能写进去（`wrote-copy`，两张卡
+    /// 都上屏）；但 URL 那条路从来没接过扳机 —— Aevon(248) 里 QQ 分享那次
+    /// `act: activate ... payload=1` 到 `act: scene id=sceneID:com.tencent.mqq-default`
+    /// 只隔 39 ms，中间没有任何 `act: arm`，于是 QQ 照旧整屏。
+    ///
+    /// 写 scene 参数是全工程唯一一处「在建 scene 之前改系统参数」的地方，URL 这条
+    /// 路上还多一个没人验过的风险：**系统激活事务会不会在出生尺寸之后又把 scene
+    /// 摆回整屏**。所以这一版默认**不写**，只干跑（`act: frame birth dry=1`，
+    /// 记下「本来要写成什么、走的是副本还是直写」）。看完那一行确认门槛都过，
+    /// 手写 `touch …/url.write` 再测一次，不用换包。
+    public static let urlWritePath      = "/var/mobile/Library/Logs/Aevon/url.write"
 
     /// Pre-0.0.3 locations. Read on upgrade so a stop stays a stop.
     public static let legacyDomain    = "com.aevon.aevon"

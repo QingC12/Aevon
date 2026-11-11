@@ -127,6 +127,16 @@ public func AevonBirthSwitchOff() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.birthOffPath) ? 1 : 0
 }
 
+/// 0.3.23 — URL / 分享那条路「要不要真的写出生尺寸」。
+///
+/// 与 `AevonBirthSwitchOff` 方向相反：那位是**关**（存在即不写），这一位是**开**
+/// （存在才写）。理由：URL 路比圆盘路多一个没人验过的变量 —— 系统激活事务会不会
+/// 在出生尺寸之后把 scene 摆回整屏。默认干跑只留读数，确认门槛都过再手写打开。
+@_cdecl("AevonURLWriteOn")
+public func AevonURLWriteOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlWritePath) ? 1 : 0
+}
+
 /// 0.3.5 — 在 presenter 的 `presentationContext` 上写 `setResizesHostedContext:`。
 ///
 /// `setResizesHostedContext:` 的 owner 是 `UIMutableScenePresentationContext`

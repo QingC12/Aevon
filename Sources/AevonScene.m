@@ -56,6 +56,9 @@ extern int AevonShareSwitchOff(void);
 // 与前两个不同：那两个关的是接管，这一位关的是**写 scene 参数**。
 // 它在 ⇒ 一刀都不写，只留只读读数。
 extern int AevonBirthSwitchOff(void);
+// 0.3.23 — URL 路那条写路的**开**关（`url.write`）：存在才真写，不存在只干跑。
+// 方向与 `birth.off` 相反，理由见 `Paths.swift` 里的注解。
+extern int AevonURLWriteOn(void);
 // 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
 // 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
 extern int AevonCardYieldForFullscreen(const char *bundle);
@@ -3750,6 +3753,13 @@ static int AevonActBooted = 0;
 // 把上一笔的帧写给下一次，等于把白名单里的 App 也压成卡片。
 static char AevonActCardBundle[160] = {0};
 static volatile int64_t AevonActCardAt = 0;
+// 0.3.23 — 这一刀是谁装的扳机：1 = 圆盘 `AevonCardTargetArm`，2 = URL/分享
+// `AevonCardTargetArmURL`。两条路的「写」规则不同：圆盘路已真机验通，照写；
+// URL 路默认只干跑（`url.write` 在才写）。分不清来源就只能一律干跑或一律写，
+// 前者等于回退圆盘路，后者等于拿没验过的路赌黑屏。
+static int AevonActCardSrc = 0;
+static long AevonActArmURLCalls = 0;
+static long AevonActFrameDry = 0;
 static long AevonActFrameWrote = 0;
 static long AevonActFrameSkip = 0;
 // 0.3.20 — 「压根不是这一刀的目标」的次数。0.2.90 起这一支一句话都不记，
@@ -3785,9 +3795,42 @@ void AevonCardTargetArm(const char *bundle) {
     if (n < 3 || n >= sizeof(AevonActCardBundle)) return;
     memcpy(AevonActCardBundle, bundle, n + 1);
     AevonActCardAt = AevonActMs();
+    AevonActCardSrc = 1;
     if (__sync_fetch_and_add(&AevonActArmCalls, 1) < 8) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"act: arm b=%s n=%ld", bundle, AevonActArmCalls] UTF8String]);
+    }
+}
+
+/// 0.3.23 — **URL 路的扳机。只装扳机，不建卡。**
+///
+/// 读数从哪来：Aevon(248) 里两次 QQ 分享都是这个形状 ——
+///
+///     act: activate n=2 t=687890 trusted=0 b=com.tencent.mqq
+///          keys=3 payload=1 k=__PayloadOptions|__PayloadURL|__PasteSharingToken
+///     act: scene n=8 t=687929 gap=39 id=sceneID:com.tencent.mqq-default
+///
+/// 39 ms。中间没有 `act: arm`，所以那一版 `AevonActCardBundle` 一直是空的，
+/// `AevonActFrameBirth` 第一行就 `return 0`（连日志都没有，因为 `idle` 行有 4 条
+/// 预算，被开机那几拍用完了）—— 于是 QQ 照旧整屏，Documents 那张卡被压在下面。
+///
+/// 这一位只写三个静态量：bundle、时间、来源=2。**不建卡、不动 scene、不动窗口**，
+/// 因此即使它在 URL 路上判断错了，后果也只是「多打一行日志」。
+void AevonCardTargetArmURL(const char *bundle, int kind) {
+    if (bundle == NULL || bundle[0] == '\0') return;
+    size_t n = strlen(bundle);
+    if (n < 3 || n >= sizeof(AevonActCardBundle)) return;
+    memcpy(AevonActCardBundle, bundle, n + 1);
+    AevonActCardAt = AevonActMs();
+    AevonActCardSrc = 2;
+    // kind：1 = 只有 __PayloadURL（普通深链），2 = 还带 __PasteSharingToken（分享）。
+    // 两者写进日志是因为「分享」和「深链」在 URL 路上要分开看：分享的 URL 是
+    // 系统给的临时落地页，深链的是 App 自己的 scheme。
+    if (__sync_fetch_and_add(&AevonActArmURLCalls, 1) < 6) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: arm src=url b=%s kind=%d n=%ld write=%d",
+                      bundle, kind, AevonActArmURLCalls, AevonURLWriteOn()]
+                     UTF8String]);
     }
 }
 
@@ -4636,6 +4679,41 @@ static void AevonProbeTransitionContext(id context, id settings) {
                             nowCount = (long)((NSUInteger (*)(id, SEL))objc_msgSend)(
                                 now, NSSelectorFromString(@"count"));
                         }
+                        // 0.3.23 — **这一格里到底装了什么。**
+                        //
+                        // Aevon(248) 的 QQ 分享第一次让 `n=` 不是 0/−1：
+                        // `probe: tctx cls=UIApplicationSceneTransitionContext actions=1
+                        //  getter=1 now=__NSSingleObjectSetI n=1` —— 分享那次**带了一个
+                        // action**。母版装东西也只有这一条路（`setActions:`），所以
+                        // 「这个 action 是哪个类、里面有没有 URL」就成了 URL 路上
+                        // 除 `__PayloadURL` 之外唯一还没看过的载体。
+                        //
+                        // 只读：取 `allObjects` 里前 3 个，打类名 + `description` 前 90 字。
+                        // 不修改、不 retain（autorelease 由调用方的池管）。
+                        if (nowCount > 0 &&
+                            [now respondsToSelector:NSSelectorFromString(@"allObjects")]) {
+                            id arr = ((id (*)(id, SEL))objc_msgSend)(
+                                now, NSSelectorFromString(@"allObjects"));
+                            if (arr != nil && [arr respondsToSelector:NSSelectorFromString(@"count")]) {
+                                NSUInteger arn = ((NSUInteger (*)(id, SEL))objc_msgSend)(
+                                    arr, NSSelectorFromString(@"count"));
+                                for (NSUInteger ai = 0; ai < arn && ai < 3; ai++) {
+                                    id one = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(
+                                        arr, NSSelectorFromString(@"objectAtIndex:"), ai);
+                                    if (one == nil) continue;
+                                    NSString *desc = [one description];
+                                    if (desc.length > 90) {
+                                        desc = [[desc substringToIndex:90]
+                                                stringByAppendingString:@"…"];
+                                    }
+                                    AevonLogRaw([[NSString stringWithFormat:
+                                                  @"probe: tctx act cls=%s d=%s",
+                                                  object_getClassName(one),
+                                                  desc != nil ? [desc UTF8String] : "-"]
+                                                 UTF8String]);
+                                }
+                            }
+                        }
                     }
                 } @catch (NSException *inner) {
                     nowCls = "threw";
@@ -4853,7 +4931,13 @@ static void AevonProbePresenterBirth(id scene) {
                       hasPM, hasCreate, pmText] UTF8String]);
         // 0.3.2 — 探针说 `create=1` 之后，真的建一次（只建造、不激活）。
         // 这一步把「有这个选择子」升级成「这个选择子在这个 scene 上能出东西」。
-        if (hasPM && hasCreate) {
+        //
+        // 0.3.23 — 但 URL 路干跑时**不建**。这一版只回答一个问题：扳机到不到
+        // `frame birth`。多建一个 presenter 等于给「系统自己那份承载」加一个
+        // 没人验证过的变量（同一个 scene 两份 presenter 会不会互抢，0.3.22 的
+        // 交付说明里还列在「未证伪」里）。所以干跑保持纯净，`url.write` 打开后
+        // 才连同 presenter 一起测。
+        if (hasPM && hasCreate && !(AevonActCardSrc == 2 && AevonURLWriteOn() != 1)) {
             (void)AevonPresenterBuild(scene, "probe");
         }
     } @catch (NSException *e) {
@@ -4967,6 +5051,32 @@ static int AevonActFrameBirth(id settings, NSString *ident,
             CGRect cur = ((CGRect (*)(id, SEL))objc_msgSend)(target, fSel);
             if (cur.size.width < 400.0 || cur.size.height < 900.0) {
                 AevonActStep("birth:small");
+                result = 2;
+            } else if (AevonActCardSrc == 2 && AevonURLWriteOn() != 1) {
+                // 0.3.23 — **URL 路：干跑。**
+                //
+                // 走到这里说明四道门全过了：扳机在 10 s 内、scene 身份含目标 bundle、
+                // 首帧是整屏、可变副本拿得到（或本来就是可变的）。剩下唯一没验过的
+                // 是「写进去之后，系统激活事务会不会把 scene 摆回整屏」—— 这一问
+                // 只能靠真机，而拿它当赌注的代价是黑屏 / 两份 present。
+                //
+                // 所以默认不写，只把「本来要写成什么、走副本还是直写」照下来。
+                // 确认这一行出现之后，`touch …/url.write` 再测一次即可真写，
+                // 不需要换包 —— 这是这个版本必须留在包里的第二条路。
+                if (beforeOut != NULL) *beforeOut = cur;
+                if (afterOut != NULL) {
+                    *afterOut = CGRectMake(0.0, 0.0, cur.size.width, cur.size.height - 215.0);
+                }
+                if (whyOut != NULL) *whyOut = copied != nil ? "dry-copy" : "dry-direct";
+                if (__sync_fetch_and_add(&AevonActFrameDry, 1) < 6) {
+                    AevonLogRaw([[NSString stringWithFormat:
+                                  @"act: frame birth dry=1 b=%s before=%.0fx%.0f want=%.0fx%.0f via=%s",
+                                  AevonActCardBundle,
+                                  cur.size.width, cur.size.height,
+                                  cur.size.width, cur.size.height - 215.0,
+                                  copied != nil ? "copy" : "direct"] UTF8String]);
+                }
+                AevonActStep("birth:dry");
                 result = 2;
             } else {
                 CGRect next = CGRectMake(0.0, 0.0, cur.size.width, cur.size.height - 215.0);
@@ -5128,6 +5238,22 @@ static void AevonActInstall(NSMutableString *out) {
                                       @"probe: payload n=%ld via=%d |%s",
                                       (long)[dict count], via, [pairs UTF8String]]
                                      UTF8String]);
+                    }
+                    // 0.3.23 — **URL 路的扳机，挂在唯一能看到「URL 真的装进激活请求」
+                    // 的那一拍上。**
+                    //
+                    // 时机是这个版本的全部要点：Aevon(248) 实测这条钩子到
+                    // `act: scene` 只隔 39 ms（Safari 71 / 微信 241 / Filza 4789），
+                    // 而 `AevonActFrameBirth` 的窗口是 10 s，绰绰有余。反过来 ——
+                    // 把扳机挂在建卡那边（`openCard`）就永远等不到：URL 路上没人建卡。
+                    //
+                    // 只记不建：`AevonCardTargetArmURL` 不碰任何系统对象。要不要真写，
+                    // 由 `AevonActFrameBirth` 按 `AevonActCardSrc == 2` + `url.write`
+                    // 两把闸决定 —— 这一版默认只干跑。
+                    if (payload == 1 && [bundleID isKindOfClass:[NSString class]] &&
+                        [(NSString *)bundleID length] > 2) {
+                        int kind = ([dict objectForKey:@"__PasteSharingToken"] != nil) ? 2 : 1;
+                        AevonCardTargetArmURL([(NSString *)bundleID UTF8String], kind);
                     }
                 }
             }
