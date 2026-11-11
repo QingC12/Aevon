@@ -1228,15 +1228,25 @@ def main():
                   # `plan` 一定在放行那一拍落；`go` 只在真正按 Home 之前落；
                   # `timeout` 是「8 秒都没轮到」的唯一证据；`done` 是成败判据
                   # （`card=1` 才算进卡，`card=0` 要去 `win: url card declined` 找原因）。
-                  b"act: cold adopt plan wait=2500ms b=%s",
-                  b"act: cold adopt go tick=%d live=%d alive=%d front=%d b=%s",
-                  b"act: cold adopt timeout tick=%d live=%d alive=%d front=%d b=%s",
+                  b"act: cold adopt plan wait=%dms late=%d b=%s",
+                  b"act: cold adopt go tick=%d ms=%d delay=%d live=%d alive=%d front=%d b=%s",
+                  b"act: cold adopt timeout tick=%d ms=%d live=%d alive=%d front=%d b=%s",
                   b"act: cold adopt done card=%d b=%s",
+                  # 0.3.52 — 逐拍读数：`front` 从哪一拍翻成 1 是这一版唯一的未知量，
+                  # 也是「整屏到底还剩多长」的唯一证据。没有它，delay 该调多少只能猜。
+                  b"act: cold adopt tick=%d ms=%d front=%d live=%d alive=%d since=%d b=%s",
                   # 收卡没成时的那一条退路：Home 是我们按的，就不能把用户留在
                   # 桌面上。`revive` 只在「卡没起来 且 目标已不在前台」时落。
                   b"act: cold adopt revive ok=%d b=%s",
                   b"AevonColdAdoptOn",
                   b"/var/mobile/Library/Logs/Aevon/url.cold.adopt.off",
+                  # 0.3.52 — 时长旋钮与 A/B 闸：`delay` 是「目标上屏之后再等多少毫秒」，
+                  # `late` 是「回到 0.3.51 的固定 2.0 s」。两个都必须真的在包里 ——
+                  # 前两版的教训是「写成不可达就整段被 dead_strip 删掉」。
+                  b"AevonColdAdoptDelayMs",
+                  b"AevonColdAdoptLateOn",
+                  b"/var/mobile/Library/Logs/Aevon/url.cold.adopt.delay",
+                  b"/var/mobile/Library/Logs/Aevon/url.cold.adopt.late",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`

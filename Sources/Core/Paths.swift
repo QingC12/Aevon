@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.51"
+    public static let version = "0.3.52"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -452,6 +452,27 @@ public enum Aevon {
     /// 把分享页弄丢或弄黑，删掉/建上它就能回到 0.3.49 的确切行为，不必换包。
     public static let urlColdAdoptOffPath =
         "/var/mobile/Library/Logs/Aevon/url.cold.adopt.off"
+
+    /// 0.3.52 — **「目标上屏之后再等多久才收卡」的旋钮**（文件内容是十进制毫秒）。
+    ///
+    /// 0.3.51 把这段写死成 2.5 s，理由是「给分享面板留出弹出来的时间」。Aevon(273)
+    /// 证明那个数从来没被量过：`act: cold adopt go tick=10` 就是 2.5 s，而面板在
+    /// 收进卡之后照样在。这一版默认 0 ms（目标一上屏就按 Home），把「整屏」压到
+    /// 系统激活的那一下过渡。
+    ///
+    /// 调法（不用换包）：
+    ///     echo 400 > /var/mobile/Library/Logs/Aevon/url.cold.adopt.delay
+    /// 判据：卡起来之后**面板还在不在**。不在就往上加（400 / 800 / 1200）；
+    /// 每次改完 respring 生效（读的是计划那一刻的文件内容）。
+    public static let urlColdAdoptDelayPath =
+        "/var/mobile/Library/Logs/Aevon/url.cold.adopt.delay"
+
+    /// 0.3.52 — A/B 闸（存在 = 回到 0.3.51 的固定 2.0 s，忽略上面的旋钮）。
+    ///
+    /// 留给「这一版压过头了」的现场对比：建上它，行为和 0.3.51 一字不差，
+    /// 删掉就回到「一上屏就收」。
+    public static let urlColdAdoptLatePath =
+        "/var/mobile/Library/Logs/Aevon/url.cold.adopt.late"
 
     /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
     ///

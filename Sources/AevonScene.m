@@ -180,6 +180,10 @@ extern int AevonColdSuspOn(void);          ///< 闸（`url.cold.susp.off` 存在
 // 0.3.50 — 冷分享放行之后的「事后收卡」闸（`url.cold.adopt.off` 存在 = 不做）。
 // 这一位不改投递口，只决定「系统开完之后要不要按 Home 把它收进卡」。
 extern int AevonColdAdoptOn(void);
+/// 0.3.52 — 收卡之前「目标上屏」之后再等多少毫秒（默认 0，文件可调 0…2000）。
+extern int AevonColdAdoptDelayMs(void);
+/// 0.3.52 — 1 = 回到 0.3.51 的固定 2.0 s（`url.cold.adopt.late` 存在）。
+extern int AevonColdAdoptLateOn(void);
 static int AevonColdPending(void);         ///< 一次性：这一次接管要不要扣请求
 static void AevonColdWantNote(void);       ///< `AevonURLDenyTake` 里置位
 static int AevonColdHolds(const char *bundle);  ///< 扣着的是不是这个 App
@@ -5402,11 +5406,46 @@ static int AevonAuthishURL(const char *u) {
 // 不触发。`AevonCardIsUpFor` 是另一条：已经在卡里就不该再排一次。
 //
 // 关闸 `url.cold.adopt.off`：存在 = 一个字都不做，行为回到 0.3.49。
+//
+// ── 0.3.52 — 把「整屏」压到「闪一下」 ─────────────────────────────────────
+//
+// Aevon(273) 是 0.3.51 第一次在真机上完整跑通：冷分享两条都
+// `act: pass why=coldshare` → `act: cold adopt plan wait=2500ms` →
+// `go tick=10 front=1` → `win: url card via home-first` → `done card=1`，
+// 热分享照旧 `act: float card` + `deliver ok=1 send=sendActions` 直接在卡里。
+// 也就是说机制成立，剩下的问题只有一个：**那 2.5 s 的整屏是能看见的**。
+//
+// 全屏本身去不掉。它是系统激活事务的一部分 —— 我们放行 `_activateBundleID:`
+// 之后，整屏窗由 FrontBoard 自己提交，改 scene 帧、写挂起位、eventOnly 三种
+// 写法都被真机否过（0.2.12 / 0.2.88 / 0.3.48）。唯一没有全屏窗的形状是
+// 「吞掉」，而吞掉之后 QQ 冷启动不出面板（0.3.34 / 0.3.37 / 0.3.45 三次）。
+// 所以这里能把住的只有**时长**：从「目标上屏」到「我们按 Home」之间那一段。
+//
+// 0.3.51 写死 2.5 s，理由是「给面板留出弹出来的时间」。Aevon(273) 证明面板
+// 在那之后照样在卡里 —— 但也说明这 2.5 s 从来没被量过，它只是估计。这一版
+// 把它拆成两个可测的量：`front` 翻成 1 的拍号（`act: cold adopt tick=`
+// 逐拍记），以及翻过来之后再等多久（`url.cold.adopt.delay`，默认 0 ms）。
+// 判断「是不是压过头」的标准很硬：卡片起来之后面板还在不在 —— 不在就把
+// delay 调大（400/800），不用换包。
+//
+// A/B：`url.cold.adopt.late` 存在 = 回到 0.3.51 的「2.0 s 之后且目标在屏」。
 // ═══════════════════════════════════════════════════════════════════════════
 static long AevonColdAdoptSeq = 0;
 static long AevonColdAdoptPlans = 0;
 static long AevonColdAdoptRuns = 0;
 static long AevonColdAdoptSkip = 0;
+static long AevonColdAdoptLines = 0;
+/// 这一次分享里**第一次**看到「它就是屏上那个」的拍号（0 = 还没看到过）。
+///
+/// 0.3.52 起它是全部判据的核心：动手时刻 = `front` 翻成 1 之后再过
+/// `delay` 毫秒。每次 `AevonColdAdoptPlan` 归零 —— 不归零就会把上一次分享
+/// 的前台时间算进这一次，`sinceFront` 一开始就是几百毫秒，等于没等。
+static int AevonColdAdoptFrontTick = 0;
+/// 一拍多长（毫秒）。0.3.51 是 250 ms：那一版把「等 2.5 s」当固定预算，
+/// 粒度无所谓；0.3.52 的全部目的是**尽早**动手，粒度就是精度本身。
+/// Aevon(273) 里 `adopt go tick=10` 对应 2.5 s、`tick=25` 对应 8 s 的超时，
+/// 都是按这个数换算的。
+static const int AevonColdAdoptStepMs = 80;
 
 static void AevonColdAdoptTick(char *bundle, long seq, int tick);
 
@@ -5434,11 +5473,12 @@ static void AevonColdAdoptReport(const char *bundle, long seq) {
                   @"act: cold adopt revive ok=%d b=%s", ok, bundle] UTF8String]);
 }
 
-static void AevonColdAdoptGo(const char *bundle, int tick, int live, int alive, int front) {
+static void AevonColdAdoptGo(const char *bundle, int tick, int ms, int delay,
+                             int live, int alive, int front) {
     if (__sync_fetch_and_add(&AevonColdAdoptRuns, 1) < 6) {
         AevonLogRaw([[NSString stringWithFormat:
-                      @"act: cold adopt go tick=%d live=%d alive=%d front=%d b=%s",
-                      tick, live, alive, front, bundle] UTF8String]);
+                      @"act: cold adopt go tick=%d ms=%d delay=%d live=%d alive=%d front=%d b=%s",
+                      tick, ms, delay, live, alive, front, bundle] UTF8String]);
     }
     long seq = AevonColdAdoptSeq;
     char *copy = strdup(bundle);
@@ -5454,7 +5494,7 @@ static void AevonColdAdoptGo(const char *bundle, int tick, int live, int alive, 
     });
 }
 
-/// 0.25 s 一拍。`bundle` 的所有权在这个函数里：每条出口都必须 free，
+/// 80 ms 一拍。`bundle` 的所有权在这个函数里：每条出口都必须 free，
 /// 往下传的那一拍由被调用的自己 free —— 否则一次分享会漏一个 160 字节。
 static void AevonColdAdoptTick(char *bundle, long seq, int tick) {
     if (bundle == NULL) return;
@@ -5471,26 +5511,47 @@ static void AevonColdAdoptTick(char *bundle, long seq, int tick) {
         front = (strcmp(fb, bundle) == 0) ? 1 : 0;
         free(fb);
     }
-    // 2.5 s（第 10 拍）起才动手。冷启动上「放行 → App 起来 → 面板出来」大约
-    // 1.0~2.0 s（Aevon(270) 21:25:39 放行，同一秒 `app: boot`），早于它就按
-    // Home，会把还没弹出来的面板连同这一次分享一起按进后台。
-    if (tick >= 10 && front == 1) {
-        AevonColdAdoptGo(bundle, tick, live, alive, front);
+    int ms = (tick - 1) * AevonColdAdoptStepMs;
+    int delay = AevonColdAdoptDelayMs();
+    int late = AevonColdAdoptLateOn();
+    if (front == 1 && AevonColdAdoptFrontTick == 0) AevonColdAdoptFrontTick = tick;
+    int sinceFront = (AevonColdAdoptFrontTick > 0)
+                   ? (tick - AevonColdAdoptFrontTick) * AevonColdAdoptStepMs : -1;
+
+    // 前 12 拍逐拍记。这一版唯一的未知量就是「`front` 从哪一拍翻成 1」——
+    // 没有它，2.5 s 压到 0.1 s 是不是压过头只能靠「用户说闪了一下」猜。
+    if (__sync_fetch_and_add(&AevonColdAdoptLines, 1) < 12) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: cold adopt tick=%d ms=%d front=%d live=%d alive=%d since=%d b=%s",
+                      tick, ms, front, live, alive, sinceFront, bundle] UTF8String]);
+    }
+
+    if (late == 1) {
+        // 0.3.51 的确切形状：2.0 s（第 25 拍）之后、且目标在屏才动手。留给 A/B。
+        if (tick >= 25 && front == 1) {
+            AevonColdAdoptGo(bundle, tick, ms, -1, live, alive, front);
+            free(bundle);
+            return;
+        }
+    } else if (front == 1 && sinceFront >= delay) {
+        AevonColdAdoptGo(bundle, tick, ms, delay, live, alive, front);
         free(bundle);
         return;
     }
-    // 8 s 还没轮到（用户切走了 / 面板没出 / 目标没上屏）：放弃，什么都不做。
+
+    // 4 s 还没轮到（用户切走了 / 目标没上屏 / 一直没成前台）：放弃，什么都不做。
     // 这一次分享就停在 0.3.49 的形状（整屏），不会比不放行更糟。
-    if (tick >= 32) {
+    if (ms >= 4000) {
         if (__sync_fetch_and_add(&AevonColdAdoptSkip, 1) < 6) {
             AevonLogRaw([[NSString stringWithFormat:
-                          @"act: cold adopt timeout tick=%d live=%d alive=%d front=%d b=%s",
-                          tick, live, alive, front, bundle] UTF8String]);
+                          @"act: cold adopt timeout tick=%d ms=%d live=%d alive=%d front=%d b=%s",
+                          tick, ms, live, alive, front, bundle] UTF8String]);
         }
         free(bundle);
         return;
     }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)((double)AevonColdAdoptStepMs / 1000.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         AevonColdAdoptTick(bundle, seq, tick + 1);
     });
@@ -5502,11 +5563,15 @@ static void AevonColdAdoptPlan(const char *bundle) {
     char *copy = strdup(bundle);
     if (copy == NULL) return;
     long seq = __sync_fetch_and_add(&AevonColdAdoptSeq, 1) + 1;
+    AevonColdAdoptFrontTick = 0;
+    AevonColdAdoptLines = 0;
     if (__sync_fetch_and_add(&AevonColdAdoptPlans, 1) < 8) {
         AevonLogRaw([[NSString stringWithFormat:
-                      @"act: cold adopt plan wait=2500ms b=%s", bundle] UTF8String]);
+                      @"act: cold adopt plan wait=%dms late=%d b=%s",
+                      AevonColdAdoptDelayMs(), AevonColdAdoptLateOn(), bundle] UTF8String]);
     }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)((double)AevonColdAdoptStepMs / 1000.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         AevonColdAdoptTick(copy, seq, 1);
     });
@@ -5636,8 +5701,10 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
         AevonPassNote(bundle);
         AevonDenySrc[0] = '\0';
         // 0.3.50 — 系统这一发照旧放行（面板一定出），但把「开完之后收进卡」
-        // 排上。这一句不改任何投递行为：它在 2.5 s 后才可能动手，而且只在
-        // 目标真成了屏上那一个、并且不在卡里时才按 Home。
+        // 排上。这一句不改任何投递行为：它只在目标真成了屏上那一个、并且不在
+        // 卡里时才按 Home。0.3.52 起这一段是「上屏 + `url.cold.adopt.delay`
+        // 毫秒」（默认 0），不再固定等 2.5 s —— Aevon(273) 证明那 2.5 s 只是
+        // 估计值，而它换来的正是用户看见的那一整屏。
         AevonColdAdoptPlan(bundle);
         return 0;
     }

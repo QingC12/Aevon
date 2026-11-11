@@ -322,6 +322,34 @@ public func AevonColdAdoptOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlColdAdoptOffPath) ? 0 : 1
 }
 
+/// 0.3.52 — 收卡之前「目标上屏」之后再等多少毫秒（`url.cold.adopt.delay` 的内容）。
+///
+/// 缺省 0：目标成了屏上那一个的**下一拍**就按 Home。0.3.51 的 2.5 s 是估计值，
+/// Aevon(273) 的 `go tick=10` 就是它的全部证据 —— 这一版把这个估计换成旋钮，
+/// 让「压过头（面板没出来）」和「压不够（整屏还在）」都能用同一个数字调回来。
+///
+/// 读不到、不是数字、负数一律按 0；上限 2000 ms（大过它就没有意义了，那一段
+/// 本来就是 0.3.51 的形状）。
+@_cdecl("AevonColdAdoptDelayMs")
+public func AevonColdAdoptDelayMs() -> Int32 {
+    guard let raw = try? String(contentsOfFile: Aevon.urlColdAdoptDelayPath, encoding: .utf8) else {
+        return 0
+    }
+    let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let value = Int32(text) else { return 0 }
+    if value <= 0 { return 0 }
+    return value > 2000 ? 2000 : value
+}
+
+/// 0.3.52 — 1 = 回到 0.3.51 的固定 2.0 s（`url.cold.adopt.late` 存在）。
+///
+/// 只用于现场 A/B：同一台设备、同一次分享，建上/删掉这个文件就能对比「整屏压到
+/// 多短才不影响面板」。默认关。
+@_cdecl("AevonColdAdoptLateOn")
+public func AevonColdAdoptLateOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlColdAdoptLatePath) ? 1 : 0
+}
+
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
 ///
 /// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、
