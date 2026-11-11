@@ -3401,12 +3401,42 @@ zStackParticipantDidChange:
         // 这一格只负责报「等到了」。`bundle` 不是当前扣着的那条时 C 侧自己会忽略。
         let readyKey = bundleID ?? hostedBundle ?? ""
         if !readyKey.isEmpty {
+            // 0.3.46 — 容器的三种取法，按「最可能是那一格」排序。
+            //
+            // 0.3.45 只有前两种（`hostContainerView` → 直接子视图），而 Aevon-2
+            // 的日志把答案写在反面：`hosted ready` 一次没打，`win: after 1s
+            // hosted=` 也一次没打 —— 后一行说明这段代码所在的这一拍**根本没被
+            // 调到**（同一函数的 `keepalive beat` 却在跑）。这一版不再赌一个
+            // 键名：拿不到就下潜两层找类名带 `HostContainer` 的视图，再拿不到
+            // 就把视图自己的 layer 当候选（`_UISceneLayerHostContainerView` 本身
+            // 就是 layer 的 delegate，两条路读的是同一个计数）。
+            func hostContainer(_ v: UIView, _ depth: Int) -> NSObject? {
+                if let c = value(of: v, "hostContainerView") as? NSObject { return c }
+                for sub in v.subviews
+                where NSStringFromClass(type(of: sub)).contains("HostContainer") {
+                    return sub
+                }
+                if depth > 0 {
+                    for sub in v.subviews {
+                        if let c = hostContainer(sub, depth - 1) { return c }
+                    }
+                }
+                return v.layer
+            }
             func hostedTick(_ n: Int, _ held: UIView?) {
                 guard let held = held else { return }
-                let container = value(of: held, "hostContainerView") ?? held.subviews.first {
-                    NSStringFromClass(type(of: $0)).contains("HostContainer")
+                let container = hostContainer(held, 1)
+                let layers = count(of: container, "hostedLayers")
+                // 前三次留读数：`layers=-1` 是「这个键不存在」，`layers=0` 是
+                // 「键在、但一格都没挂」—— 下一份日志必须能把它们分开，否则
+                // 「等托管」就会像 0.3.45 那样，等了两秒却不知道在等什么。
+                if n < 3 {
+                    Log.write("win: hosted probe n=" + String(n)
+                              + " layers=" + String(layers)
+                              + " cls=" + (container.map { NSStringFromClass(type(of: $0)) } ?? "-")
+                              + " sub=" + String(held.subviews.count))
                 }
-                if count(of: container, "hostedLayers") >= 1 {
+                if layers >= 1 {
                     Log.write("win: hosted ready b=" + readyKey + " tick=" + String(n))
                     AevonColdCardReady(readyKey)
                     return

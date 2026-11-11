@@ -1511,6 +1511,23 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             Log.write(String(format: "win: hosted bounds after=%.0fx%.0f asked=%.0fx%.0f",
                              view.bounds.width, view.bounds.height,
                              source.width, source.height))
+            // 0.3.46 — **托管就绪的第二判据，而且是最硬的那一条。**
+            //
+            // 0.3.45 只让 SceneProbe 那边读容器 `hostedLayers ≥ 1`，结果 Aevon-2
+            // 的两份日志里 `win: hosted ready` **一次都没打**，冷分享两次都走到
+            // `act: cold replay why=deadline`（2 秒）。同一份日志里这一行
+            // （`hosted bounds after=430x717 asked=430x717`）却每条都打了 ——
+            // 说明「托管视图已经按卡片尺寸换过」这一刻是**能观测到的**，而
+            // `hostedLayers` 那次读数（`-1` = 键不存在）只是一条读不到的判据。
+            //
+            // 语义上也更贴近母版：ScreenCore 等的是「小窗画面托管与入场动画
+            // 完成」（说明书 .12-25），`presentationView` 的 bounds 被改成卡片
+            // 尺寸就是「画布已经换到小窗」的实证；`hostedLayers` 只说明层挂上
+            // 了，不说明尺寸换好了。两条谁先到都算就绪，C 侧只认第一次
+            // （`AevonColdBridgeSent` 是一次性闸）。
+            if !bundle.isEmpty {
+                AevonColdCardReady(bundle)
+            }
         }
         Log.write("win: scale factor=" + String(format: "%.3f", plan.scale)
                   + " shown=" + String(format: "%.0fx%.0f",

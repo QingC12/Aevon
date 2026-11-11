@@ -15433,6 +15433,26 @@ static CFAbsoluteTime AevonColdAt = 0;
 static int AevonColdRuns = 0;
 static int AevonColdNotes = 0;
 
+/// 0.3.46 — **已交付那一组对象的落脚处。**
+///
+/// 回放之后不能当场 release：`_activateBundleID:` 会把 options 与完成块放进
+/// FrontBoard 的事务表，它在自己的队列上读完之前，我们不知道哪一拍才算完
+/// （ScreenCore 的 .12-27 也只敢写「交付一次后释放」，因为它拿得到事务的
+/// 生命周期，我们拿不到）。所以把 +1 的引用挪到这里，**下一次扣留之前**再
+/// 释放 —— 那时至少隔了一次完整的分享，系统那边早就处理完了。
+/// 下标与 `AevonColdService`… 的顺序一致：0 service / 1 bundle / 2 requestID /
+/// 3 options / 4 source / 5 origin / 6 result。
+static id AevonColdPrev[7] = {nil, nil, nil, nil, nil, nil, nil};
+
+static void AevonColdPrevRelease(void) {
+    for (int i = 0; i < 7; i++) {
+        if (AevonColdPrev[i] != nil) {
+            [(id)AevonColdPrev[i] release];
+            AevonColdPrev[i] = nil;
+        }
+    }
+}
+
 /// 2.0 秒 —— ScreenCore 的 `SCWSShareDelivery.deadline`。不是拍的：它的说明书
 /// 原文写着「目标小窗启动失败或 2 秒内始终未就绪时，撤销本次挂起启动参数，
 /// 完整请求只交给系统正常打开一次」。
@@ -15461,7 +15481,15 @@ static NSString *AevonColdSuspKey(void) { return @"__ActivateSuspended"; }
 ///   ① `+optionsWithDictionary:` —— `FBSOpenApplicationOptions` 的正门；
 ///   ② `-init` + `-setDictionary:` —— 0.3.6 量到的唯一写入口；
 ///   ③ 放弃。
-static id AevonColdOptionsWithSuspended(id options, int *readOut) {
+/// 0.3.46 — **停用**（保留函数体是为下一版留正门，不是还在用）。
+///
+/// 0.3.45 的 `act: cold replay … susp=-2 boxed=1` 说明这条路造出来的副本
+/// 读不到 `__ActivateSuspended`：`+optionsWithDictionary:` 认这个字典，但
+/// 这份字典经过 `setDictionary:` 之后**不保留**系统原件里的 `__PayloadOptions`
+/// 结构。为一个不生效的挂起位去换系统的原件，是拿「QQ 认不认」去赌，
+/// 这一版改成原件直交（见 `AevonColdReplay`）。函数留着，是因为「将来真要
+/// 加挂起位，唯一正门在这里」，而且审计靠它的两条选择子名字盯着私有面。
+static __attribute__((unused)) id AevonColdOptionsWithSuspended(id options, int *readOut) {
     if (readOut != NULL) *readOut = -1;
     if (options == nil) return nil;
     id dict = AevonActRead(options, @"dictionary");
@@ -15535,8 +15563,21 @@ static void AevonColdReplay(const char *why) {
     AevonColdTrusted = 0;
     AevonColdAt = 0;
 
-    int suspRead = -1;
-    id boxed = AevonColdOptionsWithSuspended(options, &suspRead);
+    // 0.3.46 — **交回的是系统原来那一份 options，一个字节都不改。**
+    //
+    // 0.3.45 在这里构造过一份带 `__ActivateSuspended` 的副本
+    // （`AevonColdOptionsWithSuspended`），日志读数 `susp=-2 boxed=1` 说明它
+    // 根本没被认：`+optionsWithDictionary:` 造出来的对象读不到那个键。也就是
+    // 说我们为了一个「不存在」的挂起位，把系统给的原件换成了一份自己拼的 ——
+    // 而原件里除了 URL 还有 `__PayloadOptions` / `__PasteSharingToken`
+    // （分享的内容在通用剪贴板上，全靠这个令牌），伪造版一旦少一格，QQ 就
+    // 只会在首页站着。ScreenCore 的说明书 .12-25 写的是「保留原始文件分享请求
+    // 的文件 URL / Actions / 沙盒授权 / 来源 / 激活参数 / 完成回调」，不是
+    // 「重造一份」。
+    //
+    // 只读一次 `susp=`：原件的 dictionary 里本来就带挂起位时（相册那种系统
+    // 自己发的请求），这一格是 1，日志里看得见，不用改它。
+    int suspRead = AevonActRead(options, AevonColdSuspKey()) != nil ? 1 : -1;
     // 桥那一路如果还挂着同一个 App，一并收掉：这条分享已经由原始请求接手了。
     // 不收的话它会在 0.45 s 后再投一次，那就是把同一条 URL 开两遍。
     if (AevonAppOpenBundle != nil) {
@@ -15547,19 +15588,29 @@ static void AevonColdReplay(const char *why) {
         AevonColdNotes += 1;
         AevonLogRaw([[NSString stringWithFormat:
                       @"act: cold replay why=%s b=%s at=%.0fms tick=%d susp=%d boxed=%d",
-                      why != NULL ? why : "-", bundle, ms, runs, suspRead,
-                      boxed != nil ? 1 : 0] UTF8String]);
+                      why != NULL ? why : "-", bundle, ms, runs, suspRead, 0] UTF8String]);
     }
-    if (imp != NULL) {
+    if (imp != NULL && options != nil) {
         ((void (*)(id, SEL, id, id, BOOL, id, id, id, id))imp)
             (service, cmd, bundleArg, requestID, trusted,
-             boxed != nil ? boxed : options, source, origin, result);
+             options, source, origin, result);
+        if (AevonColdNotes < 24) {
+            AevonColdNotes += 1;
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: cold replay done b=%s at=%.0fms ret=void",
+                          bundle, ms] UTF8String]);
+        }
     }
-    // `boxed` 与 `result` **故意不 release**：原实现可能在这一拍之后仍然持有它们
-    // （完成块会进系统的事务表；ScreenCore 的 .12-27 专门写了「复制到堆、交付
-    // 一次后释放」，它知道自己什么时候算完，我们不知道）。一次分享漏两个对象，
-    // 换「回调不会悬空」，与文件里另外三处同一个取舍（见 `AevonForwardFlushNow`）。
-    (void)boxed;
+    // 交付完的这一组挪进 `AevonColdPrev`，下一次扣留之前释放（见那里的注释）。
+    // 顺序在调用之后：万一原实现在返回前又把 options 读了，指针仍然有效。
+    AevonColdPrevRelease();
+    AevonColdPrev[0] = service;
+    AevonColdPrev[1] = bundleArg;
+    AevonColdPrev[2] = requestID;
+    AevonColdPrev[3] = options;
+    AevonColdPrev[4] = source;
+    AevonColdPrev[5] = origin;
+    AevonColdPrev[6] = result;
 }
 
 /// 看门狗：卡片可能根本建不起来（黑名单 / 槽位满 / 系统界面盖着）。到点就
@@ -15582,17 +15633,32 @@ static int AevonColdBridgeSend(void);
 
 /// Swift 侧报「这张卡的承载层出来了」。只在主队列调用（`float` 那条链就在主队列）。
 ///
-/// 0.3.45 — 到了这一拍**先问桥，不问系统**。理由：桥在微信上是验过的
-/// （`dlg=MMMainSceneDelegate rsp=1` 秒接），而它在 QQ 上失败的原因正是「问得太早」。
-/// 先把桥放到正确的时刻再问一次，答案才有意义：
-///   · 强答案 ⇒ 这条分享已经进去了，原始请求就地取消（`AevonColdCancel`）；
-///   · 弱答案 / 没有回执 ⇒ `AevonAppOpenCheck` 那边调 `AevonColdReplay`，
-///     把系统原来那份 options 交回去。
-/// 这样「换投递物」只在「换时机」失败之后才发生，微信那条好路不会被这一版动到。
+/// 0.3.46 — **就绪 ⇒ 直接交回原始请求，不再先问桥。**
+///
+/// 0.3.45 在这里先调 `AevonColdBridgeSend()`（发我们自己造的 options），指望
+/// 「把桥放到正确的时刻再问一次」。Aevon-2 的两份日志把这个指望判掉了：
+/// `win: hosted ready` 一次没出现（判据读不到），于是桥那条路**根本没被走到**，
+/// 冷分享两次都停在 `act: cold replay why=deadline`。更要紧的是「问桥」本身
+/// 在这条链上是错的：桥送的是空字典 + 来源 App，而 QQ 的分享入口要的是系统
+/// 那份 `__PayloadOptions` / `__PasteSharingToken`（Aevon(265)(266)(267) 的
+/// `dlg=- rsp=0` 就是这句话的十二次证词）。ScreenCore 也没有这一步 ——
+/// 它就等托管，然后把原件交回去。
+///
+/// 所以这一版只留一条投递路径：**托管就绪 → 原件交回 → 2 s 兜底也是原件交回。**
+/// 桥的代码还在（`AevonColdBridgeSend`，标了 unused），下一版要 A/B 时再接回来。
 void AevonColdCardReady(const char *bundle) {
     if (AevonColdOn == 0 || bundle == NULL || bundle[0] == '\0') return;
     if (strcmp(bundle, AevonColdBundle) != 0) return;
-    AevonColdBridgeSend();
+    // 一次性：`FloatHost` 的 0.25 s 那一拍与 SceneProbe 的轮询可能同时报。
+    if (AevonColdBridgeSent == 1) return;
+    AevonColdBridgeSent = 1;
+    double ms = AevonColdAt > 0 ? (CFAbsoluteTimeGetCurrent() - AevonColdAt) * 1000.0 : 0;
+    if (AevonColdNotes < 24) {
+        AevonColdNotes += 1;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"act: cold ready b=%s at=%.0fms", bundle, ms] UTF8String]);
+    }
+    AevonColdReplay("hosted");
 }
 
 /// 把扣着的那条请求**取消**（不是交回）：桥已经把它办成了。
@@ -15604,6 +15670,13 @@ static void AevonColdCancel(const char *why) {
     AevonColdOn = 0;
     AevonColdImp = NULL;
     AevonColdCmd = NULL;
+    // 0.3.46 — 取消 = 这条请求**永远不会交给系统**，所以这一组 +1 的引用
+    // 由我们收尾（回放那条路是挪给 `AevonColdPrev`，因为原件还可能在系统的
+    // 事务表里）。顺序：先摘全局，再 release —— release 可能触发 dealloc，
+    // dealloc 里若有人回调进来，读到的必须是「没有扣着任何东西」。
+    id drop[7] = {AevonColdService, AevonColdBundleArg, AevonColdRequestID,
+                  AevonColdOptions, AevonColdSource, AevonColdOrigin,
+                  AevonColdResult};
     AevonColdService = nil;
     AevonColdBundleArg = nil;
     AevonColdRequestID = nil;
@@ -15611,6 +15684,10 @@ static void AevonColdCancel(const char *why) {
     AevonColdSource = nil;
     AevonColdOrigin = nil;
     AevonColdResult = nil;
+    for (int i = 0; i < 7; i++) {
+        if (drop[i] != nil) [(id)drop[i] release];
+    }
+    AevonColdPrevRelease();
     AevonColdTrusted = 0;
     AevonColdAt = 0;
     AevonColdBridgeSent = 0;
@@ -15628,7 +15705,11 @@ static void AevonColdCancel(const char *why) {
 }
 
 /// 托管就绪之后问一次桥。返回 1 = 已经问过（无论答案）。
-static int AevonColdBridgeSend(void) {
+///
+/// 0.3.46 — **当前无调用者**（`AevonColdCardReady` 改成直接交回原件，理由见
+/// 那里）。函数与它的四条收尾分支都留着：下一版要 A/B「桥 vs 原件」时，
+/// 唯一的开关就是在这里接一行；删掉等于把已经量过的证据一起删掉。
+static __attribute__((unused)) int AevonColdBridgeSend(void) {
     if (AevonColdOn == 0 || AevonColdBridgeSent == 1) return 0;
     AevonColdBridgeSent = 1;
     NSString *bu = [NSString stringWithUTF8String:AevonColdBundle];
@@ -15695,6 +15776,12 @@ static void AevonColdHoldTake(IMP imp, id service, SEL cmd, id bundleID, id requ
              originalSource, result);
         return;
     }
+    // 0.3.46 — 上一组交付过的对象到这里才敢释放：中间隔了一次完整的分享，
+    // FrontBoard 那边的激活事务早已处理完（见 `AevonColdPrev` 的注释）。
+    // **必须在下面 `AevonColdReplay("other")` 之前**：那一句会把刚回放的
+    // 一组移进 `AevonColdPrev`，紧接着释放就是把还在系统事务表里的对象
+    // 抽走 —— 那正是这一版要修的那类崩。
+    AevonColdPrevRelease();
     if (AevonColdOn == 1) {
         // 同一次点击的第二条（激活层常见：trusted / untrusted 各一拍）。
         // 只留第一条：它带来的 options 才是系统为这次打开准备的那份。
@@ -15711,15 +15798,37 @@ static void AevonColdHoldTake(IMP imp, id service, SEL cmd, id bundleID, id requ
                       @"act: cold hold flush why=other b=%s", AevonColdBundle] UTF8String]);
         AevonColdReplay("other");
     }
+    // ⛔ 0.3.46 — **这一格是本文件唯一一次「把系统参数留到下一拍再用」。**
+    //
+    // 0.3.45 在这里直接写 `AevonColdService = service;` 那样的一串裸赋值。
+    // 这个文件是 MRC（Makefile 没有 `-fobjc-arc`），`static id` 不持有 ——
+    // 而 `_activateBundleID:` 的调用方在我们返回之后**立刻释放它自己那份**。
+    // 两秒后回放时，这七个指针全是悬垂的：
+    //
+    //   SpringBoard-2026-11-11-202741.ips
+    //     objc_retain_x20
+    //     -[FBSystemService _activateBundleID:requestID:isTrusted:options:source:
+    //        originalSource:withResult:] + 128
+    //     Aevon.dylib + 0x1cc68            ← 就是 `AevonColdReplay` 里那句 imp()
+    //     _dispatch_client_callout → … → 主线程
+    //     EXC_BAD_ACCESS / SIGBUS / KERN_PROTECTION_FAILURE at 0x634be3560
+    //
+    // `objc_retain` 读的是对象的 isa；对象所在页已经被回收成保护页，于是
+    // SIGBUS —— 用户看到的是「分享到 QQ 冷启动 → 安全模式」。两次崩溃堆栈
+    // 逐字节相同，说明这不是偶发。
+    //
+    // 正确形状在本文件里早就有（`AevonForwardHold` 第 14741 行起）：**存进来
+    // 的东西全部 retain，完成块 copy 到堆**。这里改成同一套。`SEL`/`IMP` 不是
+    // 对象，不 retain。
     AevonColdOn = 1;
     AevonColdImp = imp;
     AevonColdCmd = cmd;
-    AevonColdService = service;
-    AevonColdBundleArg = bundleID;
-    AevonColdRequestID = requestID;
-    AevonColdOptions = options;
-    AevonColdSource = source;
-    AevonColdOrigin = originalSource;
+    AevonColdService = [(id)service retain];
+    AevonColdBundleArg = [(id)bundleID retain];
+    AevonColdRequestID = [(id)requestID retain];
+    AevonColdOptions = [(id)options retain];
+    AevonColdSource = [(id)source retain];
+    AevonColdOrigin = [(id)originalSource retain];
     // 完成块必须复制到堆：调用方返回之后栈上的那一份就失效了（说明书 .12-27
     // 的原话是「避免访问失效的栈回调导致 SpringBoard 安全模式」）。
     AevonColdResult = [result copy];

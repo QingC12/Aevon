@@ -1161,12 +1161,25 @@ def main():
                   # `act: cold hold take` = 真的存下来了（`opt=` 是 options 的类名，
                   # `keys=` 是 payload 项数 —— 交回时靠这两格确认原件没丢）；
                   # `act: cold replay why=hosted|deadline|other` = 交回那一刻，
-                  # `susp=` 是挂起位写后回读（1 = 写进去了，-2 = 写进去了但读不出，
-                  # -1 = 一条路都没走通），`boxed=1` = 用的是一份改过的副本。
+                  # `susp=` 读的是原件里本来就有的挂起位（1 = 有，-1 = 没有；
+                  # 0.3.46 起不再自己造副本，`boxed=` 恒为 0，留着这一格是为了
+                  # 让 0.3.45 与 0.3.46 的日志能并排读）。
                   # 判据：QQ / 微信侧 `app: openurl` 的 `dlg=` 从 `-` 翻成类名。
                   b"act: cold hold b=%s pid=%d run=%d live=%d alive=%d age=%.1f wait=%dms u=%.80s",
                   b"act: cold hold take b=%s opt=%s trusted=%d keys=%ld",
                   b"act: cold replay why=%s b=%s at=%.0fms tick=%d susp=%d boxed=%d",
+                  # 0.3.46 — **两条新读数，回答的是「为什么这次会安全模式」。**
+                  #
+                  # `act: cold ready` = 托管就绪那一拍（0.25 s 的 `hosted bounds`
+                  # 或 `hostedLayers≥1`，谁先到算谁）。0.3.45 这一行不存在，
+                  # 因为 `win: hosted ready` 一次都没打 —— 判据读不到，冷分享就
+                  # 只能等满 2 秒。
+                  # `act: cold replay done` = 原实现**返回了**。崩溃日志的那一帧
+                  # 是 `_activateBundleID:` +128 的 `objc_retain_x20`，也就是说
+                  # 0.3.45 死在调用里面；这一行出现在下一次日志里，就等于
+                  # 「参数不再是悬垂的」这件事自己说了话。
+                  b"act: cold ready b=%s at=%.0fms",
+                  b"act: cold replay done b=%s at=%.0fms ret=void",
                   # 0.3.45 — 桥被推迟到「托管就绪」之后才问（`act: cold bridge`），
                   # 强答案就 `act: cold cancel`，弱答案才轮到 `act: cold replay`。
                   # 三行合起来是这一版唯一的实验设计：先换时机，再换投递物。
@@ -1175,6 +1188,11 @@ def main():
                   b"act: cold bridge skip why=nourl",
                   b"act: cold hold skip why=again b=%s",
                   b"win: hosted ready b=",
+                  # 0.3.46 — 前三次轮询的读数（`layers=`, `cls=`, `sub=`）。
+                  # 0.3.45 的教训是「判据读不到时日志一片空白」：等了两秒，
+                  # 却不知道在等什么。有这三行，下一份日志能直接分开
+                  # 「键不存在」（`layers=-1`）和「键在但没挂」（`layers=0`）。
+                  b"win: hosted probe n=",
                   b"AevonColdHoldOn",
                   b"/var/mobile/Library/Logs/Aevon/url.cold.hold.off",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
