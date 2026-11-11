@@ -1232,6 +1232,9 @@ def main():
                   b"act: cold adopt go tick=%d live=%d alive=%d front=%d b=%s",
                   b"act: cold adopt timeout tick=%d live=%d alive=%d front=%d b=%s",
                   b"act: cold adopt done card=%d b=%s",
+                  # 收卡没成时的那一条退路：Home 是我们按的，就不能把用户留在
+                  # 桌面上。`revive` 只在「卡没起来 且 目标已不在前台」时落。
+                  b"act: cold adopt revive ok=%d b=%s",
                   b"AevonColdAdoptOn",
                   b"/var/mobile/Library/Logs/Aevon/url.cold.adopt.off",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**

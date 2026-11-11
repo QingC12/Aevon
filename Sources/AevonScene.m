@@ -5415,9 +5415,23 @@ static void AevonColdAdoptTick(char *bundle, long seq, int tick);
 /// `win: own did not come up` / `win: url card declined`，两处都有原因）。
 static void AevonColdAdoptReport(const char *bundle, long seq) {
     if (bundle == NULL || seq != AevonColdAdoptSeq) return;
+    int card = AevonCardIsUpFor(bundle);
     AevonLogRaw([[NSString stringWithFormat:
-                  @"act: cold adopt done card=%d b=%s",
-                  AevonCardIsUpFor(bundle), bundle] UTF8String]);
+                  @"act: cold adopt done card=%d b=%s", card, bundle] UTF8String]);
+    if (card == 1) return;
+    // 收卡没成 —— 那一次 Home 是我们按的，不能把用户留在桌面上。
+    // 目标还在前台就什么都不用做（它就是自己要走的），否则把它拉回来，
+    // 回到 0.3.49 的形状（整屏），最坏也只是比这一版多一次跳转。
+    int front = 0;
+    char *fb = AevonFrontBundleCopy();
+    if (fb != NULL) {
+        front = (strcmp(fb, bundle) == 0) ? 1 : 0;
+        free(fb);
+    }
+    if (front == 1) return;
+    int ok = AevonLandOpenApp(bundle);
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"act: cold adopt revive ok=%d b=%s", ok, bundle] UTF8String]);
 }
 
 static void AevonColdAdoptGo(const char *bundle, int tick, int live, int alive, int front) {
