@@ -3808,6 +3808,47 @@ public func AevonOpenCardDirect(_ bundle: UnsafePointer<CChar>?) {
     }
 }
 
+/// 0.3.25 — **URL / 分享专用开卡：走完整的 home-first。**
+///
+/// 0.3.24 用的是 `AevonOpenCardDirect`（`homed: true`），真机结果
+/// （Aevon(251)）是：卡确实建起来了 —— `win: own live attach` →
+/// `hosting=yes active=yes` → `first frame shown after 107ms`，QQ 真的在卡里。
+/// 但屏幕上多了一样东西：**那份已经提交的全屏承载**。用户原话是
+/// 「先打开全屏，然后悬浮窗抢画面显示，此时全屏页面变成黑屏，而悬浮窗浮在黑屏上」。
+///
+/// 原因就一句话：`homed: true` 的含义是「屏上已经没有目标的全屏页」，而
+/// URL 分享那一刻**恰好相反** —— 目标正在上屏。我们把 scene 抽进卡片，
+/// 系统那份全屏承载就没了内容，只剩一个黑窗口压在卡下面。
+///
+/// 圆盘那条路从来不会这样，因为它走的是 `homed: false`：先问「目标是不是
+/// 正占着屏幕」，是就发一次 Home，等它真的离开前台（`home first open ready`），
+/// 再建卡。这是 0.2.30 修掉黑屏的那一招，`win: home first open` 那一行就是它。
+/// URL 路一直没有调用过它 —— 0.2.46 的 `AevonOpenCardDirect` 是给通知那条
+/// 路做的，那里来源 App 已经被顶回前台，前提不同。
+///
+/// 代价是屏幕上会多一次「全屏 → 桌面 → 卡」的过渡，约 0.7 s。这是有意的：
+/// 一次可见的过渡，比一个永远压在卡下面的黑窗口好。
+@_cdecl("AevonOpenCardURL")
+public func AevonOpenCardURL(_ bundle: UnsafePointer<CChar>?) {
+    guard let bundle = bundle else { return }
+    let identifier = String(cString: bundle)
+    guard identifier.count > 2 else { return }
+    let work = {
+        // 这一行是 0.3.25 独有的读数：它只可能来自 URL / 分享那条路。
+        // 圆盘路走的是 `SceneProbe.openCard` 本身，不会经过这里 —— 所以日志里
+        // 出现它就等于「URL 路真的走到了 home-first 入口」，不用再靠 bundle 名去猜。
+        Log.write("win: url card via home-first b=" + identifier)
+        SceneProbe.openCard(identifier, homed: false) { reason in
+            Log.write("win: url card declined (" + reason + ") " + identifier)
+        }
+    }
+    if Thread.isMainThread {
+        work()
+    } else {
+        DispatchQueue.main.async(execute: work)
+    }
+}
+
 /// 0.1.88 — 「这个 App 已经在卡片里了吗」。
 ///
 /// `AevonScene.m` 的分流看门狗靠它决定要不要把原实现补调一次。注意它问的是

@@ -917,6 +917,18 @@ def main():
                   b"act: url card queue b=%s n=%ld after=350ms",
                   b"act: url card skip why=off b=%s",
                   b"act: url card now b=%s",
+                  # 0.3.25 — **URL 路的进场顺序。**
+                  #
+                  # Aevon(251)：卡建对了（`own live attach` / `hosting=yes` /
+                  # `first frame 107ms`），但系统那份全屏承载还在，scene 被抽走
+                  # 之后它就成了黑窗压在卡下面。根因是 0.3.24 走了
+                  # `AevonOpenCardDirect`（`homed: true`，跳过 home-first）。
+                  #
+                  # 这一版改走 `AevonOpenCardURL`（`homed: false`）。两串是证据：
+                  # 出口符号能证明那一支进了包；日志串能证明它真的被调用过
+                  # （圆盘路不经过这个入口，所以出现即等于 URL 路走到了 home-first）。
+                  b"AevonOpenCardURL",
+                  b"win: url card via home-first b=",
                   # 反向闸自己的路径常量 —— 文件闸写错文件名就等于没有闸。
                   b"/var/mobile/Library/Logs/Aevon/url.card.off",
                   # 分享那次 transitionContext 里装了 action（`n=1`），可从来没看过

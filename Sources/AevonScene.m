@@ -38,6 +38,9 @@ extern void AevonOpenFromNotification(const char *bundleID);
 // 0.2.46 — 跳过 openCard 的 home-first，直接建卡。
 // 分享那条路先把来源 App 顶回前台，目标已经不占全屏，不需要再按一次 Home。
 extern void AevonOpenCardDirect(const char *bundleID);
+// 0.3.25 — `homed: false` 那一支：先发 Home 再建卡。URL 分享用这个，
+// 不是 `AevonOpenCardDirect`（它跳过 home-first，会把系统全屏承载抽空成黑窗）。
+extern void AevonOpenCardURL(const char *bundleID);
 extern int AevonModifyContextSetResize(id presenter, const char *selName);
 // 0.1.88 — 两条只读查询，都由 Swift 侧 `@_cdecl` 导出：
 //   AevonActivateSwitchOff()  → 1 表示 `notify.off` 在，一个字节都不许改行为；
@@ -3805,9 +3808,22 @@ void AevonCardTargetArm(const char *bundle) {
     if (bundle == NULL || bundle[0] == '\0') return;
     size_t n = strlen(bundle);
     if (n < 3 || n >= sizeof(AevonActCardBundle)) return;
+    // 0.3.25 — URL 路（src=2）不被普通开卡降级。
+    //
+    // Aevon(251) 就栽在这一格：`act: url card now` 之后 `openCard` 调到本函数，
+    // 把 src 从 2 改回 1，于是 `_createScene` 钩子里探针 presenter 的条件
+    // `AevonActCardSrc != 2` 成立，在同一张 scene 上又建了一份 presenter ——
+    // 生产承载（`float()`）和探针承载并存，`presenter: birth ok=1 why=probe`
+    // 那一行就是它。两份 presenter 抢同一张 scene 会渲染到哪一份上没人验过，
+    // 在查黑屏的时候这种变量必须先去掉。
+    //
+    // 只在「同一个 bundle、10 秒窗口内」保留 src=2；换了 App 或窗口过期照旧改 1。
+    // 注意读数要在覆盖静态量**之前**取：`AevonActCardAt` 下一行就被写成现在。
+    int keepURL = (AevonActCardSrc == 2 && strcmp(AevonActCardBundle, bundle) == 0 &&
+                   AevonActCardAt > 0 && AevonActMs() - AevonActCardAt < 10000);
     memcpy(AevonActCardBundle, bundle, n + 1);
     AevonActCardAt = AevonActMs();
-    AevonActCardSrc = 1;
+    if (!keepURL) AevonActCardSrc = 1;
     if (__sync_fetch_and_add(&AevonActArmCalls, 1) < 8) {
         AevonLogRaw([[NSString stringWithFormat:
                       @"act: arm b=%s n=%ld", bundle, AevonActArmCalls] UTF8String]);
@@ -3878,6 +3894,22 @@ static int64_t AevonActMs(void) {
 ///     二次打开就是 7 次写）。写与承载必须同进。
 ///   · 这个 bundle 不在卡里 —— 已经在卡里再排一次，等于把用户刚放好的窗重新摆一遍。
 ///   · 6 秒内没为同一个 bundle 排过 —— 一次分享会从激活钩子、两条通知钩子各来一遍。
+///
+/// 0.3.25 — 上面这条「承载」确实接上了，但接法错了半步。Aevon(251) 的读数：
+///
+///     win: own live attach com.tencent.mqq t=0ms wait=121ms
+///     win: state hosting=yes active=yes
+///     win: first frame shown after 107ms (first frame)
+///
+/// 卡真的建起来了，QQ 也真的在里面 —— 但用户看到的是「先整屏、然后卡抢画面、
+/// 此时整屏变黑、卡浮在黑上」。原因不在承载，在**进场顺序**：0.3.24 走的是
+/// `AevonOpenCardDirect`（`homed: true`，跳过 home-first）。而 `homed: true`
+/// 的前提是「屏上已经没有目标的全屏页」，URL 分享那一刻恰好相反 —— 目标正在上屏。
+/// scene 被抽进卡片之后，系统那份全屏承载就没有内容了，只剩一个黑窗口压在卡下面。
+///
+/// 所以 0.3.25 换成 `AevonOpenCardURL`（`homed: false`）：先问目标是不是正占着屏，
+/// 是就发一次 Home，等它真离开前台再建卡。0.2.30 修黑屏用的就是这一招，圆盘路
+/// 一直在用，URL 路从没调用过。代价是有意接受的：屏幕上多一次「整屏 → 桌面 → 卡」。
 static void AevonURLCardSchedule(const char *bundle) {
     if (bundle == NULL || bundle[0] == '\0') return;
     if (AevonURLCardSwitchOff() == 1) {
@@ -3925,10 +3957,22 @@ static void AevonURLCardSchedule(const char *bundle) {
         }
         AevonLogRaw([[NSString stringWithFormat:
                       @"act: url card now b=%s", cb] UTF8String]);
-        // `homed: true` 的含义是「屏上已经没有目标的全屏页」，不是「按过 Home」。
-        // 这里目标（QQ）正在上屏，但那正是要接管的画面：它在 430×717 的
-        // scene 里、被一个 430×932 的窗口装着 —— 下半屏那 215 pt 是黑的。
-        AevonOpenCardDirect(cb);
+        // 0.3.25 — 这里换成 URL 专用入口（`homed: false`），与圆盘那条路同口径。
+        //
+        // 0.3.24 用的是 `AevonOpenCardDirect`（`homed: true`），Aevon(251) 的读数
+        // 说明它把卡建对了 —— `win: own live attach` → `hosting=yes active=yes`
+        // → `first frame shown after 107ms` —— 但屏上还留着另一样东西：系统为
+        // 「全屏激活」提交的那份承载。scene 被我们抽进卡片，它就没有内容了，
+        // 只剩一个黑窗口压在卡下面。用户看到的「整屏先出现 → 卡抢画面 → 整屏变黑」
+        // 就是这个顺序。
+        //
+        // `homed: true` 的前提是「屏上已经没有目标的全屏页」，URL 分享那一刻恰好
+        // 相反。所以改走 `homed: false`：先问目标是不是正占着屏，是就发一次 Home，
+        // 等它真离开前台再建卡（`win: home first open ready`）。这是 0.2.30 修掉
+        // 黑屏的那一招，圆盘路一直在用，URL 路从没调用过。
+        //
+        // 代价是有意接受的：屏幕上多一次「全屏 → 桌面 → 卡」，约 0.7 s。
+        AevonOpenCardURL(cb);
     });
 }
 
