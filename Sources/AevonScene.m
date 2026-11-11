@@ -12279,8 +12279,15 @@ static void AevonAuthCardCloseSoon(NSString *who, const char *why) {
 
 /// 一条现场行，独立预算。这个文件里每一条现场行都得有自己的计数器：跟别人共用
 /// 一个，就会在几次操作之后静默，而静默和「没发生」长得一模一样。
+/// 0.3.56 — `volatile` 是**可达性保险**，不是功能开关（值恒为 1）。
+/// 0.3.55 的教训：`-O2` 的 GlobalOpt 能把「只从一条被判死的分支里被调用」的函数
+/// 连同它的字面量一起删掉 —— 0.3.53 的 `notify: forward pass` 就是这么消失的
+/// （那条分支的真身 `AevonOpenForwardPayload` 从 0.3.8 起没人调了）。审计在包里
+/// 搜不到就是证据。把一个 volatile 读塞进条件里，编译器就不能再假定它恒真。
+static volatile int AevonDeckArmed = 1;
+
 static int AevonDeckNotes = 0;
-static void AevonDeckLog(NSString *format, ...) {
+__attribute__((noinline, used)) void AevonDeckLog(NSString *format, ...) {
     if (AevonDeckNotes >= 24) return;
     AevonDeckNotes++;
     va_list args;
@@ -12311,7 +12318,7 @@ static int AevonDeckGateRan = 0;
 static int AevonDeckGateMiss = -1;
 
 /// 只问不调：返回缺失条数，0 表示这条路接得上。
-static int AevonDeckGate(void) {
+__attribute__((noinline, used)) int AevonDeckGate(void) {
     if (AevonDeckGateRan) return AevonDeckGateMiss;
     AevonDeckGateRan = 1;
     int miss = 0;
@@ -12557,7 +12564,7 @@ static void AevonDeckSpin(void) {
 ///   · 热启动：已经有 scene、桥也已经在工作（`act: deliver ok=1 send=sendActions`），
 ///     没有全屏问题，不需要这条更重的路；
 ///   · 有卡 / 正在建卡：让 `openCard` 自己处理。
-static int AevonDeckWanted(const char *bundle, id request, id options, NSString **urlOut) {
+__attribute__((noinline, used)) int AevonDeckWanted(const char *bundle, id request, id options, NSString **urlOut) {
     if (urlOut != NULL) *urlOut = nil;
     if (bundle == NULL || bundle[0] == '\0') return 0;
     if (AevonDeckOn() != 1) return 0;
@@ -12592,7 +12599,7 @@ static int AevonDeckWanted(const char *bundle, id request, id options, NSString 
 /// 拿不到就返回 0（调用方照旧把请求交给原实现，行为等于 0.3.53）。
 /// 这样「吞掉之后没东西可显示」这个最坏形状不可能发生：吞掉的前提是
 /// handle 已经在手里，剩下的只是等它出 scene。
-static int AevonDeckStart(const char *bundle, const char *url, const char *from) {
+__attribute__((noinline, used)) int AevonDeckStart(const char *bundle, const char *url, const char *from) {
     if (bundle == NULL || bundle[0] == '\0') return 0;
     if (url == NULL || url[0] == '\0') return 0;
     if (AevonDeckBusy == 1) return 0;
@@ -16619,7 +16626,7 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             // 只要 `AevonDeckStart` 拿不到 scene handle，它就返回 0，这里照旧
             // `verdict = 0` 走原实现 —— 吞掉请求却无内容可显示那个最坏形状
             // 在结构上不可能出现。
-            if (slot == 0) {
+            if (slot == 0 && AevonDeckArmed == 1) {
                 NSString *deckURL = nil;
                 if (AevonDeckWanted(bundle, request, options, &deckURL) == 1 &&
                     AevonDeckStart(bundle, [deckURL UTF8String], "open") == 1) {
@@ -17080,6 +17087,12 @@ void AevonActivateProbeInstall(void) {
     AevonLogRaw([[NSString stringWithFormat:@"notify: open armed n=%d/%d shape=%s skip=%@",
                   armed, AevonOpenMax, AEVON_OPEN_SHAPE,
                   skip.length > 0 ? skip : @"-"] UTF8String]);
+    // 0.3.56 — **开机可达性锚**，不是功能。`AevonDeckGate` 只问不调
+    // （`NSClassFromString` + `respondsToSelector:`），代价是一次类查询，换三件事：
+    //   ① 整段 `AevonDeck*` 不可能再被 GlobalOpt 判死删掉（0.3.55 就是这么丢的）；
+    //   ② 真机第一屏就能读到 SB 那四个私有面接不接得上（`deck: gate need=4 miss=N`）；
+    //   ③ `miss>0` 时 `AevonDeckStart` 立刻返回 0，这条路一次都不会真去试。
+    if (AevonDeckOn() == 1) { AevonDeckGate(); }
     // 0.2.7 — 能力面（三家综合的前提）。只问不调，见函数上方那段。
     AevonAbilityProbe();
 }

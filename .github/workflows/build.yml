@@ -90,21 +90,36 @@ jobs:
           ls -la packages/
           test "$(ls packages/*.deb | wc -l | tr -d ' ')" -eq 1
 
+      - name: Diagnose payload symbols
+        if: always()
+        run: |
+          set -uxo pipefail
+          D=$(find .theos -name 'Aevon.dylib' | head -1)
+          echo "dylib=$D"
+          ls -l "$D" || true
+          for s in "deck:" "notify: forward" "act: cold adopt" "win: own deck"; do
+            echo "[$s] -> $(strings -a "$D" 2>/dev/null | grep -c -- "$s" || true)"
+          done
+          strings -a "$D" 2>/dev/null | grep "deck:" | head -20 || true
+          nm -a "$D" 2>/dev/null | grep -i "deck" | head -20 || true
+
       - name: Gate — audit package payload
         run: |
           set -euxo pipefail
           bash ./tools/audit-deb.sh "$(ls packages/*.deb | head -1)"
 
       - name: Name artifact
+        if: always()
         run: |
           set -euxo pipefail
           bash ./tools/name-deb.sh packages dist
           ls -la dist/
 
       - name: Upload deb
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: aevon-deb
           path: dist/com.Aevon_*.deb
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
