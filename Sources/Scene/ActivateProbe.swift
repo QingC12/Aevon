@@ -236,6 +236,21 @@ public func AevonURLActivityOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlActivityOffPath) ? 0 : 1
 }
 
+/// 0.3.37 — 1 = 回到 0.3.36 的「放行式接管」（存在才放行）。
+///
+/// 默认 0：吞掉。Aevon(262) 证明放行必然带回系统那份全屏窗，而我们在
+/// 150 ms 后把 scene 搬走，留下的就是一个空的全屏窗 —— 黑。
+@_cdecl("AevonURLPassOn")
+public func AevonURLPassOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlPassOnPath) ? 1 : 0
+}
+
+/// 0.3.37 — 1 = tctx 装上之后仍然补发（存在才补，默认不补）。
+@_cdecl("AevonURLPlusOn")
+public func AevonURLPlusOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlPlusOnPath) ? 1 : 0
+}
+
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
 ///
 /// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、

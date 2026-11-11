@@ -113,6 +113,15 @@ extern int AevonURLSwallowOn(void);
 // 授权/支付那两次激活都是 `payload=0` + `__Actions[0]` 是 `UIActivityContinuationAction`，
 // URL 挖不到，但 bundle id 是现成的 —— 放行式接管不需要 URL，系统自己会送。
 extern int AevonURLActivityOn(void);
+// 0.3.37 — 两把开闸，默认都不开：
+//   `url.pass.on` 存在 = 回到 0.3.36 的放行式接管（系统提交全屏，我们抢 scene）；
+//   `url.plus.on` 存在 = tctx 装上之后仍然补发（0.3.34 的 2.2 s + 5 s）。
+//
+// Aevon(262) 把 0.3.36 判了：放行 = 系统那份全屏窗先提交，我们 150 ms 后把
+// scene 搬进卡，留下一个空的全屏窗 —— 用户看到的就是「先全屏、再浮窗、全屏黑」，
+// 与 0.3.25 一模一样。这不是新缺陷，是把已经判死过的形状又走了一遍。
+extern int AevonURLPassOn(void);
+extern int AevonURLPlusOn(void);
 // 0.2.36 — 「系统要普通全屏打开这个 App 了，把正在承载它的卡片让开」。
 // 只在主线程有效（`closeCard` 动 scene / window）；返回 1 = 真的拆了一张卡。
 extern int AevonCardYieldForFullscreen(const char *bundle);
@@ -3866,7 +3875,7 @@ static volatile int AevonDeliverWaits = 0;
 static volatile int AevonDenyTctxOk = 0;
 static long AevonDenyTctxTries = 0;
 // 0.3.36 — 这一次接管是「吞掉」还是「放行」。
-// 1 = 吞（0.3.35 的行为，`url.swallow.on`）；0 = 放行（默认，系统自己送 URL）。
+// 1 = 吞（**0.3.37 默认**）；0 = 放行（0.3.36 的默认，`url.pass.on` 才开）。
 // `AevonTctxInjectURL` 必须看这一位：放行时系统会自己把 URL 装进新 scene 的
 // transitionContext，我们再 `setActions:` 一次就是叠两份 —— 那正是「一次 openURL
 // 过两钩 ⇒ 两张卡」的老病（`AevonLandingClaim` 那一条的同类）。
@@ -4571,11 +4580,31 @@ static void AevonURLDeliverShot(int tick, int shotsLeft) {
     // 全部秒进选好友页。也就是说 QQ 冷启动时**不听 transitionContext 里那份**，
     // 只认 scene 已经连上之后 `sendActions:` 送进去的那份。
     //
-    // 所以这里不再 return：tctx 还在装（它是原生形状，不该放弃），但冷启动要
-    // 再补一发。补的那一发**必须晚一点**：0.3.29 的三发落在启动窗口里
-    // （deny 02 → boot 03 → 三发 03/04/06）全部被「首页恢复」盖掉，而
-    // Aevon(257) 冷启动成功那几次 URL 都在 deny 之后 3 s 才到。2.2 s 就是这个
-    // 时间差；热启动不补（App 早就连上 scene，多补一发只会叠面板）。
+    // 0.3.34 据此改成「不再 return」，然后被 0.3.37 推翻（见下一段）。
+    // 这段论证保留，因为它是「当初为什么补发」的唯一记录：
+    // tctx 还在装（它是原生形状，不该放弃），但冷启动要再补一发。补的那一发
+    // **必须晚一点**：0.3.29 的三发落在启动窗口里（deny 02 → boot 03 → 三发
+    // 03/04/06）全部被「首页恢复」盖掉，而 Aevon(257) 冷启动成功那几次 URL
+    // 都在 deny 之后 3 s 才到。2.2 s 就是这个时间差。
+    // 0.3.37 — **tctx 装上就收手**（回到 0.3.32 那张嘴）。
+    //
+    // Aevon(257)（0.3.32）冷启动能出分享页，Aevon(259)（0.3.34）不能；两次的
+    // `tctx put ok=1 had=0` 逐字相同，唯一差别是 0.3.34 去掉了「装上就收手」，
+    // 2.2 s 后又补了一发 `sendActions:` —— 那几发之后 QQ 回首页。
+    // 冷启动那一份 action 送第二次不是加固，是把**已经发生的一次打开**再打开
+    // 一次，App 用首页响应第二次。
+    //
+    // 0.3.34 那句「tctx 装上 ≠ 送达」本身没错，错在据此推出「所以要补发」：
+    // 0.3.32 的样本证明 tctx 对冷启动是有效的。要再做「补发是否无害」的实验，
+    // 手建 `url.plus.on`，那时才走下面 0.3.34 的老逻辑。
+    if (AevonDenyTctxOk == 1 && AevonURLPlusOn() != 1) {
+        if (tick == 1) {
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: deliver tctx win=1 cold=%d skip=1 b=%s",
+                          AevonDenyCold, AevonDenyBundle] UTF8String]);
+        }
+        return;
+    }
     if (AevonDenyTctxOk == 1) {
         if (tick == 1) {
             int wait = (AevonDenyCold == 1) ? 2200 : 0;
@@ -4891,16 +4920,16 @@ int AevonPassSkipFlag = 0;
 
 /// 0.3.26 — **拒答 / 0.3.36 放行式接管**：记 URL、排一次我们自己的开卡。
 ///
-/// 返回 2 = **接管但放行**（0.3.36 默认）：不 return，原函数照常尾调，系统自己
+/// 返回 2 = **接管但放行**（0.3.36 的行为，`url.pass.on` 才开）：不 return，原函数照常尾调，系统自己
 /// 把 URL 写进新 scene 的 connection options —— 那是唯一被 QQ 认的通道
 /// （Aevon(260)：四次冷启动、每发 `deliver ok=1`，含 5.0 s 晚发，全停首页）。
-/// 返回 1 = 接管且吞掉（只有 `url.swallow.on` 存在才这样，= 0.3.35 的行为）。
+/// 返回 1 = 接管且吞掉（**0.3.37 默认**：不提交激活事务，就没有全屏窗）。
 /// 返回 0 = 不接管。
 ///
-/// 为什么放行还能是浮窗：URL 通道与呈现通道是两条。呈现这一侧我们一直是
-/// 「`createScene` 把初始 frame 改成 430×717，再把 scene 搬进自己的 presenter」
-/// （`act: frame birth` / `win: own retired` / `presenter cls=_UIScenePresenter`），
-/// 与系统有没有提交那次全屏事务无关。
+/// ⛔ 0.3.36 曾把放行当默认，Aevon(262) 当场复现了 0.3.25 的形状（先全屏 →
+/// 浮窗 → 全屏黑）：放行就意味着系统提交它自己的全屏事务，我们再 150 ms 后
+/// 把 scene 搬走，留下的只有一个空窗口。下面「放行还能是浮窗」那段是当时的
+/// 推理，前提已被证伪，保留只为记录。
 ///
 /// 三件事都不在钩子里同步做：
 ///   · 开卡推到 150 ms —— 拒答之后来源 App 的分享面板正在收，抢前台会打架；
@@ -4977,7 +5006,7 @@ static int AevonURLDenyTake(const char *bundle, const char *url, int kind, int s
     // 问题恰恰是「App 自己的首帧布局完成（boot + 4 s）之后投，还认不认」。
     // Aevon(260) 答了：四次 `deliver late r=1`，QQ 四次停首页 —— 这条只在
     // 强制回退（`url.swallow.on`）时还排。
-    if (swallow == 1 && AevonDenyCold == 1) {
+    if (swallow == 1 && AevonDenyCold == 1 && AevonURLPlusOn() == 1) {
         int64_t token = AevonDenyAt;
         AevonLogRaw([[NSString stringWithFormat:
                       @"act: deliver late plan wait=5000 b=%s", bundle] UTF8String]);
@@ -6640,11 +6669,14 @@ static void AevonActInstall(NSMutableString *out) {
             //      `act: url dig miss … shape=UIActivityContinuationAction` 说明
             //      这一族的 URL 挖不出来，但接管本来就不需要 URL。
             //
-            // 所以：这一族纳入接管，且**两类都默认放行**（`swallow = 0`）——
-            // URL / activity 由 FrontBoard 自己写进新 scene 的 connection options，
-            // 那是「原生分享」的定义；浮窗由 `createScene` 改初始 frame + 事后
-            // 搬进 presenter 保证，两条通道互不相干。
-            // `url.swallow.on` 存在 = 回到 0.3.35 的「吞掉 + 自投」，一键回退。
+            // 0.3.36 据此把两类都改成放行（`swallow = 0`），前提是「URL 通道与
+            // 呈现通道互不相干」。Aevon(262) 否掉的正是这个前提：放行 = 系统提交
+            // 自己的全屏激活事务，我们 150 ms 后把 scene 搬进卡，系统那份窗口就
+            // 空了 —— 「先全屏、再浮窗、全屏黑」，与 0.3.25 一模一样。
+            //
+            // 0.3.37 起默认吞回（不提交激活 ⇒ 没有全屏窗可撤）；`url.pass.on`
+            // 才放行。活动继续那一族没有 URL 可重放，吞了等于 App 永远打不开，
+            // 所以**不接**（`act: float skip why=nourl`），原样交回系统。
             int shareTake = (payload == 1 && shareKind >= 1) ? 1 : 0;
             // activity 族不看 payload：0.3.34 的深挖有可能把 `payload` 写成 1
             // 而 `shareKind` 仍是 0，那种「挖到但没归族」的半截状态不该让接管落空。
@@ -6669,6 +6701,20 @@ static void AevonActInstall(NSMutableString *out) {
                                       @"act: deny skip why=scheme k=%d u=%.60s",
                                       shareKind, us != NULL ? us : "-"] UTF8String]);
                     }
+                } else if (actTake == 1 && us == NULL) {
+                    // 0.3.37 — 「活动继续」那一族、URL 挖不出来：**不接管**。
+                    //
+                    // 吞掉需要一份能重放的 URL；这一族没有（0.3.35 的
+                    // `act: url dig miss shape=UIActivityContinuationAction`），
+                    // 吞了就是 App 永远打不开，授权/支付直接断链。
+                    // 放行 + 建卡则是 0.3.36 的形状：系统全屏窗被抽空 ⇒ 黑。
+                    // 两条都不能走，所以原样交给系统 —— 用户看到的是「全屏」，
+                    // 至少流程是通的。等 tctx/payload 里能挖到 URL 再收进来。
+                    if (__sync_fetch_and_add(&AevonDenySkipLines, 1) < 8) {
+                        AevonLogRaw([[NSString stringWithFormat:
+                                      @"act: float skip why=nourl k=0 b=%s",
+                                      denyBundle] UTF8String]);
+                    }
                 } else if (AevonRedeliverUntil > 0 && AevonActMs() < AevonRedeliverUntil &&
                     strcmp(denyBundle, AevonDenyBundle) == 0) {
                     // 我们自己补投的那一下也会走到这里：放行一次，否则是自己拒自己。
@@ -6680,7 +6726,13 @@ static void AevonActInstall(NSMutableString *out) {
                     // 热启动那一种本来就已经「秒出」，放行对它同样成立（系统自己
                     // 送 URL，比我们造 action 更原生），所以不按冷热分流了 ——
                     // 分流只会多一条要维护的边界。
-                    int swallow = (AevonURLSwallowOn() == 1) ? 1 : 0;
+                    // 0.3.37 — 吞还是放行。**默认吞**：吞掉 = 不提交激活事务 =
+                    // 没有 FrontBoard 那个全屏窗可撤。放行必然带回它，我们 150 ms
+                    // 后把 scene 搬进卡，留下的就是一个空的全屏窗（Aevon(262) 的
+                    // 「先全屏 → 浮窗 → 全屏黑」，与 0.3.25 同一个形状）。
+                    // `url.pass.on` 存在才回到 0.3.36 的放行式接管；两个文件都在时
+                    // `url.swallow.on` 优先（0.3.36 的旧文件因此仍然算「强制吞」）。
+                    int swallow = (AevonURLPassOn() == 1 && AevonURLSwallowOn() != 1) ? 0 : 1;
                     int r = AevonURLDenyTake(denyBundle, us,
                                              shareTake == 1 ? shareKind : 0, swallow);
                     if (r == 1) {

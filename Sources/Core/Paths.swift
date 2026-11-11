@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.36"
+    public static let version = "0.3.37"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -338,6 +338,29 @@ public enum Aevon {
     /// URL —— 系统自己会把它送进 App。所以这一族也按放行接管处理，代价为零。
     /// 建 `url.activity.off` 可以把这一族退回去（继续全屏）。
     public static let urlActivityOffPath = "/var/mobile/Library/Logs/Aevon/url.activity.off"
+
+    /// 0.3.37 — **放行式接管的开闸**（存在 = 回到 0.3.36 的「放行 + 抢 scene」）。
+    ///
+    /// 0.3.36 让放行成为默认，Aevon(262) 当场复现了 0.3.25 的形状：
+    /// `act: float sw=0` → `act: float card` → 系统那份全屏窗被抽空 → 黑。
+    /// 原因不新：**放行 = 系统提交自己的全屏激活事务**，我们再 150 ms 后
+    /// 把 scene 搬进卡，等于对已提交的事务做撤销；撤销看得见，就是那一帧黑。
+    ///
+    /// 所以默认回到「吞掉」：不提交，就没有全屏窗可撤。吞掉之后 URL 由
+    /// transitionContext 那一份交给 App（0.3.32 冷启动能出分享页的正是这条路）。
+    /// 要复现 0.3.36 的放行形状时手建这个文件，不必换包。
+    public static let urlPassOnPath      = "/var/mobile/Library/Logs/Aevon/url.pass.on"
+
+    /// 0.3.37 — **tctx 装上之后还补不补发**（存在 = 回到 0.3.34 的 2.2 s + 5 s 补发）。
+    ///
+    /// Aevon(257)（0.3.32）冷启动能出分享页，Aevon(259)（0.3.34）不能，
+    /// 两次的 `tctx put ok=1 had=0` 一模一样；唯一差别是 0.3.34 去掉了
+    /// 「tctx 成功就收手」，2.2 s 后又发了 `sendActions:`。那几发之后 QQ 回首页。
+    /// 也就是说冷启动那一份 action 送第二次不是「加固」，是**把已有的一次打开
+    /// 再打开一次**，App 用首页响应第二次。
+    ///
+    /// 默认不再补发（= 0.3.32 的形状）。要再做「补发是否无害」的实验时建这个文件。
+    public static let urlPlusOnPath      = "/var/mobile/Library/Logs/Aevon/url.plus.on"
 
     /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
     ///

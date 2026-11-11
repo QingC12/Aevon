@@ -1051,6 +1051,26 @@ def main():
                   b"AevonURLActivityOn",
                   b"/var/mobile/Library/Logs/Aevon/url.swallow.on",
                   b"/var/mobile/Library/Logs/Aevon/url.activity.off",
+                  # 0.3.37 — **默认吞回去 + tctx 装上就收手。**
+                  #
+                  # Aevon(262)（0.3.36）当场复现了 0.3.25 的形状：`act: float sw=0`
+                  # → `act: float card` → 系统那份全屏窗被抽空 → 黑。四跳分享全一样，
+                  # 说明「放行 + 抢 scene」不是偶发，是结构：放行等于让 FrontBoard
+                  # 提交它自己的全屏事务，再搬走 scene 就只剩空窗。
+                  #
+                  # Aevon(257)（0.3.32）与 Aevon(259)（0.3.34）的 `tctx put ok=1 had=0`
+                  # 逐字相同：前者冷启动出分享页，后者回首页。两份日志的差别只有
+                  # 0.3.34 去掉「装上就收手」后多补的那几发 `sendActions:`。
+                  #
+                  # `act: deliver tctx win=1` 是「装上了就收手」的唯一读数；
+                  # `act: float skip why=nourl` 是活动继续族拿不到 URL 时退出的读数；
+                  # 两把新闸：`url.pass.on`（回到 0.3.36）/ `url.plus.on`（回到 0.3.34）。
+                  b"act: deliver tctx win=1 cold=%d skip=1 b=%s",
+                  b"act: float skip why=nourl k=0 b=%s",
+                  b"AevonURLPassOn",
+                  b"AevonURLPlusOn",
+                  b"/var/mobile/Library/Logs/Aevon/url.pass.on",
+                  b"/var/mobile/Library/Logs/Aevon/url.plus.on",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`
