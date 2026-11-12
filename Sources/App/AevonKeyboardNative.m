@@ -651,10 +651,60 @@ static UIView *AevonKbFindHostView(UIView *root, int depth) {
     return nil;
 }
 
+/// 0.4.33 — 宿主顶部那条**透明占位**的高度。
+///
+/// 316 把这件事量清楚了。同一台机器、同一个输入法，五家 App 的宿主高是：
+///
+///   微信 359   酷安 359   贴吧 359             ← 占位 0
+///   抖音 399                                   ← 占位 40
+///   Safari 419                                 ← 占位 60
+///
+/// 把占位减掉之后，五家的「键盘高」归一成**同一组值** `{359, 386, 404, 431}`：
+///
+///   抖音  399−40=359  426−40=386  444−40=404  471−40=431
+///   Safari 419−60=359 446−60=386  464−60=404  491−60=431
+///
+/// 键盘是硬件+输入法决定的，跟 App 无关 —— 五家能落回同一组，就说明那 40/60 不是
+/// 键盘的一部分，而是宿主顶部一条 0 子视图的 `_UIRemoteKeyboardPlaceholderView`：
+/// 它把整个键盘内容（键区、候选条、dock）从宿主顶往下推了 40/60，宿主自己跟着长高，
+/// 但那一条**不画任何东西**。
+///
+/// 于是 `hostH` 不是「键盘遮住屏幕多少」，而是「键盘 + 顶部空白」。我们按 hostH 报，
+/// App 就把输入条排到空白之上 ⇒ 用户看到的是「输入框被抬高了」。Safari 的空白最大
+/// （60），偏移也最大，连输入框都出画面了。
+///
+/// 判据只认形状（贴宿主顶边、宽度占满、高度 > 0、类名含 `Placeholder`），
+/// 不认具体类名 —— 私有类换个名字也还在那个位置。
+static CGFloat AevonKbHostTopSpacer(UIView *host) {
+    if (host == nil) return 0.0;
+    CGRect hostBounds = [host bounds];
+    if (hostBounds.size.height < 1.0) return 0.0;
+    NSArray *subs = [host subviews];
+    NSUInteger count = [subs count];
+    CGFloat best = 0.0;
+    for (NSUInteger i = 0; i < count && i < 16; i++) {
+        UIView *sv = [subs objectAtIndex:i];
+        if (sv == nil) continue;
+        NSString *cls = NSStringFromClass([sv class]);
+        if (cls == nil) continue;
+        if ([cls rangeOfString:@"Placeholder"].location == NSNotFound) continue;
+        CGRect f = [sv frame];
+        if (f.origin.y > 1.0) continue;                       // 只认贴顶边那条
+        if (f.size.height < 1.0) continue;
+        if (f.size.width + 8.0 < hostBounds.size.width) continue;   // 只认横向占满的
+        if (f.size.height > best) best = f.size.height;
+    }
+    // 占位比宿主还高只可能是量错（布局中/横屏），不参与。
+    if (best >= hostBounds.size.height) return 0.0;
+    return best;
+}
+
 static CGFloat AevonKbMeasuredCoverage(id keyboardWindow, CGFloat screenHeight,
-                                       CGFloat *outHostY, CGFloat *outHostH) {
+                                       CGFloat *outHostY, CGFloat *outHostH,
+                                       CGFloat *outSpacer) {
     if (outHostY != NULL) *outHostY = 0.0;
     if (outHostH != NULL) *outHostH = 0.0;
+    if (outSpacer != NULL) *outSpacer = 0.0;
     if (keyboardWindow == nil || ![keyboardWindow isKindOfClass:[UIView class]]) return 0.0;
     if (screenHeight < 1.0) return 0.0;
     UIView *win = (UIView *)keyboardWindow;
@@ -664,6 +714,8 @@ static CGFloat AevonKbMeasuredCoverage(id keyboardWindow, CGFloat screenHeight,
     if (outHostY != NULL) *outHostY = inWindow.origin.y;
     if (outHostH != NULL) *outHostH = inWindow.size.height;
     if (inWindow.size.height < 8.0) return 0.0;
+    CGFloat spacer = AevonKbHostTopSpacer(host);
+    if (outSpacer != NULL) *outSpacer = spacer;
     // 口径 = 「窗底到键盘顶」，**对窗的 origin 免疫**。
     //
     // 旧写法 `screenHeight − (win.y + host.y)` 默认「窗底 = App 世界底」，0.4.20 把窗
@@ -672,7 +724,7 @@ static CGFloat AevonKbMeasuredCoverage(id keyboardWindow, CGFloat screenHeight,
     // `[main bounds]` = 物理屏 (0,0,430,932)，键盘内容贴窗底 501..932
     // ⇒ footprint = 932 − 501 = 431，与 scene 空间里的占高（717 − 286）同值。
     CGRect winFrame = [win frame];
-    CGFloat footprint = winFrame.size.height - inWindow.origin.y;
+    CGFloat footprint = winFrame.size.height - inWindow.origin.y - spacer;
     if (footprint < 8.0 || footprint > screenHeight + 1.0) return 0.0;
     return footprint;
 }
@@ -823,11 +875,15 @@ static void AevonKbProbeAppInsets(id keyboardWindow) {
             // App 主窗贴屏幕底是卡片侧一直保证的，所以 shift = 物理屏高 − App 世界高。
             CGFloat shift = physicalH - wf.size.height;
             CGFloat hostManual = kbFrame.origin.y + inKbWin.origin.y - shift;
-            char line2[192];
+            // 0.4.33 — 顶部占位：宿主顶边要**再加上**这一段才是键盘真正露头的位置
+            // （那一条不画任何东西）。校验关系变成
+            //   `App 世界高 − (hostm + ph) == meas`
+            CGFloat spacer = AevonKbHostTopSpacer(host);
+            char line2[224];
             snprintf(line2, sizeof(line2),
-                     "app: kb: probe host=%.0fx%.0f@%.0f,%.0f hostm=%.0f\n",
+                     "app: kb: probe host=%.0fx%.0f@%.0f,%.0f hostm=%.0f ph=%.0f\n",
                      inKbWin.size.width, inKbWin.size.height,
-                     inKbWin.origin.x, inKbWin.origin.y, hostManual);
+                     inKbWin.origin.x, inKbWin.origin.y, hostManual, spacer);
             AevonKbLog(line2);
         }
     }
@@ -950,9 +1006,11 @@ static UIWindow *AevonKbKeyboardWindowLive(void) {
 // （全 0）就返回 0，由调用方决定怎么办，这里绝不编一个数。
 #define AEVON_KB_MAX_WINS 8
 static CGFloat AevonKbMeasureBest(CGFloat physicalH,
-                                  CGFloat *outHostY, CGFloat *outHostH, int *outCount) {
+                                  CGFloat *outHostY, CGFloat *outHostH,
+                                  CGFloat *outSpacer, int *outCount) {
     if (outHostY != NULL) *outHostY = 0.0;
     if (outHostH != NULL) *outHostH = 0.0;
+    if (outSpacer != NULL) *outSpacer = 0.0;
     if (outCount != NULL) *outCount = 0;
     id wins[AEVON_KB_MAX_WINS];
     int n = 0;
@@ -983,18 +1041,22 @@ static CGFloat AevonKbMeasureBest(CGFloat physicalH,
     CGFloat best = 0.0;
     CGFloat bestY = 0.0;
     CGFloat bestH = 0.0;
+    CGFloat bestSpacer = 0.0;
     for (int i = 0; i < n; i++) {
         CGFloat hy = 0.0;
         CGFloat hh = 0.0;
-        CGFloat footprint = AevonKbMeasuredCoverage(wins[i], physicalH, &hy, &hh);
+        CGFloat sp = 0.0;
+        CGFloat footprint = AevonKbMeasuredCoverage(wins[i], physicalH, &hy, &hh, &sp);
         if (footprint > best) {
             best = footprint;
             bestY = hy;
             bestH = hh;
+            bestSpacer = sp;
         }
     }
     if (outHostY != NULL) *outHostY = bestY;
     if (outHostH != NULL) *outHostH = bestH;
+    if (outSpacer != NULL) *outSpacer = bestSpacer;
     return best;
 }
 
@@ -1317,6 +1379,7 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     CGFloat realH = 0.0;
     CGFloat hostY = 0.0;
     CGFloat hostH = 0.0;
+    CGFloat spacer = 0.0;
     int winCount = 0;
     const char *src = "none";
     BOOL showNote = [(NSString *)name rangeOfString:@"Show"].location != NSNotFound;
@@ -1324,7 +1387,7 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     BOOL offFrame = (end.origin.y >= worldH - 1.0);
     if (visible && [NSThread isMainThread]) {
         // `[UIApplication windows]` 只能在主线程问；不在主线程就整段跳过。
-        realH = AevonKbMeasureBest(physicalH, &hostY, &hostH, &winCount);
+        realH = AevonKbMeasureBest(physicalH, &hostY, &hostH, &spacer, &winCount);
         // 比 App 世界还高的读数只能是量错（多窗重叠 / 非竖屏），不参与决策。
         if (realH > worldH + 1.0) realH = 0.0;
         if (realH >= 8.0) {
@@ -1355,14 +1418,14 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
 
     if (AevonKbNoteNotes < 96) {
         AevonKbNoteNotes += 1;
-        char line[368];
+        char line[384];
         const char *noteName = [(NSString *)name UTF8String];
         snprintf(line, sizeof(line),
-                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f n=%d in=%s src=%s fix=%d vis=%d\n",
+                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f ph=%.0f n=%d in=%s src=%s fix=%d vis=%d\n",
                  noteName != NULL ? noteName : "?",
                  end.size.width, end.size.height, end.origin.x, end.origin.y,
-                 worldH, physicalH, shift, realH, hostY, hostH, winCount, inSpace, src,
-                 (int)visible, (int)AevonKbShown);
+                 worldH, physicalH, shift, realH, hostY, hostH, spacer, winCount,
+                 inSpace, src, (int)visible, (int)AevonKbShown);
         AevonKbLog(line);
     }
 
@@ -1524,7 +1587,8 @@ static CGFloat AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, B
     // 只读取证：量出来的真实占高仍然打日志，方便对照公式的余量够不够。
     CGFloat hostY = 0.0;
     CGFloat hostH = 0.0;
-    CGFloat measured = AevonKbMeasuredCoverage(keyboardWindow, screenHeight, &hostY, &hostH);
+    CGFloat spacer = 0.0;
+    CGFloat measured = AevonKbMeasuredCoverage(keyboardWindow, screenHeight, &hostY, &hostH, &spacer);
     if (measured > screenHeight) measured = screenHeight;
     if (measured > 8.0) AevonKbLastRealH = measured;
 
@@ -1545,11 +1609,11 @@ static CGFloat AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, B
 
     if (AevonKbInterNotes < 16) {
         AevonKbInterNotes += 1;
-        char line[288];
+        char line[304];
         snprintf(line, sizeof(line),
-                 "app: kb: inter orig=%.0f screen=%.0f kb=%.0f hf=%.2f formula=%.0f meas=%.0f host=%.0f,%.0f -> %.0f\n",
+                 "app: kb: inter orig=%.0f screen=%.0f kb=%.0f hf=%.2f formula=%.0f meas=%.0f host=%.0f,%.0f ph=%.0f -> %.0f\n",
                  orig, screenHeight, keyboardHeight, AevonKbHeightFraction,
-                 answer, measured, hostY, hostH, chosen);
+                 answer, measured, hostY, hostH, spacer, chosen);
         AevonKbLog(line);
     }
     // 0.4.24 — 只读取证：App 收到这个值之后，到底给键盘留了多少。

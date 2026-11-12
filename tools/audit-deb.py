@@ -1448,7 +1448,9 @@ def main():
                       # （458 > 真实 431，自带 27 pt 余量），而测量反而只报「此刻」
                       # 的键盘、把候选条后到的那 45 pt 漏掉 ⇒ 输入框被盖。
                       # `meas` / `host` 保留为**只读取证**，不参与决策。
-                      b"app: kb: inter orig=%.0f screen=%.0f kb=%.0f hf=%.2f formula=%.0f meas=%.0f host=%.0f,%.0f -> %.0f",
+                      # 0.4.33：`ph=` 是宿主顶部那条透明占位的高度，`meas` 已经是
+                      # 扣掉占位之后的真值（`host 高 − ph`）。
+                      b"app: kb: inter orig=%.0f screen=%.0f kb=%.0f hf=%.2f formula=%.0f meas=%.0f host=%.0f,%.0f ph=%.0f -> %.0f",
                       # 0.4.25 — App 的 safeArea 读数（只读取证，配额 6）。
                       # 这是 `_UIRemoteKeyboards` 的**直接输出终点**：系统算完
                       # intersectionHeight 就把它写进 window.safeAreaInsets，App 从那儿读。
@@ -1464,8 +1466,10 @@ def main():
                       # 第二行：键盘在 App 世界的顶边。`hostc` 已被 309 证伪 —— App 主窗
                       # 在进程内的 origin 恒为 0（宿主在外部把 scene 摆到屏幕 215），
                       # 跨 window 转换拿不到那 215，退化成窗内坐标 501 而真值 286。
-                      # 只留手工算法，校验关系 `App 世界高 − hostm == meas`。
-                      b"app: kb: probe host=%.0fx%.0f@%.0f,%.0f hostm=%.0f",
+                      # 只留手工算法，校验关系 `App 世界高 − (hostm + ph) == meas`。
+                      # 0.4.33：`ph=` 是宿主顶部那条透明占位（抖音 40、Safari 60、
+                      # 微信/酷安/贴吧 0）；键盘真正露头的位置是 `hostm + ph`。
+                      b"app: kb: probe host=%.0fx%.0f@%.0f,%.0f hostm=%.0f ph=%.0f",
                       # 0.4.26 — 键盘通知里的 frame 用的是哪套坐标（只读取证 + 按判据修正）。
                       #
                       # 310 把两条候选出口都排除了：`safe=…,34,…` 十次采样恒为 34
@@ -1503,7 +1507,11 @@ def main():
                       #              315 在第二次会话里恒为 `host=932,289`：那不是键盘
                       #              的高度（289），是量错了窗 ⇒ 改成「所有候选里取
                       #              footprint 最大」。`n=1` 却仍 `meas=0` 才算真的没有。
-                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f n=%d in=%s src=%s fix=%d vis=%d",
+                      #   ph=        0.4.33 起：宿主顶部那条透明占位的高。
+                      #              316 五家 App 的宿主高减去它之后归一到同一组
+                      #              `{359,386,404,431}` —— 抖音 40、Safari 60、
+                      #              微信/酷安/贴吧 0。`meas` 已扣掉它。
+                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f ph=%.0f n=%d in=%s src=%s fix=%d vis=%d",
                       # 修正那一拍：0.4.29 起只有一种写法 —— 整块换成真值
                       # （y = world − meas、高 = meas、底边恒 = world 底）。
                       # `src=` 标明真值来源（`meas` 现场量 / `last` 上次已知），
