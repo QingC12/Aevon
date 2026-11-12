@@ -211,6 +211,8 @@ static void AevonKbLog(const char *line) {
 /// 每类读数各有配额：一次输入会反复问交集高度，日志本身不能变成负担。
 static volatile int AevonKbInterNotes = 0;
 static volatile int AevonKbBoundsNotes = 0;
+// 0.4.15 — 系统原值只打一次（`-bounds` 没被我们接手的那个数）。配额 1，不刷屏。
+static volatile int AevonKbSysNotes = 0;
 static volatile int AevonKbWinNotes = 0;
 static volatile int AevonKbShellNotes = 0;
 
@@ -523,12 +525,32 @@ static CGRect AevonKbBounds(id self, SEL _cmd) {
         if (AevonKbAppScene != nil) {
             CGRect box = AevonKbSceneBounds(AevonKbAppScene);
             if (!CGRectIsEmpty(box)) {
+                // 0.4.15 — 系统原值只打一次：它回答「我们到底改掉了什么」。
+                // `-bounds` 是计算属性，`AevonKbOrigBounds` 就是系统原实现，只读。
+                // 与下面那行并排看：`sys` 的 origin 若也是 (0,0)，说明 215 这个偏移
+                // 从头到尾不在 `UIScreen` 上，键盘贴 0..717 就是必然。
+                if (AevonKbSysNotes == 0) {
+                    AevonKbSysNotes = 1;
+                    if (AevonKbOrigBounds != NULL) {
+                        CGRect sysBox = AevonKbOrigBounds(self, _cmd);
+                        char sline[224];
+                        snprintf(sline, sizeof(sline),
+                                 "app: kb: bounds sys=%.0fx%.0f@%.0f,%.0f (hook off)\n",
+                                 sysBox.size.width, sysBox.size.height,
+                                 sysBox.origin.x, sysBox.origin.y);
+                        AevonKbLog(sline);
+                    }
+                }
+                // 0.4.15 — origin 一起打。0.4.14 只打了尺寸，于是「App 认为屏幕从
+                // 哪一点开始」这件事从来没被记录过 —— 而键盘窗是按 `-bounds` 摆的，
+                // 若它的原点恒为 (0,0)，键盘就永远贴在 0..717，离屏底 215。
                 if (AevonKbBoundsNotes < 6) {
                     AevonKbBoundsNotes += 1;
-                    char line[192];
+                    char line[224];
                     snprintf(line, sizeof(line),
-                             "app: kb: bounds -> %.0fx%.0f (hosted=%d)\n",
+                             "app: kb: bounds -> %.0fx%.0f@%.0f,%.0f (hosted=%d)\n",
                              box.size.width, box.size.height,
+                             box.origin.x, box.origin.y,
                              1 - (int)AevonKbIsFrontMost());
                     AevonKbLog(line);
                 }
@@ -648,10 +670,48 @@ static void AevonKbDumpChain(UIWindow *window, const char *why) {
 
     UIWindowScene *scene = ((id (*)(id, SEL))objc_msgSend)(window, @selector(windowScene));
     if (scene != nil) {
+        // 0.4.15 — scene 的**物理落点**（origin 才是关键）。
+        //
+        // 0.4.14 只试了 `-_frame`，`UIWindowScene` 没有这条选择子 ⇒ 每份日志都是
+        // `scene=0x0@0,0`，等于什么都没读到。而「键盘悬空 215 + 下面透明」这个形状，
+        // 唯一还没被排除的变量就是它：App 的承载面到底住在屏幕 0..717 还是 215..932。
+        //
+        // 三级回落，全部先 `respondsToSelector:` 再读（问是免费的，裸调会杀进程）：
+        //   ① `-uiSettings` → `-frame`        （UIScene 私有，最常见）
+        //   ② `-_scene` → `-settings` → `-frame`（FBScene 这一层，兜底）
+        //   ③ `-_frame`                        （0.4.14 那条，多半不答）
+        // 日志里带 `src=` 指明哪一级命中，拿不到就写 `none` —— 不拿 0 冒充。
         CGRect sf = CGRectZero;
-        SEL frameSel = NSSelectorFromString(@"_frame");
-        if ([scene respondsToSelector:frameSel]) {
-            sf = ((CGRect (*)(id, SEL))objc_msgSend)(scene, frameSel);
+        const char *src = "none";
+        SEL uiSel = NSSelectorFromString(@"uiSettings");
+        SEL frameSel = NSSelectorFromString(@"frame");
+        if ([scene respondsToSelector:uiSel]) {
+            id us = ((id (*)(id, SEL))objc_msgSend)(scene, uiSel);
+            if (us != nil && [us respondsToSelector:frameSel]) {
+                sf = ((CGRect (*)(id, SEL))objc_msgSend)(us, frameSel);
+                src = "ui";
+            }
+        }
+        if (src[0] == 'n') {
+            SEL fbsSel = NSSelectorFromString(@"_scene");
+            SEL setSel = NSSelectorFromString(@"settings");
+            if ([scene respondsToSelector:fbsSel]) {
+                id fb = ((id (*)(id, SEL))objc_msgSend)(scene, fbsSel);
+                if (fb != nil && [fb respondsToSelector:setSel]) {
+                    id st = ((id (*)(id, SEL))objc_msgSend)(fb, setSel);
+                    if (st != nil && [st respondsToSelector:frameSel]) {
+                        sf = ((CGRect (*)(id, SEL))objc_msgSend)(st, frameSel);
+                        src = "fbs";
+                    }
+                }
+            }
+        }
+        if (src[0] == 'n') {
+            SEL plain = NSSelectorFromString(@"_frame");
+            if ([scene respondsToSelector:plain]) {
+                sf = ((CGRect (*)(id, SEL))objc_msgSend)(scene, plain);
+                src = "raw";
+            }
         }
         CGRect cb = CGRectZero;
         id space = ((id (*)(id, SEL))objc_msgSend)(scene, @selector(coordinateSpace));
@@ -659,8 +719,8 @@ static void AevonKbDumpChain(UIWindow *window, const char *why) {
             cb = ((CGRect (*)(id, SEL))objc_msgSend)(space, @selector(bounds));
         }
         snprintf(line, sizeof(line),
-                 "app: kb: tree %s scene=%.0fx%.0f@%.0f,%.0f co=%.0fx%.0f@%.0f,%.0f\n",
-                 why, sf.size.width, sf.size.height, sf.origin.x, sf.origin.y,
+                 "app: kb: tree %s scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f\n",
+                 why, sf.size.width, sf.size.height, sf.origin.x, sf.origin.y, src,
                  cb.size.width, cb.size.height, cb.origin.x, cb.origin.y);
         AevonKbLog(line);
     }

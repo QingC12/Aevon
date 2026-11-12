@@ -1415,7 +1415,12 @@ def main():
                       b"app: kb: native on installed=%d mask=0x%x bundle=%s",
                       # 钩子 4 —— `UIScreen.bounds` 换成了承载面尺寸。整套机制的核心
                       # 证词：没有它，App 仍然认为屏是 932，键盘就还会悬在 215 之上。
-                      b"app: kb: bounds -> %.0fx%.0f (hosted=%d)",
+                      b"app: kb: bounds -> %.0fx%.0f@%.0f,%.0f (hosted=%d)",
+                      # 0.4.15 — `-bounds` 的系统原值（钩子关着那个数），配额 1。
+                      # 与上一行并排看才知道「我们到底改掉了什么」：若 sys 的 origin
+                      # 也是 (0,0)，那 215 这个偏移从头到尾不在 `UIScreen` 上，
+                      # 键盘贴 0..717 就是必然，下一版该动的是 scene 落点不是窗。
+                      b"app: kb: bounds sys=%.0fx%.0f@%.0f,%.0f (hook off)",
                       # 钩子 1 —— 交集高度换算。`orig` / `screen` / `kb` 三个数必须
                       # 不同源：screen 读的是**钩过的** bounds，kb 读的是键盘窗 frame。
                       # 0.4.12 起两者都等于承载面高（717）⇒ 公式退化成恒等 = 真值，
@@ -1441,7 +1446,11 @@ def main():
                       #   co=    coordinateSpace.bounds（App 认为的屏幕）
                       #   main=  App 主窗（与键盘窗并排看，才知道谁短了）
                       b"app: kb: tree %s win=%.0fx%.0f@%.0f,%.0f bnd=%.0f,%.0f,%.0fx%.0f lvl=%.0f",
-                      b"app: kb: tree %s scene=%.0fx%.0f@%.0f,%.0f co=%.0fx%.0f@%.0f,%.0f",
+                      # 0.4.15 — `src=` 是哪一级读法命中的（ui / fbs / raw / none）。
+                      # 0.4.14 只试了 `-_frame`，`UIWindowScene` 没这条选择子 ⇒ 每份
+                      # 日志都是 `scene=0x0@0,0`，等于没读。这一栏必须有 src 才不会
+                      # 再把「读不到」误当成「落在 0,0」。
+                      b"app: kb: tree %s scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f",
                       b"app: kb: tree %s main=%.0fx%.0f@%.0f,%.0f %s",
                       # 逐层：类名 / frame / bounds.origin / clipsToBounds / 子视图数。
                       # `cl=1` 的那一层就是裁刀候选。
