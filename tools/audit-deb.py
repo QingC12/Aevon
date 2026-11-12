@@ -1494,6 +1494,20 @@ def main():
                       # 整个矩形（y = world − meas、高 = meas），`src=shift` 是量不到时的
                       # 退回。`rem=` 是让位高度，必须等于 `meas`（386/431/359/404）。
                       b"app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f",
+                      # 0.4.28 — 「第二条通道」取证（**只读**，一次会话两拍）。
+                      # 312：QQ 正确、微信先对后错，而 App 主窗十次都是 430x717
+                      # ⇒ 不是悬浮窗的事，是微信自己又排了一次版、没走通知。
+                      #   guide=  rootViewController.view 的 keyboardLayoutGuide.layoutFrame
+                      #   wg=     窗口自己的那份（有的 App 用 window 的）
+                      #   has=    (root, win) 两处能不能读到
+                      #   host=   键盘宿主在键盘窗里的矩形（物理口径，573..932）
+                      #   conv=   同一个矩形转到 App 主窗（进程内同原点 ⇒ 仍是 573）
+                      #   kbwin=  键盘窗自身 frame（验 932 那个假设）
+                      #   world=  App 世界高 − 宿主高（真顶边，358/331/286）
+                      # 判据：`guide≈world` ⇒ 指南是对的，换线；
+                      #       `guide≈conv.y`（573）⇒ 确诊，下一版改指南。
+                      b"app: kb: chan %s win=%.0fx%.0f root=%.0fx%.0f guide=%.0fx%.0f@%.0f,%.0f wg=%.0fx%.0f@%.0f,%.0f has=%d%d",
+                      b"app: kb: chan %s host=%.0fx%.0f@%.0f,%.0f conv=%.0fx%.0f@%.0f,%.0f kbwin=%.0fx%.0f@%.0f,%.0f world=%.0f",
                       # 钩子 2 —— 建键盘窗那一拍把 frame 写成承载面尺寸。`scale=0.0`
                       # 是横屏「不显示」，母版原样，不是 bug。
                       b"app: kb: win frame=%.0fx%.0f@%.0f,%.0f scale=%.1f hosted=%d",

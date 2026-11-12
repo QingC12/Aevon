@@ -901,6 +901,112 @@ static UIWindow *AevonKbKeyboardWindowLive(void) {
     return nil;
 }
 
+// ===========================================================================
+// 0.4.28 — 「第二条通道」取证：App 到底从哪儿读到键盘顶边
+// ===========================================================================
+//
+// 312 把症状钉得很准：**QQ 完全正确；微信先对，0.5 秒后输入框自己下移、被键盘盖住。**
+// 同一份日志里 App 主窗从头到尾都是 `430x717`（`probe win=430x717` 十次不变），
+// 卡片没缩、scene 没动 —— 所以这不是悬浮窗的问题，是**微信自己又排了一次版**，
+// 而它这次用的不是我们改过的那份通知。
+//
+// App 还能从两条路问到键盘，两条都不经过通知：
+//   · `-[UIView keyboardLayoutGuide]`（iOS 15+）：`layoutFrame` 由 UIKit 用
+//     「键盘在本窗口坐标系里的位置」现算，通知改了它也不会跟着改；
+//   · 自己转窗口：`[kbWin convertRect:hostFrame toWindow:appWin]`。
+// 在我们的进程里这两条只能看到**物理屏**那一套：键盘窗 `(0,0,430,932)`、
+// 宿主 `573..932`。而 App 的世界只有 717 ⇒ 照它们排版会把输入条放到 573，
+// 比真顶边 358 低 215 pt，整块塞进键盘里 —— 正是「下移被挡住」。
+//
+// 判据（一次会话两拍：0.06 s 与 1.00 s）：
+//   `guide≈358`            ⇒ 指南是对的，微信那 0.5 s 不在这一层，换线；
+//   `guide≈573`            ⇒ 确诊，下一版把它改成我们控制的矩形；
+//   `t0=358 而 t1=573`      ⇒ 最硬的证据：UIKit 是动画收尾后才把指南落到窗坐标。
+//
+// ⛔ 这一版**只读**：一个新钩子都没装，`installed` 仍是 5、`mask` 仍是 `0x1f`。
+// 只打日志，不改任何几何 —— QQ 这一版必须和 312 完全一样。
+static volatile int AevonKbChanProbes = 0;
+
+/// 读某个视图的 `keyboardLayoutGuide.layoutFrame`。两个选择子都先问
+/// `respondsToSelector:`：iOS 15 以下没有这个属性，私有改版的机型上也可能没有，
+/// 问一句比 catch 一次崩溃便宜。
+static BOOL AevonKbGuideFrame(UIView *owner, CGRect *out) {
+    if (out != NULL) *out = CGRectZero;
+    if (owner == nil || out == NULL) return NO;
+    SEL selGuide = NSSelectorFromString(@"keyboardLayoutGuide");
+    if (![owner respondsToSelector:selGuide]) return NO;
+    id guide = ((id (*)(id, SEL))objc_msgSend)(owner, selGuide);
+    if (guide == nil) return NO;
+    SEL selFrame = NSSelectorFromString(@"layoutFrame");
+    if (![guide respondsToSelector:selFrame]) return NO;
+    *out = ((CGRect (*)(id, SEL))objc_msgSend)(guide, selFrame);
+    return YES;
+}
+
+/// 两行一组：指南读到的矩形 + 窗口转换读到的矩形。配平关系：
+/// `world = App 世界高 − 宿主高`；`conv.y` 若等于 `host.y` 就说明窗口转换那一路
+/// 拿的是物理坐标（比 world 大 215）。
+static void AevonKbProbeChannels(const char *tag) {
+    if (AevonKbChanProbes >= 24) return;
+    if (![NSThread isMainThread]) return;
+    UIWindow *appWin = AevonKbAppMainWindow();
+    if (appWin == nil) return;
+    AevonKbChanProbes += 1;
+
+    UIView *rootView = nil;
+    id rvc = ((id (*)(id, SEL))objc_msgSend)(appWin, @selector(rootViewController));
+    if (rvc != nil) {
+        rootView = (UIView *)((id (*)(id, SEL))objc_msgSend)(rvc, @selector(view));
+    }
+    CGRect winGuide = CGRectZero;
+    CGRect rootGuide = CGRectZero;
+    BOOL hasWinGuide = AevonKbGuideFrame(appWin, &winGuide);
+    BOOL hasRootGuide = AevonKbGuideFrame(rootView, &rootGuide);
+
+    CGRect wf = [appWin frame];
+    CGRect rf = rootView != nil ? [rootView frame] : CGRectZero;
+    char line[288];
+    snprintf(line, sizeof(line),
+             "app: kb: chan %s win=%.0fx%.0f root=%.0fx%.0f guide=%.0fx%.0f@%.0f,%.0f wg=%.0fx%.0f@%.0f,%.0f has=%d%d\n",
+             tag, wf.size.width, wf.size.height, rf.size.width, rf.size.height,
+             rootGuide.size.width, rootGuide.size.height,
+             rootGuide.origin.x, rootGuide.origin.y,
+             winGuide.size.width, winGuide.size.height,
+             winGuide.origin.x, winGuide.origin.y,
+             (int)hasRootGuide, (int)hasWinGuide);
+    AevonKbLog(line);
+
+    UIWindow *kbWin = AevonKbKeyboardWindowLive();
+    CGRect inKb = CGRectZero;
+    CGRect inWin = CGRectZero;
+    if (kbWin != nil) {
+        UIView *host = AevonKbFindHostView(kbWin, 4);
+        if (host != nil) {
+            inKb = [host convertRect:[host bounds] toView:kbWin];
+            inWin = [host convertRect:[host bounds] toWindow:appWin];
+        }
+    }
+    CGRect kbf = kbWin != nil ? [kbWin frame] : CGRectZero;
+    CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
+    char line2[288];
+    snprintf(line2, sizeof(line2),
+             "app: kb: chan %s host=%.0fx%.0f@%.0f,%.0f conv=%.0fx%.0f@%.0f,%.0f kbwin=%.0fx%.0f@%.0f,%.0f world=%.0f\n",
+             tag, inKb.size.width, inKb.size.height, inKb.origin.x, inKb.origin.y,
+             inWin.size.width, inWin.size.height, inWin.origin.x, inWin.origin.y,
+             kbf.size.width, kbf.size.height, kbf.origin.x, kbf.origin.y,
+             inKb.size.height > 8.0 ? worldH - inKb.size.height : 0.0);
+    AevonKbLog(line2);
+}
+
+/// 一次会话两拍。0.06 s 抓「刚起来、微信排对了」那一拍，1.00 s 抓「已经下移」那一拍。
+/// 两拍对比就能分清是我们的值不对，还是 UIKit 在动画收尾后又换了一套口径。
+static void AevonKbScheduleChannelProbes(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbProbeChannels("t0"); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.00 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbProbeChannels("t1"); });
+}
+
 // 0.4.27 — 通知里那个 frame，**y 用什么、高用什么**。
 //
 // 311 把两条通道的错法同时钉死了。同一拍的三组读数：
@@ -981,6 +1087,14 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
                  end.size.width, end.size.height, end.origin.x, end.origin.y,
                  worldH, physicalH, shift, realH, hostY, hostH, (int)screenSpace);
         AevonKbLog(line);
+    }
+
+    // 0.4.28 — 会话级两拍取证（见上面 `AevonKbProbeChannels` 那一节）。
+    // 挂在 `DidShow` 上而**不**挂在每条通知上：一次弹键盘只会来一条，两拍探针
+    // 正好落在「已经排好版」与「0.5 s 之后」两个时刻，配对数不会乱。
+    if (screenSpace
+        && [(NSString *)name isEqualToString:UIKeyboardDidShowNotification]) {
+        AevonKbScheduleChannelProbes();
     }
 
     if (!screenSpace || !AevonKbNoteFixOn) {
