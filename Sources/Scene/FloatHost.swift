@@ -4377,61 +4377,56 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             content.frame.size.width, content.frame.size.height,
             content.frame.minX, content.frame.minY,
             scale, canvasOriginY, canvasHeight, bars, why))
-        noteFacePlacement(why)
+        noteSurfaceMapping(why)
     }
 
-    /// 0.4.16 — 量「App 的渲染面在屏幕上被摆在哪」。**只读，不改任何几何。**
+    /// 0.4.18 — 量「App 的画面到底被摆在哪、按几倍画」。**只读，不改任何几何。**
     ///
-    /// Aevon(300) 把前两步钉死了：
-    ///   ① `app: kb: bounds sys=430x717@0,0 (hook off)` —— 系统原值就是 717，
-    ///      说明我们钩 `-bounds` 是**空操作**（display 被改小之后，`UIScreen.bounds`
-    ///      本来就跟着 display 走）；母版那条「关钩子读真屏 932」在 Aevon 里永远
-    ///      读不到 932。
-    ///   ② `frame drift now=430x717@0 want=430x717@215` → 收起时反过来 `@215→@0`
-    ///      —— 键盘态 scene 的落点最终确实是 215，补写成功。
+    /// 302 的报障变了形状：**键盘悬空 + 键盘下方到屏幕底是空白透明**。
+    /// 这一条直接推翻「映射 1:1」这个前提 —— 因为 App 侧 `UIInputSetHostView`
+    /// 是 `f=0,376,430x341`（376+341=717，贴 App 世界的底），宿主侧 `content`
+    /// 是 430x717@0,0、`card` 是 430x717@0,215，两边都指向「键盘底 = 卡片底 = 屏底」。
+    /// 键盘却悬空 ⇒ **屏幕上的像素不服从这两个 frame**。
     ///
-    /// 于是「scene 在 215」「键盘窗 717 贴窗底」「root=717」三个数全对，画面却还是
-    /// 悬空 + 下半透明 ⇒ 只剩一个从没量过的变量：**内容层（`_UIScenePresentationView`）
-    /// 在宿主 window 里的绝对落点**。系统每次写 settings 都会把它按 scene 的 frame
-    /// 重设成「原点 (0,0)、尺寸 430x717」（见 `reassertCanvas` 那段），若它真的被摆在
-    /// 宿主 window 的 0，那 App 的一切都在物理 0..717，而卡片在 215..932 —— 症状
-    /// 就是这个形状，一个像素都不差。
+    /// 只剩三种可能，这一行把三种一起量出来：
+    ///   ① `t=` 的 d 不是 1.000（`kb geom` 只打了 a）—— 内容是纵向压过的；
+    ///   ② `bou=` 不是 430x717，或 `abs=` 不是 @0,215 —— 承载面不在卡片原点；
+    ///   ③ `sub=` 那一层（`_UIContextLayerHostView`，真正承载远端渲染面）的
+    ///      `b=` / `l=` 比 `cont` 高 —— 932 的画面被塞进 717 的视图里压缩显示，
+    ///      空出来的那截（717×215÷932 ≈ 165 pt）就是用户看到的「下方空白透明」。
     ///
-    /// 输出一行：face 自己的类名/frame、换算到宿主 window 的绝对矩形、四层父链。
-    /// 父链是为了看「谁把它摆在 0」——只看 face 自己的 frame 分不出坐标系。
-    private func noteFacePlacement(_ why: String) {
+    /// 0.4.16 那版在这里找「类名含 ScenePresentation 的子视图」，永远 `none` ——
+    /// `content` 本身就是 `_UIScenePresentationView`，它的唯一子视图是渲染面宿主。
+    private func noteSurfaceMapping(_ why: String) {
         guard let content = content else { return }
-        var face: UIView? = nil
-        for sub in content.subviews where NSStringFromClass(type(of: sub)).contains("ScenePresentation") {
-            face = sub
-            break
+        let t = content.transform
+        var abs = content.frame
+        var winRect = CGRect.zero
+        if let host = window {
+            abs = content.convert(content.bounds, to: host)
+            winRect = host.frame
         }
-        guard let pv = face else {
-            Log.write(String(format: "win: kb face none subs=%d (%@)",
-                             content.subviews.count, why))
-            return
-        }
-        var abs = pv.frame
-        if let host = self.window {
-            abs = pv.convert(pv.bounds, to: host)
-        }
-        var chain: [String] = []
-        var cur: UIView? = pv
-        var depth = 0
-        while let v = cur, depth < 4 {
-            chain.append(String(format: "%@@%.0f,%.0f",
-                                NSStringFromClass(type(of: v)),
-                                v.frame.minX, v.frame.minY))
-            cur = v.superview
-            depth += 1
-        }
+        let scr = UIScreen.main.bounds
         Log.write(String(format:
-            "win: kb face %@@%.0f,%.0f b=%.0fx%.0f abs=%.0fx%.0f@%.0f,%.0f chain=%@ (%@)",
-            NSStringFromClass(type(of: pv)),
-            pv.frame.minX, pv.frame.minY,
-            pv.bounds.width, pv.bounds.height,
+            "win: kb surf cont=%.0fx%.0f@%.0f,%.0f bou=%.0fx%.0f t=%.3f,%.3f,%.3f,%.3f abs=%.0fx%.0f@%.0f,%.0f win=%.0fx%.0f@%.0f,%.0f scr=%.0fx%.0f (%@)",
+            content.frame.width, content.frame.height,
+            content.frame.minX, content.frame.minY,
+            content.bounds.width, content.bounds.height,
+            t.a, t.b, t.c, t.d,
             abs.width, abs.height, abs.minX, abs.minY,
-            chain.joined(separator: " < "), why))
+            winRect.width, winRect.height, winRect.minX, winRect.minY,
+            scr.width, scr.height, why))
+        let sub = content.subviews.first
+        let subCls = sub == nil ? "none" : NSStringFromClass(type(of: sub!))
+        let sf = sub?.frame ?? .zero
+        let sb = sub?.bounds ?? .zero
+        let sl = sub?.layer.bounds ?? .zero
+        Log.write(String(format:
+            "win: kb surf sub=%@ f=%.0fx%.0f@%.0f,%.0f b=%.0fx%.0f l=%.0fx%.0f clip=%d nat=%.0fx%.0f subs=%d (%@)",
+            subCls, sf.width, sf.height, sf.minX, sf.minY,
+            sb.width, sb.height, sl.width, sl.height,
+            content.clipsToBounds ? 1 : 0,
+            natural.width, natural.height, content.subviews.count, why))
     }
 
     @discardableResult

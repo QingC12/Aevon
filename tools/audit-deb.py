@@ -631,11 +631,15 @@ def main():
                   b"win: corner w=%.0f r=%.0f pct=%.1f",
                   b"win: lift one shot ",
                   b"win: band report ",
-                  # 0.4.16 — 「App 的渲染面在屏幕上被摆在哪」。300 已经证到
-                  # `-bounds` 系统原值就是 717（钩子空操作）、scene 落点最终是 215、
-                  # root=窗=717，三个数全对而画面悬空 ⇒ 只剩内容层绝对落点没量过。
-                  # 这一行缺失等于这一版白做，必须钉住。
-                  b"win: kb face %@@%.0f,%.0f b=%.0fx%.0f abs=%.0fx%.0f@%.0f,%.0f chain=",
+                  # 0.4.18 — 「画面到底被摆在哪、按几倍画」。302 的报障是
+                  # 「键盘悬空 + 下方到屏底空白透明」，而两侧 frame 都自洽 ⇒
+                  # 像素不服从 frame。这一对必须同时在场：第一行给映射
+                  # （transform 四分量 / bounds / 换算到 window 的绝对矩形 / 宿主
+                  # window frame / SpringBoard 屏高），第二行给远端渲染面宿主
+                  # （`_UIContextLayerHostView`）的 frame / bounds / layer.bounds。
+                  # 0.4.16 那条 `kb face` 已删（content 本身就是承载面，找子视图永远 none）。
+                  b"win: kb surf cont=%.0fx%.0f@%.0f,%.0f bou=%.0fx%.0f t=%.3f,%.3f,%.3f,%.3f abs=",
+                  b"win: kb surf sub=%@ f=%.0fx%.0f@%.0f,%.0f b=%.0fx%.0f l=%.0fx%.0f clip=%d nat=",
                   b"win: style follow ",
                   # 0.1.31 — 锁屏 / 通知中心 / 控制中心盖上来时整层让开，
                   # 以及恢复显示后那一次「把承载面动一下」。
