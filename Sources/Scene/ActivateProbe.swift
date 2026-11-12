@@ -379,6 +379,17 @@ public func AevonBGKeepDisplay() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlDisplayKeepPath) ? 1 : 0
 }
 
+/// 0.3.60 — 分享族 URL 要不要**按下来等卡在屏上**再交回（`url.core.defer.off`
+/// 存在 = 不按，立刻交回，行为等于 0.3.59）。
+///
+/// 依据写在 `Aevon.urlCoreDeferOffPath` 上：母版替身 `0x4c770` 在 `0x4c8e0`
+/// 用 `dispatch_after(0.5 s)` 把原实现押后，块里才交回全部七个实参。我们这一版
+/// 押后的判据不是毫秒，是 `AevonCardIsUpFor` 真答 1（卡片在屏上），最多等 2.0 s。
+@_cdecl("AevonURLDeferOff")
+public func AevonURLDeferOff() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlCoreDeferOffPath) ? 1 : 0
+}
+
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
 ///
 /// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、

@@ -193,6 +193,10 @@ extern int AevonBGOn(void);
 /// 0.3.58 — A/B：`url.display.keep` 存在 = `_openURLCore` 的 `display:` 原样透传
 /// （不切成 nil）。默认切，切之前会先记下它原本的类名。
 extern int AevonBGKeepDisplay(void);
+/// 0.3.60 — **延后交回**的关闸（`url.core.defer.off` 存在 = 分享族 URL 也立刻
+/// 交给原实现，行为等于 0.3.59）。默认延后：等卡在屏上再交，母版 0x4c770 里
+/// 那段 `dispatch_after` 说的是同一件事，它固定 0.5 s，我们等「卡在屏上」。
+extern int AevonURLDeferOff(void);
 /// 0.3.54 — 把一个指定的 scene 挂进新的卡片窗口（Swift 侧 `float`）。
 /// 返回 1 = 已经进了建卡链；0 = 参数 / 线程不对，调用方当场回落。
 extern int AevonOwnFloatScene(const char *bundle, void *scene);
@@ -3761,6 +3765,136 @@ static void AevonBGInstall(NSMutableString *out) {
      AevonBGOn() == 1 ? @"on" : @"off"];
 }
 
+// MARK: - 0.3.60 延后交回（母版 0x4c770 里那一段）
+
+/// **母版到底怎么做到「无全屏 + 面板照出」，这一格是缺的另一半。**
+///
+/// 0.3.58/0.3.59 只做了 `setBackground:`（L2，显示层），URL 仍然**立刻**交给原实现。
+/// Aevon(283) 把结果摆了出来：三次冷分享 `bg: set background was=0 now=1` 都在，
+/// 全屏确实没了、卡也确实起来了（`cold adopt done card=1`），可整份日志里
+/// `page sheet … box=717`（卡里出面板）**一条都没有** —— QQ 在后台状态收到那条
+/// URL，处理不掉也不报错，卡里只能停在首页。
+///
+/// 母版的替身（`0x4c770`）在这件事上是这样写的：
+///
+///   4c8c0: cbz  x26, #0x4c9d8        ; url 串长度 0 ⇒ 当场交回
+///   4c8c4: bl   sub_4d708            ; 它自己的路由判据（isEnabled + split 开关 + 长度）
+///   4c8d0: bl   sub_4d820            ; 这次要不要由我托着
+///   4c8e0: mov  w1, #0x6500
+///   4c8e8: movk w1, #0x1dcd, lsl #16 ; = 500,000,000 ns
+///   4c8ec: bl   _dispatch_time
+///   4c990: bl   _dispatch_after      ; ← 0.5 s 之后
+///   4c9d8: blraaz x8                 ; 判据不成立的走这里：当场交回
+///
+/// 那段 block 捕获了全部七个实参，**0.5 秒之后才** `braaz` 原实现。配上
+/// `setBackground:` 让这次提交不显示，才是「一次全屏帧都没有，面板还在」。
+///
+/// 我们这一版不写死毫秒（卡起来要 0.6~2 s，机型与 App 差异太大），改成
+/// 「等卡」：每 100 ms 看一次 `AevonCardIsUpFor`，卡片真的在屏上了才交回；
+/// 2.0 s 还没等到就照旧交回（那时系统至少已经把 App 起了一半，不会更差）。
+///
+/// 只在「这次是分享族 URL **且** 此刻还没有这个 App 的卡」时按 —— 热分享那条路
+/// 卡已经在，交回必须是立即的，一个字都不动。
+typedef struct {
+    id host;            // 不能叫 self：那是保留字
+    id url;
+    id display;
+    id settings;
+    id origin;
+    id result;
+    SEL cmd;
+    BOOL animating;
+    int step;
+    char bundle[128];
+} AevonURLDefer;
+
+static const int AevonURLDeferStepMs = 100;
+static const int AevonURLDeferMaxStep = 20;      // 2.0 s
+static long AevonURLDeferLines = 0;
+
+__attribute__((noinline, used))
+static void AevonURLDeferFire(AevonURLDefer *task, const char *why) {
+    if (task == NULL) return;
+    int ms = task->step * AevonURLDeferStepMs;
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"land: url fire t=%dms why=%s b=%s",
+                  ms, why, task->bundle] UTF8String]);
+    if (AevonURLCoreOriginal != NULL) {
+        AevonURLCoreOriginal(task->host, task->cmd, task->url, task->display,
+                             task->animating, task->settings, task->origin,
+                             task->result);
+        AevonURLForwarded = 1;
+    }
+    [task->host release];
+    [task->url release];
+    [task->display release];
+    [task->settings release];
+    [task->origin release];
+    [task->result release];
+    free(task);
+}
+
+__attribute__((noinline, used))
+static void AevonURLDeferTick(AevonURLDefer *task) {
+    if (task == NULL) return;
+    if (AevonCardIsUpFor(task->bundle) == 1) {
+        AevonURLDeferFire(task, "card");
+        return;
+    }
+    if (task->step >= AevonURLDeferMaxStep) {
+        AevonURLDeferFire(task, "timeout");
+        return;
+    }
+    task->step += 1;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)AevonURLDeferStepMs * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        @autoreleasepool { AevonURLDeferTick(task); }
+    });
+}
+
+/// 这一次要不要按下来等一下。返回 1 = 已经排进队列（调用方**不许**再调原实现）。
+__attribute__((noinline, used))
+static int AevonURLDeferStart(id host, SEL cmd, id url, id display,
+                              BOOL animating, id settings, id origin, id result,
+                              const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return 0;
+    if (AevonURLCoreOriginal == NULL) return 0;
+    AevonURLDefer *task = (AevonURLDefer *)calloc(1, sizeof(AevonURLDefer));
+    if (task == NULL) return 0;
+    // MRC：七个实参全部持有到交回那一刻。nil 走 retain/release 也是安全的。
+    task->host = [host retain];
+    task->url = [url retain];
+    task->display = [display retain];
+    task->settings = [settings retain];
+    task->origin = [origin retain];
+    task->result = [result retain];
+    task->cmd = cmd;
+    task->animating = animating;
+    task->step = 0;
+    snprintf(task->bundle, sizeof(task->bundle), "%s", bundle);
+    if (__sync_fetch_and_add(&AevonURLDeferLines, 1) < 10) {
+        NSString *text = nil;
+        if ([url isKindOfClass:[NSURL class]]) {
+            text = [(NSURL *)url absoluteString];
+        } else if ([url isKindOfClass:[NSString class]]) {
+            text = (NSString *)url;
+        }
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"land: url defer wait=1 b=%s u=%.44s",
+                      bundle, text != nil ? [text UTF8String] : "-"] UTF8String]);
+    }
+    // 第 0 拍也排到主队列上：`_openURLCore` 不保证在主线程被调用，而
+    // `AevonCardIsUpFor` 读的是 `FloatHost` 的主线程静态量（同一份注释在
+    // `AevonCardIsComingFor` 上写了原因）。100 ms 的代价换掉一整类竞态。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)AevonURLDeferStepMs * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        @autoreleasepool { AevonURLDeferTick(task); }
+    });
+    return 1;
+}
+
 static void AevonURLCoreBody(id self, SEL _cmd, id url, id display,
                              BOOL animating, id settings, id origin, id result) {
 
@@ -3807,6 +3941,8 @@ static void AevonURLCoreBody(id self, SEL _cmd, id url, id display,
         text = (NSString *)url;
     }
     int armed = 0;
+    char armedBundle[128];
+    armedBundle[0] = '\0';
     if (AevonBGOn() == 1 && text.length > 0) {
         @try {
             NSString *target = AevonTargetForURLString(text);
@@ -3815,9 +3951,11 @@ static void AevonURLCoreBody(id self, SEL _cmd, id url, id display,
                 AevonBGURLShareLike(text)) {
                 AevonBGArm([target UTF8String], "url");
                 armed = 1;
+                snprintf(armedBundle, sizeof(armedBundle), "%s", [target UTF8String]);
             }
         } @catch (NSException *e) {
             armed = 0;
+            armedBundle[0] = '\0';
         }
     }
     // 0.3.59 — **R2 判死。**
@@ -3844,6 +3982,22 @@ static void AevonURLCoreBody(id self, SEL _cmd, id url, id display,
                       display != nil ? object_getClassName(display) : "nil",
                       animating ? 1 : 0, armed, cut,
                       text != nil ? [text UTF8String] : "-"] UTF8String]);
+    }
+    // 0.3.60 — **分享族 + 冷启动：按下来，等卡在屏上再交回。**
+    //
+    // 判据只有两条，都很便宜：这次被我们认成分享族（`armed`）、且此刻还没有
+    // 这个 App 的卡（`AevonCardIsUpFor` 答 0）。后者同时是「冷/热」的分界 ——
+    // 热分享那条路上卡已经在，交回必须是立即的，一个字节都不动。
+    //
+    // 交回由 `AevonURLDeferTick` 负责：每 100 ms 看一次卡，卡片真的在屏上就
+    // 交回；2.0 s 没等到照旧交回（那时系统至少把 App 起了一半，不会更差）。
+    // 闸 `url.core.defer.off` 存在 = 退回 0.3.59 的「立刻交回」。
+    if (armed == 1 && armedBundle[0] != '\0' && AevonURLDeferOff() == 0 &&
+        AevonCardIsUpFor(armedBundle) == 0) {
+        if (AevonURLDeferStart(self, _cmd, url, sendDisplay, animating,
+                               settings, origin, result, armedBundle) == 1) {
+            return;
+        }
     }
     if (AevonURLCoreOriginal != NULL) {
         AevonURLCoreOriginal(self, _cmd, url, sendDisplay, animating, settings, origin, result);

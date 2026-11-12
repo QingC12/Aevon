@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.59"
+    public static let version = "0.3.60"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -509,6 +509,22 @@ public enum Aevon {
     /// 想复现 0.3.58 的症状就把这个文件建上。
     public static let urlDisplayKeepPath =
         "/var/mobile/Library/Logs/Aevon/url.display.keep"
+
+    /// 0.3.60 — **延后交回**的关闸（存在 = 分享族 URL 也立刻交给原实现）。
+    ///
+    /// Aevon(283) 把 0.3.59 的形状量完了：三次冷分享都是 `bg: set background
+    /// was=0 now=1` + `cold adopt done card=1`（无全屏、约 1 秒出卡），可整份
+    /// 日志里「卡里出面板」的读数 `page sheet … box=717` **一次都没有**，
+    /// QQ 的三次面板全在 `box=932`（全屏态）。也就是说 URL 到手了、App 也起了，
+    /// 只是在它还没有窗的时候就被送到，处理不掉。
+    ///
+    /// 母版 ScreenCore 的替身（`0x4c770`）在 `0x4c8e0` 那几句里做的正是这件事：
+    /// `w1 = 0x1dcd6500`（500,000,000 ns）→ `dispatch_after` → **块里才**调原实现。
+    /// 这一版照它做，但不等固定毫秒，等「卡在屏上」。
+    ///
+    /// 建上这个文件 = 退回 0.3.59 的「立刻交回」，留给 A/B。
+    public static let urlCoreDeferOffPath =
+        "/var/mobile/Library/Logs/Aevon/url.core.defer.off"
 
     /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
     ///

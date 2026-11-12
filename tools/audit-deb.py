@@ -1307,6 +1307,14 @@ def main():
                   # 没有这一行，「桌面 + 后台里一个没人看得见的 App」这个最坏
                   # 形状在日志上会是一段空白。
                   b"act: cold adopt bg giveup ok=%d b=%s",
+                  # 0.3.60 — **延后交回**：母版替身 0x4c770 在 0x4c8e0 用
+                  # `dispatch_after(0.5 s)` 把原实现押后，块里才把七个实参交回。
+                  # 0.3.58/0.3.59 只做了 setBackground（L2），URL 仍立刻投，结果是
+                  # Aevon(283) 的三次冷分享「无全屏、有卡、卡里零 panel」。
+                  b"land: url defer wait=1 b=%s u=%.44s",
+                  b"land: url fire t=%dms why=%s b=%s",
+                  b"AevonURLDeferOff",
+                  b"/var/mobile/Library/Logs/Aevon/url.core.defer.off",
                   b"AevonBGOn",
                   b"AevonBGKeepDisplay",
                   b"/var/mobile/Library/Logs/Aevon/scene.background.off",
