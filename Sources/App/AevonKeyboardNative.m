@@ -1127,31 +1127,44 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
         inSpace = "world";
     }
 
-    // 量「这一刻」键盘真实占多少。宿主还没建出来就是 0，下面退回平移那条老路。
+    // 量「这一刻」键盘真实占多少 —— 这是唯一的数据来源。
+    //
+    // ⛔ 量不到时**什么都不做**，不要退回 0.4.26 那种「减 215」的平移：311 已经证明
+    // 平移只改 y、不改高度，App 按错的高度让位，中间那 142 pt 就是黑屏。猜一个值
+    // 一定比不动更坏，因为不动至少和没装钩子时一样。
     CGFloat realH = 0.0;
     CGFloat hostY = 0.0;
     CGFloat hostH = 0.0;
+    const char *src = "none";
     if (visible && [NSThread isMainThread]) {
-        // `[UIApplication windows]` 只能在主线程问；不在主线程就退回平移那条老路，
-        // 不拿线程安全去换一个精度。
+        // `[UIApplication windows]` 只能在主线程问；不在主线程就整段跳过。
         UIWindow *kbWin = AevonKbKeyboardWindowLive();
         realH = AevonKbMeasuredCoverage(kbWin, physicalH, &hostY, &hostH);
         // 比 App 世界还高的读数只能是量错（多窗重叠 / 非竖屏），不参与决策。
         if (realH > worldH + 1.0) realH = 0.0;
-        if (realH > 8.0) AevonKbLastRealH = realH;
+        if (realH >= 8.0) {
+            src = "meas";
+            AevonKbLastRealH = realH;
+        } else if (end.origin.y <= worldH - 40.0 && AevonKbLastRealH >= 8.0) {
+            // 宿主还没建出来（全新进程弹第一拍）。这一批 frame 自己说「键盘在我的
+            // 世界里」（顶边在 world 底之上 40 以上），那就用上次已知的高顶着 ——
+            // 同一台设备同一输入法，高就那么几个值。反过来说：一个**说不清**的
+            // frame（顶边在 world 底之下）绝不用旧值去猜，那会把「已经收起」重新
+            // 说成「还开着」，输入条就再也不下来了。
+            realH = AevonKbLastRealH;
+            src = "last";
+        }
     }
-    // 通知比宿主早一拍（全新进程弹第一次键盘）时用上次的已知值，不用 0 冒充。
-    if (realH < 8.0 && AevonKbLastRealH > 8.0) realH = AevonKbLastRealH;
 
     if (AevonKbNoteNotes < 24) {
         AevonKbNoteNotes += 1;
-        char line[288];
+        char line[320];
         const char *noteName = [(NSString *)name UTF8String];
         snprintf(line, sizeof(line),
-                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f in=%s fix=%d\n",
+                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f in=%s src=%s fix=%d\n",
                  noteName != NULL ? noteName : "?",
                  end.size.width, end.size.height, end.origin.x, end.origin.y,
-                 worldH, physicalH, shift, realH, hostY, hostH, inSpace, (int)visible);
+                 worldH, physicalH, shift, realH, hostY, hostH, inSpace, src, (int)visible);
         AevonKbLog(line);
     }
 
@@ -1164,7 +1177,7 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
         AevonKbScheduleChannelProbes();
     }
 
-    if (!visible || !AevonKbNoteFixOn) {
+    if (!visible || !AevonKbNoteFixOn || realH < 8.0) {
         orig(self, _cmd, name, object, userInfo);
         return;
     }
@@ -1174,15 +1187,11 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
         orig(self, _cmd, name, object, userInfo);
         return;
     }
+    // 三批通知口径各不相同，但真值只有一个：底边落在 App 世界底（= 卡片底），
+    // 高度等于量到的占高。这条式子里没有「输入」，所以对哪一套坐标都成立。
     CGRect end2 = end;
-    const char *src = "shift";
-    if (realH > 8.0) {
-        end2.origin.y = worldH - realH;      // 底边落在 App 世界的底（= 卡片底）
-        end2.size.height = realH;
-        src = "meas";
-    } else {
-        end2.origin.y -= shift;              // 量不到：只平移，至少不再整块偏 215
-    }
+    end2.origin.y = worldH - realH;
+    end2.size.height = realH;
     [fixed setObject:[NSValue valueWithCGRect:end2] forKey:UIKeyboardFrameEndUserInfoKey];
     NSValue *beginValue = [info objectForKey:UIKeyboardFrameBeginUserInfoKey];
     if (beginValue != nil && [beginValue isKindOfClass:[NSValue class]]) {

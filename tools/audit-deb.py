@@ -1494,11 +1494,16 @@ def main():
                       #   in=screen  这一批贴物理屏底（W1）
                       #   in=world   这一批贴 App 世界底
                       #   in=off     两套都不是（W2/W3 都在这一档）
+                      #   src=       真值从哪来：`meas` 现场量到 / `last` 用上次已知 /
+                      #              `none` 量不到（这一拍不动）
                       #   fix=       本版是否会重写（1 = 键盘在屏幕上）
-                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f in=%s fix=%d",
-                      # 修正那一拍：0.4.27 起不再只平移 —— `src=meas` 表示用真值重写了
-                      # 整个矩形（y = world − meas、高 = meas），`src=shift` 是量不到时的
-                      # 退回。`rem=` 是让位高度，必须等于 `meas`（386/431/359/404）。
+                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f in=%s src=%s fix=%d",
+                      # 修正那一拍：0.4.29 起只有一种写法 —— 整块换成真值
+                      # （y = world − meas、高 = meas、底边恒 = world 底）。
+                      # `src=` 标明真值来源（`meas` 现场量 / `last` 上次已知），
+                      # `rem=` 是让位高度，必须等于 `meas`（386/431/359/404）。
+                      # ⛔ 0.4.26 的 `src=shift`（只减 215 不改高度）已整条删除：
+                      # 311 证明它留下 142 pt 黑边，猜值比不动更坏。
                       b"app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f",
                       # 0.4.28 — 「第二条通道」取证（**只读**，一次会话两拍）。
                       # 312：QQ 正确、微信先对后错，而 App 主窗十次都是 430x717
