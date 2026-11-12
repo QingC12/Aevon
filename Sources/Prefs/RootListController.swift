@@ -106,9 +106,6 @@ final class RootListController: PSListController {
         case "!gate.panic":     return Gate.panicActive
         case "!gate.disabled":  return Gate.disabledActive
         case "@ring.summary":   return RingConfig.load().summary
-        // 0.2.60 — 两个分流开关。界面语义是「接管 = 开」，文件闸是它的反面。
-        case "!gate.notify":    return !Gate.notifyOffActive
-        case "!gate.share":     return !Gate.shareOffActive
         default:                return super.readPreferenceValue(specifier)
         }
     }
@@ -122,14 +119,6 @@ final class RootListController: PSListController {
                 Gate.setPanic(on)
                 Log.write("settings: G0 emergency stop -> \(on ? "on" : "off")")
                 refreshLiveRows()
-                return
-            case "!gate.notify":
-                Gate.setNotifyOff(!on)
-                Log.write("settings: notify divert -> \(on ? "on" : "off")")
-                return
-            case "!gate.share":
-                Gate.setShareOff(!on)
-                Log.write("settings: share divert -> \(on ? "on" : "off")")
                 return
             case "!gate.disabled":
                 Gate.setDisabled(on, reason: "manual:settings")
@@ -230,28 +219,9 @@ final class RootListController: PSListController {
         RingActions.editApps(from: self)
     }
 
-    /// The 窗口与场景 probe, reachable from the root page as well: the panel
-    /// plist is the one thing in this bundle that a future iOS can silently
-    /// refuse to load, and the probe is how we would find that out.
-    @objc func sceneProbe(_ specifier: PSSpecifier) {
-        SceneActions.probeScene(from: self)
-    }
-
-    @objc func sceneSurface(_ specifier: PSSpecifier) {
-        SceneActions.probeSurface(from: self)
-    }
-
-    @objc func sceneCalls(_ specifier: PSSpecifier) {
-        SceneActions.probeCalls(from: self)
-    }
-
     /// 0.2.83 — 承载层普查。Stheno 的 presenter 路线能不能走，全靠这一份账。
     /// 0.2.82 把它绑在「每版一次」上，而装包会截断日志 —— 所以在拿到数据之前，
     /// 这一行就是唯一能重来的入口（不必再烧一个构建、不必重启）。
-    @objc func probePresenter(_ specifier: PSSpecifier) {
-        SceneActions.probePresenter(from: self)
-    }
-
     private func alert(_ title: String, _ message: String) {
         let sheet = UIAlertController(title: title, message: message, preferredStyle: .alert)
         sheet.addAction(UIAlertAction(title: "好", style: .default, handler: nil))

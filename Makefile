@@ -93,7 +93,6 @@ BUNDLE_NAME := AevonPrefs
 AevonPrefs_FILES := $(AE_CORE) $(AE_RING) \
                     Sources/Ring/RingPreviewController.swift \
                     Sources/Prefs/RingActions.swift \
-                    Sources/Prefs/SceneActions.swift \
                     Sources/Prefs/AppListController.swift \
                     Sources/Prefs/AppPickerController.swift \
                     Sources/Prefs/PanelController.swift \

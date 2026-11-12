@@ -14,6 +14,14 @@ audit-deb.py — 安装包闸门（CI 与本地同一份逻辑）
   5  设置入口自洽（PreferenceLoader plist ↔  bundle ↔ 面板 plist）
   6  体积预算（超过即失败，防止"再加一点点"慢慢膨胀）
 
+0.4.0 — 断言表按「这一版真的还有哪些功能」重写了一遍。
+  URL 全链（落点 / deck / 冷启动接管 / 授权 / 支付 / 进程内桥）、通知中心
+  接管、以及全部只读取证（普查 / 探针 / 调用表）都在这一版删掉了；它们原本
+  各带一组「字面量必须在包里」的断言，字面量随代码一起消失，断言留着只会在
+  CI 里挂。判据是机械的：**源码（去注释后）里已经不存在的字面量，这一版不
+  再断言**。783 条 → 446 条，删掉 337 条，其余一条没动 —— 被删的每一条都
+  在 0.3.61 的包里成立过，剩的每一条在源码里都还在。
+
 用法: audit-deb.py <file.deb>
 """
 import io
@@ -319,22 +327,8 @@ def main():
     else:
         ok("prefs: loads Root.plist explicitly into the specifiers ivar")
 
-    # 0.2.83 — 承载层普查那行必须真的接线。
-    #
-    # 0.2.80 写好了三个探针函数却没有一行 plist 指向它们，于是「探针按钮」
-    # 在设置里根本不存在，取证通路只剩开机那一次 —— 而开机那一次被装包截断
-    # 吃掉了。这里两头都查：plist 里有这一行，二进制里有同名 @objc 入口。
-    # 只查 plist 会放过「行画出来了、点下去没反应」这种最难查的形态。
-    if root is not None:
-        if not any(i.get("action") == "probePresenter:"
-                   for i in plistlib.loads(root).get("items", [])):
-            bad("prefs: Root.plist has no probePresenter: row — the census "
-                "is unreachable without a rebuild")
-        elif b"probePresenter:" not in prefs:
-            bad("prefs: Root.plist names probePresenter: but the bundle has "
-                "no such @objc action — the row would be dead")
-        else:
-            ok("prefs: 承载层普查 row is wired (plist action + @objc entry)")
+    # 0.4.0 — 「承载层普查」那一行（`probePresenter:`）随普查代码一起下线：
+    # 设置里没有这个按钮了，plist 与二进制两头自然也不需要再各查一次。
 
     # 0.0.6's panel page returned early when Preferences had already filled the
     # ivar, which made all eight panels render the same rows. The log line is
@@ -695,28 +689,7 @@ def main():
                   #   `card closed after auth` = Swift 侧真的把那张卡拆了。
                   b"win: warm start b=%@",
                   b"win: warm done b=%@ at=%.0fms pid=%d",
-                  b"notify: auth card close b=%@ why=%s",
                   b"win: card closed after auth b=",
-                  # 0.2.91 — 分享点了就进安全模式：`_Block_signature` 被当成
-                  # `struct { void *; const char *; } *` 读。真原型返回的是
-                  # `const char *` 本身，于是 `sig->signature` 读到签名串自己的
-                  # 第 8~16 字节（崩溃地址 `0x22726f7272455340` = `@SError"`），
-                  # `strnlen` 踩上去就是 EXC_BAD_ACCESS + PAC 失败，而且是**在
-                  # 写日志之前** —— 所以三份日志里连一行 `act: activate` 都没有。
-                  # 这一条断言证明的是「出错时有话说」，不是「不会出错」：
-                  b"landing: url threw %s",
-                  # 0.2.79 — **撤掉 0.2.74 的「吞掉 + 自建 + 投递」。**
-                  #
-                  # Aevon(212) 把它证伪在三处，而且每一处都指向同一个根：
-                  # 自建 scene 里没有系统那一次激活。
-                  #   · QQ      `appurl ack ok=1 via=app-src … rsp=0` —— SDK 没接；
-                  #   · 支付宝  `appurl give why=timeout at=6342ms` —— 连回执都没有；
-                  #   · 微信第二次 `own live attach` + `launch state cs=0` —— 黑卡。
-                  #
-                  #   `oauth native` = 这一条授权 / 支付原样交给系统激活，卡片在
-                  #       scene 一登记时收回来（紧跟 `notify: auth swap card`）。
-                  #       `url=` 只说明这一拍照样带不带 URL，不参与判断。
-                  b"notify: oauth native b=%s src=%@ scheme=%s pay=%s url=%d card=%d",
                   # 0.2.80 — 承载层只读普查。这是 Stheno 的 presenter 路线在
                   # 本机能不能走的唯一证词，少了这几行就只剩推断：
                   #   class     每个类在不在、方法数、ivar 数、父类
@@ -725,39 +698,7 @@ def main():
                   #   method    两类的全量方法名
                   #   live      前台 scene 答不答 presenter 那三个选择子
                   #   end/skip  这一轮跑完 / 本版本已跑过
-                  b"presenter: census begin version=",
-                  b"presenter: class ",
                   b"presenter: selector ",
-                  b"presenter: ivar ",
-                  b"presenter: method ",
-                  # 0.2.87 — `presenter: live app=1 scene=` 与
-                  # `presenter: live app=none scene=none` 两条断言随
-                  # `describeLiveCarrier` 一起删除：那个函数问的七个名字没有一个
-                  # 能给出信息（四个是猜的，`uiPresentationManager` 挂在 NSObject
-                  # 上 ⇒ responds 恒真），留着只会让 census 账本更难读。
-                  b"presenter: census end classes=",
-                  b"presenter: census skip version=",
-                  # 上一轮普查死在哪 —— 标记先写、普查后跑的代价由这一行补回来。
-                  b"presenter: last census stopped at ",
-                  # 0.2.83 — 普查的第二个出口。0.2.82 那一轮的数据是被装包动作
-                  # 吃掉的：`postinst` 从 0.2.21 起就截断 Aevon.log，而普查一个
-                  # 版本只跑一次 ⇒ Aevon(214) 只剩一行 `census skip version=0.2.82`。
-                  # 这三条字面量就是「数据不会再被装包吃掉」与「不必烧构建、
-                  # 不必重启就能重跑」在二进制里的证词：
-                  #   presenter.census  专用账本（追加，装包不清）
-                  #   presenter.force   手写即强制重跑
-                  #   why=              boot / panel / force，三个入口分开读
-                  b"presenter.census",
-                  b"presenter.force",
-                  # 0.2.84 — 第二轮普查：按选择子反查归属类。第一轮只回答「类在不在」，
-                  # 而写调用需要的是「这一步定义在哪个类上、编码是什么」。三条字面量
-                  # 就是这一轮真的跑过、并且自己收尾了的证词：
-                  #   pass begin … classes=  开始扫，附带运行时类总数
-                  #   pass end found=…       扫完，命中的「选择子 × 类」总条数
-                  #   aborted                拿不到类表（真机上不该出现，出现即这一版白跑）
-                  b"carrier: pass begin why=",
-                  b"carrier: pass end found=",
-                  b"carrier: pass aborted, no class list",
                   # 0.2.85 — 方案 S 的取证面。0.2.84 只回答了「谁实现了那 21 个
                   # 选择子」，写调用还差三块，这一版一次取全：
                   #   · URL 到底能从哪儿拿 —— `shape:` 把打开请求的四个参数
@@ -767,8 +708,6 @@ def main():
                   #     新增五个类，方法名以 `carrier: m <类> <选择子> <编码>` 落地；
                   #   · 母本那个构造器长在哪个类上 —— 只有全类扫描能答。
                   # 前缀全部长过 15 字节，理由同上：短的会被编成立即数搜不到。
-                  b"initWithURL:workspaceOriginatingProcess:",
-                  b"workspaceOriginatingProcess",
                   b"parametersForSpecification:",
                   # 0.2.87 — 三条 `shape:` 断言随 `AevonOpenShapeDump` 一起删除。
                   # 它跑过一轮（Aevon(219)）并且答完了：第一个参数是 bundle id
@@ -776,7 +715,6 @@ def main():
                   # 函数已从源码移除 —— 未调用的静态函数会被 `-Osize` 整段消除，
                   # 留断言必然落空（这一版就是这么被 CI 挡下来的）。
                   b"FBSMutableSceneDefinition",
-                  b"FBSMutableSceneSettings",
                   # 0.2.86 — 方案 S 判死之后的一轮「URL 装哪」取证。这一轮不再问
                   # 「谁实现了什么」，而是问「action 投进哪个容器」：
                   #   · 七类 `carrier: class` —— parameters / transitionContext /
@@ -788,13 +726,7 @@ def main():
                   #     打开请求里 payload 与 actions 元素的真实类名和 ivar 名。
                   # 0.2.85 把 shape 挂在 `verdict == 1` 上，真机两次分享都走
                   # `return 0`，探针一次没落地；这一版改挂在「带 payload」上。
-                  b"FBSSceneParameters",
-                  b"FBSSceneTransitionContext",
-                  b"UIMutableSceneTransitionContext",
-                  b"UISOpenURLAction",
                   b"LSApplicationWorkspace",
-                  b"openSensitiveURL:withOptions:",
-                  b"setObject:forActivationSetting:",
                   # 0.2.87 — `shape: payload` / `shape: actions` / `shape: act[]`
                   # 三条断言同样随函数删除而移除。它们那一轮的读数记在这里备查：
                   #   shape: payload url=#NSURL len=-1   → `__PayloadURL` 是裸 NSURL
@@ -810,19 +742,6 @@ def main():
                   #   `FBSystemService` 只有 15 B（不写断言），
                   #   `FBSOpenApplicationOptions` + `openApplication:options:withResult:`
                   #   是它的正反面。
-                  b"notify: link native b=%s kind=%s scheme=%s front=%d card=%d",
-                  b"notify: prewarm b=%s door=%ld ms=%d",
-                  b"FBSOpenApplicationOptions",
-                  b"openApplication:options:withResult:",
-                  # 0.2.88 — 整屏那一帧的开关。`SBActivationSettings` 第 6 格
-                  # `eventOnly`（键名由本机键表打出来，不是猜的），两行就是它的
-                  # 全部判据面：
-                  #   · `win: act key ev=` —— 键表里有没有这一格。`-1` = 本机没有，
-                  #     那是读数不是故障，`eventbit` 整格跳过、行为退回 0.2.87；
-                  #   · `notify: eventbit` —— 写给哪一次激活、读回多少。`read=1` 才是
-                  #     「写进去了」，与 `suspended` 当初的判据同形。
-                  b"win: act key ev=%d evflag=%d",
-                  b"notify: eventbit idx=%d flag=%d read=%ld b=%s why=%s n=%d",
                   # 0.2.89 — 起点迁移第①段：激活那一拍，**只读**。
                   #
                   # 这一版的行为改动是零：两个方法都只挂上、原样尾调。所以它的
@@ -833,195 +752,11 @@ def main():
                   # `_createSceneWithDefinition:…fromRemnant:…completion:` 在
                   # `FBSceneManager`。0.1.85~0.1.87 三次「本机没有」都出在只在一个
                   # 类里找，名字本身一次没写错过。
-                  b"_activateBundleID:requestID:isTrusted:options:source:originalSource:withResult:",
-                  b"_createSceneWithDefinition:settings:initialClientSettings:"
-                  b"transitionContext:fromRemnant:usingClientProvider:completion:",
-                  # 形状闸：activate 走整串相等（219 的普查给的就是这一串），
-                  # createScene 只钉头尾 + 总长（中段类型静态读不出全串）。
-                  b"v68@0:8@16@24B32@36@44@52@?60",
-                  b"act: shape %s cls=%@ types=%s",
-                  b"act: shape reject cls=%@ got=%s want=%s",
-                  b"act: activate owners=%d",
-                  b"act: createScene owners=%d",
-                  # 四行读数，第①段要回答的就是这四件事：
-                  #   `payload=1`  → URL 真的装在激活请求的 options 里（母版靠这一条
-                  #                  才不用自己投 URL）；`keys=` 是那份 options 的大小；
-                  #   `gap=`       → createScene 与它前面那次激活差多少毫秒（谁先谁后
-                  #                  由正负号直接读出来）；
-                  #   `id=` / `idc=` → scene 的身份在建 scene **之前**就拿得到吗 ——
-                  #                  这是第②段能不能先建 presenter 的唯一前提；
-                  #   `blk=1`      → completion 在第 7 位上，还是空。
-                  #
-                  # 0.2.90 — 第①段回来后改的口径：`res=` 删了（那是在读一个 void
-                  # 方法的返回值，读到栈上垃圾）；options 改走 `dictionary`/`payload`
-                  # 两级取字典（`via=` 说明走的是哪一级）；`sl=`/`susp=` 是「让系统
-                  # 别摆屏」的两个候选键；`set=`/`frame=`/`resize=`/`tctx=`/`act=`
-                  # /`icl=` 是 createScene 六个参数的形状，`csig=`/`rsig=` 是两个块
-                  # 的真实签名；`fw=`/`fs=` 是那一刀几何写了几次、被挡几次。
-                  b"act: activate n=%ld t=%lld trusted=%d b=%s opt=%s via=%d "
-                  b"keys=%ld payload=%d sl=%d susp=%d k=%s rsig=%s",
-                  b"act: scene n=%ld t=%lld gap=%ld def=%s idc=%s id=%s rem=%s prov=%s "
-                  b"blk=%d set=%s frame=%d resize=%d tctx=%s act=%d icl=%s csig=%s",
-                  b"act: hits activate=%ld scene=%ld boot=%d fw=%ld fs=%ld fi=%ld card=%s",
-                  b"act: frame birth wrote=1 b=%s before=%.0fx%.0f after=%.0fx%.0f by=%s",
-                  b"act: frame birth blocked why=%s b=%s set=%s",
                   # 0.2.92 — 不可变 settings 是 trap 不是异常：写下去 FrontBoard
                   # `_setValue:forSetting:` 直接 `__builtin_trap()`，`@try` 抓不住。
                   # 这几串是「闸真的在写之前」的证词，缺一条就说明又有人绕过闸写信。
-                  b"act: frame birth threw %s cls=%s",
                   b"birth:immutable",
-                  b"birth:enter",
                   b"birth:wrote",
-                  # 0.3.20 — G1 的旁路。0.3.19 只从 `FBScene` 上找 handle，三条读法
-                  # 全不答就 give up，于是 G2/G3 一次没跑。这三串证明「换 App 那一侧」
-                  # 的代码真的进了包：fallback 起手、某一条读法答了、以及两条都断时
-                  # 把 SBApplication 的 scene 族方法名列出来。
-                  b"probe: G1 fallback b=%s",
-                  b"probe: G1 via=%s cls=%s",
-                  b"probe: G1 give up how=%s app=%s %@",
-                  # 0.3.20 — `born == 0` 的黑洞。0.2.90 起只记 1（写了）/ 2（挡住），
-                  # 「压根不是目标」一个字都不记，于是 Aevon(246) 里 `frame birth`
-                  # 零行、分不清「没生效」与「没轮到」。
-                  b"act: frame birth idle why=%s card=%s id=%s set=%s",
-                  # 0.3.20 — 这条写路自己的闸。语义与 notify.off 不同：关的是「写」。
-                  b"birth:off",
-                  # 0.3.20 — **写路的扳机**。0.3.8 清零 URL 接管后 AevonActCardBundle
-                  # 永远为空，`AevonActFrameBirth` 第一行就 return 0，于是「出生即卡
-                  # 尺寸」从 0.3.8 起一次都没跑过。这一串是 Swift `openCard` 调的
-                  # `AevonCardTargetArm` 打的，它出现就说明扳机接上了。
-                  b"act: arm b=%s n=%ld",
-                  # 0.3.22 — 普查一次性化。Aevon(247) 的 1869 行里 890 行是
-                  # `presenter:` / `carrier:` 两轮普查，每次重启把 99307 个类重扫一遍
-                  # 重打一遍。只把打印删掉是「永远不查」，所以要断言这两条路都进了包：
-                  # 跳过（同一版第二次起）与强制（手写 `census.force`）。
-                  b"presenter: census skip v=",
-                  b"presenter: census forced why=",
-                  # 0.3.23 — **URL 路的扳机 + 干跑。**
-                  #
-                  # Aevon(248) 的两次 QQ 分享都是 `act: activate ... payload=1` 到
-                  # `act: scene id=sceneID:com.tencent.mqq-default` 只隔 39 ms，中间
-                  # 没有任何 `act: arm` —— 于是 `AevonActCardBundle` 一直是空的，
-                  # 出生尺寸在 URL 路上一次没跑过。这两串证明扳机真的接进了激活钩子
-                  # （`src=url` 与圆盘的 `act: arm b=` 是两条独立读数，不能互相顶替）。
-                  b"act: arm src=url b=%s kind=%d n=%ld write=%d",
-                  # 0.3.28 — 普通深链（kind=1）不再上扳机。Aevon(3) 里
-                  # `act: arm src=url b=com.apple.mobilesafari kind=1` 后面紧跟
-                  # `act: frame birth dry=1 b=com.apple.mobilesafari` —— 深链、
-                  # 不拒答、不排卡，却进了 birth 的干跑分支，只因 0.3.23 把两种
-                  # kind 一起 arm。这一串是「它真的被排除」的唯一读数。
-                  b"act: arm skip why=link b=%s kind=%d n=%ld",
-                  # 干跑那一行：默认不写，只记「本来要写成什么、走副本还是直写」。
-                  # 唯一能证明「四道门全过、只差按下开关」的读数。
-                  b"act: frame birth dry=1 b=%s before=%.0fx%.0f want=%.0fx%.0f via=%s",
-                  # 0.3.24 — **URL 路第一次接上承载。**
-                  #
-                  # Aevon(250)：frame 写成功了（`after=430x717`），系统也认了，
-                  # 但装 scene 的窗口还是 430×932 —— 「像全屏又不是，下半屏黑」。
-                  # 这一版在分享激活之后排一次 `openCard`，把 scene 挂到我们的卡上。
-                  # 三串分别是：排上了 / 被闸挡住（`off` `off-late` `nowrite` `up`）/
-                  # 真的开始建卡。少任何一串都说明这条承载路没进包。
-                  b"act: url card queue b=%s n=%ld after=350ms",
-                  b"act: url card skip why=off b=%s",
-                  b"act: url card now b=%s",
-                  # 0.3.25 — **URL 路的进场顺序。**
-                  #
-                  # Aevon(251)：卡建对了（`own live attach` / `hosting=yes` /
-                  # `first frame 107ms`），但系统那份全屏承载还在，scene 被抽走
-                  # 之后它就成了黑窗压在卡下面。根因是 0.3.24 走了
-                  # `AevonOpenCardDirect`（`homed: true`，跳过 home-first）。
-                  #
-                  # 这一版改走 `AevonOpenCardURL`（`homed: false`）。两串是证据：
-                  # 出口符号能证明那一支进了包；日志串能证明它真的被调用过
-                  # （圆盘路不经过这个入口，所以出现即等于 URL 路走到了 home-first）。
-                  b"AevonOpenCardURL",
-                  b"win: url card via home-first b=",
-                  # 0.3.26 — **拒答：0.3.8 之后第一次在「问句」那一拍改答案。**
-                  #
-                  # 之前每一版都是「答开 → 系统提交 → 我们去撤」；全屏那扇窗在
-                  # 我们代码跑起来之前就存在，所以撤得再早也看得见（0.3.21 是
-                  # 最早可写的一拍，它仍然看得见）。这一版不调原函数 ⇒ 没有激活
-                  # 事务 ⇒ 没有那扇窗。
-                  #
-                  # 四串分别是：拒了（带 URL 与 `reply=none`）/ 旧路让位 /
-                  # 自己开卡 / 补投一次。少任何一串都说明这一支没进包。
-                  # 0.3.36 — 前三串换成了 `act: float …`（见下面 0.3.36 那一组），
-                  # 这一支剩下的只有「旧路让位」与「补投成功」两条读数。
-                  b"act: url card skip why=deny b=%s",
-                  b"act: deny redeliver ok=1 n=%ld how=%s b=%s url=%.100s",
-                  # 0.3.27 — **补投改成 scene action（不再提交激活事务）。**
-                  #
-                  # Aevon(2)：`act: deny ... url=-` 后面 2.6 s 一律
-                  # `act: deny redeliver skip why=nourl` —— `__PayloadURL` 是 `NSURL`，
-                  # 0.3.26 只认 `NSString`，于是 URL 从来没记下来，QQ 只被拉起、
-                  # 停在首页。这一版认两种类型，并且把投递从 `openSensitiveURL:`
-                  # （会再走一次激活 ⇒ 全屏窗回来）改成给目标 scene 送 action。
-                  #
-                  # 五串分别是：类的方法表（下一版据此定名字）/ 送到或没送到 /
-                  # 等 scene（0 = 还没登记）/ 硬路径不可用时的唯一读数 /
-                  # 软路径自己的闸。缺任何一串都说明这一支没进包。
-                  b"act: deliver census cls=%s cm=%@ im=%@ iv=%@",
-                  b"act: deliver ok=%d act=%s send=%s cls=%s has=%d/%d fix=%d iv=%s b=%s url=%.100s",
-                  b"act: deliver act empty how=%s fix=%d b=%s",
-                  b"act: deliver wait why=noscene b=%s",
-                  b"act: deliver skip why=soft-off",
-                  b"/var/mobile/Library/Logs/Aevon/url.redeliver.soft",
-                  # 符号本身也要在：路径常量在、函数没编进去的例子有过（0.2.87）。
-                  b"AevonURLRedeliverSoftOn",
-                  # 补投会再触发一次激活，那一次必须放行，否则自己拒自己、打转。
-                  b"act: pass why=redeliver b=%s",
-                  # 0.3.29 — **投递不再等固定 2.6 s，冷启动补发两发。**
-                  #
-                  # Aevon(252)：`act: deny` 到 `act: deliver done` 每次都正好差 3 s，
-                  # 而 deliver 之后 QQ 立刻进选好友页 —— 那 3 s 是 0.3.26 的定时器，
-                  # 不是 QQ 慢。改成 0.35 s 起手、每 0.2 s 问一次 scene（挂上就投）。
-                  #
-                  # 第一次分享停在首页则是冷启动：`app: boot pid=50788` 在投递前 2 s，
-                  # 首页恢复盖掉了分享页。所以拒答那一刻按 `pid` 定冷/热，冷的多发两发。
-                  #
-                  # 三串分别是：冷/热判定（下一份日志的第一判据）/ 投出去了还是被补发 /
-                  # 补发的关闸。少任何一串都说明这一版没进包。
-                  # 0.3.36 — 冷/热那一串换成 `act: float cold=… live=… sw=…`
-                  # （见下面 0.3.36 那一组），这里只留投递链自己的两串。
-                  b"act: deliver done tick=%d cold=%d left=%d b=%s",
-                  b"AevonURLShotOff",
-                  b"/var/mobile/Library/Logs/Aevon/url.shot.off",
-                  # 0.3.30 — **URL 装进新 scene 的 transitionContext。**
-                  #
-                  # Aevon(253)：热启动 scene action「秒出」，冷启动连发三发全丢
-                  # （tick=3/4/5 三行 `deliver ok=1`，QQ 侧一个字都没有）。差别不在
-                  # 时间，在投递口 —— 原生 URL 激活是把 action 装进 tctx 交给新 scene
-                  # 的（0.3.23 亲眼看到 `n=1`）。四串分别是：装上了（带 had/act/cls）/
-                  # 被闸挡住 / 装好之后不再叠 scene action / 闸的文件名。
-                  b"act: tctx put ok=%d had=%ld act=%s cls=%s n=%ld b=%s url=%.80s",
-                  b"act: tctx skip why=off",
-                  # 0.3.34 — **tctx 装上 ≠ 送达。** Aevon(258) 三次冷启动分享
-                  # 全是 `tctx put ok=1 had=0` 之后停在首页，而热启动走
-                  # `deliver ok=1 send=sendActions` 秒进选好友页 —— 所以 tctx 之后
-                  # 冷启动要晚 2.2 s 再补一发。这两串是新读数（补不补、挖没挖到）。
-                  b"act: deliver tctx plus=1 cold=%d wait=%d b=%s",
-                  b"act: url deep k=%s b=%s src=po url=%.100s",
-                  b"AevonURLTctxOff",
-                  b"/var/mobile/Library/Logs/Aevon/url.tctx.off",
-                  # 0.3.35 — **冷启动第五秒那一发 + 授权/支付的 URL 在哪。**
-                  #
-                  # Aevon(259)：四次冷启动分享，投出去的每一发都落在 QQ 自己的
-                  # `app: geom late`（boot + 4 s）之前 —— 0.3.29 是 0.4/1.6/2.8 s，
-                  # 0.3.34 是 0.1/2.2/3.4 s，而 `geom late` 在 17:19:14。
-                  # 所以这一版排一发 5.0 s 的晚发，专门落在窗口关上之后：
-                  # `act: deliver late plan` 是排上了、`act: deliver late r=` 是投出去了。
-                  #
-                  # 另外两条是授权/支付那一族的唯一证据：那两次激活 `payload=0`
-                  # （URL 不在 `__PayloadURL` 上），落点侧都是
-                  # `act=#UIActivityContinuationAction url=-`。`act: url dig` 是
-                  # 把 `__Actions` 翻开的读数（hit 带 URL，miss 带 action 类名形状），
-                  # `act: url act-would` 是「挖到了但不接」的那一行。
-                  #
-                  # `probe: po` 是 `__PayloadOptions` 整层的内容 —— 0.3.34 只找
-                  # 「键名含 url」的项，一行没命中，这一版把整层照出来。
-                  b"act: deliver late plan wait=5000 b=%s",
-                  b"act: deliver late r=%d age=%lld b=%s url=%.60s",
-                  b"act: url dig hit b=%s n=%ld at=%s url=%.100s",
-                  b"act: url dig miss b=%s n=%ld at=%s shape=%s",
                   # 0.3.38 — **冷启动换投递口 + 活动继续族深挖。**
                   #
                   # Aevon(263) 同一份日志把两件事同时说清了：
@@ -1053,281 +788,13 @@ def main():
                   # `src=` 是来源 App；`alive=`/`age=` 是 App 侧心跳的判据；
                   # `bridge skip why=hot` 是「热启动走回 scene action」的正证；
                   # `bridge fallback` 是「桥没送到、链接/支付补一发」的正证。
-                  b"act: bridge b=%s send=%d bonly=%d src=%s u=%.60s",
-                  b"act: bridge skip why=hot b=%s alive=%d age=%.1f live=%d",
-                  b"act: bridge fallback b=%s kind=%d weak=%d why=%s",
-                  b"AevonFrontBundleCopy",
                   b"aevon-alive",
-                  b"act: deliver skip why=bridge",
-                  b"act: url deep2 from=%s how=%s b=%s url=%.100s",
-                  b"act: url deep2 from=none force=%d b=%s keys=%s",
-                  b"act: shape %s cls=%s b=%s ivars=[%s] sels=[%s]",
-                  b"AevonURLBridgeOn",
-                  b"/var/mobile/Library/Logs/Aevon/url.bridge.off",
-                  b"probe: po n=%ld b=%s |%s",
-                  b"AevonURLActOn",
-                  b"/var/mobile/Library/Logs/Aevon/url.act.on",
-                  # 0.3.36 — **放行式接管**：不再吞掉激活，让 FrontBoard 自己把
-                  # URL / activity 写进新 scene 的 connection options。
-                  #
-                  # Aevon(260) 是这一刀的依据，两条读数：
-                  #   ① 四次冷启动分享，每发 `deliver ok=1`（含 5.0 s 晚发
-                  #      `deliver late r=1 age=5156`，落在 QQ 自己 `geom late` 之后），
-                  #      QQ 四次全停首页 ⇒「自己造 action 投进去」这条路对冷启动无效，
-                  #      不是时机问题。
-                  #   ② 授权（`b=com.tencent.mqq`）与支付（`b=com.alipay.iphoneclient`）
-                  #      两次激活 `payload=0` + `__Actions[0]=UIActivityContinuationAction`
-                  #      ⇒ 连接管条件都不满足 ⇒ 原样放行 ⇒ 全屏。
-                  #
-                  # 所以这一版：接管条件补上 activity 族，接管动作改成「放行 + 抢 scene」。
-                  # `act: float sw=` 是分流读数（0 = 放行 / 1 = 强制回退吞掉），
-                  # `act: float card` 是建卡，`win: own pass wait` 是「不发启动请求、
-                  # 只等系统那张 scene」。后两个文件名是两把新闸。
-                  b"act: float sw=%d b=%s kind=%d n=%ld live=%d reply=none url=%.140s",
-                  b"act: float cold=%d pid=%d run=%d seen=%d live=%d alive=%d age=%.1f shots=%d sw=%d b=%s",
-                  b"act: float card b=%s sw=%d",
-                  b"act: float card skip why=up b=%s",
-                  b"win: own pass wait %@ t=%ldms wait=%ldms",
-                  b"AevonURLSwallowOn",
-                  b"AevonURLActivityOn",
-                  b"/var/mobile/Library/Logs/Aevon/url.swallow.on",
-                  b"/var/mobile/Library/Logs/Aevon/url.activity.off",
-                  # 0.3.37 — **默认吞回去 + tctx 装上就收手。**
-                  #
-                  # Aevon(262)（0.3.36）当场复现了 0.3.25 的形状：`act: float sw=0`
-                  # → `act: float card` → 系统那份全屏窗被抽空 → 黑。四跳分享全一样，
-                  # 说明「放行 + 抢 scene」不是偶发，是结构：放行等于让 FrontBoard
-                  # 提交它自己的全屏事务，再搬走 scene 就只剩空窗。
-                  #
-                  # Aevon(257)（0.3.32）与 Aevon(259)（0.3.34）的 `tctx put ok=1 had=0`
-                  # 逐字相同：前者冷启动出分享页，后者回首页。两份日志的差别只有
-                  # 0.3.34 去掉「装上就收手」后多补的那几发 `sendActions:`。
-                  #
-                  # `act: deliver tctx win=1` 是「装上了就收手」的唯一读数；
-                  # `act: float skip why=nourl` 是活动继续族拿不到 URL 时退出的读数；
-                  # 两把新闸：`url.pass.on`（回到 0.3.36）/ `url.plus.on`（回到 0.3.34）。
-                  b"act: deliver tctx win=1 cold=%d skip=1 b=%s",
-                  b"act: float skip why=nourl k=0 b=%s",
-                  b"AevonURLPassOn",
-                  b"AevonURLPlusOn",
-                  b"/var/mobile/Library/Logs/Aevon/url.pass.on",
-                  b"/var/mobile/Library/Logs/Aevon/url.plus.on",
-                  # 0.3.40 — **三处判据修正，一条一条对应 Aevon(265) 的现场。**
-                  #
-                  #   ① 桥回执分级。QQ 冷启动分享那一行是
-                  #      `app: openurl ok=1 via=app-src … dlg=- rsp=0` —— 现代选择子
-                  #      回 NO，回 YES 的是老选择子（兼容壳，不弹面板）。宿主把
-                  #      `ok=1` 当成功就销毁请求，「桥送到了」与「面板弹了」之间那
-                  #      条缝一直是隐形的。`notify: appurl weak` 是分级后的新读数，
-                  #      `weak-refused` 是「重投到用完仍然只是弱答案」的收尾。
-                  #   ② 同一次点击的连发只认第一条。支付宝支付那三条在 30 ms 内到齐
-                  #      （universal link → `alipaymatrix…` → `aliminipayauth…`），
-                  #      各自走完整条接管链：`act: activate` ×3、`act: float card` ×3、
-                  #      `win: own retired` ×3，最后投出去的是最不像支付的那一条。
-                  #      `act: float skip why=claim` 是「后续几条只吞不接」的读数。
-                  #   ③ 授权回跳认人换成「收信方 == 等待方」。旧判据拿**送信方**
-                  #      （`com.tencent.xin`）去比**承接方**（`com.midea.msmart.appstore`），
-                  #      永远不相等，于是授权一结束就把发起方拖进卡片
-                  #      （`win: demote old=com.tencent.xin side=right new=…`）。
-                  #      `act: auth wait` 记等待方，`act: float skip why=authback`
-                  #      是「回跳不接管、让它回全屏」的正证。
-                  #   ④ 通用链接里包着的自定义 scheme 先解开再投（`openURL` 语义），
-                  #      `act: unwrap` 两侧的 `from=` / `to=` 是这一步的读数。
-                  #   ⑤ 桥只给微信 / QQ：名单外的 App（支付宝）不再空等 2 秒，
-                  #      `act: bridge skip why=noapp` 是它的正证。
-                  b"notify: appurl weak b=%@ via=%@ rsp=%d n=%d",
-                  b"notify: appurl retry n=%d via=%@ weak=%d",
-                  b"weak-refused",
-                  b"act: float skip why=claim b=%s k=%d u=%.60s",
-                  b"act: auth wait b=%s k=%d src=%s",
-                  # 0.3.42 — 弱答案问一次就停，把那一发让给 scene action。
-                  b"notify: appurl weak stop n=1 via=%@ b=%@",
-                  # 0.3.42 — 支付宝那一族不接管（只认 App Link 的 App）。
-                  b"act: pass why=payapp b=%s k=%d src=%@ u=%.60s",
-                  # 0.3.44 — 授权族（出发 / 回跳）与冷启动分享一律交回系统。
-                  b"act: pass why=auth b=%s k=%d src=%s u=%.70s",
-                  b"act: pass why=coldshare b=%s k=%d u=%.70s",
-                  b"act: url card skip why=pass b=%s",
-                  b"/var/mobile/Library/Logs/Aevon/url.coldshare.pass.off",
-                  # 0.3.42 — 剪贴板令牌进 transitionContext：分享的内容在剪贴板上。
-                  b"act: tctx paste=1 cls=%s b=%s",
-                  b"act: float skip why=authback b=%s sso=%@ u=%.80s",
-                  b"act: bridge skip why=noapp b=%s cold=%d shots=%d",
-                  # 0.3.45 — **冷启动分享：扣下原始请求，等托管就绪再交回。**
-                  #
-                  # 这一段是逆向 ScreenCore 2.1.0 的直接产物（`rev` 那一轮）：
-                  # `act: cold hold` = 这条激活请求被扣住了（连同 4 个读数一起打，
-                  # 因为「冷」这件事在这台机器上从来没有一个能对的判据）；
-                  # `act: cold hold take` = 真的存下来了（`opt=` 是 options 的类名，
-                  # `keys=` 是 payload 项数 —— 交回时靠这两格确认原件没丢）；
-                  # `act: cold replay why=hosted|deadline|other` = 交回那一刻，
-                  # `susp=` 读的是原件里本来就有的挂起位（1 = 有，-1 = 没有；
-                  # 0.3.46 起不再自己造副本，`boxed=` 恒为 0，留着这一格是为了
-                  # 让 0.3.45 与 0.3.46 的日志能并排读）。
-                  # 判据：QQ / 微信侧 `app: openurl` 的 `dlg=` 从 `-` 翻成类名。
-                  b"act: cold hold b=%s pid=%d run=%d live=%d alive=%d age=%.1f wait=%dms u=%.80s",
-                  b"act: cold hold take b=%s opt=%s trusted=%d keys=%ld",
-                  b"act: cold replay why=%s b=%s at=%.0fms tick=%d susp=%d boxed=%d",
-                  # 0.3.46 — **两条新读数，回答的是「为什么这次会安全模式」。**
-                  #
-                  # `act: cold ready` = 托管就绪那一拍（0.25 s 的 `hosted bounds`
-                  # 或 `hostedLayers≥1`，谁先到算谁）。0.3.45 这一行不存在，
-                  # 因为 `win: hosted ready` 一次都没打 —— 判据读不到，冷分享就
-                  # 只能等满 2 秒。
-                  # `act: cold replay done` = 原实现**返回了**。崩溃日志的那一帧
-                  # 是 `_activateBundleID:` +128 的 `objc_retain_x20`，也就是说
-                  # 0.3.45 死在调用里面；这一行出现在下一次日志里，就等于
-                  # 「参数不再是悬垂的」这件事自己说了话。
-                  b"act: cold ready b=%s at=%.0fms",
-                  b"act: cold replay done b=%s at=%.0fms ret=void",
-                  # 0.3.45 — 桥被推迟到「托管就绪」之后才问（`act: cold bridge`），
-                  # 强答案就 `act: cold cancel`，弱答案才轮到 `act: cold replay`。
-                  # 三行合起来是这一版唯一的实验设计：先换时机，再换投递物。
-                  b"act: cold bridge b=%s send=%d src=%s u=%.60s",
-                  b"act: cold cancel why=%s b=%s at=%.0fms",
-                  b"act: cold bridge skip why=nourl",
-                  b"act: cold hold skip why=again b=%s",
-                  b"win: hosted ready b=",
-                  # 0.3.46 — 前三次轮询的读数（`layers=`, `cls=`, `sub=`）。
-                  # 0.3.45 的教训是「判据读不到时日志一片空白」：等了两秒，
-                  # 却不知道在等什么。有这三行，下一份日志能直接分开
-                  # 「键不存在」（`layers=-1`）和「键在但没挂」（`layers=0`）。
-                  b"win: hosted probe n=",
-                  b"AevonColdHoldOn",
-                  b"/var/mobile/Library/Logs/Aevon/url.cold.hold.off",
-                  # 0.3.49 — **冷分享扣留降级成实验路**：默认不存在这个文件，
-                  # `AevonColdHoldOn()` 回 0 ⇒ 走上面那条 `pass why=coldshare`。
-                  # 两条文件路径都要在包里：一条开、一条强关，A/B 时不换包。
-                  b"/var/mobile/Library/Logs/Aevon/url.cold.hold.on",
-                  # 0.3.46 — 「就绪先问桥」的 A/B 闸。它必须真的是一把**运行期**
-                  # 文件闸：写成编译期常量时，CI 的 -O2 + dead_strip 会把没人
-                  # 调用的 `AevonColdBridgeSend` 整段删掉，连 `act: cold bridge`
-                  # 这三条字面量一起（0.3.46 第一次构建就是这样失败的两条）。
-                  b"AevonColdBridgeOn",
-                  b"/var/mobile/Library/Logs/Aevon/url.cold.bridge.on",
-                  # 0.3.48 — **交回原件前写挂起位**的闸与符号。
-                  #
-                  # Aevon(269) 两次冷分享的因果是完整的：`act: cold replay why=hosted`
-                  # 之后紧跟 `win: card yield seen now=430x932` → `card yielded to
-                  # fullscreen` → `card closed by fullscreen launch`。卡在 107 ms
-                  # 就出了首帧、1 s 后才交回，所以**不是时机**：这次激活本身提交了
-                  # 系统自己的全屏事务。ScreenCore 与 floatingView 两家都在请求里带
-                  # `__ActivateSuspended`，这一版只补这一个键（`setDictionary:` 就地
-                  # 改原件，不造副本 —— 副本会丢 `__PayloadOptions`）。
-                  # `susp=` 的四个值：1 就位 / 0 写了读回 NO / -1 没写成 / -2 读不回。
-                  b"AevonColdSuspOn",
-                  b"/var/mobile/Library/Logs/Aevon/url.cold.susp.off",
-                  # 0.3.49 — 写挂起位降级成实验（默认不写）。Aevon(5)(2) 的
-                  # `susp=1` + `card yield seen now=430x932` 证明它在这一层不起作用。
-                  b"/var/mobile/Library/Logs/Aevon/url.cold.susp.on",
-                  # 0.3.50 — **冷分享「事后收卡」**。四条读数 + 闸符号 + 文件名。
-                  #
-                  # 这一版不改投递口，改的是顺序：系统原生那一发照旧放行（面板
-                  # 一定出），2.5 s 后如果目标真成了屏上那一个、并且不在卡里，
-                  # 就走圆盘路的 home-first 把它收进卡。
-                  # `plan` 一定在放行那一拍落；`go` 只在真正按 Home 之前落；
-                  # `timeout` 是「8 秒都没轮到」的唯一证据；`done` 是成败判据
-                  # （`card=1` 才算进卡，`card=0` 要去 `win: url card declined` 找原因）。
-                  b"act: cold adopt plan wait=%dms late=%d b=%s",
-                  b"act: cold adopt go tick=%d ms=%d delay=%d live=%d alive=%d front=%d b=%s",
-                  b"act: cold adopt timeout tick=%d ms=%d live=%d alive=%d front=%d b=%s",
-                  b"act: cold adopt done card=%d b=%s",
-                  # 0.3.52 — 逐拍读数：`front` 从哪一拍翻成 1 是这一版唯一的未知量，
-                  # 也是「整屏到底还剩多长」的唯一证据。没有它，delay 该调多少只能猜。
-                  b"act: cold adopt tick=%d ms=%d front=%d live=%d alive=%d since=%d b=%s",
-                  # 收卡没成时的那一条退路：Home 是我们按的，就不能把用户留在
-                  # 桌面上。`revive` 只在「卡没起来 且 目标已不在前台」时落。
-                  b"act: cold adopt revive ok=%d b=%s",
-                  b"AevonColdAdoptOn",
-                  b"/var/mobile/Library/Logs/Aevon/url.cold.adopt.off",
-                  # 0.3.52 — 时长旋钮与 A/B 闸：`delay` 是「目标上屏之后再等多少毫秒」，
-                  # `late` 是「回到 0.3.51 的固定 2.0 s」。两个都必须真的在包里 ——
-                  # 前两版的教训是「写成不可达就整段被 dead_strip 删掉」。
-                  b"AevonColdAdoptDelayMs",
-                  b"AevonColdAdoptLateOn",
-                  b"/var/mobile/Library/Logs/Aevon/url.cold.adopt.delay",
-                  b"/var/mobile/Library/Logs/Aevon/url.cold.adopt.late",
-                  # 0.3.54 — **自建承载**：逆向 ScreenCore 2.1.0 之后第一次真的
-                  # 「不让系统开」。钩子在 `_handleOpenApplicationRequest:` 答「我接」、
-                  # 不调原实现，改向 SB 的 scene manager 要一个 scene handle，
-                  # 自己挂进卡片，URL 走进程内那条桥。
-                  #
-                  # 六条读数各自回答一个问题：`gate` = 类面接不接得上（0 才敢往下调）；
-                  # `skip why=handle` = SB 那边给不出 handle（让路，行为等于 0.3.53）；
-                  # `start door=` = 挂起启动的三种结果（1 成功 / 2 拒绝 / 0 无此方法）；
-                  # `scene up tick=` = 第几拍拿到活 scene（2.24 s 上限的证据）；
-                  # `card not up` / `scene timeout` = 两条退路真的走了；
-                  # `deliver send=` = URL 有没有投进去。
-                  b"deck: gate need=%d miss=%d",
-                  b"deck: skip why=handle b=%s from=%s",
-                  b"deck: start b=%s from=%s door=%ld u=%.48s",
-                  b"deck: scene up b=%@ tick=%d cls=%@ float=%d",
-                  b"deck: card not up b=%s",
-                  b"deck: scene timeout b=%s tick=%d",
-                  b"deck: deliver b=%@ send=%d src=%@ u=%.48s",
-                  b"deck: end why=%s b=%s tick=%d",
-                  # 「一次就下线」：任何一条退路被走到都写手闸，本次开机不再尝试。
-                  # 这一行是现场唯一能区分「这条路没跑」与「跑了一次就自禁」的读数。
-                  b"deck: strike why=%s b=%s (route off until reboot)",
-                  # Swift 侧那一拍的读数：进没进建卡链、拿到的 scene 是哪一类。
-                  b"win: own deck float b=",
-                  # 0.3.57 — 判定第一次开口。Aevon(277) 只能证明「deck 没起来」，
-                  # 证明不了「哪一格挡的」；这两行让下一次日志直接给出答案：
-                  # `want why=` 一个 return 0 一行原因（b / auth / no-url / card /
-                  # scene / front），`want ok` 是唯一能证明判据全过的读数。
-                  b"deck: want why=%s b=%s",
-                  b"deck: want ok b=%s share=%d file=%d u=%.48s",
-                  # 闸：符号与文件名都必须在包里，否则现场关不掉这条路。
-                  b"AevonDeckOn",
-                  b"/var/mobile/Library/Logs/Aevon/url.own.start.off",
                   # 逆向出来的四个私有名字。它们是这条路的地基：任何一个拼错，
                   # `AevonDeckGate` 会在真机上 miss 而不是崩 —— 但那也是白跑一趟，
                   # 所以在这里先按字面量核一遍。
-                  b"SBSceneManagerCoordinator",
                   b"SBApplicationController",
-                  b"SBDeviceApplicationSceneEntity",
-                  b"initWithApplicationForMainDisplay:generatingNewPrimarySceneIfRequired:",
-                  # 0.3.58 — **显示层（L2）**：六家插件复盘之后补的那一层。
-                  #
-                  # 0.2.x / 0.3.x 二十几版一直在 L1（吞不吞）与 L3（scene 进谁的窗）
-                  # 里换花样，没有一版碰 L2（这一次打开要不要显示）—— 这就是
-                  # 「有全屏」与「没面板」二选一的全部原因。母本 ScreenCore 2.1.0
-                  # 的两条替身把 BOOL 实参强制成 1：系统照常提交激活事务，只是提交成
-                  # 后台。四条读数各回答一件事：
-                  #   `installed=` 两条 setter 装没装上（0 = 这一版等于没做）；
-                  #   `arm`        显示层窗口有没有被打开（0 = 分享没认出来，退路有效）；
-                  #   `set`        真正被改的那几拍（`was=0 now=1` 才是真改动）；
-                  #   `land: url hit display=` 是 R2 的证据：非 nil 才会被切成 nil，
-                  #                0.2.63 那十几版是在本来就是 nil 的情况下「传 nil」。
-                  b"bg: installed=%d cut=%@",
-                  b"bg: arm b=%s why=%s win=1600",
-                  b"bg: set %s was=%d now=1 cls=%s b=%s",
-                  b"land: url hit display=%s anim=%d arm=%d cut=%d u=%.44s",
-                  # 按了后台却没等到 scene 时的唯一收尾：把它拉回前台。
-                  # 没有这一行，「桌面 + 后台里一个没人看得见的 App」这个最坏
-                  # 形状在日志上会是一段空白。
-                  b"act: cold adopt bg giveup ok=%d b=%s",
-                  # 0.3.60 — **延后交回**：母版替身 0x4c770 在 0x4c8e0 用
-                  # `dispatch_after(0.5 s)` 把原实现押后，块里才把七个实参交回。
-                  # 0.3.58/0.3.59 只做了 setBackground（L2），URL 仍立刻投，结果是
-                  # Aevon(283) 的三次冷分享「无全屏、有卡、卡里零 panel」。
-                  b"land: url defer wait=1 b=%s u=%.44s",
-                  b"land: url fire t=%dms why=%s b=%s",
-                  # 0.3.61 — **冷分享静默期不让路。**
-                  #
-                  # Aevon(286) 七次冷分享里五次是这一条被判成让路：卡已出帧，
-                  # `land: url fire` 之后系统又对同一个 scene 写 430x932，年龄
-                  # 超过 0.40 s ⇒ 拆卡 ⇒ 整屏（而且 QQ 窗口按 717 建，下半 215 黑）。
-                  # 现在冷分享窗口内把 932 改回 717，读数就是这一行。
-                  b"win: card hold b=%s now=%.0fx%.0f want=%.0fx%.0f n=%d",
                   # 让路之后把屏幕也还回去（否则全屏页只剩上面 717 有内容）。
                   b"win: card yield display back %.0fx%.0f -> %.0fx%.0f b=%s",
-                  b"AevonURLDeferOff",
-                  b"/var/mobile/Library/Logs/Aevon/url.core.defer.off",
-                  b"AevonBGOn",
-                  b"AevonBGKeepDisplay",
-                  b"/var/mobile/Library/Logs/Aevon/scene.background.off",
-                  b"/var/mobile/Library/Logs/Aevon/url.display.keep",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`
@@ -1337,27 +804,11 @@ def main():
                   # 所以这一版把那 14 条启动链断言全撤，换成「范围」与「不再回桌面」
                   # 这两组。前两串是接管范围的两种拒绝理由（闸关 / scheme 不该管），
                   # 第三串是新的 Home 判据读数（谁在屏上），后面是闸的符号与文件名。
-                  b"act: deny skip why=global k=%d b=%s",
-                  b"act: deny skip why=scheme k=%d u=%.60s",
                   b"win: home first skip why=front b=",
                   # 0.3.52 — 收卡提前到「目标刚上屏」之后，那一下 Home 正撞在激活
                   # 过渡里，有可能被系统丢掉。丢了还继续建卡就是把还在全屏的 scene
                   # 搬进卡（黑）。这一串是「补按了一次」的唯一证据。
                   b"win: home first retry why=still-front b=",
-                  b"AevonURLGlobalOn",
-                  b"/var/mobile/Library/Logs/Aevon/url.global.off",
-                  # 两把闸自己的路径常量 —— 文件名写错就等于没有闸。
-                  b"/var/mobile/Library/Logs/Aevon/url.deny.off",
-                  b"/var/mobile/Library/Logs/Aevon/url.redeliver.off",
-                  # 反向闸自己的路径常量 —— 文件闸写错文件名就等于没有闸。
-                  b"/var/mobile/Library/Logs/Aevon/url.card.off",
-                  # 分享那次 transitionContext 里装了 action（`n=1`），可从来没看过
-                  # 是哪个类。这一串是「action 本体」的唯一读数，缺了就是没进包。
-                  b"probe: tctx act cls=%s d=%s",
-                  # 0.3.20 — `probe:tctx` 是 Aevon(246) 记录的上一次死因，可那一份日志
-                  # 被装包清空了，死了都不知道死在哪一类上。这一行排在 @try 之前、
-                  # 方法表之前，trap 也能留下类名。
-                  b"probe: tctx enter ctx=%s set=%s",
                   # 0.2.91 把正常收尾写成空串，等于自己擦掉断点；这一串证明
                   # 「收尾有名字」而不是一片空白。Swift 侧的 `(settled)` /
                   # `(INTERRUPTED)` 是插值出来的，二进制里没有独立字面量，
@@ -1365,8 +816,6 @@ def main():
                   b"sig:done",
                   # `_Block_signature` 用 dlsym 取，所以这串必须进二进制；取不到就
                   # 是这一格空着，不是这条断言该消失。
-                  b"_Block_signature",
-                  b"__LaunchSceneless",
                   b"/var/mobile/Library/Logs/Aevon/act.step",
                   # 0.2.75 — 安全闸的**运行期**复查。Aevon(207) 里用户把 G0 与 G1
                   # 都打开，`win: touch in=17 eat=3` 照样在吞 —— 原因是设置侧只写
@@ -1388,68 +837,6 @@ def main():
                   b"gate: stand down why=",
                   b"gate: released why=",
                   b"probe: gate snapshot why=",
-                  # 0.2.76 — URL 四路（跳转 / 分享 / 授权 / 支付）去名单化。
-                  # 判据从「两个 scheme」换成「问 LaunchServices 这条 URL 归谁」，
-                  # 于是三行都必须能在产物里搜到：
-                  #
-                  #   `bundle from url` = 请求里没有 bundle，是**这条分支**把目标
-                  #       App 算出来的。Aevon(210) 的
-                  #       `notify: hit op=open b=- … act=#UILinkConnectionAction`
-                  #       以前紧跟 `why=nobundle` 整条放行，现在它必须有这一行；
-                  #   `landing: url hand … why=auth` = 微/QQ/支付宝那一族刻意让给
-                  #       分流（吞掉 + 自建），落点不接 —— 出现它说明「两条链不再
-                  #       各建一张卡」这条规则被走到了；
-                  #   `landing: url keep … why=front` = 目标 App 已经在前台且不在卡
-                  #       里，落点不动它。这条是防「把用户正在用的整屏 App 缩进卡」
-                  #       的那道否决，不能没有。
-                  b"notify: bundle from url b=%@",
-                  # 通知名 `com.aevon.gate` **不在这里断言**：它只有 14 字节，会被
-                  # Swift 编成立即数，二进制里一个字节都没有。它通不通，由运行时
-                  # 那两行直接读出来：`settings: G0 emergency stop -> on` 之后若
-                  # 紧跟 `gate: runtime switch 1`，通知就是通的；只出现前者，说明
-                  # 喊了没人应 —— 那正是 Aevon(207) 的形状。
-                  # 0.2.62 — 放行之后 100 ms 内收进卡片（Aevon(203) 第 1 条：授权
-                  # 不能停在整屏）。两行一起断言：`card` = 真的收进来了，
-                  # `giveup` = 收不进来时把登记彻底撤掉（否则整屏只画上半截）。
-                  b"notify: auth swap card b=%s after=%dms fg=%d live=%d board=%d",
-                  # 0.3.0 — URL 四路统一主干。0.2.x 的两套入口 / 三套收卡调度 /
-                  # 四套兜底已收成「一个判定 + 一个调度」。这三条是主干是否真的
-                  # 接上的唯一证词：
-                  #   `route: settle`      四路都汇到这一个调度点，`kind=` 分辨是哪一路；
-                  #   `route: settle skip` 卡已在 / 开关关着时不重复建卡；
-                  #   `route: settle why=off` 总闸生效时一个字节都不改行为。
-                  b"route: settle b=%s kind=%s",
-                  b"route: settle skip b=%s why=incard",
-                  b"route: settle skip b=%s why=off",
-                  b"notify: auth swap giveup b=%s fg=%d live=%d tick=%d build=%d",
-                  # 0.2.70 — 授权那一支**不再**改激活设置（0.2.69 的挂起位已撤：
-                  # 挂起的进程不跑，SSO 没人接；而且「激活一个不上屏的目标」正是
-                  # 0.2.69 分享死局的形状）。
-                  # 0.2.67 — 授权结果回到第三方 App：放行，不按进小窗。
-                  # 0.2.79 — 补 `ptk=`：带 paste token 的回跳（微信把登录结果
-                  # 塞在粘贴板里送回来）也要认成回跳，否则发起方会被
-                  # `paste promote` 收进卡片。`ptk=1` 就是那一格。
-                  b"notify: auth return b=%s src=%@ recent=%d in=%d ptk=%d",
-                  # 0.2.63/0.2.66 — 落点（对比报告的方案 A）：系统的 URL 打开入口带一个
-                  # `display` 参数（真机编码 `v60@0:8@16@24B32@36@44@?52` ⇒ 它是对象）。
-                  # 0.2.70 — **display 原样下发**（0.2.69 的 nil + 补台已撤：nil 让目标
-                  # 不上屏、建卡等不到 scene，主屏又没有前台 App ⇒ 手势失效、无法注销）。
-                  #   `owners=` / `cls=… types=` = 这个选择子在这台系统上存不存在、
-                  #      形状对不对（对不上就不装，只留一行 shape skip）；
-                  #   `hooked` = 真装上了；
-                  #   `url … land=1` = 那一次会接手落点（display 原样交给系统）；
-                  #   `url card` = 随后把那份 scene 收进了卡片。
-                  # 另两条 `landing: %s cls=` 是 Stheno 的激活口与 TrollOpen 的
-                  # 实体口的普查，只记录、不改变行为 —— 它们的答案决定下一版要不要
-                  # 换入口。
-                  b"_openURLCore:display:animating:activationSettings:origin:withResult:",
-                  b"landing: url owners=%d",
-                  b"landing: url cls=%@ types=%s",
-                  b"landing: url hooked",
-                  b"landing: url shape ok (sig=%s)",
-                  b"landing: url shape skip (sig=%s args=%d)",
-                  b"landing: url build b=%s after=%dms",
-                  b"landing: %s cls=%@ types=%s",
                   # 0.2.60 — 卡片走了、App 窗口还回场景高（「全屏中下黑」的另一半）。
                   # 0.2.46 — 「让抖音真重排」这一版的四条：显示覆盖 / 参考尺寸 /
                   # 屏幕跟随 / 回执。逐条都要能在产物里 grep 到，缺哪条就等于那一步
@@ -1460,9 +847,7 @@ def main():
                   #   `own ref` = 建 scene 时把内容参考尺寸定成了画布大小。
                   #   `display follow` = 推 frame 时屏幕跟着变（尺寸真的不同才会出现）。
                   #   `scene ack` = transition 门的回执，证明「门后面真的有人接」。
-                  b"win: own display %.0fx%.0f -> %.0fx%.0f via=override",
                   b"win: own display override skip enc=%s n=%u",
-                  b"win: own display cap=%d",
                   b"win: own ref %.0fx%.0f via=%s",
                   b"win: own ref skip %s enc=%s n=%u",
                   b"win: display follow %.0fx%.0f -> %.0fx%.0f slot=%d",
@@ -1472,9 +857,6 @@ def main():
                   # 入口」和下一版要不要换路的依据。名字来自对比报告第五节那张表。
                   b"copyWithOverrideBounds:",
                   b"setContentReferenceSize:withContentOrientation:andContainerOrientation:",
-                  # 只问不调的探针：`FBUpdateSceneTransaction` 在真机上叫什么、在不在。
-                  # 这一版**没有**用它（用回执），所以它出现在产物里不代表被调用过。
-                  b"win: own txn %s meta=%d inst=%d enc=%s",
                   # 0.1.87 — 激活入口观察器。名字不是猜的：0.1.86 的普查在真机上
                   # 把四条同形状的方法列了出来（`surf: SBMainWorkspace~activ
                   # n=16/170`），这一版按真名装，闸二改成**逐字节比对参数编码**。
@@ -1482,43 +864,9 @@ def main():
                   # 四条选择子都要在二进制里 —— 少一条就是「少装一路观察」，
                   # 而那在日志里只表现为「某条从来没命中」，与「这条路不走」
                   # 分不开。
-                  b"_handleOpenApplicationRequest:options:activationSettings:origin:withResult:",
-                  b"_handleUntrustedOpenRequestForApplication:options:activationSettings:origin:withResult:",
-                  b"_handleTrustedOpenRequestForApplication:options:activationSettings:origin:withResult:",
-                  b"_handleUserActionRequest:options:activationSettings:origin:withResult:",
                   # 形状闸：真机量到的编码就是这 21 个字节。它同时是「装没装」的
                   # 判据和下一版的 ABI 依据，所以必须能在产物里 grep 到。
                   b"v56@0:8@16@24@32@40@?48",
-                  #   armed  = 四条里装上了几条，skip= 写清每条为什么没装
-                  #            （absent / shape(真实编码) / inherited / no-orig）
-                  b"notify: open armed n=%d/%d shape=%s skip=%@",
-                  b"notify: open absent reason=no-class",
-                  # 取证行本身。op 是四条里的哪一条，b/src/act/url 是母本当年
-                  # 那三个字段的真值，req/opt/set/org 是四个参数的真实类名。
-                  b"notify: hit op=%s b=%s src=%s act=%s n=%d url=%s req=%s opt=%s set=%s org=%s",
-                  # 闸五：预算用尽后闭嘴的那一行（四条合计 32 行）。
-                  b"notify: open budget spent n=96",
-                  # 0.1.88 — 分流。这是第一次「不原样转发」，所以每一条分支都要
-                  # 能在产物里 grep 到：哪一条缺了，就等于那一种结局没有证词。
-                  #
-                  #   divert b=… op=… why=… unlock=…  吞掉了，去开卡片
-                  #   divert chain b=…                同一次点击的第二条，吞掉但不再开
-                  #   divert pass b=… why=…           认出来了但没吞（开关/上限/取不到）
-                  # 0.2.1 — `divert card up` / `divert replay` / `replay threw` 三条删掉：
-                  #   2.5 秒重放整段拔掉（它是自循环的发动机，Aevon(169)）。它们现在在
-                  #   反向断言表里，见下面的 `# gone`。
-                  b"notify: divert pass b=%s why=%s",
-                  # 0.2.77 — 熔断换了形状：全局 60 次 / 60 秒，外加每个 App
-                  # 3 秒 / 6 次的连击计数。Aevon(211) 12:00:17 的支付就是被旧的
-                  # 「24 次 / 10 分钟」掐掉的（三分钟的正常使用只有 24 次）。
-                  # `why=cap` / `why=loop` 只有四个字母，会被编成立即数，所以
-                  # 断言认这一行长的 —— 它是「究竟哪一把尺掐的」的唯一证词。
-                  b"notify: divert loop b=%s n=%d",
-                  # 0.2.77 — 落点解析不出来时的三条证词：
-                  #   pending  记在案上了（下一跳应当报门牌）
-                  #   ls miss  LaunchServices 断在哪一步（class/shared/ws/one-nil/…）
-                  #   link late 下一跳把目标报出来了，收卡链已排上
-                  b"landing: url ls miss step=%s",
                   # 0.2.77 — 同一条授权来两拍（payload / url）时，第二拍不再
                   # 建第二个 presenter（Aevon(211) 11:58:28 的
                   # `presenter threw … already in use`）。
@@ -1526,119 +874,7 @@ def main():
                   # 那种打开，只在紧跟我们自己那次分流时才被吞（`why=syschain` 会出现在
                   # 上面那行 chain 日志里 —— 短串会被编成立即数，所以断言只认这条长的）。
                   b"com.apple.springboard",
-                  # 判据要能在二进制里找到，否则「为什么没吞」全靠猜。
-                  b"NotificationResponseAction",
-                  # 0.1.89 — 分流之后的收尾。收面板 / 收横幅这两件事本来挂在
-                  # SpringBoard 那一段的收尾里，被跳过之后要自己补。每一条候选
-                  # 选择子都必须能在产物里 grep 到 —— 少一条就等于少一条试过的
-                  # 路，而「面板还是没关」与「压根没试」在日志里长得不一样。
-                  #
-                  #   hub      = dispatcher 走哪条路拿到的、拿到的是什么类
-                  #   clean    = 一次收尾的横幅结论（面板另起一行，见下）
-                  #   cover    = 面板的结论，`wait=` 是等了几拍才等到卡片
-                  #   sels     = 六个候选的真实编码，一次开机一行（0.1.90 新增）
-                  #
-                  # 0.1.90 的变化：`cover=locked` 那条闸删了 —— `isUILocked` 在通知
-                  # 中心在屏时本来就是 1，等于把功能关掉；换成 `cover=skip:passcode`
-                  # 与 `cover=skip:nocard` 两条。所以这两条必须在产物里，而 `locked`
-                  # 必须不在。
-                  b"notify: hub d=%@ via=%s",
-                  # 0.1.91 — 面板那行多了两格：`at=` 是手指到面板开始走的毫秒数，
-                  # `f=1` 表示「卡在路上就收了」而不是「卡片已经在」。用户报的是
-                  # 「会收但慢」，没有这两格，下一版只能再靠感觉调。
-                  # 0.1.92 — 清通知（点开 = 已读）。母版线 log67~log71 四版试出来的落点，
-                  # 每一条都要能在产物里找到，否则「没清」与「没试」在日志里长得一样：
-                  #   clear b=… id=… via=… sel=… = 清成功了，写清走的是哪个宿主/哪个方法
-                  #   clear=noid                 = 取不到标识（这一版的安全出口）
-                  #   clear=noreq                = 标识有了，但没有哪个宿主认这条请求
-                  #   clear map                  = 一次开机的「能力地图」，下一版据此改名字
-                  #   clear b=%@ clear=noid      = 上面那条的 Swift 版（分流那一拍就写）
-                  b"notify: clear map",
-                  # 0.2.5 — 清通知改「截对象」。老路（上面五条 getter + 各宿主比对）在
-                  # 真机 6/6 是 `clear=noid`：猜标识这件事本身走不通，不是名字没试全。
-                  # 新路的证词是这七条，缺一条就等于「那条分支没跑过」：
-                  #
-                  #   capture live / failed   钩子装上没有（装上才有对象可截）
-                  #   capture class missing   通知栈 20 次都没起来（懒加载的真实现）
-                  #   capture req=… ok=…      钩子**第一次**被调用时四个参数的真实类名；
-                  #                           `ok=1` 是「第三格确实是 NotificationRequest」，
-                  #                           参数顺序猜错的唯一现场证据就是这里
-                  #   clear b=… via=…         真正动手那一次：哪个宿主、哪个方法、哪条标识
-                  #   clear b=… capture=…     截对象没成（section 不符 / 无 withdraw），
-                  #                           写清是哪一半缺的
-                  #   clear b=… via=capture only  老路取不到标识，但截到了对象 —— 这一拍
-                  #                           仍然排队（0.1.9x 的死结就是「没标识就不排」）
-                  b"notify: capture live cls=%@",
-                  b"notify: capture failed %@",
-                  b"notify: capture class missing after 20 tries",
-                  b"notify: capture req=%s dest=%s act=%s ok=%d",
-                  # 0.2.37 — 两条清通知证词前面多了一格 `%s`（` retry` / 空串），
-                  # 1.6 秒那次补刀与第一拍在日志里要能分开。
-                  # 0.2.7 —— 三家综合（TrollOpen / Myrtle / Mango）这一版的四条证词。
-                  #
-                  #   shareprobe   分享那一拍的全部现场：来源、payload 类型、结果块形状、
-                  #                挂起键读回值、settings 四个能力、options 全部键名。
-                  #                它存在的理由就是「分享这条路从来没有真机现场」——
-                  #                快照有 32 拍预算，分享常排在第 11 拍之后。
-                  #   forward adopt 第二道认领（同一 App 2 秒内）。Aevon(173) 里 op=trusted
-                  #                转发出去之后，op=untrusted 那条又被转发一次，多出来
-                  #                的那次原实现调用就是把 App 拉上全屏的那一次。
-                  #   win: ability 三家各自的核心能力在 iOS 17.3.1 上还在不在
-                  #                （forceBackgrounded / _setDeactivationReasons /
-                  #                 SBTransientOverlayWindow / 进程事务 / _openURLCore）。
-                  #                只问不调，问错也只是 0。
-                  # 0.2.12 —— 挂起位写在 settings 对象上（不是 options 字典）。
-                  # 0.2.9 那版 `win: act dump` 已作废并删除（四个 tag 全是 n=1
-                  # _settings=0x1 —— 这个类只有一个 ivar，做差在数学上不可能有结果），
-                  # 它现在在反向断言表里。替代它的三件东西：
-                  #   act enc   setFlag/flagFor 两个方法的真实编码（接线前必须知道形状）
-                  #   act key   下标 → 名字 + 每个 flag 值的描述（挑挂起位靠它）
-                  #   suspbit   置位后立刻读回（「写了」和「生效了」不是一件事）
-                  b"win: act enc set=%s get=%s",
                   b'win: act key %d "%.30s"%@',
-                  b"win: act key pick=%d flag=%d n=%d enc=%s",
-                  # 0.2.39 —— 分享黑名单（`shareBlacklist` / `notify: blacklist drain`）
-                  # 已随微信移出整块删除，这里不再断言旧证词。
-                  # 一次开机一遍：这一族到底有哪些手段。真 API 名靠 census 不靠 strings。
-                  b"win: act api set=SBActivationSettings n=%u %@",
-                  b"win: act api set=absent",
-                  # 「按回后台 / 别前台激活」这一族的存在性（-1 类不在 / 0 方法不在 / 1 可调）。
-                  b"win: ability bg app=%d ctrl=%d mainws=%d sbws=%d set=%d susp=%d fg=%d",
-                  b"win: ability deact2 sbws=%d fbmgr=%d fluid=%d coord=%d",
-                  # 因果读数：转发前/后目标 App 在系统眼里是不是前台。
-                  # 0.2.10 —— 自建 scene 的三问：类在不在 / 名字叫什么 /
-                  #                   关键选择子落在哪个类、什么形状。全部 class_copyMethodList
-                  #                   + method_getTypeEncoding，一个对象都不建、一次 msgSend
-                  #                   都不发 —— 这条线的历史是两次安全模式，所以本版只问。
-                  b"surf: scn exists a",
-                  b"surf: scn exists b",
-                  b"surf: scn names total=%d",
-                  b"surf: scn sel %s n=%d",
-                  b"surf: scn sel total=%d",
-                  # 0.2.11 —— 0.2.10 那五个答 none 的名字改成「全类扫」。三条证词：
-                  #   host <sel> <cls> i|c{enc}   名字在、宿主是谁、形状（改 IMP 前必须知道）
-                  #   host none <sel>             全类都没有 —— 那就是真不在，得换宿主进程
-                  #   urln <cls>.<sel>{enc}       按 openurl + display|scene 重新取名（防改名）
-                  # 仍然只读。产物里缺这三条，等于这一版什么都没问。
-                  b"surf: scn host %s %s %c{%s}",
-                  b"surf: scn host none %s",
-                  b"surf: scn host total=%d urln=%d",
-                  b"surf: scn urln %s.%s{%s}",
-                  # 0.2.13 —— 真正开始用自建 scene（不再是「先全屏、再抢」）。
-                  #
-                  # 这一族是整条链上第一次「scene 不是系统给的」。每一条都是产物里
-                  # 必须能找到的证词，缺一条就等于那一格根本没编进去：
-                  #   own gate need=  miss=   那 35 样私有面问过几样、缺几样（0 才敢调）
-                  #   own miss       缺的是哪一类哪一个选择子（只问不调，问错也只是 0）
-                  #   own begin      起进程那一刻：谁的、从哪条路进来、画布多大
-                  #   own compose ok scene=… id=…   真建出来了，是什么类、什么 identity
-                  #   own done phase=…  scene=…     completion 落地时的终态
-                  #   own start      openCard 这一拍的判决（1 = 走自建，其余 = 退回老路）
-                  #   own scene up   自建 scene 交到卡片手里的时刻（毫秒）
-                  #   own gave up    自建失败，落回 0.2.12 那条挂起启动
-                  #   own destroyed  关卡：destroyScene，而不是 push background
-                  b"win: own gate need=%d miss=%ld",
-                  b"win: own miss %s%s %s",
                   # 0.3.1 — 自建 scene 在**行为上**下线（Aevon(225) 的安全模式
                   # 就崩在 `createSceneWithDefinition:initialParameters:` 那一行）。
                   #
@@ -1652,89 +888,15 @@ def main():
                   # 文件级 `AevonOwnRetired = 1`，函数第一句就返回 0，一次
                   # `objc_msgSend` 都不会发生。下一版若把这套代码整段摘除（推荐），
                   # 再把这些断言连同函数一起删 —— 0.2.92 的教训是「要删就删到底」。
-                  b"win: own begin b=%@ from=%s frame=%.0fx%.0f",
-                  b"win: own compose ok scene=%s id=%s",
-                  b"win: own done phase=%ld scene=%s",
                   b"win: own scene up after ",
                   b"win: own gave up door=%ld b=%@ after %ldms",
                   b"win: own destroyed %@",
-                  # 0.3.2 — presenter 只建造原型（A/B 两条读数把范围收敛到这一条）。
-                  # 0.3.3 — identifier 与生产链错开：0.3.2 用 `com.aevon.float`
-                  # 真机撞了 7 次 `already in use`，只有卡片拆掉之后才成功 1 次。
-                  b"presenter: birth ok=1 b=%s why=%s cls=%s view=%s resize=%d",
-                  b"presenter: birth fail b=%s why=busy(%s) id=%s",
                   # 0.3.5 — `setResizesHostedContext:` 的 owner 是
                   # `UIMutableScenePresentationContext`，不是 presenter。
                   # Aevon(230) 四路全部 `resize=-1` 就是这个原因；生产链那句
                   # `AevonCallSetBool(presenter, …)` 从 0.2.x 起一直静默失效。
                   b"presenter: resize ctx cls=%@ read=%@",
                   b"presenter: resize ctx no setter cls=%@",
-                  # 0.3.6 — 线 B 扩展：`setActions:` 的真实编码、有没有 getter、
-                  # 现状是什么。三条读数把方向收敛到这一条之后，先问清楚再动手。
-                  b"probe: tctx cls=%s actions=%d enc=%s getter=%d now=%s n=%ld frame=%d %s | set cls=%s %s",
-                  # 0.3.7 — payload 的每个键值。线 A 已确认 options 只有
-                  # `setDictionary:` 一个写入口，要改就必须先看清里面有什么。
-                  b"probe: payload n=%ld via=%d |%s",
-                  # 0.3.8 — 照母版 P1 的承载链取证（线 D/E/F）。三条线全只读：
-                  #   D: 建独立承载的 5 个符号（UIWindow(windowScene:) / presenter /
-                  #      _UIContextLayerHostView / setResizesHostedContext:）
-                  #   E: 收窗链（_dismissPresentable / deactivateWithTransitionContext）
-                  #      —— 母版各 2 次，Aevon 一次都没调过
-                  #   F: SBDeviceApplicationSceneViewController 的可用面
-                  b"probe: D1 UIWindow initWithWindowScene = %@",
-                  b"probe: D3 UIScenePresentationManager createPresenter = %@",
-                  b"probe: D4 _UIContextLayerHostView initWithSceneLayer = %@",
-                  b"probe: E%d %s dismiss=%s deactivate=%s",
-                  b"probe: F1 SBDeviceApplicationSceneViewController set* = %@",
-                  # 0.3.9 — P1 落地前三问：sceneHandle 拿不拿得到、newSceneViewController
-                  # 出不出 VC、那个 VC 收不收 resize/background 两刀。
-                  # 线 F 只答了「选择子在」，这三条答「能不能拿到能挂的东西」。
-                  b"probe: G1 scene.%s -> %s",
-                  b"probe: G2 %s vc=%s view=%s size=%.0fx%.0f",
-                  b"probe: G3 %s resize=%d bg=%d mode=%d grabber=%d",
-                  # 0.3.11 — H 线：`_targetWindowSceneForApplication:…` 是
-                  # 「决定 App 落到哪个 windowScene」的那一拍。四个参数全是
-                  # 对象/BOOL，返回一个对象，hook 风险低。母版没用过它，
-                  # 所以这一版只装壳、原样尾调、只记读数。
-                  b"probe: H1 owner=SBMainWorkspace enc=%s",
-                  b"probe: H1 shape skip (%s)",
-                  b"probe: H2 n=%ld app=%s ret=%s",
-                  b"probe: H4 app=%s cls=%s opt=%s fg=%d",
-                  # 0.3.15 — 0.3.14 的通用透传壳已整段删除（Aevon(240) 崩在
-                  # `objc_retain_x20`，根因是统一 `void*` 壳破坏了 ARC 返回语义与
-                  # callee-saved 寄存器契约）。这里改成**纯只读普查**：
-                  # 只问 owner / 返回类型 / 参数个数 / 编码，一次 hook 都不装。
-                  b"census: %s owner=%s ret=%c argc=%d enc=%s",
-                  b"census: %s absent",
-                  b"census: done found=%d missing=%d total=%d",
-                  # 0.3.16 — 四个返回 void 的入口，逐个手写壳（不用通用透传）。
-                  # 选它们是因为 `v` 返回不碰返回寄存器、参数全是对象不拆寄存器。
-                  b"h4: layout.add armed",
-                  b"h4: layout.addC armed",
-                  b"h4: sysvc armed",
-                  b"h4: destroy armed",
-                  b"layout: add item=%s ws=%s",
-                  b"layout: addC item=%s ws=%s",
-                  b"h4: sysvc n=%ld actseq=%ld svc=%s req=%s",
-                  # 0.3.18 — 普查 FBSMutableSceneDefinition / FBSMutableSceneParameters。
-                  # 系统建 scene 传的是可变子类，而 0.2.85 查的是不可变父类。
-                  b"defn: %s chain=%@",
-                  b"defn: %s methods %@",
-                  b"defn: %s ivars %@",
-                  b"defn: mut.%s enc=%s",
-                  b"defn: mut.%s absent",
-                  b"defn: done",
-                  # 0.3.19 — 验证 updateSettingsWithBlock: 的 block 收到什么类。
-                  # 这是唯一可能「能改 settings」的入口（contra 0.3.13 的 48 方法零 setter）。
-                  b"p2: set armed",
-                  b"p2: cli armed",
-                  b"p2: set.ctx cls=%s",
-                  b"p2: cli.ctx cls=%s",
-                  b"p2: set called n=%ld blk=%s",
-                  b"p2: set shape skip (%s)",
-                  b"presenter: birth fail b=%s why=nil id=%s",
-                  b"presenter: birth skip b=%s why=nopm",
-                  b"presenter: birth threw b=%s why=%s",
                   # 0.2.14 —— 两处修根因：
                   #   own live attach   已经有活 scene ⇒ 直接贴，一个启动请求都不发
                   #                     （0.2.13 这里还会落下去走挂起启动，等于自己
@@ -1751,51 +913,11 @@ def main():
                   # 0.2.38 — 让路改成「松手」：自建 scene 交给系统，不销毁。
                   # 少了这一条，设置 App 在「卡片 → 全屏」那一拍会闪退。
                   b"win: own handed over %@",
-                  # 0.2.38 — 粘贴板分享的诊断行：下一版要靠它决定 token 能不能本地投递。
-                  b"notify: paste token b=%s cls=%s desc=%@",
-                  # 0.2.39 — 粘贴板/微信分享「先放行、再把前台 App 收回卡片」。
-                  # 少了这两条，分享要么停在原生全屏，要么根本没人去收卡。
-                  # 0.2.43 — 分享完成后把来源 App 请回全屏，卡片浮在它上方：
-                  # 少了 source/restore 这一对，卡片背后就只有桌面。
-                  b"notify: share source b=%s target=%s",
-                  # 0.2.44 — UIApplication 拒绝时的备份启动通道。
-                  # 0.2.46 — 分享收卡不再先回桌面：先把来源 App 顶回前台，
-                  # 等目标离开前台后直接建卡（homed: true）。少任意一条，
-                  # 真机上就又会看到「QQ 全屏 → 桌面 → 文件列表 → 卡片」。
-                  b"win: direct card declined (",
-                  # 0.2.48 — 应用内链接跳 Safari / 微信 QQ 登录授权不再整屏：
-                  # 认出带 URL 的打开请求、建卡、把 URL 投进卡片里的 App。
-                  # 少任意一条，这两类请求就又回到 `plain` 全屏那条老路。
-                  # 0.2.58 — 这条行尾补了 `front=` 与 `card=`：
-                  #     `front=1 card=1` 就是「卡里的 App 被 SpringBoard 认成前台」，
-                  #     旧版在这里放行成全屏，授权回调一跳全屏就是这个。
-                  #
-                  # 0.2.87 — 原来断言的是 `notify: link b=…`。这一族并轨母版之后
-                  # 改成放行（`return 0` + `AevonAuthSwapSchedule`），日志行也改名为
-                  # `notify: link native b=…`，词条已挪到 0.2.87 段。
-                  # 这里保留的是同一族的另外三行：卡里回调 / 建卡 / 回落。
-                  b"notify: link incard b=%s scheme=%s front=%d",
-                  b"linkchain",
-                  # 0.2.15 —— 尺寸 + 分享两件：
-                  #   own display       scene 的 displayConfiguration 被改成画布大小
-                  #                     （不改就是「UIScreen 932 / 窗口 717」，按屏幕
-                  #                      排版的 App 直接错位）
-                  #   appurl send       宿主把 URL + options 写进目标 App 容器
-                  #   appurl ack        App 侧回执（ok=1 via=app|scene）
-                  #   appurl give      没回执 ⇒ 退回老路转发
-                  #   forward drop      投递成功 ⇒ 就地销毁，一个字节都不交给 SB
-                  b"win: own display %.0fx%.0f -> %.0fx%.0f",
-                  b"win: own display keep %.0fx%.0f (no setBounds) cls=%s mut=%d",
-                  b"win: own safe top=%.0f bottom=%.0f src=win",
-                  b"win: own safe top=%.0f bottom=0 src=statusbar",
-                  b"win: own safe set %.0f/%.0f enc=%s",
-                  b"win: own safe skip top=%.0f bottom=%.0f enc=%s n=%u",
                   # 0.2.17 —— 抖音「出生整屏」那一次尺寸变化，以及分享不再抢跑。
                   #   own staged        这个 App 的 scene 先按整屏建，贴上后再推到画布
                   #                     （名单里现在只有抖音；串在产物里 = 名单真的编进去了）
                   #   share lost        投递失败就地销毁（不再交回 SB）
                   #   ack … [%@]        回执原文进主日志（pid / sc / wsc / dlg / rsp）
-                  b"win: own staged %.0fx%.0f -> %.0fx%.0f b=%@",
                   b"com.ss.iphone.ugc.Aweme",
                   # 0.2.18 —— 0 ms 抢跑的修复：两种「等」各自的收尾词不能丢。
                   #   no deliver    卡片 3 秒内一次投递都没发起 ⇒ 就地销毁
@@ -1807,53 +929,8 @@ def main():
                   b"FBApplicationProcessLaunchTransaction",
                   b"registerProcessForAuditToken:",
                   b"createSceneWithDefinition:initialParameters:",
-                  b"win: ability app forceBg=%d ctrl forceBg=%d app dehost=%d ctrl dehost=%d",
-                  b"win: ability scene deact=%d/%d overlay=%d txn=%d openurl=%d/%d",
-                  # settings 能力行补了两个读数（getFlag / n）。0.2.6 之前它是「一次开机
-                  # 只记一次」，分享换一条路进来时日志里什么都没有。
-                  # 放行侧独立预算（原来与通知共用 6 条，第三次点击之后永久静默）。
-                  b"notify: divert pass b=%s why=%s n=%d",
                   # Mango 的「判内容就绪」：空壳不建卡，继续等。
                   b" shell=1 (deferred, no black card)",
-                  # 这一对是三家逆向（2026-11-08）里同时出现在 `__objc_selrefs` 的选择子：
-                  # TrollOpen 1.5.2 就是拿它们做「点通知 → 清掉那一条」的。选择子本身
-                  # 必须在产物里 —— 名字写错一位，钩子装不上，而日志只会说 failed。
-                  b"destination:executeAction:forNotificationRequest:requestAuthentication:withParameters:completion:",
-                  # 归属校验：截到的请求必须属于这次分流的目标 App，否则不清。
-                  b"sectionIdentifier",
-                  # 取标识的五条无参 getter。`identifier` 故意不在里面（BSAction 自己也有），
-                  # 这几条同时是「这一版到底问过哪些名字」的证词。
-                  # 找请求：一个按标识取 + 三个列表 + 一张字典。
-                  # 四个清除方法 + 四个 destination 宿主。
-                  b"withdrawNotificationRequest:",
-                  b"lockScreenDestination",
-                  # 0.1.92 — 分享面板 → 浮窗。判据只有一个字符串：来源进程。
-                  # 0.1.97 — 判据从「只有 sharingd」扩到「来源是分享扩展 或 这次打开带东西」。
-                  # 四个字面量就是这两条判据的全部证据面。
-                  b"__PayloadURL",
-                  b"__PasteSharingToken",
-                  b"ShareExtension",
-                  b"sharetimeline",
-                  # 0.1.95 — 分享带 payload 时必须交回系统的那一次调用。
-                  #   ActivateSuspended = 只写这一个键，让 App 不上前台但 launch option 送到
-                  #   forward done ok=1 / ok=0 / err = 交回去之后系统怎么回的
-                  # 0.1.98 — 挂起键的**值**才是要写进字典的键名。0.1.95~97 写的是常量名，
-                  #   系统不认，于是分享时全屏和卡片一起被拉起（Aevon(165) 回环那行的 keys
-                  #   里能直接看到那个长名字躺着）。
-                  b"__ActivateSuspended",
-                  # 0.1.96 — 自己交回去的那条请求要认出来，只放行（不认就会二次分流）。
-                  # 0.1.99 — 三条诊断。这一版不改行为，价值全在这三行能不能被真机读出来：
-                  #   pass      = 被放行的那条请求（哪一条、为什么、带没带东西）。
-                  #               Aevon(167) 里 QQ 有一条 op=user 被放行，而 Sileo 没有，
-                  #               全屏的来源高度怀疑就在它身上。
-                  #   fwd settings = 第 4 个参数（SBActivationSettings）认不认「挂起」相关选择子。
-                  #   clear probe  = 点通知时公开链断在哪一跳（母版 log70 取到过标识，我们 6/6 没有）。
-                  b"notify: pass b=%s op=%s why=%s src=%s pay=%s n=%d",
-                  # 0.1.99 — 能力地图加了 dispatcher 类名那一格（取不到是最要紧的一种结果）。
-                  b"notify: clear map d=%s",
-                  b"sharingd",
-                  b"UIApplicationLaunchOptionsSourceApplicationKey",
-                  b"UIApplicationLaunchOptionsURLKey",
                   # 0.1.93 — 主线程看门狗。这一整版的价值就是「下次卡死能被一句话
                   # 说清」，所以这两条必须在产物里：
                   #   win: main stall …ms (no main beat …s) = 主线程真被卡住了，毫秒数是时长
@@ -1869,35 +946,12 @@ def main():
                   # 形状闸的六个期望值。它们同时是「这一版到底校验了什么」的证词。
                   # 横幅：只有 GCD 计时器才动，而且必须是这个名字的那一个。
                   b"dispatch_source",
-                  b"bannerDestination",
-                  b"dashBoardDestination",
-                  b"notificationCenterDestination",
                   # dispatcher 的三条取法 + 起点。
-                  b"notificationDispatcher",
-                  b"ncDispatcher",
-                  b"_notificationDispatcher",
                   b"delegate",
-                  # 闸四（Swift 侧）：闩的两振。0.2.26 起第一次只跳过本次装配，
-                  # 第二次才落 notify.off —— 普通重载桌面不再永久关掉通知/分享。
-                  b"notify: activate latch held 1/2, this boot stays native",
-                  b"notify: activate latch held twice, notify.off written",
-                  b"notify: activate latch cleared uptime=",
-                  b"notify: activate off switch=notify.off",
-                  b"notify: activate arm scheduled in ",
-                  # 0.1.86 — 激活面普查（只读）。这一版的价值全在「取证是不是
-                  # 真的装进去了」：0.1.85 的教训是断言写了、位置放错了，于是
-                  # audit 失败而二进制其实没问题。所以这五条必须落在 Aevon.dylib
-                  # （SpringBoard 侧）那一组里 —— AevonApp.dylib 没有这个文件。
-                  #   exists  = 18 个候选类在不在（1 / 0）
-                  #   ~       = 某个类自己的方法名，花括号里是参数编码
-                  #   g       = 全局命中（不限类名）
-                  #   begin/end = 一次普查的边界，缺 end 就是半路断了
-                  b"surf: exists ",
-                  b"surf: chain %@",
-                  b"surf: %s~%s n=%d/%u %@",
-                  b"surf: g n=%d %@",
-                  b"surf: begin (0.1.86 read-only)",
-                  b"surf: end",):
+                  # 0.4.0 — 「激活面普查」那一组（`surf:` 六条）随普查代码一起撤销。
+                  # 0.1.86 的普查是只读取证，0.4.0 把「和功能无关的探针」全删了，
+                  # 普查是最大的一块：18 个候选类、方法表、全局命中，一条不留。
+                  ):
 
         if token not in dylib_early:
             bad(f"host: {token.decode(errors='replace')} missing from Aevon.dylib — "
@@ -2464,26 +1518,6 @@ def main():
                       b"app: band touch at %.0f,%.0f watch",
                       # 0.1.29 — 深浅色的应用侧观察者。
                       b"com.aevon.style.",
-                      # 0.2.15 — 分享 payload 的落点。这三行分别代表「交给自己了」
-                      # 与两种「没东西可交」；通道名与回执名也一起钉住 —— 宿主和
-                      # 应用两侧的拼写只要差一个字符，这条链就永久静默。
-                      b"com.aevon.openurl.",
-                      b"app: openurl ok=%d via=%s u=%d opt=%d src=%d sc=%d wsc=%d wins=%d state=%d rsp=%d dlg=%s",
-                      # 0.2.18 —— 回执又加了 `wins` / `state`：区分「一条 scene 都没有」
-                      # 与「有窗口但没 scene」。两个字段都不进产物就等于这版白改。
-                      b"ok=%d via=%s pid=%d sc=%d wsc=%d wins=%d state=%d dlg=%s rsp=%d ready=%d",
-                      # 0.2.17 —— AppDelegate 的两条老入口。QQ 这类老工程常常只实现
-                      # 这两条；名字写错一位就等于那条路从来没存在过。
-                      b"application:openURL:sourceApplication:annotation:",
-                      b"application:handleOpenURL:",
-                      b"app: openurl ctx opt miss",
-                      # 0.2.42 —— 微信分享崩溃的修复标记：`_options` 必须是对象。
-                      # 这两行只有真的按「系统类 / 替身」二选一才存在，缺了说明
-                      # 又把裸字典塞回去了。
-                      b"app: openurl ctx opt real",
-                      b"app: openurl ctx opt stub",
-                      b"app: openurl no file",
-                      b"app: openurl bad plist",
                       b"setContentOffset:"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")
@@ -2656,12 +1690,7 @@ def main():
     # Deliberately NOT asserted: `win: no presenter`, `win: no presentationView`
     # and `win: no window …` share constant prefixes, and LLVM merges shared
     # prefixes at link time; only the longest distinctive half is checked.
-    for token in (b"scene: probe begin", b"scene: probe end",
-                  b"scene: window level", b"scene: carrier view", b"scene: live scenes",
-                  b"win: previous run died at ",
-                  b"win: armed, building in 6s (switch to the target app now)",
-                  b"win: no app scene in the list this run",
-                  b"win: scene candidate ",
+    for token in (b"win: scene candidate ",
                   b"win: enumerating scenes ",
                   b" background, nothing to float",
                   b"win: no uiPresentationManager",
@@ -3057,12 +2086,6 @@ def main():
                   # level/idle，而不是只写 foreground。
                   b"setIdleModeEnabled:",
                   b"win: close requested by ",
-                  # 0.0.27 — the mother ship's route. The two selectors are the
-                  # ones her binary calls and hooks; the selftest string is the
-                  # only proof in the package that the write path is exercised
-                  # before SpringBoard is touched at all.
-                  b"win: now swipe up to the desktop - the card follows",
-                  b"win: left the app at ",
                   # 0.0.31 — the push moved off the hook and onto a main-thread
                   # keepalive clock. `force foreground door=` is gone on purpose:
                   # that line was printed from inside `_setDeactivationReasons:`
@@ -3070,7 +2093,6 @@ def main():
                   # seconds later. These two strings are the only proof in the
                   # package that the clock and its census reached the binary.
                   b"win: keepalive beat ",
-                  b"win: push banned for this run",
                   # 0.0.32 — the hand-back. Aevon(30) closed the card and left
                   # the settings saying `foreground=yes`, so Douyin played on to
                   # an empty desktop. These two strings are the only proof in the
@@ -3094,7 +2116,6 @@ def main():
                   # 形状回执都进了二进制。0.0.54 删掉了第三个候选点
                   # （SBDeviceApplicationSceneViewController）：0.0.53 真机日志里
                   # `client=0` 走完全场，那条路一次都没响过。
-                  b"SBMainDisplaySceneManager",
                   b" shape cls=%@",
                   b"presenter %@ -> %@",
                   b"/var/mobile/Library/Logs/Aevon/win.step"):
@@ -3118,61 +2139,21 @@ def main():
         if token in dylib_early:
             bad(f"probe: {token.decode()} 又出现了 —— 0.0.66 已撤掉换进程那条路")
 
-    # The surface dump was retired in 0.0.11 to pay for the call table. What
-    # must stay in the binary is the retirement line itself: the button is still
-    # on the panel, and a press that logs nothing is indistinguishable from a
-    # request that never arrived.
-    for token in (b"scene2: retired in 0.0.11", b"docs/REVERSE-NOTES.md"):
-        if token not in dylib_early:
-            bad(f"probe: {token.decode()} missing from Aevon.dylib — "
-                "a retired section that says nothing reads as a dead button")
-
-    # The call table is the gate on building a window: if its markers or the
-    # per-line prefix fall out of the stripped binary, the log comes back empty
-    # and looks like 'nothing answered' instead of 'the dump never ran'.
-    for token in (b"calls: definition begin v2 targets=", b"calls: defined by ",
-                  b"calls: definition end v2 missing=", b"calls: scan reached "):
-        if token not in dylib_early:
-            bad(f"probe: {token.decode()} missing from Aevon.dylib — "
-                "the call table would come back empty and read as a negative")
-
-    # 0.0.13 splits the call table in two: the family walk, and a name-only pass
-    # over the tail it may no longer walk. Losing any of these lines silently
-    # turns "nine selectors unresolved" into "nine selectors nobody asked about".
-    for token in (b"calls: tail cand ", b"calls: tail owns ", b"calls: tail done names=",
-                  b"calls: previous run faulted with signal ",
-                  b"calls: that class lives in ",
+    # 0.4.0 — 调用表普查整块撤销。
+    #
+    # 这一段原本盯的是 `calls:` 那三组（定义表 / 尾巴那一遍 / 上一轮死在哪），
+    # 以及 `scene2: retired`「已退役的那一页」的死按钮证词。它们全是只读取证：
+    # 0.4.0 按「移除和功能无关的探针」把普查代码连同它的按钮一起删了，字面量
+    # 自然不在包里，断言跟着撤销。
+    #
+    # 留下来的只有 `reportPreviousDeath` 真的会读写的两个文件 —— 它每次开机
+    # 回答「上一次是不是死在半路上」，是崩溃归因的唯一入口，路径写错就等于
+    # 这条线断了。所以这两个仍然断言。
+    for token in (b"/var/mobile/Library/Logs/Aevon/call.state",
                   b"/var/mobile/Library/Logs/Aevon/call.fault"):
         if token not in dylib_early:
             bad(f"probe: {token.decode()} missing from Aevon.dylib — "
-                "the tail pass would report nothing and look like 'no owner exists'")
-
-    # 0.0.9: the scan that killed SpringBoard twice now carries its own witness.
-    # Each of these three is load-bearing on its own —
-    #   `phase1`   the first half's results, so a death in the second half is not fatal
-    #   `died at`  the class named at next boot instead of "something, somewhere"
-    #   `ordering` separates a death in the main-thread ordering pass from one in the walk
-    for token in (b"calls: phase1 by ", b"calls: previous scan died at ",
-                  b"calls: ordering walk over ", b"calls: skip list now holds "):
-        if token not in dylib_early:
-            bad(f"probe: {token.decode()} missing from Aevon.dylib — "
-                "a third SpringBoard death would be as blind as the first two")
-    for token in (b"/var/mobile/Library/Logs/Aevon/call.state",
-                  b"/var/mobile/Library/Logs/Aevon/call.skip"):
-        if token not in dylib_early:
-            bad(f"probe: {token.decode()} missing from Aevon.dylib — "
-                "the death marker and the skip list would silently stop working")
-
-    # 0.0.7 crashed SpringBoard mid-scan with nothing written. The progress line
-    # is what turns the next crash from "somewhere" into "class N", so its
-    # absence from the binary would be a silent regression to blind guessing.
-    if b"calls: scan reached " not in dylib_early:
-        bad("probe: the progress line is gone — a crash would again be unattributable")
-
-    probe_path = b"/var/mobile/Library/Logs/Aevon/probe.request"
-    if probe_path not in prefs or probe_path not in dylib_early:
-        bad("probe: the request path is missing from one side — Settings could ask "
-            "for a dump nothing would ever answer")
+                "the death marker would silently stop working")
 
     # -- 6. log path contract ----------------------------------------------
     dylib = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")

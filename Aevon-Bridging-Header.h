@@ -72,14 +72,6 @@ NSString *AevonHookArmedList(void);
 /// this system does not answer it. Zero and "absent" are different facts.
 unsigned long long AevonReasonsOf(id _Nullable scene);
 
-/// 0.0.40 — how many times the system has tried to set deactivation reasons on
-/// any scene since launch. The counter only ever moves when FrontBoard runs its
-/// own update path, so a change during a card's life is the one moment the
-/// system is taking the scene away — the moment the picture can go black.
-/// Reading it is free; acting on it is one push, which the clock already knows
-/// how to do.
-long AevonDeactCount(void);
-
 /// 0.2.57 — 上面那个数是「钩子被调了几次」，里面有一大半 `reasons` 本来就是 0
 /// （系统只是在重新声明「可以睡」，不是要收走场景）。真正被我们清零的只有
 /// `reasons != 0` 那一种，也就是**场景确实被要求去激活、而我们把它撤掉**。
@@ -103,11 +95,6 @@ int AevonDeactLastReasons(void);
 /// Main thread only, and never from inside a hook: Aevon(29) called it from
 /// `_setDeactivationReasons:` and deadlocked SpringBoard into a safe mode.
 NSInteger AevonPushForeground(id _Nullable scene);
-
-/// 0.0.31 — refuse to push for the rest of this process. Called when the
-/// previous run died inside the push: one crash is a bug, two in a row is what
-/// the system calls a safe mode.
-void AevonBanPush(void);
 
 /// 0.0.32 — hand the settings back: `foreground=NO, backgrounded=YES`.
 /// A value written by this tweak does not expire when the card comes down, and
@@ -145,21 +132,9 @@ long AevonFrameOrphanCount(void);
 /// `win: scene ack slot=N`。`AevonSceneFrameAcked` 就是读这个回执 —— 拿到了
 /// 就别再用「四拍定时重推」去赌它到底送到没有。
 NSInteger AevonPushSceneFrame(id _Nullable scene);
-/// 0.2.57 — 上一次 `AevonPushSceneFrame` 返回 0 的原因。0 写成了；1 scene 是
-/// nil；2 不在主线程；3 在钩子里；4 上一次推送还没收尾；5 这一格没登记；
-/// 6 scene 没有 settings；7 已经是目标（不必写，调用方应当收手）；
-/// 8 值写进去了但没有门。
-///
-/// 这一格存在的理由：`7` 与 `3/4/5` 都是 0，但前者要停、后者要继续等。
-/// 分不开就会出现 Aevon(198) 那种「四次补推全撞在同一格，最后写一句
-/// `gave up door=0`」—— 日志上看不出到底是被挡了还是本来就没事。
-int AevonPushSceneFrameWhy(void);
 /// 这个 bundle 的目标尺寸有没有拿到过回执（1 = 拿到）。`AevonSceneFrameSet`
 /// 登记新目标时会把回执作废，所以「拿到」永远指的是当前这个目标。
 int AevonSceneFrameAcked(const char *_Nullable bundle);
-/// 回执总次数（判据：长时间为 0 = 门后面没人接，应该退回无回执门）。
-long AevonSceneAckCount(void);
-
 /// 真写进 settings 的次数。系统每次把 frame 写成整屏、我们每次又写回小胖屏，
 /// 这个数就会一直涨；它停在 1 说明系统认了，没有再覆盖。
 long AevonFrameWriteCount(void);
@@ -288,17 +263,6 @@ BOOL AevonSystemCovered(void);
 /// 两者差的那一条正是「点通知那一刻 `isUILocked` 必真」的教训（Aevon(171)）。
 BOOL AevonSystemPanelUp(void);
 
-/// 0.0.72 — 把 scene 的尺寸真正动一下再还回去，幅度由调用者给。
-///
-/// 只改承载视图的 bounds 不会让 App 重排：视图变了、scene 没变。冷启的抖音
-/// （`icon scene up after 1085ms`）内容贴顶、同进程第二次开（`0ms`）正常，
-/// 差别就是「有没有走完一次真正的窗口尺寸变化」。
-///
-/// 0.0.70 用的是固定 1 pt；Aevon(62) 的日志里那一推之后一条 `app: page
-/// transition` 都没有，说明 1 pt 多半没被当成「窗口变了」。现在由调用者给幅度
-/// （开卡用 -17，1 s 后再 +17），返回门编号，0 = 没有可推的目标。
-NSInteger AevonNudgeSceneFrame(id _Nullable scene, double delta);
-
 /// 0.0.50 — 画面到底在不在。`AevonContentStateOf` 读的是 `FBScene.contentState`
 /// （2 = ready 有画，0 = 没准备好 ⇒ 黑，-1 = 没有这个方法），`AevonSceneLevel`
 /// 读 `settings.level`（1 前台档 / 0 后台档 / -1 读不到）。
@@ -324,12 +288,6 @@ long AevonInterceptWrites(void);
 /// 正是守护四版一次都没动的原因。只由 `contentState != 2` 触发，上限 8 次、
 /// 间隔 200 ms。返回 1/2/3 表示走了哪条门，0 表示没门可走或被节流。
 NSInteger AevonWakeScene(id _Nullable scene);
-/// 0.2.26 — 回桌面那一秒的连写：同一段写入体，不走 200 ms 节流。额度由
-/// `AevonHomeWakeReset` 在每次回桌面前重置。
-NSInteger AevonHomeWake(id _Nullable scene);
-void AevonHomeWakeReset(void);
-long AevonWakeCount(void);
-
 /// 0.0.51 — 画面回来的那一刻把这一段的额度还回去，下一段黑重新从满格起。
 /// 按整场会话计的额度会在几十次切换之后用完，那之后修好的东西自己就过期了。
 void AevonWakeReset(void);
@@ -348,9 +306,6 @@ NSInteger AevonIdleTimerKick(void);
 NSInteger AevonIdleTimerEnd(void);
 /// 这一张卡片里 kick 被调用了几次（判据：卡片开满一分钟应该 ≥ 3）。
 long AevonIdleTimerCount(void);
-
-/// 0.0.28 — `- (void)name:(BOOL)`. 1 for "ran", 0 for "no such setter".
-NSInteger AevonCallSetBool(id _Nullable object, NSString *_Nullable name, BOOL value);
 
 /// 0.0.38 — 承载形状的图标直接开悬浮窗，靠的是母本自己的第一步：
 /// `-launchApplicationWithIdentifier:suspended:`，把应用拉起来但不占屏幕。
@@ -381,13 +336,6 @@ NSInteger AevonLaunchSuspended(id _Nullable application, NSString *_Nullable bun
 //   AevonOwnState / AevonOwnFetch  轮询那一格：0 没在跑 / 1 在建 / 2 建好了 / 3 失败
 //   AevonOwnDestroy / AevonOwnIsOwned  关卡时走哪一半
 
-/// 缺失项条数，0 表示整条自建路都接得上。只问不调。
-NSInteger AevonOwnGate(void);
-
-/// 起进程（launchIntent=4，不进前台）并建 scene。
-/// 返回 0 = 闸不过（调用方必须回落老路）、1 = 已开始、2 = 已有一次在跑。
-NSInteger AevonOwnStart(NSString *_Nullable bundleID, CGRect frame, const char *_Nullable from);
-
 /// 0.2.59 — 只把进程拉起来，**不建 scene、不上屏**（圆盘悬停预热）。
 /// 返回 1 = 已开始 / 0 = 不必热（在跑 / 黑名单 / 刚热过 / 另一条链在跑）。
 /// 刻意不碰 `AevonOwnState` 那套状态机：预热没被用上也不会留下孤儿 scene。
@@ -400,34 +348,6 @@ NSInteger AevonOwnState(void);
 id _Nullable AevonOwnFetch(void);
 
 // MARK: - 0.2.14 分享转发延后
-//
-// 分享那条请求（带 payload）不再在分流里立刻交回系统：先建卡、等 scene 到位，
-// 再由这里投出去。原因见 `AevonForwardHold` 上面那段 —— 交回系统那一瞬
-// SpringBoard 就把目标 App 摆成前台，那正是用户看到的「先全屏」。
-//
-// `why` 只进日志（`notify: forward flush why=…`）。任意线程调都安全，没有待发
-// 请求时什么都不做；不调用也不会丢分享（1.6 秒超时会自己发）。
-void AevonForwardFlush(const char *_Nullable why);
-
-// 0.2.15 — 卡片的 scene 就位时调这个，**不要**直接调 `AevonForwardFlush`：
-// 它先试「把这次 open URL 直接投进目标 App」（宿主写 `tmp/aevon-open.plist` +
-// Darwin 通知，App 侧调自己的 `application:openURL:options:`），拿到 `ok=1`
-// 就整条销毁、一个字节都不交给 SpringBoard —— 交给它就等于把我们自建的 scene
-// 抢去全屏（Aevon(185)：`win: scene frame after=430x932` + 卡片黑屏）。
-// 1.25 秒没回执才退回 `AevonForwardFlush` 那条老路，分享不会丢。
-void AevonForwardDeliver(const char *_Nullable why);
-
-/// 0.3.45 — 「这张卡的承载层真的出来了」。
-///
-/// ScreenCore 的 `sc_beginAwaitingHostedContentReadinessForHostView:` 就是我们
-/// 这句的母版：它等的不是「scene 登记」，是**画面托管完成**（连续稳定采样），
-/// 之后才交付系统原始请求。我们这边等的是渲染树那一格
-/// （容器 `hostedLayers ≥ 1`）—— 同一个意思，用我们已有的读数表达。
-///
-/// 只在主队列调用（`SceneProbe.float` 那条链本来就在主队列）。`bundle` 不是
-/// 当前扣着的那个时什么都不做。
-void AevonColdCardReady(const char *_Nullable bundle);
-
 /// 这一次卡片没有用自建的 scene（复用系统那个 / 走了老路）—— 关卡时不许销毁。
 void AevonOwnClear(void);
 
@@ -492,32 +412,9 @@ int AevonSceneForeground(id _Nullable scene);
 /// C 侧的直写日志。`AevonNote` 是缓冲，事件型的证词不能等下一次排空。
 void AevonLogRaw(const char *_Nullable line);
 
-/// SpringBoard 侧：挂 `SBMainWorkspace -executeTransitionRequest:`，认通知回应。
-void AevonNotificationOpenInstall(void);
-
-/// 0.2.5 — 清通知的「截对象」入口：挂 `NCNotificationDispatcher` 的
-/// `-destination:executeAction:forNotificationRequest:requestAuthentication:withParameters:completion:`，
-/// 把被点击的那条 `NCNotificationRequest` 连同它所在的 destination 登记下来，
-/// 供 0.60 秒后的 `AevonClearNotification` 直接 withdraw。
-/// 通知栈是懒加载的，取不到类会自己 3 秒后再试（上限 20 次），调用方只叫一次。
-void AevonNotificationCaptureInstall(void);
-
 /// 0.1.93 — 主线程看门狗。后台队列每秒问主线程一次;主线程被卡住时它从后台
 /// 直接往日志里写一行 `win: main stall …ms`（不走 `Log.write`,那条路的
 /// `DateFormatter` 不是线程安全的）。`version` 只用于日志前缀。
 void AevonMainStallWatchdogStart(const char *_Nullable version);
-
-/// 0.3.36 — 「这一拍是系统自己开的」。
-///
-/// 放行式接管里 `_openURLCore` 原样尾调，激活事务是系统的；`openCard` 里那两道
-/// 门（「目标就是屏上那个 ⇒ 先回桌面」与 `AevonLaunchSuspended`）在这一拍都是
-/// 错的 —— 前者会把系统刚激活的 App 按回去，后者是重复请求。
-///
-/// C 侧在接管时分流里置 1，这里**读一次就清零**（一次性令牌，不是开关状态：
-/// 留着不清会被下一次完全无关的开卡读到，那正是「粘性全局状态 = 自锁」的老坑）。
-extern int AevonPassSkipFlag;
-
-/// Swift 侧的实现（`SceneProbe.swift`）：拿 bundle id 走圆盘同一条开卡路。
-void AevonOpenFromNotification(const char *_Nullable bundleID);
 
 NS_ASSUME_NONNULL_END

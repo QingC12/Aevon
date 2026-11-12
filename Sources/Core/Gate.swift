@@ -109,40 +109,10 @@ public enum Gate {
         notifyPost(Aevon.noteGate)
     }
 
-    // MARK: 分流文件闸（0.2.60 起有界面开关）
-
-    /// `notify.off` 存在 = 通知那条路整个不接管。界面上的开关是它的反面
-    /// （「通知点开进浮窗」开 = 文件不在），这里只暴露事实，取反在控制器里做。
-    public static var notifyOffActive: Bool {
-        FileManager.default.fileExists(atPath: Aevon.activateOffPath)
-    }
-
-    /// `share.off` 存在 = 分享面板那条路不接管。
-    public static var shareOffActive: Bool {
-        FileManager.default.fileExists(atPath: Aevon.shareOffPath)
-    }
-
-    public static func setNotifyOff(_ off: Bool) {
-        let manager = FileManager.default
-        try? manager.createDirectory(atPath: Aevon.stateDir,
-                                     withIntermediateDirectories: true)
-        if off {
-            manager.createFile(atPath: Aevon.activateOffPath, contents: Data())
-        } else {
-            try? manager.removeItem(atPath: Aevon.activateOffPath)
-        }
-    }
-
-    public static func setShareOff(_ off: Bool) {
-        let manager = FileManager.default
-        try? manager.createDirectory(atPath: Aevon.stateDir,
-                                     withIntermediateDirectories: true)
-        if off {
-            manager.createFile(atPath: Aevon.shareOffPath, contents: Data())
-        } else {
-            try? manager.removeItem(atPath: Aevon.shareOffPath)
-        }
-    }
+    // 0.4.0 — 「分流文件闸」（`notify.off` / `share.off`）整块删除：这两个闸门
+    // 管的是「通知 / 分享要不要接管」，而这一版不再接管任何一条打开请求。
+    // 面板上对应的两个开关（`!gate.notify` / `!gate.share`）一并去掉 ——
+    // 留一个拧了没反应的开关，比没有更糟。
 
     public static func setDisabled(_ on: Bool, reason: String) {
         setPrefBool("disabled", on)

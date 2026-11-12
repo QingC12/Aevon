@@ -18,12 +18,6 @@ import CoreFoundation
 @_silgen_name("AevonInstallTouchTap")
 private func AevonInstallTouchTap()
 
-/// 0.2.63 — 落点钩子（`_openURLCore:display:…`）。**必须在开机这一拍装**：
-/// `AevonHookInstall()` 是建第一张卡时才调用的，而这条钩子要管的正是「第一张卡
-/// 还不存在」的那一刻。装晚一步，系统那次 URL 打开已经过去了。
-@_silgen_name("AevonLandingBoot")
-private func AevonLandingBoot()
-
 // Two notifications, two callbacks. Deciding "which notification is this" by
 // comparing the name needs a CFString -> String bridge that this toolchain
 // refuses (CFNotificationName is not class-constrained here), so the name is
@@ -31,9 +25,6 @@ private func AevonLandingBoot()
 private let prefsCallback: CFNotificationCallback = { _, _, _, _, _ in
     DispatchQueue.main.async {
         RingHost.shared.refresh()
-        // A probe request rides the same note: Settings drops a file, this
-        // process owns the scene tree. One shot, then the file is gone.
-        SceneProbe.consumeRequest()
     }
 }
 
@@ -131,11 +122,13 @@ public func AevonStart() {
     // 于是「崩在写日志之前」和「什么都没发生」长得一模一样，Aevon(224) 就栽在
     // 这上面（读到 `step=-`，其实不是没有断点，是断点被自己擦掉了）。现在正常
     // 收尾写具体终态名，开机就知道该不该当事故看。
+    //
+    // 0.4.0 — `url.step` 随 URL 主线删除，只留 `act.step`：它记的是建 scene
+    // 那一拍走到了哪里，与 URL 无关。
     let settledSteps: Set<String> = ["sig:done", "birth:wrote", "birth:immutable",
                                      "birth:noset", "birth:noframe", "birth:small",
                                      "birth:threw"]
     let stepFiles: [(path: String, label: String)] = [
-        (Aevon.urlStepPath, "url"),
         (Aevon.actStepPath, "act"),
     ]
     for entry in stepFiles {
@@ -172,32 +165,16 @@ public func AevonStart() {
     // 这个方法是每一个触摸都必经的地方。装不上就只是退回旧行为，不会弄坏触摸。
     AevonInstallTouchTap()
 
-    // 0.1.40 — 通知点击开浮窗。挂 `SBMainWorkspace -executeTransitionRequest:`，
-    // 认的是 action 的类名而不是母本那套 Swift 方法名（方法名被 strip，猜等于赌）。
+    // 0.1.40 — 通知点击开浮窗。0.4.0 随 URL 主线整条删除（用户决定不再接管
+    // 通知与分享），这里只留一行说明，避免下一个人以为漏了。
     //
     // 0.1.41 — 这里原来还有 `AevonKeyboardHostInstall()`，撤了。它在 SpringBoard
     // 里遍历窗口树并把「类名带 Keyboard」的视图按全屏 bounds 摆正，0.1.40 真机
     // 第一下点输入框就进了安全模式（`__NSMallocBlock__ countByEnumerating...`）。
     // 母本 `SthenoKb.dylib` 注入 SpringBoard 却连 UIView 都没导入 —— 键盘几何
     // 全在键盘进程（`AevonAppHook.m` 的 `AevonKbNativeInstall`），这里不该有活。
-    AevonNotificationOpenInstall()
 
-    // 0.2.5 — 清通知改「截对象」。老路是从动作对象反推标识再去各宿主里比对，
-    // 真机 6/6 `clear=noid`（猜标识这件事本身走不通，不是 getter 没试全）。
-    // 这一条挂的是系统的通知动作入口，第三个参数就是 `NCNotificationRequest` 本体，
-    // 直接拿对象去 withdraw。钩子只登记、原样转发，不改变通知的任何行为；
-    // 类不存在时它自己 3 秒后重试（通知栈懒加载）。
-    AevonNotificationCaptureInstall()
-
-    // 0.2.63 — 落点：系统的 URL 打开入口带一个 `display` 参数，要进卡片的那个
-    // App 传 NO。放在这里而不是 `openCard` 里，理由写在 `AevonLandingBoot` 上。
-    AevonLandingBoot()
-
-    // 0.1.85 — 通知点击观察器。**只取证，不接管**：挂的是 SpringBoard 的
-    // App 激活总入口，替身只读一遍参数、原样转发、写一行日志。
-    // 装配的三道前置闸在这里，钩子自己的两道在 AevonScene.m 里；六道闸的
-    // 分工与理由写在 Sources/Scene/ActivateProbe.swift 的文件头。
-    ActivateProbe.arm()
+    // 0.1.85 — 通知点击观察器。0.4.0 删除，理由同上。
 
     // Before anything else touches the runtime: if a probe left a death marker
     // behind, name the class that stopped it and blacklist it. This is the only
@@ -211,13 +188,8 @@ public func AevonStart() {
     Gate.refreshRuntime("boot")
     scheduleStableReset()
 
-    // 0.2.80 — Stheno 的 presenter 路线开工前先取证。
-    //
-    // 这一步只读：问类在不在、选择子定义在哪个类上、真实类型编码是什么。
-    // 一个未知选择子都不调，一个 presenter 都不建。产出（`presenter: …` 那些行）
-    // 决定 P1 怎么写 —— 权限表里的每个字段都是 SpringBoard 崩不崩的分界线。
-    // 每个版本只跑一次，标记文件带版本号，重启不重放。
-    SceneProbe.presenterCensusOnce()
+    // 0.2.80 的 presenter 普查在 0.4.0 删除：它只产出「类在不在 / 编码是什么」
+    // 这类取证行，正是这一版要清掉的探针。
 
     // ---------------------------------------------------------------------
     // The carrier shape, hosted in SpringBoard.
@@ -232,8 +204,5 @@ public func AevonStart() {
     DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
         RingHost.shared.refresh()
         Log.write("ring: mount pass done, desktop=\(RingHost.shared.isEnabled)")
-        // Second chance for a probe: the request may have been written while
-        // this process was still coming up and the note went nowhere.
-        SceneProbe.consumeRequest()
     }
 }

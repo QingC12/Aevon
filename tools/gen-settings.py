@@ -48,8 +48,6 @@ WIRED = {
     "kb.keep",               # FloatHost.setKeyboardFill：键盘态是否保持浮窗尺寸
     "windowBlacklistText",   # AevonOpenDecide：名单里的 App 走原生
     "!ring.desktop",         # RingHost：桌面是否挂圆盘
-    "!gate.notify",          # 写 notify.off 文件闸
-    "!gate.share",           # 写 share.off 文件闸
 }
 
 # ---------------------------------------------------------------------------
@@ -177,26 +175,11 @@ def build_root():
         items.append({"cell": "PSButtonCell", "label": label,
                       "action": "openPanel:", "panel": pid})
 
-    items.append({"cell": "PSGroupCell", "label": "接管范围",
-                  "footerText": "关掉的那一类请求按系统原生方式打开，Aevon 一个字节都不改。"
-                                "关掉之后立刻生效，不需要重载。"})
-    items.append({"cell": "PSSwitchCell", "label": "通知点开进浮窗",
-                  "key": "!gate.notify", "default": True, "defaults": DOMAIN})
-    items.append({"cell": "PSSwitchCell", "label": "分享进浮窗",
-                  "key": "!gate.share", "default": True, "defaults": DOMAIN})
-
     items.append({"cell": "PSGroupCell", "label": "诊断",
                   "footerText": "日志页显示最近 600 行，右上角可整段复制，"
                                 "手机上就能把现场发出来，不用导出文件。"})
     items.append({"cell": "PSButtonCell", "label": "查看日志",
                   "action": "openLog:", "defaults": DOMAIN})
-    # 0.2.83 — 承载层普查。只读，两秒出结果；写进日志与
-    # /var/mobile/Library/Logs/Aevon/presenter.census（后者不会被装包截断）。
-    # 存在的理由：0.2.82 的普查数据被 postinst 的日志截断吃掉了，
-    # 而重来一次不该再烧一个构建。
-    items.append({"cell": "PSButtonCell", "label": "承载层普查（只读）",
-                  "action": "probePresenter:", "defaults": DOMAIN})
-
     items.append({"cell": "PSGroupCell", "label": "安全",
                   "footerText": "任一闸门开着，重载桌面后 Aevon 不装任何 hook；"
                                 "关掉也不会自己恢复，同样要再重载一次。停用是常规退路；"

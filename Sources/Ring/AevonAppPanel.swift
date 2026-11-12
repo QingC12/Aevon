@@ -63,7 +63,6 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
     private let sideInset: CGFloat = 18
     /// 右侧多留一条，给字母索引。索引压在网格上会挡住最后一列的长名字。
     private let indexLane: CGFloat = 22
-    private let columnGap: CGFloat = 8
     /// 88 → 70：图标从 54 降到 44 之后，一格只需要 44 + 6 + 14 ≈ 64，
     /// 留 6 给上下呼吸。行高不跟着降，缩小图标就只是让格子变空。
     private let rowHeight: CGFloat = 70

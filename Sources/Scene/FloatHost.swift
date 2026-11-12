@@ -1511,23 +1511,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             Log.write(String(format: "win: hosted bounds after=%.0fx%.0f asked=%.0fx%.0f",
                              view.bounds.width, view.bounds.height,
                              source.width, source.height))
-            // 0.3.46 — **托管就绪的第二判据，而且是最硬的那一条。**
-            //
-            // 0.3.45 只让 SceneProbe 那边读容器 `hostedLayers ≥ 1`，结果 Aevon-2
-            // 的两份日志里 `win: hosted ready` **一次都没打**，冷分享两次都走到
-            // `act: cold replay why=deadline`（2 秒）。同一份日志里这一行
-            // （`hosted bounds after=430x717 asked=430x717`）却每条都打了 ——
-            // 说明「托管视图已经按卡片尺寸换过」这一刻是**能观测到的**，而
-            // `hostedLayers` 那次读数（`-1` = 键不存在）只是一条读不到的判据。
-            //
-            // 语义上也更贴近母版：ScreenCore 等的是「小窗画面托管与入场动画
-            // 完成」（说明书 .12-25），`presentationView` 的 bounds 被改成卡片
-            // 尺寸就是「画布已经换到小窗」的实证；`hostedLayers` 只说明层挂上
-            // 了，不说明尺寸换好了。两条谁先到都算就绪，C 侧只认第一次
-            // （`AevonColdBridgeSent` 是一次性闸）。
-            if !bundle.isEmpty {
-                AevonColdCardReady(bundle)
-            }
+            // 0.4.0 — `AevonColdCardReady(bundle)` 这一句删除。它是「冷启动分享可以
+            // 投进去了」的信号，只服务 URL 那条链；这一版没有投递，C 侧的
+            // `AevonColdBridgeSent` 与整条扣留/回交也一并删了。上面那一行 bounds
+            // 读数留着 —— 它是「画布到底换没换到卡片尺寸」唯一的证词。
         }
         Log.write("win: scale factor=" + String(format: "%.3f", plan.scale)
                   + " shown=" + String(format: "%.0fx%.0f",
@@ -2041,9 +2028,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// `ReflectManager.finalCardCorner` 那层意思（设备圆角 × 卡片缩放比）之外的
     /// 一次人为收敛 —— 她的卡片永远接近整屏，不需要这一档，我们的不是。
     ///
-    /// 0.0.64 — 两个真机反馈把这一档夹在中间：0.0.61 的 44（12.8 %）「太圆」，
-    /// 0.0.63 的 34（10.1 %）「太方」。取中点偏上 11.5 %：337 宽的卡片落 39。
-    private let cornerTune: CGFloat = 0.90
+    /// 0.4.0 — 这里原本有一个 `cornerTune = 0.90`（把 12.8 % 拉到 11.5 % 的
+    /// 人为收敛）。0.2.39 改成「按卡宽 12.73 %」之后它就没有读方了，删掉；
+    /// 现在圆角只有一个来源，见下面 `updateCorner`。
 
     /// 0.0.64 — 圆角**只由卡片的短边走**，不再由「卡片高 / 画布高」推。
     ///
