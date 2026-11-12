@@ -1466,6 +1466,29 @@ def main():
                       # 跨 window 转换拿不到那 215，退化成窗内坐标 501 而真值 286。
                       # 只留手工算法，校验关系 `App 世界高 − hostm == meas`。
                       b"app: kb: probe host=%.0fx%.0f@%.0f,%.0f hostm=%.0f",
+                      # 0.4.26 — 键盘通知里的 frame 用的是哪套坐标（只读取证 + 按判据修正）。
+                      #
+                      # 310 把两条候选出口都排除了：`safe=…,34,…` 十次采样恒为 34
+                      # （我们算的 458 从没进过 safeArea），`inset` 与键盘高不成比例
+                      # （QQ 打 none、微信 133/365/344）。结论是这两家都不吃
+                      # `intersectionHeightForWindowScene:`，改吃
+                      # `UIKeyboardWillChangeFrameNotification` 的
+                      # `UIKeyboardFrameEndUserInfoKey` —— 也就是 0.4.17~0.4.23 那六版
+                      # 一直在调一个不会被读的值。
+                      #
+                      # 这条路上有个 215 pt 的坐标差：键盘窗按真屏建在 (0,0,430,932)，
+                      # App 主窗是 (0,0,430,717)，两者进程内同原点，那 215 是宿主在
+                      # 屏幕上的摆放偏移。`screen=1` 表示 frame 底边贴在**物理屏底**
+                      # ⇒ 通知给的是屏幕坐标，App 拿它当 717 用会少算 215。
+                      #   end=   UIKeyboardFrameEndUserInfoKey 原值
+                      #   world= `UIScreen.bounds`（钩过 ⇒ 717）
+                      #   phys=  nativeBounds/nativeScale（932）
+                      #   shift= phys − world（215）
+                      #   screen= 判据是否命中（1 = 需要换算）
+                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f screen=%d",
+                      # 修正那一拍：`rem=` 是换算后的让位高度，必须等于
+                      # `App 世界高 − hostm`（310 四个样本全部吻合，386/431/359/313）。
+                      b"app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> @%.0f,%.0f rem=%.0f",
                       # 钩子 2 —— 建键盘窗那一拍把 frame 写成承载面尺寸。`scale=0.0`
                       # 是横屏「不显示」，母版原样，不是 bug。
                       b"app: kb: win frame=%.0fx%.0f@%.0f,%.0f scale=%.1f hosted=%d",

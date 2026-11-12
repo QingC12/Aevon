@@ -809,6 +809,143 @@ static void AevonKbProbeAppInsets(id keyboardWindow) {
 }
 
 // ===========================================================================
+// 0.4.26 — 键盘通知里的 frame：屏幕坐标还是 App 世界坐标
+// ===========================================================================
+//
+// 310 的 probe 把两条候选出口**都**排除了：
+//   · `safe=59,0,34,0`、`rsafe=34` 十次采样恒为 34（top 59 是灵动岛、
+//     bottom 34 是 home indicator）。我们算出的 458 从来没进过 window 的 safeArea；
+//   · `inset` 对 QQ 是 `none`（深 12 层没扫到带 inset 的滚动视图）、对微信是
+//     133/365/344，与键盘真实占高 386/431/359 不成比例 —— 那是微信自己的列表内边距。
+//
+// 两条合起来只有一个结论：**这两家 App 都不吃 `intersectionHeightForWindowScene:`。**
+// 它们吃的是 `UIKeyboardWillChangeFrameNotification` 里的
+// `UIKeyboardFrameEndUserInfoKey`，自己算让位。0.4.17~0.4.23 那六版调的是
+// 一个不会被它们读的值 —— 这就是「六版无效」的全部原因。
+//
+// 而这条路上有一个 215 pt 的坐标差：
+//   键盘窗按真屏建在 `(0,0,430,932)`（0.4.21 定案），App 主窗是 `(0,0,430,717)`。
+//   两者在进程内都以 `(0,0)` 为原点 —— 那 215 是**宿主在屏幕上的摆放偏移，
+//   进程内看不见**。所以 UIKit 发的 frame 极可能仍是屏幕坐标。
+//   App 若拿 546（屏幕）当自己的 717 坐标用，遮挡会算成 `717−546=171`，
+//   而键盘真实占 386 ⇒ 输入条被压进键盘内部 215 pt，整块被盖。
+//
+// 判据不是猜的：`hostm` 已经把真值量出来了（310 四个样本全部满足
+// `App 世界高 − hostm == meas`）。所以这里第一次采样只并排打出两个数：
+//   `note … end=0,546,430x386 … shift=215` 与 `probe host … hostm=331`
+//   · `end.y ≈ 546` 而 `hostm=331` ⇒ 通知是屏幕坐标，App 算错 215（确诊，本版即修）
+//   · `end.y ≈ 331` 且等于 `hostm`  ⇒ 通知本来就是对的，问题不在这一层
+//
+// 修正只在确诊时生效：把 `end` / `begin` 的 origin.y 减去 `shift`，让它们落进
+// App 世界的坐标系。命中判据是「frame 的底边贴在**物理屏底**」—— 全屏 App
+// （`shift=0`）和横屏（世界高度 = 430）都不会命中，行为与没装钩子时一致。
+static IMP AevonKbOrigPostNote = NULL;
+static volatile int AevonKbNoteNotes = 0;
+static volatile int AevonKbNoteFixes = 0;
+/// 0.4.26 — 修正开关。install 那一拍读一次（运行期、主队列，不在构造期），
+/// 之后只在热路径上做一次内存判断。偏好 `com.aevon.kbNoteFixOff = true`
+/// 并 respring 即回到「只取证不改帧」。
+static volatile int AevonKbNoteFixOn = 0;
+
+/// 0.4.26 — 修正开关（缺省开）。`com.aevon.kbNoteFixOff = true` + respring
+/// 即回到「只取证、一帧不改」。
+static BOOL AevonKbNoteFixEnabled(void) {
+    BOOL on = YES;
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("kbNoteFixOff"),
+                                                        AevonKbDomain);
+    if (value != NULL) {
+        if (CFGetTypeID(value) == CFBooleanGetTypeID()) {
+            on = CFBooleanGetValue((CFBooleanRef)value) ? NO : YES;
+        }
+        CFRelease(value);
+    }
+    return on;
+}
+
+/// 物理屏高。`UIScreen.bounds` 此刻已被我们钩成承载面（717），所以必须走
+/// `nativeBounds / nativeScale`（932），不能读 bounds。
+static CGFloat AevonKbPhysicalHeight(void) {
+    CGRect native = [[UIScreen mainScreen] nativeBounds];
+    CGFloat scale = [[UIScreen mainScreen] nativeScale];
+    if (scale <= 0.0) return 0.0;
+    return native.size.height / scale;
+}
+
+/// 0.4.26 — 通知帧的坐标系校正。**只改 `UIKeyboard*` 系列**，其余通知一律透传。
+static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) {
+    if (AevonKbOrigPostNote == NULL) return;
+    void (*orig)(id, SEL, id, id, id) = (void (*)(id, SEL, id, id, id))AevonKbOrigPostNote;
+    if (userInfo == nil || !AevonKbTakeOver
+        || ![name isKindOfClass:[NSString class]]
+        || ![(NSString *)name hasPrefix:@"UIKeyboard"]) {
+        orig(self, _cmd, name, object, userInfo);
+        return;
+    }
+    NSDictionary *info = (NSDictionary *)userInfo;
+    NSValue *endValue = [info objectForKey:UIKeyboardFrameEndUserInfoKey];
+    if (endValue == nil || ![endValue isKindOfClass:[NSValue class]]) {
+        orig(self, _cmd, name, object, userInfo);
+        return;
+    }
+    CGRect end = [endValue CGRectValue];
+    CGFloat worldH = [UIScreen mainScreen].bounds.size.height;   // 钩过 ⇒ 717
+    CGFloat physicalH = AevonKbPhysicalHeight();                 // 932
+    CGFloat shift = physicalH - worldH;
+    // 只有「世界比屏幕矮」时才有这个差（悬浮窗卡片）。全屏 shift≈0、横屏 worldH=430
+    // ⇒ 两条都不会进下面的修正分支。
+    BOOL canFix = (shift > 20.0 && shift < 400.0);
+    CGFloat bottom = end.origin.y + end.size.height;
+    // 屏幕坐标的特征：frame 底边贴在物理屏底。2 pt 容差吸收取整噪声。
+    BOOL screenSpace = canFix && fabs(bottom - physicalH) < 2.0;
+
+    if (AevonKbNoteNotes < 8) {
+        AevonKbNoteNotes += 1;
+        char line[256];
+        const char *noteName = [(NSString *)name UTF8String];
+        snprintf(line, sizeof(line),
+                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f screen=%d\n",
+                 noteName != NULL ? noteName : "?",
+                 end.size.width, end.size.height, end.origin.x, end.origin.y,
+                 worldH, physicalH, shift, (int)screenSpace);
+        AevonKbLog(line);
+    }
+
+    if (!screenSpace || !AevonKbNoteFixOn) {
+        orig(self, _cmd, name, object, userInfo);
+        return;
+    }
+
+    NSMutableDictionary *fixed = [info mutableCopy];
+    if (fixed == nil) {
+        orig(self, _cmd, name, object, userInfo);
+        return;
+    }
+    CGRect end2 = end;
+    end2.origin.y -= shift;
+    [fixed setObject:[NSValue valueWithCGRect:end2] forKey:UIKeyboardFrameEndUserInfoKey];
+    NSValue *beginValue = [info objectForKey:UIKeyboardFrameBeginUserInfoKey];
+    if (beginValue != nil && [beginValue isKindOfClass:[NSValue class]]) {
+        CGRect begin = [beginValue CGRectValue];
+        // begin 只在同样贴屏底时才平移 —— 键盘从屏外升起那一拍它的底边就是屏底。
+        if (fabs((begin.origin.y + begin.size.height) - physicalH) < 2.0) {
+            begin.origin.y -= shift;
+        }
+        [fixed setObject:[NSValue valueWithCGRect:begin] forKey:UIKeyboardFrameBeginUserInfoKey];
+    }
+    if (AevonKbNoteFixes < 8) {
+        AevonKbNoteFixes += 1;
+        char line[208];
+        snprintf(line, sizeof(line),
+                 "app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> @%.0f,%.0f rem=%.0f\n",
+                 end.size.width, end.size.height, end.origin.x, end.origin.y,
+                 end2.origin.x, end2.origin.y, worldH - end2.origin.y);
+        AevonKbLog(line);
+    }
+    orig(self, _cmd, name, object, fixed);
+    [fixed release];
+}
+
+// ===========================================================================
 // 钩子 1：`-[_UIRemoteKeyboards intersectionHeightForWindowScene:
 //             isLocalMinimumHeightOut:ignoreHorizontalOffset:]`（母版 0x5128，264 B）
 // ===========================================================================
@@ -1348,6 +1485,9 @@ static void AevonKbNativeInstall(void) {
     AevonKbInjectApp = AevonKbBridgeEnabled();
     AevonKbTakeOver = AevonKbInjectApp;
     AevonKbShellRead = 1;
+    // 0.4.26 — 通知帧校正的开关。走盘只在这一拍（主队列、App 已跑起来），
+    // 钩子热路径上只读这个 int。
+    AevonKbNoteFixOn = (AevonKbInjectApp && AevonKbNoteFixEnabled()) ? 1 : 0;
     if (!AevonKbInjectApp) {
         AevonKbLog("app: kb: native off, inject=0\n");
         return;
@@ -1401,6 +1541,20 @@ static void AevonKbNativeInstall(void) {
         AevonKbOrigBounds = (CGRect (*)(id, SEL))oldBounds;
         installed += 1;
         mask |= 1 << 3;
+    }
+
+    // 0.4.26 — 第五条：键盘通知的坐标系校正（理由见 `AevonKbPostNote` 那一节）。
+    // 装在 `NSNotificationCenter` 而不是各类 UIKit 内部方法上，是因为这里
+    // 是唯一一个「所有键盘通知都必须经过」的公开收口；block 观察者、
+    // selector 观察者都在它下游，改一次就全覆盖。
+    Class center = NSClassFromString(@"NSNotificationCenter");
+    IMP oldPost = AevonKbInstallInstance(center,
+                                         @selector(postNotificationName:object:userInfo:),
+                                         (IMP)AevonKbPostNote);
+    if (oldPost != NULL) {
+        AevonKbOrigPostNote = oldPost;
+        installed += 1;
+        mask |= 1 << 4;
     }
 
     char line[192];
