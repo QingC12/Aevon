@@ -653,42 +653,64 @@ static CGFloat AevonKbMeasuredCoverage(id keyboardWindow, CGFloat screenHeight,
 }
 
 // ===========================================================================
-// 0.4.24 — App 到底收到了多少 inset（只读取证，一次输入会话 3 条）
+// 0.4.25 — App 的 safeArea 到底被设成了多少（只读取证，一次输入会话 6 条）
 // ===========================================================================
 //
-// 0.4.21→0.4.23 四版都在改「我们认为该报的值」：386 → 431 → 458。每一版都能在
-// 日志里看到 `-> N`，但**从来没有验证过 App 收下的是不是这个 N**。
+// 0.4.21→0.4.23 三版都在改「我们认为该报的值」：386 → 431 → 458，`-> N` 每版都在变，
+// 但**从来没有验证过 App 收下的是不是这个 N**。
 //
 // 308 给了最硬的对照：`formula=458` 报出去了，输入框还是被「键盘的工具栏」盖住。
-// 如果 App 真按 458 让位，输入框底部会在 App 世界 `717−458=259`，而键盘顶在 358，
-// 中间空 99 pt —— 不可能被盖。所以只剩两种可能：App 没收到这个值，或者它收到了
-// 但算的时候用的是别的量。这两者用日志里的 `-> N` 分辨不出来，必须去读 App 的成品。
+// 如果 App 真按 458 让位，输入框底部会在 App 世界 `717−458=259`，而键盘顶在 286，
+// 中间空 27 pt —— 不可能被盖。所以只剩两种可能：App 没收到这个值，或者它收到了
+// 但算的时候用的是别的量。
 //
-// 这组只读三个数，把「App 认为键盘有多高」从推测变成读数：
-//   inset   App 主窗里第一个 UIScrollView 的 contentInset（bottom 就是它给键盘留的高度）
-//   off     同一 scrollView 的 contentOffset.y（键盘让位时它通常跟着滚）
-//   hostc   `UIInputSetHostView` **转换到 App 主窗**的矩形。这是「键盘在 App 世界里
-//           从哪开始」的唯一真值，不需要任何换算；跨 window 转换失败时会退化成 0
-//   hostm   同一件事的手工算法：(键盘窗 frame.y + host 在窗内 y) − (物理屏高 − App 世界高)
-// 两个都打，是为了让它们互相校验：一致就说明 hostc 可信，不一致就说明跨 window 转换
-// 在这个进程里不成立，只能采信 hostm。
+// 0.4.24 用 `contentInset` 去问，309 证明这个口不可用：
+//   QQ    `inset=none`       —— 深 6 层一个 UIScrollView 都没命中
+//   微信  `inset=0,0,0,0`     —— 命中的对象恒为 0，不可能是键盘升起时的聊天列表
+// 两个都不作数，等于这一版白取。
 //
-// 三者并排就能定性：
-//   inset ≈ 458/437 ⇒ 我们的值生效了，问题在 App 自己的布局，不在钩子；
-//   inset ≈ 431/359 ⇒ App 用的是键盘真实占高，我们的返回值没被采纳；
-//   inset ≈ 316     ⇒ App 用的是系统的 orig，钩子返回值整条没生效。
+// 0.4.25 换成 `safeAreaInsets` —— 它是 `_UIRemoteKeyboards` 的**直接输出终点**：
+// 系统算完 intersectionHeight 就把它写进 window 的 safeArea，App 从那里读。
+// 四个读数并排就能定性：
+//   safe=       App 主窗的 safeAreaInsets（`bottom` 就是它给键盘留的高度）
+//   rsafe=      rootViewController.view 的 bottom（App 内容真正挂的那层，可能被容器改过）
+//   inset=      所有 UIScrollView 里 bottom 最大的那个（兜底，量不到打 `none`）
+//   hostm=      键盘在 App 世界的顶边；校验关系 `App 世界高 − hostm == meas`
+//
+// 判定：
+//   safe.bottom ≈ 458/437 ⇒ 我们的值生效了，问题在 App 自己的输入条布局；
+//   safe.bottom ≈ 431/359 ⇒ App 用的是键盘几何，我们的返回值被丢弃；
+//   safe.bottom ≈ 316/289 ⇒ App 用的是系统 orig，钩子整条是空转；
+//   safe.bottom 不随键盘变 ⇒ App 根本不用 safeArea，要换钩点。
 static volatile int AevonKbInsetProbes = 0;
 
-static UIScrollView *AevonKbFindScrollView(UIView *root, int depth) {
-    if (root == nil || depth < 0) return nil;
-    if ([root isKindOfClass:[UIScrollView class]]) return (UIScrollView *)root;
+// 0.4.25 — 改成「遍历全部、取 bottom 最大者」，而不是深度优先第一个。
+//
+// 309 证伪了「第一个」这个选法：QQ 打出 `inset=none`（深 6 层一个 UIScrollView
+// 都没命中），微信打出 `inset=0,0,0,0 off=0`（命中了，但那个对象恒为 0，
+// 不可能是键盘升起时的聊天列表）。深度 6 对现代 App 的视图层级本来就不够，
+// 而「第一个」在多标签 / 侧滑容器里天然选错。
+//
+// 键盘升起时，真正让位的那个 scrollView 的 bottom 是全场最大的，取最大即可。
+// 只接受 bottom > 0.5：键盘没升起时所有 scrollView 都是 0，那时宁可不打，
+// 也不要用一个 0 冒充读数。
+static void AevonKbScanScrollViews(UIView *root, int depth,
+                                   UIScrollView **best, int *seen, CGFloat *bestBottom) {
+    if (root == nil || depth < 0 || best == NULL || seen == NULL || bestBottom == NULL) return;
+    if ([root isKindOfClass:[UIScrollView class]]) {
+        *seen += 1;
+        UIScrollView *sv = (UIScrollView *)root;
+        CGFloat bottom = [sv contentInset].bottom;
+        if (bottom > 0.5 && (*best == nil || bottom > *bestBottom)) {
+            *best = sv;
+            *bestBottom = bottom;
+        }
+    }
     NSArray *subs = [root subviews];
     NSUInteger count = [subs count];
-    for (NSUInteger i = 0; i < count && i < 8; i++) {
-        UIScrollView *found = AevonKbFindScrollView([subs objectAtIndex:i], depth - 1);
-        if (found != nil) return found;
+    for (NSUInteger i = 0; i < count && i < 32; i++) {
+        AevonKbScanScrollViews([subs objectAtIndex:i], depth - 1, best, seen, bestBottom);
     }
-    return nil;
 }
 
 static UIWindow *AevonKbAppMainWindow(void) {
@@ -712,50 +734,78 @@ static UIWindow *AevonKbAppMainWindow(void) {
 }
 
 static void AevonKbProbeAppInsets(id keyboardWindow) {
-    if (AevonKbInsetProbes >= 3) return;
+    if (AevonKbInsetProbes >= 6) return;
     UIWindow *appWin = AevonKbAppMainWindow();
     if (appWin == nil) return;
     AevonKbInsetProbes += 1;
 
+    // 0.4.25 — 取证口换成 `safeAreaInsets`。
+    //
+    // `safeAreaInsets` 是这条链路的**直接终点**：`_UIRemoteKeyboards` 算完
+    // `intersectionHeightForWindowScene:` 之后，系统把它写进 window 的 safeArea，
+    // App 再从那里读。所以这一个数就能回答「我们报的 458 有没有被采纳」：
+    //   safe.bottom ≈ 458/437 ⇒ 采纳了，问题在 App 自己的输入条布局；
+    //   safe.bottom ≈ 431/359 ⇒ 采纳的是键盘几何，我们的返回值被丢弃；
+    //   safe.bottom ≈ 316/289 ⇒ 采纳的是系统 orig，钩子整条是空转；
+    //   safe.bottom 不随键盘变 ⇒ App 根本不用 safeArea，要换钩点。
+    //
+    // 同时读 `rootViewController.view` 那一份 —— App 内容几乎都挂在这层，
+    // 自定义容器会改它，两份不一定相等。
+    UIEdgeInsets safe = [appWin safeAreaInsets];
+    UIEdgeInsets rsafe = UIEdgeInsetsZero;
+    id rvc = [appWin rootViewController];
+    if (rvc != nil) {
+        UIView *rv = (UIView *)[rvc view];
+        if (rv != nil) rsafe = [rv safeAreaInsets];
+    }
+
+    UIScrollView *best = nil;
+    int seen = 0;
+    CGFloat bestBottom = 0.0;
+    AevonKbScanScrollViews(appWin, 12, &best, &seen, &bestBottom);
+
     CGRect wf = [appWin frame];
-    CGRect hostInApp = CGRectZero;
-    CGFloat hostManual = 0.0;
+    char line[320];
+    if (best != nil) {
+        snprintf(line, sizeof(line),
+                 "app: kb: probe win=%.0fx%.0f safe=%.0f,%.0f,%.0f,%.0f rsafe=%.0f inset=%.0f sc=%d\n",
+                 wf.size.width, wf.size.height,
+                 safe.top, safe.left, safe.bottom, safe.right,
+                 rsafe.bottom, bestBottom, seen);
+    } else {
+        snprintf(line, sizeof(line),
+                 "app: kb: probe win=%.0fx%.0f safe=%.0f,%.0f,%.0f,%.0f rsafe=%.0f inset=none sc=%d\n",
+                 wf.size.width, wf.size.height,
+                 safe.top, safe.left, safe.bottom, safe.right,
+                 rsafe.bottom, seen);
+    }
+    AevonKbLog(line);
+
+    // 第二行：键盘在 App 世界的顶边。
+    // `hostc`（`convertRect:toView:` 到 App 主窗）已被 309 证伪：App 主窗在进程内
+    // 的 origin 恒为 0（宿主在外部把 scene 摆到屏幕 215），跨 window 转换拿不到
+    // 那 215 的屏幕偏移，退化成窗内坐标。所以只打手工算法 `hostm`。
+    // 校验关系：`App 世界高 − hostm == meas`（309 四个样本全部吻合）。
     if (keyboardWindow != nil && [keyboardWindow isKindOfClass:[UIView class]]) {
         UIView *kbWin = (UIView *)keyboardWindow;
         UIView *host = AevonKbFindHostView(kbWin, 4);
         if (host != nil) {
-            hostInApp = [host convertRect:[host bounds] toView:appWin];
             CGRect inKbWin = [host convertRect:[host bounds] toView:kbWin];
             CGRect kbFrame = [kbWin frame];
             CGRect native = [[UIScreen mainScreen] nativeBounds];
             CGFloat nativeScale = [[UIScreen mainScreen] nativeScale];
             CGFloat physicalH = nativeScale > 0.0 ? native.size.height / nativeScale : 0.0;
-            // 手工算法：先把 host 抬到屏幕坐标，再减去「App 世界相对屏幕底的偏移」。
             // App 主窗贴屏幕底是卡片侧一直保证的，所以 shift = 物理屏高 − App 世界高。
             CGFloat shift = physicalH - wf.size.height;
-            hostManual = kbFrame.origin.y + inKbWin.origin.y - shift;
+            CGFloat hostManual = kbFrame.origin.y + inKbWin.origin.y - shift;
+            char line2[192];
+            snprintf(line2, sizeof(line2),
+                     "app: kb: probe host=%.0fx%.0f@%.0f,%.0f hostm=%.0f\n",
+                     inKbWin.size.width, inKbWin.size.height,
+                     inKbWin.origin.x, inKbWin.origin.y, hostManual);
+            AevonKbLog(line2);
         }
     }
-
-    UIScrollView *sv = AevonKbFindScrollView(appWin, 6);
-    char line[288];
-    if (sv != nil) {
-        UIEdgeInsets ins = [sv contentInset];
-        CGPoint off = [sv contentOffset];
-        snprintf(line, sizeof(line),
-                 "app: kb: probe win=%.0fx%.0f inset=%.0f,%.0f,%.0f,%.0f off=%.0f hostc=%.0fx%.0f@%.0f,%.0f hostm=%.0f\n",
-                 wf.size.width, wf.size.height,
-                 ins.top, ins.left, ins.bottom, ins.right, off.y,
-                 hostInApp.size.width, hostInApp.size.height,
-                 hostInApp.origin.x, hostInApp.origin.y, hostManual);
-    } else {
-        snprintf(line, sizeof(line),
-                 "app: kb: probe win=%.0fx%.0f inset=none hostc=%.0fx%.0f@%.0f,%.0f hostm=%.0f\n",
-                 wf.size.width, wf.size.height,
-                 hostInApp.size.width, hostInApp.size.height,
-                 hostInApp.origin.x, hostInApp.origin.y, hostManual);
-    }
-    AevonKbLog(line);
 }
 
 // ===========================================================================

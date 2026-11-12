@@ -1449,6 +1449,23 @@ def main():
                       # 的键盘、把候选条后到的那 45 pt 漏掉 ⇒ 输入框被盖。
                       # `meas` / `host` 保留为**只读取证**，不参与决策。
                       b"app: kb: inter orig=%.0f screen=%.0f kb=%.0f hf=%.2f formula=%.0f meas=%.0f host=%.0f,%.0f -> %.0f",
+                      # 0.4.25 — App 的 safeArea 读数（只读取证，配额 6）。
+                      # 这是 `_UIRemoteKeyboards` 的**直接输出终点**：系统算完
+                      # intersectionHeight 就把它写进 window.safeAreaInsets，App 从那儿读。
+                      # 前两版用 contentInset 问（0.4.24），309 判死那个口：
+                      # QQ 打 `inset=none`（深 6 层没命中任何 UIScrollView），
+                      # 微信打 `0,0,0,0`（命中的对象恒为 0，不是聊天列表）。
+                      #   safe=  window 的四个边，bottom 就是它给键盘留的高度
+                      #   rsafe= rootViewController.view 的 bottom（App 内容真正挂的那层）
+                      #   inset= 全部 UIScrollView 里 bottom 最大者，量不到打 `none`
+                      #   sc=    扫到多少个 UIScrollView（0 说明搜索深度仍不够）
+                      b"app: kb: probe win=%.0fx%.0f safe=%.0f,%.0f,%.0f,%.0f rsafe=%.0f inset=%.0f sc=%d",
+                      b"app: kb: probe win=%.0fx%.0f safe=%.0f,%.0f,%.0f,%.0f rsafe=%.0f inset=none sc=%d",
+                      # 第二行：键盘在 App 世界的顶边。`hostc` 已被 309 证伪 —— App 主窗
+                      # 在进程内的 origin 恒为 0（宿主在外部把 scene 摆到屏幕 215），
+                      # 跨 window 转换拿不到那 215，退化成窗内坐标 501 而真值 286。
+                      # 只留手工算法，校验关系 `App 世界高 − hostm == meas`。
+                      b"app: kb: probe host=%.0fx%.0f@%.0f,%.0f hostm=%.0f",
                       # 钩子 2 —— 建键盘窗那一拍把 frame 写成承载面尺寸。`scale=0.0`
                       # 是横屏「不显示」，母版原样，不是 bug。
                       b"app: kb: win frame=%.0fx%.0f@%.0f,%.0f scale=%.1f hosted=%d",
