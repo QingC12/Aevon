@@ -1,5 +1,5 @@
 // ===========================================================================
-// AevonKeyboardNative.m — 0.4.7 / 0.4.9 / 0.4.10
+// AevonKeyboardNative.m — 0.4.7 / 0.4.9 / 0.4.10 / 0.4.12
 //
 // 键盘的承载面接管。**1:1 复刻 Stheno 母版的 `SthenoKeyboard.dylib`**
 // （0.1.23；修复版 final.3 的键盘组件与母版只差 1 处：`0x4de8` 那个「首启打开
@@ -7,6 +7,29 @@
 //
 // 逆向数据：`stheno-逆向分析/final3/analysis/hooks-SthenoKeyboard.md`
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
+//
+// ---------------------------------------------------------------------------
+// 0.4.12 — 键盘窗必须按**承载面**建，且 x/y 沿用系统给的（Aevon(296)）
+// ---------------------------------------------------------------------------
+// 症状：键盘贴到屏幕底了，但只露出上面一截，下半面透明；输入框被抬高。
+//
+// 截图硬测量（885x1920，932/1920 = 0.4854 pt/px）：
+//   卡片顶边 215.0 pt（= `band report 430x717 at 0,215`，精确吻合）
+//   键盘内容顶边 573.0 pt（= 932 − 359，**位置已经对了**）
+//   键盘在 **717.0 pt 被一条水平线硬切**，717.9 起全宽 #F1F1F1 到 932
+// 717 正是 `UIScreen.bounds` 钩后的返回值（承载面高）。⇒ 键盘内容的「底」按
+// **窗高 932** 算（贴到屏底 ✓），而窗里 root view 只有 **717**（按 `UIScreen.bounds`
+// 建的）⇒ root view 把内容裁在 717 ✗。两把尺子，两个结果。
+//
+// 修法是回到母版字面值：`0x5230` 竖屏分支是「x/y/宽 沿用系统建好的原框，只把高
+// 改成 H」，而 H 是 `[main bounds].size.height` —— 在 Aevon 里就是**承载面高 717**
+// （不是物理屏高 932）。于是窗 = (0,215,430,717)：窗底 = 215+717 = 屏幕底 932 ✓，
+// root view 717 = 窗高 ✓，而且 `kbH`(717) == `screenH`(717) ⇒ intersection 公式
+// `(orig×screen÷kb)×hf + kb − screen` 自动退化成**恒等** = 真值 ⇒ 输入框落回键盘上沿。
+//
+// 0.4.7~0.4.11 的两处偏离：① 写 `[main bounds].origin`（= 0,0）把窗顶拽到屏幕上沿
+// ⇒ 0.4.10 的「键盘悬空 426..717 + 下面一条白」；② 0.4.11 又把高改成物理屏高 932
+// ⇒ 本版要修的裁剪。**这两次都是我在「调参数」，母版从来没这么做过。**
 //
 // ---------------------------------------------------------------------------
 // 0.4.9 — 补上母版 `0x4f4c` 的第二道闸（Aevon(293) 的真机事故）
@@ -192,9 +215,15 @@ static BOOL AevonKbTakeOver = NO;
 /// 建键盘窗那一拍它被临时清 0（`0x5230`），为了读到**真**屏幕 bounds。
 static BOOL AevonKbHookUIScreen = NO;
 
-/// 0.4.11 — 建键盘窗那一拍的冻结计数器（>0 时 `UIScreen -bounds` 一律返回系统值）。
-/// 理由见 `AevonKbBounds` 与 `AevonKbRemoteWindow` 里的注释：Aevon 比母版多一个
-/// 写 `AevonKbHookUIScreen` 的线程（band 的 Darwin 通知），必须挡住。
+/// 0.4.12 — 建键盘窗那一拍的冻结计数器（>0 时 `UIScreen -bounds` **一律钩**，
+/// 即一律返回承载面高度）。
+///
+/// 0.4.11 把它做成了「一律返回系统值」，方向反了。母版建窗要的 `H` 就是**承载面高**
+/// （717），不是物理屏高（932）。用 932 建出来的窗，窗底在屏幕 932、而窗内 root view
+/// 只有 717 高 ⇒ 键盘被硬切在 717（Aevon(296) 的「下半面透明」）。详见
+/// `AevonKbBounds` 与 `AevonKbRemoteWindow` 的注释。
+///
+/// 仍然需要冻结：band 的 Darwin 通知回调不保证主线程，能在读之前把旗子翻掉。
 static volatile int AevonKbWinFreeze = 0;
 
 /// 0xc3b0 `_appScene`。缓存承载面那个 `UIWindowScene`。
@@ -352,19 +381,17 @@ void AevonKbEnsureInstalled(void) {
 
 /// 母版 `_updateHeightFraction`（0x4a00）：先把 1.0 写回去，再读 plist 覆盖。
 /// `HeightFraction` 的语义是「键盘高度占屏高的比例」，1.0 = 不缩放。
+///
+/// ⛔ 0.4.12 — **Aevon 不读这个键，恒 1.0。**
+///
+/// 母版读的是自己域里的 `HeightFraction`，没有别人用这个名字；Aevon 的设置面板
+/// 用的是同一个键名表达**浮窗首帧高度**（`gen-settings.py` 的「尺寸 / 高度」滑条，
+/// 缺省 0.63）。照母版去读，用户一动那个滑条，键盘的 inset 就会被乘 0.63 —— 在
+/// 0.4.12 的几何下（`kbH == screenH`，公式退化成恒等）那等于让键盘盖住输入条。
+///
+/// 1.0 就是母版的缺省值，所以行为与本条存在时完全一致；只是不再跟着滑条抖。
 static void AevonKbUpdateHeightFraction(void) {
     AevonKbHeightFraction = 1.0;
-    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("HeightFraction"),
-                                                        AevonKbDomain);
-    if (value != NULL) {
-        if (CFGetTypeID(value) == CFNumberGetTypeID()) {
-            double number = 0.0;
-            if (CFNumberGetValue((CFNumberRef)value, kCFNumberDoubleType, &number)) {
-                if (number > 0.0 && number < 8.0) AevonKbHeightFraction = number;
-            }
-        }
-        CFRelease(value);
-    }
 }
 
 /// 母版 `_updateInit169` + `_upadteFrontMost` 的合并入口，由 `0x5430` 每次调用。
@@ -443,19 +470,18 @@ static CGRect AevonKbSceneBounds(UIWindowScene *scene) {
 // Aevon 照抄三条，一个都不省。另外这个文件只编进 `AevonApp.dylib`（App 进程），
 // 而 `AevonApp.plist` 的 Filter 排除了 SpringBoard —— 桌面进程里根本没有这条代码。
 static CGRect AevonKbBounds(id self, SEL _cmd) {
-    // 0.4.11 — `AevonKbWinFreeze`：建键盘窗那一拍**必须**读到真屏高度。
+    // 0.4.12 — `AevonKbWinFreeze`：建键盘窗那一拍**必须**读到承载面高度。
     //
-    // 母版只写 `_hookUIScreen = 0` 就够了，因为它有两个前提：
-    //   ① `_upadteFrontMost` 只在 `0x5430`（scene settings 回调）里跑，与建窗同一线程；
-    //   ② 没有第二个写 `_hookUIScreen` 的地方。
-    // Aevon 多了一个写者：band 的 Darwin 通知回调（不保证主线程）。宿主在**键盘弹起
-    // 那一拍**正好会发 band（日志里 `win: band report 430x717 at 0,215` 就在
-    // `keyboard native on` 旁边），于是它可以在 `_hookUIScreen = 0` 与 `[main bounds]`
-    // 之间把这面旗子翻回 1 ⇒ 读到的是承载面的 717 ⇒ 键盘窗按 717 建 ⇒ 键盘的「底」
-    // 落在屏幕 y=717 而不是 932 ⇒ 悬空 215 pt、下方一条白（Aevon(295) 的形状）。
+    // 0.4.11 在这里要求读「系统值（932）」，那是错的：键窗按 932 建之后，窗底落在
+    // 屏幕 932，而窗里的 root view 仍是承载面高 717 ⇒ 键盘被裁在屏幕 717
+    // （Aevon(296) 截图实测：键盘内容顶边 573 正确、到 717 被硬切、下面 215 全空）。
     //
-    // 冻结计数器把这一拍变成原子的：期间无论谁来写旗子，本函数都按「关」处理。
-    if (AevonKbWinFreeze == 0 && AevonKbTakeOver && AevonKbHookUIScreen) {
+    // 母版要的 `H` 是承载面高：窗框 = (0,215,430,717)，键盘贴在这个窗的底 —— 而
+    // 这个窗的底正好是屏幕底 932。于是「键盘贴屏底」和「root view 不被裁」同时成立，
+    // 而且 `kbH`(717) == `screenH`(717) ⇒ intersection 公式退化成恒等 = 真值。
+    //
+    // 冻结仍然必要：band 的 Darwin 通知回调不保证主线程，可能在读之前把旗子翻掉。
+    if (AevonKbWinFreeze > 0 || (AevonKbTakeOver && AevonKbHookUIScreen)) {
         if (AevonKbAppScene == nil) {
             AevonKbAppScene = AevonKbMainScene();
         }
@@ -583,36 +609,61 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
     if (AevonKbAppScene == nil) {
         AevonKbAppScene = AevonKbMainScene();
     }
-    // 0.4.11 — 冻结 + 关旗子，两个一起。冻结挡住并发写者（band 通知线程、scene
-    // settings 回调），关旗子是母版原作者的动作。只关旗子不冻结 ⇒ Aevon(295) 的
-    // `win frame=430x717@0,0`：读到的是承载面高，键盘窗按承载面建，键盘的「底」
-    // 落在屏幕 y=717 而不是 932 ⇒ 悬空 215 pt、下方一条白。
+    // 0.4.12 — 冻结期把旗子**按开**处理（见 `AevonKbBounds`），读到承载面高。
+    //
+    // 母版在这里写 `_hookUIScreen = 0`（读真屏高 932），那是给「App 以为自己还在
+    // 932 的屏上、内容整体缩放」那个模型用的。Aevon 的 App 真的重排进 717 的承载面，
+    // 窗也必须按 717 建 —— Aevon(296) 截图实测：窗按 932 建之后，键盘内容顶边 573
+    // （正确）却**在屏幕 717 被硬切**，下面 215 全是空背景。
+    //
+    // 根因是两把尺子：窗高 932 决定键盘内容贴哪条底（贴到屏底 932 ✓），窗里 root
+    // view 却仍是承载面高 717（`UIScreen.bounds` 的返回值）⇒ 它把内容裁在 717 ✗。
+    // 按 717 建窗，两把尺子才一致：窗底 = 0,215 + 717 = 屏幕底 932，root view 717
+    // 正好等于窗高，键盘整块露出来。
     AevonKbWinFreeze += 1;
-    AevonKbHookUIScreen = NO;
     UIScreen *main = [UIScreen mainScreen];
     CGAffineTransform scale = CGAffineTransformMakeScale(1, 1);
 
-    CGRect box = [main bounds];          // 冻结态 ⇒ 一定是**系统值**
-    CGFloat readH = box.size.height;
-    // 兜底：若这一读仍等于承载面高（说明有别的钩子/系统把 bounds 压成了场景尺寸），
-    // 就用物理屏高（`nativeBounds / nativeScale` = 430×932）。母版这一拍的目的就是
-    // 「拿到真屏高度给键盘窗」，物理屏高就是那个数的定义本身。
+    // 系统建好这一拍的原框。母版 `0x5230` 竖屏分支是 **x/y/宽 沿用、只把高改成 H**
+    // （反汇编注释写作「x/y 沿用」）。这一条是关键：UIKit 把键盘窗建在**承载面**的
+    // 原点上（Aevon 里是 0,215），沿用之后窗底才落在屏幕底 932。
+    //
+    // 0.4.7~0.4.11 都写 `[main bounds].origin`（= 0,0），把窗顶拽到了屏幕上沿 ——
+    // 0.4.10 的 `win frame=430x717@0,0` 就是那个形状：键盘悬在 426..717、下面一条
+    // 白（Aevon(295) 用户报的「键盘悬空盖住输入框」）。
+    CGRect orig = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(frame));
+
+    CGRect box = [main bounds];          // 冻结态 ⇒ 承载面（430x717）
+    CGFloat height = box.size.height;
+    CGFloat width = orig.size.width > 1.0 ? orig.size.width : box.size.width;
+    // 屏幕底与承载面底之间的那段（932 − 717 = 215）。宿主永远把卡片铺到屏底
+    // （日志 `keyboard fill on card=430x717 at 0,215`），所以「窗底 = 原点 + 高」。
     CGRect native = [main nativeBounds];
     CGFloat nativeScale = [main nativeScale];
-    CGFloat physicalH = nativeScale > 0.0 ? native.size.height / nativeScale : readH;
-    int fallback = 0;
-    if (physicalH > readH + 1.0) {
-        readH = physicalH;
-        fallback = 1;
+    CGFloat physicalH = nativeScale > 0.0 ? native.size.height / nativeScale : height;
+    // 读到的值若等于物理屏高，说明这一拍没拿到承载面（scene 还没就绪、钩子被绕开）
+    // ⇒ 现取一次承载面高。全屏 App 本来就该是 932，这条不会动它。
+    if (height > physicalH - 1.0 && AevonKbAppScene != nil) {
+        CGRect sceneBox = AevonKbSceneBounds(AevonKbAppScene);
+        if (!CGRectIsEmpty(sceneBox) && sceneBox.size.height < physicalH - 1.0) {
+            height = sceneBox.size.height;
+        }
     }
-    CGFloat height = readH;
-    CGFloat width = box.size.width;
+    CGFloat fillBottom = physicalH > height + 1.0 ? physicalH - height : 0.0;
 
     CGRect asked = CGRectZero;
+    int lifted = 0;
     if (AevonKbIsFrontMost()
         || (AevonKbAppScene != nil && [AevonKbAppScene interfaceOrientation] == 1)) {
-        // 竖屏两条分支（母版 0x5230 的 0x5280 / 0x52d8）：窗口 = 真屏尺寸。
-        asked = CGRectMake(box.origin.x, box.origin.y, width, height);
+        // 竖屏两条分支（母版 0x5230 的 0x5280 / 0x52d8）：x/y/宽 沿用，高 = H。
+        CGFloat y = orig.origin.y;
+        if (y < 1.0 && fillBottom > 0.0) {
+            // 系统给的窗顶在 0（说明它按物理屏建）⇒ 往下补到承载面原点，让窗底
+            // 正好落在屏幕底。证词里的 `dy=1` 就是走了这条路。
+            y = fillBottom;
+            lifted = 1;
+        }
+        asked = CGRectMake(orig.origin.x, y, width, height);
         ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setFrame:), asked);
         CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(frame));
         ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setBounds:), now);
@@ -631,6 +682,10 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
             ((void (*)(id, SEL, CGAffineTransform))objc_msgSend)(view,
                                                                 @selector(setTransform:),
                                                                 scale);
+            // root view 的高度必须等于窗的高度，否则它就是那把裁刀
+            // （0.4.11 的 `win frame=430x932@0,0` + root 717 ⇒ 键盘切在屏幕 717）。
+            CGRect want = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(bounds));
+            ((void (*)(id, SEL, CGRect))objc_msgSend)(view, @selector(setFrame:), want);
         }
     }
     AevonKbWinFreeze -= 1;
@@ -639,20 +694,24 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
     if (AevonKbWinNotes < 6) {
         AevonKbWinNotes += 1;
         CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(frame));
-        char line[224];
+        char line[256];
         snprintf(line, sizeof(line),
                  "app: kb: win frame=%.0fx%.0f@%.0f,%.0f scale=%.1f hosted=%d\n",
                  now.size.width, now.size.height, now.origin.x, now.origin.y,
                  scale.a, 1 - (int)AevonKbIsFrontMost());
         AevonKbLog(line);
-        // 0.4.11 — 三个数分开写，下一份日志能直接指出是哪一环断的：
-        //   ask  我们要求窗口多大（= 真屏高，母版语义）
-        //   real 冻结后读到的屏高 / fallback 为 1 说明读到的是场景尺寸
-        //   frame 系统最终给窗口多大（比 ask 小 ⇒ 窗口被场景夹住了，问题不在公式）
+        // 0.4.12 — 四个数分开写，下一份日志能直接指出是哪一环断的：
+        //   orig  系统建好这一拍的原框（期望 430x717@0,215，x/y 沿用它的）
+        //   host  承载面宽×高 与 物理屏高（期望 430x717 / 932）
+        //   ask   我们要求窗口多大（期望 430x717@0,215）
+        //   frame 系统最终给的框（比 ask 矮 ⇒ 被夹；`dy=1` ⇒ 补过 215 的偏移）
         snprintf(line, sizeof(line),
-                 "app: kb: win ask=%.0fx%.0f real=%.0fx%.0f frame=%.0fx%.0f fb=%d\n",
-                 asked.size.width, asked.size.height, width, height,
-                 now.size.width, now.size.height, fallback);
+                 "app: kb: win orig=%.0fx%.0f@%.0f,%.0f host=%.0fx%.0f phys=%.0f ask=%.0fx%.0f@%.0f,%.0f frame=%.0fx%.0f@%.0f,%.0f dy=%d\n",
+                 orig.size.width, orig.size.height, orig.origin.x, orig.origin.y,
+                 width, height, physicalH,
+                 asked.size.width, asked.size.height, asked.origin.x, asked.origin.y,
+                 now.size.width, now.size.height, now.origin.x, now.origin.y,
+                 lifted);
         AevonKbLog(line);
     }
     return window;
