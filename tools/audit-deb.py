@@ -1478,18 +1478,24 @@ def main():
                       #
                       # 这条路上有个 215 pt 的坐标差：键盘窗按真屏建在 (0,0,430,932)，
                       # App 主窗是 (0,0,430,717)，两者进程内同原点，那 215 是宿主在
-                      # 屏幕上的摆放偏移。`screen=1` 表示 frame 底边贴在**物理屏底**
-                      # ⇒ 通知给的是屏幕坐标，App 拿它当 717 用会少算 215。
+                      # 屏幕上的摆放偏移。
                       #   end=   UIKeyboardFrameEndUserInfoKey 原值
                       #   world= `UIScreen.bounds`（钩过 ⇒ 717）
                       #   phys=  nativeBounds/nativeScale（932）
                       #   shift= phys − world（215）
-                      #   screen= 判据是否命中（1 = 需要换算）
                       # 0.4.27 加了两个读数：`meas=` 是这一拍量到的键盘真实占高
                       # （`InputSetHostView` 高），`host=` 是宿主在键盘窗里的顶边与高。
                       # 判据：`meas` 必须等于 `probe hostm` 那个方向上的值
                       # （`world − meas == hostm`），否则说明量错了窗。
-                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f screen=%d",
+                      #
+                      # 0.4.29 — `screen=` 换成 `in=` + `fix=`。313 证明「底边贴物理屏底」
+                      # 只覆盖三批通知里的第一批：后面两批底边是 `world + 2×shift`
+                      # （932→1147），原样透传等于告诉 App「键盘在我底下」，输入条被按回去。
+                      #   in=screen  这一批贴物理屏底（W1）
+                      #   in=world   这一批贴 App 世界底
+                      #   in=off     两套都不是（W2/W3 都在这一档）
+                      #   fix=       本版是否会重写（1 = 键盘在屏幕上）
+                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f in=%s fix=%d",
                       # 修正那一拍：0.4.27 起不再只平移 —— `src=meas` 表示用真值重写了
                       # 整个矩形（y = world − meas、高 = meas），`src=shift` 是量不到时的
                       # 退回。`rem=` 是让位高度，必须等于 `meas`（386/431/359/404）。

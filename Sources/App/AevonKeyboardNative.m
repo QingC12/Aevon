@@ -882,23 +882,37 @@ static CGFloat AevonKbPhysicalHeight(void) {
 /// 通知钩子里没有 `_UIRemoteKeyboards` 这个 `self`，拿不到 `-keyboardWindow`；而
 /// 「键盘此刻真实占多少」必须在**收到通知的那一拍**量，晚一拍就是旧值。App 的窗口
 /// 表只有十几项，扫一遍是常数级开销，也省掉一份会失效的缓存。
+/// 0.4.29 — 键盘窗缓存，由 `intersectionHeightForWindowScene:` 那一拍留住。
+///
+/// 313 证明窗口表这条路在通知钩子里**拿不到**键盘窗：`chan … kbwin=0x0`，于是
+/// `note … host=0,0`、`meas` 只能吃 `inter` 留下的旧值。旧值这次恰好对，但那是
+/// 运气 —— `inter` 不一定在每条通知之前被调，而通知钩子里没有 `_UIRemoteKeyboards`
+/// 这个 `self`，问不到 `-keyboardWindow`。
+///
+/// 那个窗是「每屏一个」的单例，App 活着它就活着；这里 retain 一次（不释放），
+/// 就不会留下野指针。量的时候仍然走 `AevonKbMeasuredCoverage`：宿主找不到就返回 0，
+/// 不会因为拿错窗就编一个数出来。
+static UIWindow *AevonKbWindowKeep = nil;
+
 static UIWindow *AevonKbKeyboardWindowLive(void) {
     Class appCls = objc_getClass("UIApplication");
-    if (appCls == Nil) return nil;
-    id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, @selector(sharedApplication));
-    if (app == nil) return nil;
-    NSArray *wins = ((id (*)(id, SEL))objc_msgSend)(app, @selector(windows));
-    NSUInteger count = [wins count];
-    for (NSUInteger i = 0; i < count && i < 24; i++) {
-        id w = [wins objectAtIndex:i];
-        if (![w isKindOfClass:[UIWindow class]]) continue;
-        if (((CGFloat (*)(id, SEL))objc_msgSend)((id)w, @selector(windowLevel)) < 1.0) continue;
-        NSString *cls = NSStringFromClass([w class]);
-        if (cls != nil && [cls rangeOfString:@"Keyboard"].location != NSNotFound) {
-            return (UIWindow *)w;
+    if (appCls != Nil) {
+        id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, @selector(sharedApplication));
+        if (app != nil) {
+            NSArray *wins = ((id (*)(id, SEL))objc_msgSend)(app, @selector(windows));
+            NSUInteger count = [wins count];
+            for (NSUInteger i = 0; i < count && i < 24; i++) {
+                id w = [wins objectAtIndex:i];
+                if (![w isKindOfClass:[UIWindow class]]) continue;
+                if (((CGFloat (*)(id, SEL))objc_msgSend)((id)w, @selector(windowLevel)) < 1.0) continue;
+                NSString *cls = NSStringFromClass([w class]);
+                if (cls != nil && [cls rangeOfString:@"Keyboard"].location != NSNotFound) {
+                    return (UIWindow *)w;
+                }
+            }
         }
     }
-    return nil;
+    return AevonKbWindowKeep;
 }
 
 // ===========================================================================
@@ -926,6 +940,9 @@ static UIWindow *AevonKbKeyboardWindowLive(void) {
 // ⛔ 这一版**只读**：一个新钩子都没装，`installed` 仍是 5、`mask` 仍是 `0x1f`。
 // 只打日志，不改任何几何 —— QQ 这一版必须和 312 完全一样。
 static volatile int AevonKbChanProbes = 0;
+/// 0.4.29 — 每个进程只排一轮两拍。`DidShow` 与 `PrivateDidShow` 是同一拍发出的两条，
+/// 只看 `AevonKbChanProbes == 0` 挡不住（那时探针还没跑、计数仍是 0）。
+static volatile int AevonKbChanScheduled = 0;
 
 /// 读某个视图的 `keyboardLayoutGuide.layoutFrame`。两个选择子都先问
 /// `respondsToSelector:`：iOS 15 以下没有这个属性，私有改版的机型上也可能没有，
@@ -1035,6 +1052,45 @@ static void AevonKbScheduleChannelProbes(void) {
 //
 // ⛔ 别再用 `end.size.height − shift` 当高度：528−215=313，比真实 386 少 73 ——
 // 那 73 正好是键盘顶部工具栏 + 它上面那一条，等于把输入条重新塞回键盘里。
+// ===========================================================================
+// 0.4.29 — 判据换轴：不问「是不是屏幕坐标」，只问「键盘在不在屏幕上」
+// ===========================================================================
+//
+// 313 把最后一块拼图补齐了。一次弹键盘，系统连发 **三批** 通知，三批的口径
+// 各不相同（QQ 与微信完全一样）：
+//
+//   W1  end=430x456@0,476   bottom=932 = 物理屏底   meas=386   ← 0.4.27 认得出，修了
+//   W2  end=430x501@0,646   bottom=1147 = 932+215   meas=431   ← 放过去了
+//   W3  end=430x429@0,718   bottom=1147 = 932+215   meas=359   ← 放过去了
+//
+// 0.4.27 的判据是「底边贴在物理屏底（±2）」，只有 W1 命中。W2/W3 原样透传给 App：
+// `end.origin.y=718`，而 App 的世界只有 717 —— **它读到「键盘顶边在 718」，等于
+// 「键盘在我底下，看不见」**，于是把输入条放回窗口底部，正好被真实键盘盖住。
+// 这就是微信「先对、0.5 秒后自己下移」的机制：先吃 W1（对），再吃 W2/W3（错）。
+// QQ 不吃后面两批，所以它一直是对的。
+//
+// W2/W3 的底边正好是「world + 430 = world + 2×shift」，顶边减 430 之后落在
+// 216 / 288 —— 也就是它们就是「键盘真实位置再整体下移 2×shift」。这解释了那 215，
+// 但**不要去算这个 430**：换设备、换缩放、换输入法它都可能不是 430。
+// 我们只需要一条不变式：
+//
+//   键盘只要在屏幕上，报给 App 的矩形永远 = (x, worldH − realH, w, realH)
+//
+// 底边恒落在 App 世界底（= 卡片底），高度恒等于量到的真实占高。这条式子对
+// 932 口径、1147 口径、甚至将来别的口径都成立，因为**我们不读输入，只量事实**。
+//
+// 判据（是否「在屏幕上」）：
+//   · 高 ≥ 40            —— 收起那一拍发的是 `(0,932,430,0)`
+//   · 顶边 ≤ 屏底 − 40    —— 收起时还可能发 `(0,932,430,359)`（整块在屏底之下）
+//   · 名字不含 `Hide`    —— 收起通知一律不碰，让 App 自己收输入条
+// 三条都不看坐标口径，只描述「露出来没有」。
+//
+// ⛔ 0.4.28 取证的那条 `keyboardLayoutGuide` 线**判死**：QQ `guide=430x144@0,573`、
+// 微信 `guide=430x34@0,683`，两家都不是 358，而 QQ 是完美的 ⇒ 这两家根本不读它。
+// 剩下的就只有通知这一条，也就是本节这条。
+//
+// ⛔ 别用「底边 == 物理屏底」当判据（0.4.27 的错）：它只覆盖第一批，而**后面的
+// 那两批才是把输入条按下去的手**。判据要描述事实（在不在屏幕上），不要描述坐标系。
 static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) {
     if (AevonKbOrigPostNote == NULL) return;
     void (*orig)(id, SEL, id, id, id) = (void (*)(id, SEL, id, id, id))AevonKbOrigPostNote;
@@ -1058,17 +1114,24 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     // ⇒ 两条都不会进下面的修正分支。
     BOOL canFix = (shift > 20.0 && shift < 400.0);
     CGFloat bottom = end.origin.y + end.size.height;
-    // 屏幕坐标的特征：frame 底边贴在物理屏底。2 pt 容差吸收取整噪声。
-    // 另加两条：键盘必须真的露在屏幕上（高 ≥ 40、顶边在屏底之上 40），否则收起那一拍
-    // 的 `(0,932,430,0)` 一类也会命中，被我们改写成「键盘还在」。
-    BOOL screenSpace = canFix && fabs(bottom - physicalH) < 2.0
-                       && end.size.height >= 40.0 && end.origin.y <= physicalH - 40.0;
+    // 「键盘此刻在不在屏幕上」——不看口径，只看几何事实（见上面 0.4.29 那一段）。
+    BOOL hideNote = [(NSString *)name rangeOfString:@"Hide"].location != NSNotFound;
+    BOOL visible = canFix && !hideNote
+                   && end.size.height >= 40.0 && end.origin.y <= physicalH - 40.0;
+    // 只读取证：这一批 frame 是哪套口径。`screen`=贴物理屏底（W1）、
+    // `world`=贴 App 世界底、`off`=两套都不是（W2/W3 就是这一档，且底边更低）。
+    const char *inSpace = "off";
+    if (fabs(bottom - physicalH) < 2.0) {
+        inSpace = "screen";
+    } else if (fabs(bottom - worldH) < 2.0) {
+        inSpace = "world";
+    }
 
     // 量「这一刻」键盘真实占多少。宿主还没建出来就是 0，下面退回平移那条老路。
     CGFloat realH = 0.0;
     CGFloat hostY = 0.0;
     CGFloat hostH = 0.0;
-    if (screenSpace && [NSThread isMainThread]) {
+    if (visible && [NSThread isMainThread]) {
         // `[UIApplication windows]` 只能在主线程问；不在主线程就退回平移那条老路，
         // 不拿线程安全去换一个精度。
         UIWindow *kbWin = AevonKbKeyboardWindowLive();
@@ -1085,22 +1148,23 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
         char line[288];
         const char *noteName = [(NSString *)name UTF8String];
         snprintf(line, sizeof(line),
-                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f screen=%d\n",
+                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f in=%s fix=%d\n",
                  noteName != NULL ? noteName : "?",
                  end.size.width, end.size.height, end.origin.x, end.origin.y,
-                 worldH, physicalH, shift, realH, hostY, hostH, (int)screenSpace);
+                 worldH, physicalH, shift, realH, hostY, hostH, inSpace, (int)visible);
         AevonKbLog(line);
     }
 
     // 0.4.28 — 会话级两拍取证（见上面 `AevonKbProbeChannels` 那一节）。
-    // 挂在 `DidShow` 上而**不**挂在每条通知上：一次弹键盘只会来一条，两拍探针
-    // 正好落在「已经排好版」与「0.5 s 之后」两个时刻，配对数不会乱。
-    if (screenSpace
+    // 只取第一次 `DidShow`：一次弹键盘会连发 `DidShow` 与 `PrivateDidShow`，
+    // 不设这道闸就会排两轮四拍，日志里配不上对。
+    if (visible && AevonKbChanScheduled == 0
         && [(NSString *)name isEqualToString:UIKeyboardDidShowNotification]) {
+        AevonKbChanScheduled = 1;
         AevonKbScheduleChannelProbes();
     }
 
-    if (!screenSpace || !AevonKbNoteFixOn) {
+    if (!visible || !AevonKbNoteFixOn) {
         orig(self, _cmd, name, object, userInfo);
         return;
     }
@@ -1179,6 +1243,11 @@ static CGFloat AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, B
     BOOL sameApp = AevonKbIsFrontMost();
     id keyboardWindow = ((id (*)(id, SEL))objc_msgSend)(self,
                                                        NSSelectorFromString(@"keyboardWindow"));
+    // 0.4.29 — 把窗留住给通知钩子用（见 `AevonKbWindowKeep` 的说明）。
+    if (keyboardWindow != nil && AevonKbWindowKeep == nil
+        && [keyboardWindow isKindOfClass:[UIWindow class]]) {
+        AevonKbWindowKeep = [(UIWindow *)keyboardWindow retain];
+    }
     if (sameApp || keyboardWindow == nil) return orig;
 
     AevonKbUpdateHeightFraction();
