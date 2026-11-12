@@ -1486,6 +1486,13 @@ int AevonSceneFrameAcked(const char *bundle) {
 
 /// 0.2.46 — 推 frame 的时候，把 `displayConfiguration` 一起推上去。
 ///
+/// ⛔ **0.4.21 起这个函数的语义整个反过来了**：它不再把屏幕改成卡片尺寸，而是
+/// **写回物理屏**（把 0.2.46 那个决定撤掉）。理由写在函数体里 0.4.21 那一段：
+/// 母版从不改 `displayConfiguration`，它让 App 以为屏幕是 717 的办法是换
+/// `-[UIScreen bounds]` 的返回值。我们改了 display 之后，932 高的键盘窗必然越界，
+/// 12 个版本都在跟这个自己造出来的假世界搏斗（305 的「下半透明」是它的最后一幕）。
+/// 下面这段 0.2.46 的原始说明保留，作为「当时为什么那样想」的记录。
+///
 /// 这一条是「真重排」的核心，也是对比报告第一节那条病因的正解：
 ///
 ///   建 scene 时我们把 display 改成了画布（430x717），可**之后每次推 frame 都只写
@@ -1527,6 +1534,40 @@ static BOOL AevonSettingsMutable(id settings) {
     return strstr(name, "Mutable") != NULL;
 }
 
+/// 0.4.21 — 物理屏尺寸。**不经过任何钩子**：`nativeBounds / nativeScale` 是纯粹
+/// 的硬件量，谁都没改过它。`-bounds` 不行 —— 它在我们自己的钩子后面，
+/// 卡片态返回的是承载面（717）。
+static CGSize AevonPhysicalScreenSize(void) {
+    UIScreen *screen = [UIScreen mainScreen];
+    if (screen == nil) return CGSizeZero;
+    CGRect native = [screen nativeBounds];
+    CGFloat scale = [screen nativeScale];
+    if (scale <= 0.0 || CGRectIsEmpty(native)) return CGSizeZero;
+    return CGSizeMake(native.size.width / scale, native.size.height / scale);
+}
+
+/// 0.4.21 — 回退开关 `com.aevon` 域的 `DisplayHoldOff`。
+///
+/// 存在 = 回到 0.4.20 的行为（把 `displayConfiguration` 写成卡片尺寸）。这条只是
+/// 逃生门：设备上真出问题，用 Filza 在
+/// `/var/mobile/Library/Preferences/com.aevon.plist` 里加 `DisplayHoldOff = true`，
+/// respring 即回到旧世界，不必重装插件。
+///
+/// 读一次缓存 2 s：`AevonWriteDisplay` 每次 settings 更新都会被调，但真写只在
+/// 尺寸变化时发生，2 s 的窗口足够拦住逐拍读盘。
+static BOOL AevonDisplayHoldOff(void) {
+    static int cached = -1;
+    static CFAbsoluteTime at = 0.0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (cached >= 0 && now - at < 2.0) return cached == 1;
+    at = now;
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("DisplayHoldOff"),
+                                                        CFSTR("com.aevon"));
+    cached = (value != NULL) ? 1 : 0;
+    if (value != NULL) CFRelease(value);
+    return cached == 1;
+}
+
 static BOOL AevonWriteDisplay(id settings, int slot) {
     if (settings == nil) return NO;
     if (!AevonSettingsMutable(settings)) return NO;
@@ -1542,31 +1583,48 @@ static BOOL AevonWriteDisplay(id settings, int slot) {
     SEL boundsSel = sel_registerName("bounds");
     if (![now respondsToSelector:boundsSel]) return NO;
     CGRect current = ((CGRect (*)(id, SEL))objc_msgSend)(now, boundsSel);
-    if (fabs(current.size.width - target.size.width) < 0.5 &&
-        fabs(current.size.height - target.size.height) < 0.5) return NO;
+
+    // 0.4.21 — **目标从「卡片尺寸」改成「物理屏」。**
+    //
+    // 0.2.46 起这里写的是 `AevonFrameTargets[slot]`（卡片 430x717），等于替系统宣布
+    // 「这块屏物理上只有 717 高」。母版从来不做这件事：它让 App 以为屏幕是 717 的
+    // 办法是**换 `-[UIScreen bounds]` 的返回值**（`final3/analysis/hooks-SthenoKeyboard.md`
+    // 第 4 条，156 B，只读不写 ivar），`displayConfiguration` 一直是物理屏。
+    //
+    // 两者差别在键盘上立刻显形：屏幕被宣布成 717 之后，932 高的键盘窗必然越界，
+    // 系统只能裁 —— 0.4.20 的「多出 215 pt 被裁、下半透明」就是这么来的。
+    // 把 display 还给系统之后，键盘窗 932 落在真屏里，内容 501..932 原生；
+    // 而 App 仍按 717 排版，因为 `-bounds` 钩子还在（返回 scene bounds）。
+    CGSize physical = AevonPhysicalScreenSize();
+    BOOL hold = AevonDisplayHoldOff();
+    BOOL sane = (physical.width > 80.0 && physical.height > 80.0);
+    CGSize want = (hold || !sane) ? target.size : physical;
+    if (fabs(current.size.width - want.width) < 0.5 &&
+        fabs(current.size.height - want.height) < 0.5) return NO;
     CFAbsoluteTime at = CFAbsoluteTimeGetCurrent();
     if (AevonDisplayAt[slot] > 0 && at - AevonDisplayAt[slot] < 0.20) {
-        AevonOwnDisplayLog(@"win: display follow skip slot=%d dt=%.0fms",
+        AevonOwnDisplayLog(@"win: display release skip slot=%d dt=%.0fms",
                            slot, (at - AevonDisplayAt[slot]) * 1000.0);
         return NO;
     }
-    id copy = AevonOwnDisplayOverride(
-        now, CGRectMake(0, 0, target.size.width, target.size.height));
+    id copy = AevonOwnDisplayOverride(now, CGRectMake(0, 0, want.width, want.height));
     if (copy == nil) {
-        AevonOwnDisplayLog(@"win: display follow no door %.0fx%.0f slot=%d",
-                           target.size.width, target.size.height, slot);
+        AevonOwnDisplayLog(@"win: display release no door %.0fx%.0f slot=%d",
+                           want.width, want.height, slot);
         return NO;
     }
     ((void (*)(id, SEL, id))objc_msgSend)(settings, setter, copy);
     [copy release];
-    // 参考尺寸跟着一起走（0.2.46）：建 scene 时写的那一份是「出生尺寸」，
-    // 之后 frame 变了它不会自己跟 —— 三个数（frame / display / 参考尺寸）必须
-    // 一直是同一个，否则 App 内部就有一处按旧尺寸排版。
-    AevonOwnRefSet(settings, target.size, "follow");
+    // 参考尺寸仍然跟**卡片**走，不跟物理屏走。
+    //
+    // 它和 `-bounds` 的返回值是一对：App 排版读的是 `-bounds`（717），参考尺寸若
+    // 写成 932，那些读 `referenceSize` 的 App 就会按 932 排进 717 的窗口。
+    // 母版没有这一步，因为母版只换 `-bounds`；我们两个都写，就必须让这两个同值。
+    AevonOwnRefSet(settings, target.size, hold ? "follow" : "release");
     AevonDisplayAt[slot] = at;
-    AevonOwnDisplayLog(@"win: display follow %.0fx%.0f -> %.0fx%.0f slot=%d",
+    AevonOwnDisplayLog(@"win: display release was=%.0fx%.0f -> %.0fx%.0f slot=%d",
                        current.size.width, current.size.height,
-                       target.size.width, target.size.height, slot);
+                       want.width, want.height, slot);
     return YES;
 }
 

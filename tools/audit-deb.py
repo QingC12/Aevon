@@ -895,13 +895,16 @@ def main():
                   #     这是「覆盖必成」的判据。真机上如果只有 `via=mutable` 或
                   #     `keep … (no setBounds)`，说明这条路没打开，抖音仍会按 932 排。
                   #   `own ref` = 建 scene 时把内容参考尺寸定成了画布大小。
-                  #   `display follow` = 推 frame 时屏幕跟着变（尺寸真的不同才会出现）。
+                  #   `display release` = 把 `displayConfiguration` 写回**物理屏**
+                  #     （0.4.21 起的目标；`was=430x717 -> 430x932` 是「还给系统」的证据）。
+                  #   `display release skip` = 0.20 s 节流挡住了第二次。
                   #   `scene ack` = transition 门的回执，证明「门后面真的有人接」。
                   b"win: own display override skip enc=%s n=%u",
                   b"win: own ref %.0fx%.0f via=%s",
                   b"win: own ref skip %s enc=%s n=%u",
-                  b"win: display follow %.0fx%.0f -> %.0fx%.0f slot=%d",
-                  b"win: display follow skip slot=%d dt=%.0fms",
+                  b"win: display release was=%.0fx%.0f -> %.0fx%.0f slot=%d",
+                  b"win: display release skip slot=%d dt=%.0fms",
+                  b"win: display release no door %.0fx%.0f slot=%d",
                   b"win: scene ack slot=%d",
                   # 两个私有选择子名必须真的进二进制：它们同时是「这条路走的是哪个
                   # 入口」和下一版要不要换路的依据。名字来自对比报告第五节那张表。
@@ -1438,11 +1441,12 @@ def main():
                       # 也是 (0,0)，那 215 这个偏移从头到尾不在 `UIScreen` 上，
                       # 键盘贴 0..717 就是必然，下一版该动的是 scene 落点不是窗。
                       b"app: kb: bounds sys=%.0fx%.0f@%.0f,%.0f (hook off)",
-                      # 钩子 1 —— 交集高度换算。母版公式一字未改，但 0.4.17 起在它
-                      # 之后加一道「量出来的键盘占高」：`orig` 是 932 世界的口径（316），
-                      # `UIInputSetHostView` 实占 431，两者差 115 ⇒ 输入框被盖。
+                      # 钩子 1 —— 交集高度换算。母版公式一字未改，0.4.17 起在它之后加一道
+                      # 「量出来的键盘占高」。0.4.21 再加 `adopt`（采样锁存后的值）：
+                      # 首样采纳、之后连续两次同值才更新，挡掉键盘升起动画的中途值
+                      # （386/404/431 轮着来就是用户报的「输入框随机抬高或被盖住」）。
                       # `src=meas|formula` 就地标明这一次用的是哪个值。
-                      b"app: kb: inter orig=%.0f screen=%.0f kb=%.0f hf=%.2f formula=%.0f meas=%.0f host=%.0f,%.0f src=%s -> %.0f",
+                      b"app: kb: inter orig=%.0f screen=%.0f kb=%.0f hf=%.2f formula=%.0f meas=%.0f adopt=%.0f host=%.0f,%.0f src=%s -> %.0f",
                       # 钩子 2 —— 建键盘窗那一拍把 frame 写成承载面尺寸。`scale=0.0`
                       # 是横屏「不显示」，母版原样，不是 bug。
                       b"app: kb: win frame=%.0fx%.0f@%.0f,%.0f scale=%.1f hosted=%d",
