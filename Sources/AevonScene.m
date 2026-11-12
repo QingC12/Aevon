@@ -5455,6 +5455,10 @@ static const int AevonColdAdoptStepMs = 80;
 
 static void AevonColdAdoptTick(char *bundle, long seq, int tick);
 
+/// 0.3.57 — 前向声明：定义在 `AevonDeck*` 那一段（文件更靠后），这里只用来
+/// 让「收卡」在 deck 托管期间让路。
+static int AevonDeckHolds(const char *bundle);
+
 /// 收卡那一发打完之后的结果，只报一次。这一行是「到底进没进卡」的唯一判据：
 /// `card=1` = 目标已经在卡里；`card=0` = `openCard` 中途放弃（它会自己落
 /// `win: own did not come up` / `win: url card declined`，两处都有原因）。
@@ -5506,6 +5510,14 @@ static void AevonColdAdoptTick(char *bundle, long seq, int tick) {
     if (bundle == NULL) return;
     if (seq != AevonColdAdoptSeq) { free(bundle); return; }
     if (AevonCardIsUpFor(bundle) == 1) { free(bundle); return; }
+    // 0.3.57 — deck 已经在托管这个 App ⇒ 这一条立刻让路。
+    //
+    // 两者是同一个症状的两种解，**不能同时跑**：deck 自己自建 scene、自己建卡，
+    // 而「收卡」的动作是先按 Home 再把系统那张 scene 收进卡。deck 那边的 scene
+    // 一旦被浮起来，`AevonFrontBundleCopy` 很可能也读到这个 App，收卡就会在卡
+    // 还没建好的那 300~800 ms 里按一次 Home —— 用户看到的是「闪一下桌面」，
+    // 正好是这一版要消掉的东西。判据只比字符串，不碰任何状态。
+    if (AevonDeckHolds(bundle) == 1) { free(bundle); return; }
     NSString *bu = [NSString stringWithUTF8String:bundle];
     if (bu == nil) { free(bundle); return; }
     double age = -1.0;
@@ -12558,6 +12570,35 @@ static void AevonDeckSpin(void) {
     AevonDeckAfter(0.08);
 }
 
+// 0.3.57 — 逐闸读数。0.3.54 起这条判定**一个字的日志都不写**，于是
+// Aevon(277) 只能证明「deck 没起来」，证明不了「哪一格挡的」。一个 `return 0`
+// 一行原因，上限 16 行（热路径上它每次分享只会跑两三次，不会写爆）。
+static long AevonDeckWantNotes = 0;
+static void AevonDeckNote(const char *why, const char *bundle) {
+    if (AevonDeckWantNotes >= 16) return;
+    AevonDeckWantNotes += 1;
+    AevonDeckLog(@"deck: want why=%s b=%s", why != NULL ? why : "-",
+                 bundle != NULL && bundle[0] != '\0' ? bundle : "-");
+}
+
+/// deck 是否正在托管这个 App（`AevonDeckStart` 之后、`AevonDeckEnd` 之前）。
+/// 只比字符串，不 retain 任何东西。
+///
+/// 0.3.57 — 加一个「托管窗口」。`AevonDeckEnd` 会把 `AevonDeckBundle` 清空，
+/// 而一次分享的派生请求（Aevon(277)：untrusted + user 两条）可能排在收尾之后；
+/// 那时若照旧放行，`_executeApplicationTransitionRequest` 照样会把整屏开出来。
+/// 另存一份 bundle + 时间戳，3 秒内且卡还在就继续认领。
+static char AevonDeckHeldBundle[64] = {0};
+static CFAbsoluteTime AevonDeckHeldAt = 0;
+static int AevonDeckHolds(const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return 0;
+    if (AevonDeckBusy == 1 && strcmp(AevonDeckBundle, bundle) == 0) return 1;
+    if (AevonDeckHeldAt <= 0 || strcmp(AevonDeckHeldBundle, bundle) != 0) return 0;
+    if (CFAbsoluteTimeGetCurrent() - AevonDeckHeldAt > 3.0) return 0;
+    // 卡在就继续认领；卡不在（strike 之后已经拉回前台）就把请求交回系统。
+    return AevonCardIsUpFor(bundle) == 1 ? 1 : 0;
+}
+
 /// 这一次打开要不要走自建承载。**只接冷启动的文件分享**：
 ///   · 授权 / 支付：三次真机证伪「后台收 URL」（QQ `rsp=0`、支付宝 timeout、微信空壳），
 ///     那一族必须原生激活，一个字都不碰；
@@ -12566,14 +12607,14 @@ static void AevonDeckSpin(void) {
 ///   · 有卡 / 正在建卡：让 `openCard` 自己处理。
 __attribute__((noinline, used)) int AevonDeckWanted(const char *bundle, id request, id options, NSString **urlOut) {
     if (urlOut != NULL) *urlOut = nil;
-    if (bundle == NULL || bundle[0] == '\0') return 0;
-    if (AevonDeckOn() != 1) return 0;
-    if (strncmp(bundle, "com.apple.springboard", 21) == 0) return 0;
-    if (AevonBundleIsAuthFamily(bundle)) return 0;
-    if (AevonWindowBlacklisted(bundle)) return 0;
+    if (bundle == NULL || bundle[0] == '\0') { AevonDeckNote("no-bundle", bundle); return 0; }
+    if (AevonDeckOn() != 1) { AevonDeckNote("off", bundle); return 0; }
+    if (strncmp(bundle, "com.apple.springboard", 21) == 0) { AevonDeckNote("springboard", bundle); return 0; }
+    if (AevonBundleIsAuthFamily(bundle)) { AevonDeckNote("auth", bundle); return 0; }
+    if (AevonWindowBlacklisted(bundle)) { AevonDeckNote("blacklist", bundle); return 0; }
 
     NSString *url = AevonOpenURLOf(request, options);
-    if (url.length == 0) return 0;
+    if (url.length == 0) { AevonDeckNote("no-url", bundle); return 0; }
     // **只接文件分享。** 两条判据：
     //   · 来源是分享扩展（`AevonOpenIsShareSource`，短链 / 分享面板都算）；
     //   · 或者这次带的是一条 `file:` URL 且不是通用链接回跳。
@@ -12583,14 +12624,40 @@ __attribute__((noinline, used)) int AevonDeckWanted(const char *bundle, id reque
     int isShare = AevonOpenIsShareSource(request, options) ? 1 : 0;
     int isFile = [url hasPrefix:@"file:"] ? 1 : 0;
     int isCont = AevonOpenIsContinuation(request, options) ? 1 : 0;
-    if (isShare == 0 && !(isFile == 1 && isCont == 0)) return 0;
+    if (isShare == 0 && !(isFile == 1 && isCont == 0)) {
+        AevonDeckNote("not-share", bundle);
+        return 0;
+    }
 
     NSString *targetID = [NSString stringWithUTF8String:bundle];
-    if (targetID.length == 0) return 0;
-    if (AevonCardIsUpFor(bundle) == 1 || AevonCardIsComingFor(bundle) == 1) return 0;
+    if (targetID.length == 0) { AevonDeckNote("no-target", bundle); return 0; }
+    if (AevonCardIsUpFor(bundle) == 1 || AevonCardIsComingFor(bundle) == 1) {
+        AevonDeckNote("card", bundle);
+        return 0;
+    }
     // 冷：SB 那边还没有这个 App 的 scene。有 scene 的走桥（热路）。
-    if (AevonSeenSceneForBundle(targetID) != nil) return 0;
-    if (AevonAppFrontmost(targetID) == 1) return 0;
+    //
+    // 0.3.57 — 这一格改成「进程活着 **且** 有 scene」才算热。
+    //
+    // 0.3.54 写的是「表里有 scene 就让路」，而 Aevon(277) 09:06:02 那次
+    // `act: scene n=9 id=sceneID:com.tencent.mqq-default` 就在本钩子之前落下 ——
+    // 冷分享刚被激活过，系统已经把 scene 建出来了，于是这条判据在冷启动上
+    // 也可能成立（`want why=scene`），把 deck 挡在外面。真正的冷热分界是
+    // **进程在不在**：`act: cold adopt tick` 那一列 `alive=0`（冷）/ `alive=1`
+    // （热）同一天在同一台机器上两种都见过。热启动进程活着、scene 也在，
+    // 照旧走桥（那条路 `deliver ok=1 send=sendActions` 是通的），一个字不改。
+    if (AevonAppFrontmost(targetID) == 1) { AevonDeckNote("front", bundle); return 0; }
+    if (AevonSeenSceneForBundle(targetID) != nil &&
+        AevonTargetAlive(targetID, NULL) == 1) {
+        AevonDeckNote("warm", bundle);
+        return 0;
+    }
+    // 走到这里就是「接」：这一行是唯一能证明判据全过的读数，与 `deck: start` 配对看。
+    if (AevonDeckWantNotes < 16) {
+        AevonDeckWantNotes += 1;
+        AevonDeckLog(@"deck: want ok b=%s share=%d file=%d u=%.48s",
+                     bundle, isShare, isFile, [url UTF8String]);
+    }
     if (urlOut != NULL) *urlOut = url;
     return 1;
 }
@@ -12635,6 +12702,10 @@ __attribute__((noinline, used)) int AevonDeckStart(const char *bundle, const cha
     AevonDeckHandle = [handle retain];
     snprintf(AevonDeckBundle, sizeof(AevonDeckBundle), "%s", bundle);
     snprintf(AevonDeckURL, sizeof(AevonDeckURL), "%s", url);
+    // 0.3.57 — 托管窗口的登记（见 `AevonDeckHolds`）。收尾会清上面那两份，
+    // 这一份不清，只在时间戳过期后失效。
+    snprintf(AevonDeckHeldBundle, sizeof(AevonDeckHeldBundle), "%s", bundle);
+    AevonDeckHeldAt = CFAbsoluteTimeGetCurrent();
 
     // 吞掉激活之后没有人会替我们起进程。挂起启动不请求前台，正是这里要的：
     // 进程起来才能连上这个 handle，而它上不上屏由我们的卡片决定。
@@ -16540,6 +16611,25 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
     line[0] = '\0';
     char bundle[64];
     bundle[0] = '\0';
+    // 0.3.57 — **这个缓冲一直是空串。**
+    //
+    // 0.3.8 把 `AevonOpenDecide` 从这条链上摘掉之后，`bundle` 就再没有赋值点：
+    // 它当年的唯一消费者是分流判定，判定没了，赋值也跟着没了。留在纸面上的
+    // 痕迹就是 `notify: pass b=- op=user`（Aevon(277) 09:06:02，两条都 b=-），
+    // 而 0.3.54 的 deck 第一句是 `if (bundle[0] == '\0') return 0;` —— 于是
+    // 0.3.56 那次冷分享四个私有面全通（`deck: gate need=4 miss=0`）、零
+    // `deck: start`：不是私有面不行，是这里递进去一个空串。
+    //
+    // 取值口与快照同一个（`AevonOpenBundleOf`），只读，包 @try：`request`
+    // 在真机上形状有三代（字符串 / FBSOpenApplicationRequest / 无此键）。
+    @try {
+        id openBundle = AevonOpenBundleOf(request);
+        const char *openName = [openBundle isKindOfClass:[NSString class]]
+                               ? [(NSString *)openBundle UTF8String] : NULL;
+        if (openName != NULL) snprintf(bundle, sizeof(bundle), "%s", openName);
+    } @catch (NSException *exception) {
+        bundle[0] = '\0';
+    }
     const char *why = "-";
     int verdict = 0;
 
@@ -16626,12 +16716,34 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
             // 只要 `AevonDeckStart` 拿不到 scene handle，它就返回 0，这里照旧
             // `verdict = 0` 走原实现 —— 吞掉请求却无内容可显示那个最坏形状
             // 在结构上不可能出现。
-            if (slot == 0 && AevonDeckArmed == 1) {
+            // 0.3.57 — 触发格从 `slot == 0` 放宽到「除 trusted 之外的三格」。
+            //
+            // Aevon(277) 09:06:02 这次文件分享命中的是 `op=untrusted` 与
+            // `op=user`，`op=open` **一格都没有**。0.3.54/0.3.56 那道
+            // `slot == 0` 的窄口子在这台机器上永远不会开 —— 这是第二处死结。
+            //
+            // 母本 ScreenCore 的注册表里三条都钩（0x51cbc
+            // `_handleOpenApplicationRequest:`、0x51ce0 `_handleTrusted…`、
+            // 0x51d04 `_handleUntrusted…`），它接的是「打开请求」这一类，
+            // 不是某一个选择子。这里跟着改：open / untrusted / user 三格都能起。
+            //
+            // trusted(2) 仍然排除：那是 SpringBoard 自己发起的受信请求
+            // （点图标、系统拉起），分享不走这一格，接它只是多一种误吞机会。
+            int deckSlot = (slot == 0 || slot == 1 || slot == 3) ? 1 : 0;
+            if (deckSlot == 1 && AevonDeckArmed == 1) {
                 NSString *deckURL = nil;
                 if (AevonDeckWanted(bundle, request, options, &deckURL) == 1 &&
                     AevonDeckStart(bundle, [deckURL UTF8String], "open") == 1) {
                     verdict = 2;
                     why = "ownstart";
+                } else if (AevonDeckHolds(bundle) == 1) {
+                    // deck 已经在托管这个 App：一次分享会被系统拆成两三条派生
+                    // 请求（Aevon(277) 是 untrusted + user 两条，同一秒）。
+                    // 第一条吞掉之后，第二条若照旧放行，`_executeApplicationTransitionRequest`
+                    // 就会把整屏开出来 —— 那正是这一版要消掉的东西。所以托管
+                    // 期间同 bundle 的后续拍一律吞掉，理由单独记 `ownhold`。
+                    verdict = 2;
+                    why = "ownhold";
                 }
             }
             if (verdict != 2) {

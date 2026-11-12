@@ -1271,6 +1271,12 @@ def main():
                   b"deck: strike why=%s b=%s (route off until reboot)",
                   # Swift 侧那一拍的读数：进没进建卡链、拿到的 scene 是哪一类。
                   b"win: own deck float b=",
+                  # 0.3.57 — 判定第一次开口。Aevon(277) 只能证明「deck 没起来」，
+                  # 证明不了「哪一格挡的」；这两行让下一次日志直接给出答案：
+                  # `want why=` 一个 return 0 一行原因（b / auth / no-url / card /
+                  # scene / front），`want ok` 是唯一能证明判据全过的读数。
+                  b"deck: want why=%s b=%s",
+                  b"deck: want ok b=%s share=%d file=%d u=%.48s",
                   # 闸：符号与文件名都必须在包里，否则现场关不掉这条路。
                   b"AevonDeckOn",
                   b"/var/mobile/Library/Logs/Aevon/url.own.start.off",
