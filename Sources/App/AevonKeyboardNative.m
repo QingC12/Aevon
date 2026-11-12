@@ -653,6 +653,112 @@ static CGFloat AevonKbMeasuredCoverage(id keyboardWindow, CGFloat screenHeight,
 }
 
 // ===========================================================================
+// 0.4.24 — App 到底收到了多少 inset（只读取证，一次输入会话 3 条）
+// ===========================================================================
+//
+// 0.4.21→0.4.23 四版都在改「我们认为该报的值」：386 → 431 → 458。每一版都能在
+// 日志里看到 `-> N`，但**从来没有验证过 App 收下的是不是这个 N**。
+//
+// 308 给了最硬的对照：`formula=458` 报出去了，输入框还是被「键盘的工具栏」盖住。
+// 如果 App 真按 458 让位，输入框底部会在 App 世界 `717−458=259`，而键盘顶在 358，
+// 中间空 99 pt —— 不可能被盖。所以只剩两种可能：App 没收到这个值，或者它收到了
+// 但算的时候用的是别的量。这两者用日志里的 `-> N` 分辨不出来，必须去读 App 的成品。
+//
+// 这组只读三个数，把「App 认为键盘有多高」从推测变成读数：
+//   inset   App 主窗里第一个 UIScrollView 的 contentInset（bottom 就是它给键盘留的高度）
+//   off     同一 scrollView 的 contentOffset.y（键盘让位时它通常跟着滚）
+//   hostc   `UIInputSetHostView` **转换到 App 主窗**的矩形。这是「键盘在 App 世界里
+//           从哪开始」的唯一真值，不需要任何换算；跨 window 转换失败时会退化成 0
+//   hostm   同一件事的手工算法：(键盘窗 frame.y + host 在窗内 y) − (物理屏高 − App 世界高)
+// 两个都打，是为了让它们互相校验：一致就说明 hostc 可信，不一致就说明跨 window 转换
+// 在这个进程里不成立，只能采信 hostm。
+//
+// 三者并排就能定性：
+//   inset ≈ 458/437 ⇒ 我们的值生效了，问题在 App 自己的布局，不在钩子；
+//   inset ≈ 431/359 ⇒ App 用的是键盘真实占高，我们的返回值没被采纳；
+//   inset ≈ 316     ⇒ App 用的是系统的 orig，钩子返回值整条没生效。
+static volatile int AevonKbInsetProbes = 0;
+
+static UIScrollView *AevonKbFindScrollView(UIView *root, int depth) {
+    if (root == nil || depth < 0) return nil;
+    if ([root isKindOfClass:[UIScrollView class]]) return (UIScrollView *)root;
+    NSArray *subs = [root subviews];
+    NSUInteger count = [subs count];
+    for (NSUInteger i = 0; i < count && i < 8; i++) {
+        UIScrollView *found = AevonKbFindScrollView([subs objectAtIndex:i], depth - 1);
+        if (found != nil) return found;
+    }
+    return nil;
+}
+
+static UIWindow *AevonKbAppMainWindow(void) {
+    Class appCls = objc_getClass("UIApplication");
+    if (appCls == Nil) return nil;
+    id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, @selector(sharedApplication));
+    if (app == nil) return nil;
+    NSArray *wins = ((id (*)(id, SEL))objc_msgSend)(app, @selector(windows));
+    if (wins == nil) return nil;
+    NSUInteger count = [wins count];
+    for (NSUInteger i = 0; i < count && i < 16; i++) {
+        id w = [wins objectAtIndex:i];
+        if (![w isKindOfClass:[UIWindow class]]) continue;
+        if (([w windowLevel]) != 0.0) continue;      // 键盘窗、状态栏窗都不是 0
+        NSString *cls = NSStringFromClass([w class]);
+        if (cls != nil && [cls rangeOfString:@"Keyboard"].location != NSNotFound) continue;
+        if ([w isHidden]) continue;
+        return (UIWindow *)w;
+    }
+    return nil;
+}
+
+static void AevonKbProbeAppInsets(id keyboardWindow) {
+    if (AevonKbInsetProbes >= 3) return;
+    UIWindow *appWin = AevonKbAppMainWindow();
+    if (appWin == nil) return;
+    AevonKbInsetProbes += 1;
+
+    CGRect wf = [appWin frame];
+    CGRect hostInApp = CGRectZero;
+    CGFloat hostManual = 0.0;
+    if (keyboardWindow != nil && [keyboardWindow isKindOfClass:[UIView class]]) {
+        UIView *kbWin = (UIView *)keyboardWindow;
+        UIView *host = AevonKbFindHostView(kbWin, 4);
+        if (host != nil) {
+            hostInApp = [host convertRect:[host bounds] toView:appWin];
+            CGRect inKbWin = [host convertRect:[host bounds] toView:kbWin];
+            CGRect kbFrame = [kbWin frame];
+            CGRect native = [[UIScreen mainScreen] nativeBounds];
+            CGFloat nativeScale = [[UIScreen mainScreen] nativeScale];
+            CGFloat physicalH = nativeScale > 0.0 ? native.size.height / nativeScale : 0.0;
+            // 手工算法：先把 host 抬到屏幕坐标，再减去「App 世界相对屏幕底的偏移」。
+            // App 主窗贴屏幕底是卡片侧一直保证的，所以 shift = 物理屏高 − App 世界高。
+            CGFloat shift = physicalH - wf.size.height;
+            hostManual = kbFrame.origin.y + inKbWin.origin.y - shift;
+        }
+    }
+
+    UIScrollView *sv = AevonKbFindScrollView(appWin, 6);
+    char line[288];
+    if (sv != nil) {
+        UIEdgeInsets ins = [sv contentInset];
+        CGPoint off = [sv contentOffset];
+        snprintf(line, sizeof(line),
+                 "app: kb: probe win=%.0fx%.0f inset=%.0f,%.0f,%.0f,%.0f off=%.0f hostc=%.0fx%.0f@%.0f,%.0f hostm=%.0f\n",
+                 wf.size.width, wf.size.height,
+                 ins.top, ins.left, ins.bottom, ins.right, off.y,
+                 hostInApp.size.width, hostInApp.size.height,
+                 hostInApp.origin.x, hostInApp.origin.y, hostManual);
+    } else {
+        snprintf(line, sizeof(line),
+                 "app: kb: probe win=%.0fx%.0f inset=none hostc=%.0fx%.0f@%.0f,%.0f hostm=%.0f\n",
+                 wf.size.width, wf.size.height,
+                 hostInApp.size.width, hostInApp.size.height,
+                 hostInApp.origin.x, hostInApp.origin.y, hostManual);
+    }
+    AevonKbLog(line);
+}
+
+// ===========================================================================
 // 钩子 1：`-[_UIRemoteKeyboards intersectionHeightForWindowScene:
 //             isLocalMinimumHeightOut:ignoreHorizontalOffset:]`（母版 0x5128，264 B）
 // ===========================================================================
@@ -745,6 +851,11 @@ static CGFloat AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, B
                  answer, measured, hostY, hostH, chosen);
         AevonKbLog(line);
     }
+    // 0.4.24 — 只读取证：App 收到这个值之后，到底给键盘留了多少。
+    // 放在返回值之前，是因为 App 通常是「拿到 intersection 之后」才去改
+    // scrollView 的 inset，第一拍可能还是上一轮的状态；配额 3 次横跨三次调用，
+    // 恰好覆盖 386 / 431 / 359 三种键盘形态，够对照。
+    AevonKbProbeAppInsets(keyboardWindow);
     return chosen;
 }
 
