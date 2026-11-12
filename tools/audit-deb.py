@@ -1287,6 +1287,30 @@ def main():
                   b"SBApplicationController",
                   b"SBDeviceApplicationSceneEntity",
                   b"initWithApplicationForMainDisplay:generatingNewPrimarySceneIfRequired:",
+                  # 0.3.58 — **显示层（L2）**：六家插件复盘之后补的那一层。
+                  #
+                  # 0.2.x / 0.3.x 二十几版一直在 L1（吞不吞）与 L3（scene 进谁的窗）
+                  # 里换花样，没有一版碰 L2（这一次打开要不要显示）—— 这就是
+                  # 「有全屏」与「没面板」二选一的全部原因。母本 ScreenCore 2.1.0
+                  # 的两条替身把 BOOL 实参强制成 1：系统照常提交激活事务，只是提交成
+                  # 后台。四条读数各回答一件事：
+                  #   `installed=` 两条 setter 装没装上（0 = 这一版等于没做）；
+                  #   `arm`        显示层窗口有没有被打开（0 = 分享没认出来，退路有效）；
+                  #   `set`        真正被改的那几拍（`was=0 now=1` 才是真改动）；
+                  #   `land: url hit display=` 是 R2 的证据：非 nil 才会被切成 nil，
+                  #                0.2.63 那十几版是在本来就是 nil 的情况下「传 nil」。
+                  b"bg: installed=%d cut=%@",
+                  b"bg: arm b=%s why=%s win=1600",
+                  b"bg: set %s was=%d now=1 cls=%s b=%s",
+                  b"land: url hit display=%s anim=%d arm=%d cut=%d u=%.44s",
+                  # 按了后台却没等到 scene 时的唯一收尾：把它拉回前台。
+                  # 没有这一行，「桌面 + 后台里一个没人看得见的 App」这个最坏
+                  # 形状在日志上会是一段空白。
+                  b"act: cold adopt bg giveup ok=%d b=%s",
+                  b"AevonBGOn",
+                  b"AevonBGKeepDisplay",
+                  b"/var/mobile/Library/Logs/Aevon/scene.background.off",
+                  b"/var/mobile/Library/Logs/Aevon/url.display.keep",
                   # 0.3.33 — **「带 URL 的挂起启动」整条下线，接管范围扩到全局。**
                   #
                   # Aevon(257) 把 0.3.32 判死了：两个孩子都是 `sig=11`

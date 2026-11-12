@@ -358,6 +358,27 @@ public func AevonDeckOn() -> Int32 {
     FileManager.default.fileExists(atPath: Aevon.urlOwnStartOffPath) ? 0 : 1
 }
 
+/// 0.3.58 — **显示层（L2）总闸**（`scene.background.off` 存在 = 两条 setter 全部透传）。
+///
+/// 六家插件重新切片之后，唯一比我们多出来的一层就是它：母本 ScreenCore 2.1.0
+/// 钩 `SBWorkspaceApplicationSceneTransitionContext` 的 `-setBackground:` 与
+/// `-setAnimationDisabled:`，替身把 BOOL 实参强制成 1 再尾调原实现 —— 系统照常
+/// 提交激活事务，只是提交成后台。这一位关掉之后行为等于 0.3.57。
+@_cdecl("AevonBGOn")
+public func AevonBGOn() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.sceneBackgroundOffPath) ? 0 : 1
+}
+
+/// 0.3.58 — A/B：`display:` 原样透传（`url.display.keep` 存在 = 不切成 nil）。
+///
+/// 只在 `display != nil` 时才切，并且切之前把原类名写进 `land: url hit display=…`。
+/// 0.2.63 那十几版是在 `display` 本来就是 nil 的情况下「传 nil」，所以那一刀
+/// 从头到尾没有改过任何东西 —— 这个开关就是用来验这件事的。
+@_cdecl("AevonBGKeepDisplay")
+public func AevonBGKeepDisplay() -> Int32 {
+    FileManager.default.fileExists(atPath: Aevon.urlDisplayKeepPath) ? 1 : 0
+}
+
 /// 0.3.31 — 要不要把 URL 交给**启动那一拍**（`url.launch.off` 存在 = 不带）。
 ///
 /// 默认带。这是冷启动最后一条还没被真机否定的投递口：前两条（scene action、

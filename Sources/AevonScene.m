@@ -187,6 +187,12 @@ extern int AevonColdAdoptLateOn(void);
 /// 0.3.54 — **自建承载**的总闸（`url.own.start.off` 存在 = 整条让路，
 /// 钩子照旧把请求交给原实现，行为等于 0.3.53）。
 extern int AevonDeckOn(void);
+/// 0.3.58 — **显示层（L2）**总闸（`scene.background.off` 存在 = 两条 setter
+/// 全部透传，行为等于 0.3.57）。这是母本 ScreenCore 2.1.0 唯一比我们多的那一层。
+extern int AevonBGOn(void);
+/// 0.3.58 — A/B：`url.display.keep` 存在 = `_openURLCore` 的 `display:` 原样透传
+/// （不切成 nil）。默认切，切之前会先记下它原本的类名。
+extern int AevonBGKeepDisplay(void);
 /// 0.3.54 — 把一个指定的 scene 挂进新的卡片窗口（Swift 侧 `float`）。
 /// 返回 1 = 已经进了建卡链；0 = 参数 / 线程不对，调用方当场回落。
 extern int AevonOwnFloatScene(const char *bundle, void *scene);
@@ -1886,7 +1892,7 @@ NSInteger AevonOwnDestroy(NSString *bundleID) {
 /// intercept loops already take up to four. Running out is silent — the
 /// loop breaks and the version ships with nothing installed — so the table
 /// is sized for the worst case rather than the usual one.
-#define AEVON_HOOK_SLOTS 12
+#define AEVON_HOOK_SLOTS 24
 
 typedef struct {
     Class cls;
@@ -3593,6 +3599,168 @@ static void AevonStepClear(void) {
                                                error:NULL];
 }
 
+// MARK: - 0.3.58 显示层（L2）· 母版真正动的那一刀
+//
+// 六家插件重新切片之后的结论（`dist/analysis-6plugins-url-route.html`）：
+// 0.2.x / 0.3.x 这二十几版一直在两个地方换花样 ——
+//   L1 决策层：`_handleOpenApplicationRequest:` / `_openURLCore:` 吞还是放；
+//   L3 承载层：scene 挂进谁的窗（`float` / `AevonOwnFloatScene`）。
+// **没有一版碰过 L2** ——「这一次打开要不要显示」。于是必然只能在
+// 「有全屏」与「没面板」之间二选一，这就是 Aevon(270)/(273)/(277)/(278) 的形状。
+//
+// 母本 ScreenCore 2.1.0 的 L2 只有两条钩子，替身短到能整段读完：
+//
+//   0x4ca64  -setBackground:          ldr x3,[orig]; ldrb w8,[flag]; cmp w8,#0;
+//   0x4ca80  -setAnimationDisabled:   csinc w2,w2,wzr,eq; braaz x3
+//
+// 开关非 0 ⇒ 把 BOOL 实参强制成 1，再尾调原实现。也就是说：**系统照常提交它
+// 自己那笔激活事务，只是提交成「后台、无动画」**。App 照常起来、URL 照常由
+// FrontBoard 的原生通道送进新 scene，但不占屏 —— 没有全屏帧，也就没有
+// 「先整屏再收卡」这一段。
+//
+// 这一版照这个形状做，只多两样本文件需要、母版不需要的东西：
+//   ① **窗口**。母版是进程级开关（它接管所有浮窗），我们只在「刚刚判定为一次
+//      分享」之后 1.6 s 内动手、最多改 12 次，其余时间一个字节都不碰。
+//   ② **读数**。`_openURLCore` 的 `display:` 这一格从来没被量过：0.2.63~0.3.7
+//      十几版都按「传 nil = 不上屏」写，可 Aevon(203) 的读数里 `display=(nil)`
+//      本来就是 nil —— 那一刀从来没改过任何东西。这里第一次把它的类名打出来。
+//
+// 退路：`scene.background.off` 存在 ⇒ 两条 setter 全透传，行为等于 0.3.57；
+// `url.display.keep` 存在 ⇒ `display:` 不切。两个闸都不需要换包。
+
+typedef void (*AevonBGSetProc)(id, SEL, BOOL);
+
+static volatile double AevonBGUntil = 0;        // 显示层窗口（setter 只在这段内动手）
+static volatile double AevonBGCollect = 0;      // 收卡窗口（比上面长：scene 起来要时间）
+static char AevonBGBundle[128] = {0};
+static long AevonBGArms = 0;
+static long AevonBGSets = 0;
+static long AevonBGNotes = 0;
+static long AevonURLNotes = 0;
+
+/// 窗口还开着没有。所有判定都读这一个数，出了窗口立刻恢复原样。
+static int AevonBGArmed(void) {
+    double until = AevonBGUntil;
+    if (until <= 0) return 0;
+    return CFAbsoluteTimeGetCurrent() < until ? 1 : 0;
+}
+
+/// 这一次分享里 `bundle` 是不是已经按了后台。收卡那边用它决定「等上屏」还是
+/// 「等 scene」—— 按了后台的 App 永远不会成为屏上那一个。
+///
+/// 用的是一个**更长**的窗口（8 s）：显示层只需要在事务提交那一拍生效（1.6 s 足够），
+/// 但收卡要等 scene 真的登记上来，deck 那条路实测到过 2.24 s。两个窗口共用一个
+/// bundle 名，谁也不会把上一次分享算进这一次。
+static int AevonBGArmedFor(const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return 0;
+    double until = AevonBGCollect;
+    if (until <= 0 || CFAbsoluteTimeGetCurrent() >= until) return 0;
+    return strcmp(AevonBGBundle, bundle) == 0 ? 1 : 0;
+}
+
+static void AevonBGArm(const char *bundle, const char *why) {
+    if (bundle == NULL || bundle[0] == '\0') return;
+    if (AevonBGOn() != 1) return;
+    if (AevonWindowBlacklisted(bundle)) return;
+    double now = CFAbsoluteTimeGetCurrent();
+    snprintf(AevonBGBundle, sizeof(AevonBGBundle), "%s", bundle);
+    AevonBGUntil = now + 1.6;
+    AevonBGCollect = now + 8.0;
+    if (__sync_fetch_and_add(&AevonBGArms, 1) < 8) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"bg: arm b=%s why=%s win=1600", bundle, why] UTF8String]);
+    }
+}
+
+/// 这条 URL 像不像一次「把内容送进某个 App」的分享。
+///
+/// 只认三种形状，别的全放：`file:` 开头、URL 里带 `share`（QQ 是
+/// `mqqapi://share/to_fri…`、微信是 `weixin://…/share…`）、且不带授权回跳标记。
+/// 之所以要这么窄：`_openURLCore` 在 SpringBoard 上是**所有** URL 打开的总入口，
+/// 一个「带 https 就切」的判据会把点链接打开浏览器也一起按到后台去。
+static int AevonBGURLShareLike(NSString *text) {
+    if (![text isKindOfClass:[NSString class]] || text.length < 4) return 0;
+    NSString *low = [text lowercaseString];
+    int isFile = [low hasPrefix:@"file:"] ? 1 : 0;
+    int hasShare = [low rangeOfString:@"share"].location != NSNotFound ? 1 : 0;
+    if (isFile == 0 && hasShare == 0) return 0;
+    if ([low rangeOfString:@"authreturn"].location != NSNotFound) return 0;
+    if ([low rangeOfString:@"oauth"].location != NSNotFound) return 0;
+    if ([low rangeOfString:@"opensdk"].location != NSNotFound) return 0;
+    return 1;
+}
+
+/// 装两条 setter。母版是按类名点装的（`SBWorkspaceApplicationSceneTransitionContext`），
+/// 这里不写死名字：走全类表找实现者，只接受名字里带 `TransitionContext` 的类，
+/// 其余一律打一行跳过 —— 免得把某个界面的 `setBackground:` 一起改掉。
+static void AevonBGInstall(NSMutableString *out) {
+    if (AevonBGOn() != 1) {
+        [out appendString:@"bg: off\n"];
+        return;
+    }
+    const char *names[2] = { "setBackground:", "setAnimationDisabled:" };
+    int installed = 0;
+    for (int i = 0; i < 2; i++) {
+        SEL sel = NSSelectorFromString([NSString stringWithUTF8String:names[i]]);
+        Class owners[8] = { Nil, Nil, Nil, Nil, Nil, Nil, Nil, Nil };
+        int n = sel != NULL ? AevonOwnersOf(sel, owners, 8) : 0;
+        if (n == 0) {
+            [out appendFormat:@"bg: %s owners=0\n", names[i]];
+            continue;
+        }
+        for (int k = 0; k < n; k++) {
+            NSString *clsName = NSStringFromClass(owners[k]);
+            if ([clsName rangeOfString:@"TransitionContext"].location == NSNotFound) {
+                [out appendFormat:@"bg: %s skip cls=%@\n", names[i], clsName];
+                continue;
+            }
+            Method method = class_getInstanceMethod(owners[k], sel);
+            const char *enc = method != NULL ? method_getTypeEncoding(method) : NULL;
+            char sig[32];
+            AevonLandingSig(enc, sig, sizeof(sig));
+            // 只认一个 BOOL 参数（`B`）或一个 char（`c`）—— 两者都是 1 字节，
+            // 读的是同一个寄存器的低 8 位。别的形状一律不装。
+            if (strcmp(sig, "v@:B") != 0 && strcmp(sig, "v@:c") != 0) {
+                [out appendFormat:@"bg: %s cls=%@ shape skip (sig=%s)\n",
+                 names[i], clsName, sig];
+                continue;
+            }
+            AevonHookSlot *slot = AevonReserve("bg-set");
+            if (slot == NULL) {
+                [out appendString:@"bg: no slot\n"];
+                return;
+            }
+            AevonHookSlot *mine = slot;
+            int isBackground = (i == 0);
+            id block = ^(id host, BOOL value) {
+                BOOL send = value;
+                if (AevonBGArmed() == 1 && AevonBGSets < 12) {
+                    AevonBGSets += 1;
+                    send = YES;
+                    if (__sync_fetch_and_add(&AevonBGNotes, 1) < 10) {
+                        AevonLogRaw([[NSString stringWithFormat:
+                                      @"bg: set %s was=%d now=1 cls=%s b=%s",
+                                      isBackground ? "background" : "anim",
+                                      value ? 1 : 0,
+                                      object_getClassName(host), AevonBGBundle] UTF8String]);
+                    }
+                }
+                if (mine->original != NULL) {
+                    ((AevonBGSetProc)mine->original)(host, mine->sel, send);
+                }
+            };
+            if (AevonAttach(out, slot, owners[k],
+                            [NSString stringWithUTF8String:names[i]], block)) {
+                installed += 1;
+                [out appendFormat:@"bg: %s hooked cls=%@ types=%s\n",
+                 names[i], clsName, enc != NULL ? enc : "?"];
+            }
+        }
+    }
+    [out appendFormat:@"bg: installed=%d cut=%@\n", installed,
+     AevonBGOn() == 1 ? @"on" : @"off"];
+}
+
 static void AevonURLCoreBody(id self, SEL _cmd, id url, id display,
                              BOOL animating, id settings, id origin, id result) {
 
@@ -3618,8 +3786,55 @@ static void AevonURLCoreBody(id self, SEL _cmd, id url, id display,
     // 系统原样打开，与没装插件一致。
     //
     // 下一版才是照 P1 重建承载层，然后再在 P8 用母版的形状接 URL。
+    //
+    // ═══ 0.3.58 — 这一格重新开始干活，但干的不是「吞」，是**改显示层**。 ═══
+    //
+    // 母版在 `_openURLCore` 里其实**不动 display**：0x4c87c 那七句
+    // `mov x2/x3/x5/x6/x7` 把六个实参原样交给 `braaz x8`，它只在这里做两件事
+    // —— 读数和「满足条件就延后 0.5 s 再交」（0x4c8e0 那个 `dispatch_after`）。
+    // 也就是说 L2 不在这个函数里，在 `setBackground:` / `setAnimationDisabled:`
+    // 那两条（`AevonBGInstall`）。
+    //
+    // 所以这一格只做两件事：
+    //   ① 认出「这是一次分享」→ `AevonBGArm`，把显示层的窗口打开；
+    //   ② R2（用户指定）：`display:` 非 nil 时传 nil。**只在非 nil 时才动** ——
+    //      0.2.63 那次按「传 nil」写，可常态读数本来就是 nil，等于什么都没做。
+    //      这里先把它原本的类名记下来，切与不切各是一条可读的证据。
+    NSString *text = nil;
+    if ([url isKindOfClass:[NSURL class]]) {
+        text = [(NSURL *)url absoluteString];
+    } else if ([url isKindOfClass:[NSString class]]) {
+        text = (NSString *)url;
+    }
+    int armed = 0;
+    if (AevonBGOn() == 1 && text.length > 0) {
+        @try {
+            NSString *target = AevonTargetForURLString(text);
+            if (target.length > 0 &&
+                ![target isEqualToString:@"com.apple.springboard"] &&
+                AevonBGURLShareLike(text)) {
+                AevonBGArm([target UTF8String], "url");
+                armed = 1;
+            }
+        } @catch (NSException *e) {
+            armed = 0;
+        }
+    }
+    id sendDisplay = display;
+    int cut = 0;
+    if (display != nil && AevonBGKeepDisplay() == 0) {
+        sendDisplay = nil;
+        cut = 1;
+    }
+    if (__sync_fetch_and_add(&AevonURLNotes, 1) < 10) {
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"land: url hit display=%s anim=%d arm=%d cut=%d u=%.44s",
+                      display != nil ? object_getClassName(display) : "nil",
+                      animating ? 1 : 0, armed, cut,
+                      text != nil ? [text UTF8String] : "-"] UTF8String]);
+    }
     if (AevonURLCoreOriginal != NULL) {
-        AevonURLCoreOriginal(self, _cmd, url, display, animating, settings, origin, result);
+        AevonURLCoreOriginal(self, _cmd, url, sendDisplay, animating, settings, origin, result);
         AevonURLForwarded = 1;
     }
 
@@ -3842,6 +4057,10 @@ static void AevonLandingInstall(NSMutableString *out) {
              probes[i].label, NSStringFromClass(found[k]), enc != NULL ? enc : "?"];
         }
     }
+
+    // 0.3.58 — 显示层（L2）。母本比我们多的就是这两条 setter；装不上时
+    // `bg: installed=0` / `bg: ... owners=0` 会把原因留在同一份开机日志里。
+    AevonBGInstall(out);
 }
 
 // MARK: - 0.2.89 起点迁移第①段（只读）· 0.2.90 加上唯一一刀几何
@@ -5544,6 +5763,27 @@ static void AevonColdAdoptTick(char *bundle, long seq, int tick) {
                       tick, ms, front, live, alive, sinceFront, bundle] UTF8String]);
     }
 
+    // 0.3.58 — 显示层接管了这一拍：目标**不会**成为屏上那一个。
+    //
+    // 0.3.50~0.3.57 的收卡判据是「等 front 翻 1 再按 Home」，而按后台提交之后
+    // front 永远不会翻 —— 那条路会一直等到 4 s 超时，结果比不放行更糟（App 在
+    // 后台、桌面上什么都没有）。所以这里换判据：**scene 一起来就收**。
+    // 它本来就没占屏，`openCard(homed:false)` 检查到目标不在前台就不会按 Home，
+    // 用户看到的直接是卡，一次整屏都没有。
+    //
+    // `delay=-2` 是这条路在日志上的标记（`-1` 是 0.3.51 的 late 路）。
+    if (AevonBGArmedFor(bundle) == 1 && front == 0 && tick >= 4) {
+        // `live` 只认「打分 > 0」的 scene；按后台提交的那一张可能四条里只中一条
+        // （有内容但不可见），所以这里再用 `AevonSeenSceneForBundle` 兜一层 ——
+        // 它认的是「登记过、且不是空壳」。
+        int seen = (AevonSeenSceneForBundle(bu) != nil) ? 1 : 0;
+        if (live == 1 || seen == 1) {
+            AevonColdAdoptGo(bundle, tick, ms, -2, live, alive, front);
+            free(bundle);
+            return;
+        }
+    }
+
     if (late == 1) {
         // 0.3.51 的确切形状：2.0 s（第 25 拍）之后、且目标在屏才动手。留给 A/B。
         if (tick >= 25 && front == 1) {
@@ -5560,6 +5800,14 @@ static void AevonColdAdoptTick(char *bundle, long seq, int tick) {
     // 4 s 还没轮到（用户切走了 / 目标没上屏 / 一直没成前台）：放弃，什么都不做。
     // 这一次分享就停在 0.3.49 的形状（整屏），不会比不放行更糟。
     if (ms >= 4000) {
+        // 0.3.58 — 按了后台却一直没等到 scene：这一发就什么都不会显示。
+        // 唯一的收尾是把它拉回前台，回到 0.3.49 的形状（整屏），
+        // 总好过「桌面 + 后台里一个没人看得见的 App」。
+        if (AevonBGArmedFor(bundle) == 1) {
+            int ok = AevonLandOpenApp(bundle);
+            AevonLogRaw([[NSString stringWithFormat:
+                          @"act: cold adopt bg giveup ok=%d b=%s", ok, bundle] UTF8String]);
+        }
         if (__sync_fetch_and_add(&AevonColdAdoptSkip, 1) < 6) {
             AevonLogRaw([[NSString stringWithFormat:
                           @"act: cold adopt timeout tick=%d ms=%d live=%d alive=%d front=%d b=%s",
@@ -16629,6 +16877,21 @@ static void AevonOpenHit(id self, SEL _cmd, id request, id options,
         if (openName != NULL) snprintf(bundle, sizeof(bundle), "%s", openName);
     } @catch (NSException *exception) {
         bundle[0] = '\0';
+    }
+    // 0.3.58 — 显示层的第二个起手点。
+    //
+    // `_openURLCore` 是外层总入口，但它的判据只能看 URL 本身（没有 request /
+    // options）；这一格手里正好有那两样，`AevonOpenIsShareSource` 是 0.3.57 起
+    // 唯一可信的分享判据（Aevon(277)/(278) 的 `act: pass why=coldshare` 就是它
+    // 判出来的）。两处都起手不冲突：`AevonBGArm` 只把窗口往后推、写同一份 bundle。
+    if (bundle[0] != '\0' && AevonBGOn() == 1) {
+        @try {
+            if (AevonOpenIsShareSource(request, options)) {
+                AevonBGArm(bundle, "notify");
+            }
+        } @catch (NSException *exception) {
+            // 判据抛异常就当作不是分享：显示层不动，与 0.3.57 一致。
+        }
     }
     const char *why = "-";
     int verdict = 0;

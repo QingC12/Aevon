@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.57"
+    public static let version = "0.3.58"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -482,6 +482,26 @@ public enum Aevon {
     /// 出问题 `touch` 这一个文件即可，不用换包。
     public static let urlOwnStartOffPath =
         "/var/mobile/Library/Logs/Aevon/url.own.start.off"
+
+    /// 0.3.58 — **显示层（L2）的关闸**（存在 = 两条 setter 全部透传，行为等于 0.3.57）。
+    ///
+    /// 这是六家插件复盘之后补的那一层：母本 ScreenCore 2.1.0 只钩了
+    /// `SBWorkspaceApplicationSceneTransitionContext` 的 `-setBackground:` 与
+    /// `-setAnimationDisabled:`，替身把 BOOL 实参强制成 1 —— 系统照常提交它那笔
+    /// 激活事务，只是提交成「后台、无动画」。App 起来、URL 走原生通道，但不占屏。
+    ///
+    /// 这一位关掉之后，`_openURLCore` 那条 R2（display → nil）仍然生效，所以能
+    /// 单测「只切 display」这一半；两个都关就回到 0.3.57 的确切行为。
+    public static let sceneBackgroundOffPath =
+        "/var/mobile/Library/Logs/Aevon/scene.background.off"
+
+    /// 0.3.58 — A/B：`display:` 原样透传（存在 = 不切成 nil）。
+    ///
+    /// R2 那一刀在 0.2.63~0.3.7 已经写过十几版，可那时 `display` 本来就是 nil，
+    /// 等于什么都没做。这一版改成「只在非 nil 时才切」，并把它原本的类名写进
+    /// `land: url hit display=…`。想对照就把这个文件建上。
+    public static let urlDisplayKeepPath =
+        "/var/mobile/Library/Logs/Aevon/url.display.keep"
 
     /// 0.3.31 — 「带着 URL 的挂起启动」的关闸（存在 = 不带走 URL，退回 0.3.30）。
     ///
