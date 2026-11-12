@@ -631,6 +631,11 @@ def main():
                   b"win: corner w=%.0f r=%.0f pct=%.1f",
                   b"win: lift one shot ",
                   b"win: band report ",
+                  # 0.4.16 — 「App 的渲染面在屏幕上被摆在哪」。300 已经证到
+                  # `-bounds` 系统原值就是 717（钩子空操作）、scene 落点最终是 215、
+                  # root=窗=717，三个数全对而画面悬空 ⇒ 只剩内容层绝对落点没量过。
+                  # 这一行缺失等于这一版白做，必须钉住。
+                  b"win: kb face %@@%.0f,%.0f b=%.0fx%.0f abs=%.0fx%.0f@%.0f,%.0f chain=",
                   b"win: style follow ",
                   # 0.1.31 — 锁屏 / 通知中心 / 控制中心盖上来时整层让开，
                   # 以及恢复显示后那一次「把承载面动一下」。
@@ -1451,6 +1456,11 @@ def main():
                       # 日志都是 `scene=0x0@0,0`，等于没读。这一栏必须有 src 才不会
                       # 再把「读不到」误当成「落在 0,0」。
                       b"app: kb: tree %s scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f",
+                      # 0.4.16 — 键盘窗在「屏幕坐标空间」里的绝对矩形。这是整条
+                      # 取证链的最后一格：几何全部正确而画面不对时，只剩
+                      # 「App 的世界从物理哪一点开始」。`abs=err` 也算命中（跨空间
+                      # 被 UIKit 拒绝时如实报错，不伪造坐标）。
+                      b"app: kb: tree %s abs=",
                       b"app: kb: tree %s main=%.0fx%.0f@%.0f,%.0f %s",
                       # 逐层：类名 / frame / bounds.origin / clipsToBounds / 子视图数。
                       # `cl=1` 的那一层就是裁刀候选。

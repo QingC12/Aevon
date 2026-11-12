@@ -4377,6 +4377,61 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             content.frame.size.width, content.frame.size.height,
             content.frame.minX, content.frame.minY,
             scale, canvasOriginY, canvasHeight, bars, why))
+        noteFacePlacement(why)
+    }
+
+    /// 0.4.16 — 量「App 的渲染面在屏幕上被摆在哪」。**只读，不改任何几何。**
+    ///
+    /// Aevon(300) 把前两步钉死了：
+    ///   ① `app: kb: bounds sys=430x717@0,0 (hook off)` —— 系统原值就是 717，
+    ///      说明我们钩 `-bounds` 是**空操作**（display 被改小之后，`UIScreen.bounds`
+    ///      本来就跟着 display 走）；母版那条「关钩子读真屏 932」在 Aevon 里永远
+    ///      读不到 932。
+    ///   ② `frame drift now=430x717@0 want=430x717@215` → 收起时反过来 `@215→@0`
+    ///      —— 键盘态 scene 的落点最终确实是 215，补写成功。
+    ///
+    /// 于是「scene 在 215」「键盘窗 717 贴窗底」「root=717」三个数全对，画面却还是
+    /// 悬空 + 下半透明 ⇒ 只剩一个从没量过的变量：**内容层（`_UIScenePresentationView`）
+    /// 在宿主 window 里的绝对落点**。系统每次写 settings 都会把它按 scene 的 frame
+    /// 重设成「原点 (0,0)、尺寸 430x717」（见 `reassertCanvas` 那段），若它真的被摆在
+    /// 宿主 window 的 0，那 App 的一切都在物理 0..717，而卡片在 215..932 —— 症状
+    /// 就是这个形状，一个像素都不差。
+    ///
+    /// 输出一行：face 自己的类名/frame、换算到宿主 window 的绝对矩形、四层父链。
+    /// 父链是为了看「谁把它摆在 0」——只看 face 自己的 frame 分不出坐标系。
+    private func noteFacePlacement(_ why: String) {
+        guard let content = content else { return }
+        var face: UIView? = nil
+        for sub in content.subviews where NSStringFromClass(type(of: sub)).contains("ScenePresentation") {
+            face = sub
+            break
+        }
+        guard let pv = face else {
+            Log.write(String(format: "win: kb face none subs=%d (%@)",
+                             content.subviews.count, why))
+            return
+        }
+        var abs = pv.frame
+        if let host = self.window {
+            abs = pv.convert(pv.bounds, to: host)
+        }
+        var chain: [String] = []
+        var cur: UIView? = pv
+        var depth = 0
+        while let v = cur, depth < 4 {
+            chain.append(String(format: "%@@%.0f,%.0f",
+                                NSStringFromClass(type(of: v)),
+                                v.frame.minX, v.frame.minY))
+            cur = v.superview
+            depth += 1
+        }
+        Log.write(String(format:
+            "win: kb face %@@%.0f,%.0f b=%.0fx%.0f abs=%.0fx%.0f@%.0f,%.0f chain=%@ (%@)",
+            NSStringFromClass(type(of: pv)),
+            pv.frame.minX, pv.frame.minY,
+            pv.bounds.width, pv.bounds.height,
+            abs.width, abs.height, abs.minX, abs.minY,
+            chain.joined(separator: " < "), why))
     }
 
     @discardableResult

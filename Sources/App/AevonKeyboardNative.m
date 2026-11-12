@@ -725,6 +725,49 @@ static void AevonKbDumpChain(UIWindow *window, const char *why) {
         AevonKbLog(line);
     }
 
+    // 0.4.16 — 键盘窗在**屏幕坐标空间**里的绝对矩形。
+    //
+    // 300 已经证到：`-bounds` 的系统原值就是 430x717（我们的钩子是空操作）、
+    // scene 落点最终确实是 215、root=窗=717 —— 三个数全对而画面悬空。于是只剩
+    // 「内容最终被摆在哪」这一个变量。`UIScreen.coordinateSpace` 是公开的空间，
+    // 跨窗口换算正是它的用途；万一 UIKit 拒绝跨空间，`convertRect:toCoordinateSpace:`
+    // 会抛 NSException，所以整段包在 @try 里 —— 取证不许杀进程。
+    //
+    // 判据：`abs` 的 y = 215 ⇒ App 的世界确实从物理 215 开始，键盘贴底是对的，
+    // 病根在别处；y = 0 或 331 ⇒ App 的世界从物理 0 开始，键盘悬空 215 是必然。
+    {
+        Class scrClass = (Class)objc_getClass("UIScreen");
+        id scr = nil;
+        if (scrClass != Nil && [(id)scrClass respondsToSelector:@selector(mainScreen)]) {
+            scr = ((id (*)(id, SEL))objc_msgSend)((id)scrClass, @selector(mainScreen));
+        }
+        SEL spaceSel = NSSelectorFromString(@"coordinateSpace");
+        if (scr != nil && [scr respondsToSelector:spaceSel]) {
+            id space = ((id (*)(id, SEL))objc_msgSend)(scr, spaceSel);
+            if (space != nil) {
+                CGRect absBox = CGRectZero;
+                BOOL ok = NO;
+                @try {
+                    absBox = ((CGRect (*)(id, SEL, CGRect, id))objc_msgSend)(
+                        window, @selector(convertRect:toCoordinateSpace:), wb, space);
+                    ok = YES;
+                } @catch (NSException *e) {
+                    (void)e;
+                    ok = NO;
+                }
+                if (ok) {
+                    snprintf(line, sizeof(line),
+                             "app: kb: tree %s abs=%.0fx%.0f@%.0f,%.0f\n",
+                             why, absBox.size.width, absBox.size.height,
+                             absBox.origin.x, absBox.origin.y);
+                } else {
+                    snprintf(line, sizeof(line), "app: kb: tree %s abs=err\n", why);
+                }
+                AevonKbLog(line);
+            }
+        }
+    }
+
     // App 主窗：它的尺寸就是 App 认为的屏幕。与键盘窗并排看，才知道谁短了。
     Class appClass = (Class)objc_getClass("UIApplication");
     id app = nil;
