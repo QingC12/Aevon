@@ -521,10 +521,37 @@ static BOOL AevonWindowBlacklisted(const char *bundle);
 /// 在划圆盘**的时候去付：悬停 0.18 s 就开始拉进程，松手选中时进程往往已经在跑，
 /// `own start` 的等待就只剩建 scene 那一小截。
 ///
-/// 与自建承载的关系：那条路在 0.3.1 就整条下线了（`AevonOwnStart` 已删），
-/// 所以这条现在是**唯一**会把 App 进程拉起来的旁路。它只做启动事务，
-/// completion 里什么都不建 —— 就算预热之后用户没选这个 App，也不会留下任何
-/// 需要收尾的东西。
+/// 0.4.3 — **改成母版那条路。**
+///
+/// 0.2.59 起这里走的是开源母本 FrontBoardAppLauncher（TrollOpen 致谢里点名的
+/// 那个）的做法：`RBSProcessIdentity` → `FBApplicationProcessLaunchTransaction`
+/// （launchIntent=4）→ `setCompletionBlock:`，completion 里什么都不建。它确实能
+/// 把进程拉起来，但它有两个我们兜不住的性质：
+///
+///   · 它在 MRC 下靠 `[provider copy]` 手工把 block 挪到堆上，还靠「宁可漏几十
+///     字节也不 release」来回避双释放。这条路一旦有一个环节返回 nil，FrontBoard
+///     的 `-_executeBlockAfterBootstrap:` 就会在
+///     `com.apple.frontboard.process.call-out` 队列上执行到一个无效函数指针。
+///   · 0.4.0 把 `AevonOwnGate`（「每个类、每个选择子都先问」）整段删掉之后，
+///     这里连形状闸都没有了 —— 直接 `NSClassFromString` 加 `objc_msgSend`。
+///
+/// 现场（Aevon(289)，2026-11-12 12:33:35）：首次安装注销后所有 App 都没有进程，
+/// `AevonAppPid > 0` 那道闸全部放行 ⇒ 每划过一个图标就真的开一次启动事务。
+/// 划到 `com.feng.New.WPForumClient` 时 SpringBoard 安全模式，崩溃报告是
+/// `EXC_BAD_ACCESS / SIGBUS`、`pc = 0xffffffffffffffff`、
+/// faulting queue = `com.apple.frontboard.process.call-out`、
+/// faulting frame = `-[FBProcess _executeBlockAfterBootstrap:]_block_invoke`。
+/// 日志里最后一行正是 `win: warm start b=com.feng.New.WPForumClient`，没有 done。
+///
+/// 母版用的不是这条路：`UIApplication launchApplicationWithIdentifier:suspended:`
+/// （复刻方案 P5「场景先建好不跑，要显示时再激活」），也就是同文件里
+/// `AevonLaunchSuspended` 已经在用的那一条 —— 系统 API、无私有构造器、
+/// 不自己管事务与 block。预热本来要的也只是「把进程拉起来」，挂起启动完全够。
+///
+/// 闸（少一条都会变成为难用户）：
+///   · 黑名单里的 App 不预热（那是「别碰我的路」）；
+///   · 进程已经在跑 ⇒ 预热没有意义，直接返回；
+///   · 同一个 bundle 8 s 内只热一次（来回划不会连开三次）。
 ///
 /// 闸（少一条都会变成为难用户）：
 ///   · 总闸 `notify.off` 在；
@@ -552,74 +579,20 @@ NSInteger AevonOwnWarm(NSString *bundleID) {
     AevonWarmAt = now;
 
     double started = CFAbsoluteTimeGetCurrent();
-    NSString *doneBundle = [bundleID copy];
-    // `setCompletionBlock:` 把 block 拷到堆上时，MRC 会给捕获的 `doneBundle` 记一次 retain；
-    // 那之后这个字符串的寿命就归 block 了（block 执行完释放、或随 transaction 一起释放）。
-    // 所以后面对「已交出」的路径**一个字节都不再 release** —— 宁可漏一个小字符串，
-    // 也不能在「begin 返回 NO 但 completion 仍然被调」这种实现细节上踩双释放。
-    BOOL handedOff = NO;
-    @try {
-        Class idCls = NSClassFromString(@"RBSProcessIdentity");
-        id identity = ((id (*)(id, SEL, id))objc_msgSend)(
-            idCls, sel_registerName("identityForEmbeddedApplicationIdentifier:"), bundleID);
-        if (identity == nil) { [doneBundle release]; return 0; }
-
-        Class mgrCls = NSClassFromString(@"FBProcessManager");
-        id manager = ((id (*)(id, SEL))objc_msgSend)(
-            mgrCls, sel_registerName("sharedInstance"));
-        if (manager == nil) { [doneBundle release]; return 0; }
-
-        Class ctxCls = NSClassFromString(@"FBMutableProcessExecutionContext");
-        Class txnCls = NSClassFromString(@"FBApplicationProcessLaunchTransaction");
-        id (^provider)(void) = ^id {
-            id context = ((id (*)(id, SEL))objc_msgSend)(ctxCls, sel_registerName("new"));
-            if (context == nil) return nil;
-            ((void (*)(id, SEL, id))objc_msgSend)(
-                context, sel_registerName("setIdentity:"), identity);
-            ((void (*)(id, SEL, id))objc_msgSend)(
-                context, sel_registerName("setEnvironment:"), @{});
-            ((void (*)(id, SEL, NSInteger))objc_msgSend)(
-                context, sel_registerName("setLaunchIntent:"), (NSInteger)4);
-            return ((id (*)(id, SEL, id))objc_msgSend)(
-                manager, sel_registerName("launchProcessWithContext:"), context);
-        };
-        // 与 `AevonOwnStart` 同一条理由：MRC 下栈上的 block 会被 `setCompletionBlock:`
-        // 拷到堆上，捕获的 `identity` / `manager` 要各存一份 —— 显式 copy，且故意不
-        // release（每预热一次漏几十字节，换「不会因为一个不知道有没有 retain 的
-        // 初始化器而崩」）。
-        id providerHeap = [provider copy];
-        id allocated = ((id (*)(id, SEL))objc_msgSend)(txnCls, sel_registerName("alloc"));
-        id transaction = allocated != nil
-            ? ((id (*)(id, SEL, id, id))objc_msgSend)(
-                  allocated, sel_registerName("initWithProcessIdentity:executionContextProvider:"),
-                  identity, providerHeap)
-            : nil;
-        if (transaction == nil) { [doneBundle release]; return 0; }
-
-        void (^done)(void) = ^{
-            dispatch_async(dispatch_get_main_queue(), ^{
-                double ms = (CFAbsoluteTimeGetCurrent() - started) * 1000.0;
-                AevonLogRaw([[NSString stringWithFormat:
-                              @"win: warm done b=%@ at=%.0fms pid=%d",
-                              doneBundle, ms, AevonAppPid(doneBundle)] UTF8String]);
-                [doneBundle release];
-            });
-        };
-        ((void (*)(id, SEL, id))objc_msgSend)(
-            transaction, sel_registerName("setCompletionBlock:"), done);
-        handedOff = YES;
-        if (!AevonCallVoid(transaction, @"begin")) {
-            AevonLogRaw([[NSString stringWithFormat:@"win: warm refused b=%@", doneBundle] UTF8String]);
-            return 0;
+    Class appCls = NSClassFromString(@"UIApplication");
+    id application = nil;
+    if (appCls != Nil) {
+        SEL shared = sel_registerName("sharedApplication");
+        if ([appCls respondsToSelector:shared]) {
+            application = ((id (*)(id, SEL))objc_msgSend)((id)appCls, shared);
         }
-        AevonLogRaw([[NSString stringWithFormat:@"win: warm start b=%@", doneBundle] UTF8String]);
-        return 1;
-    } @catch (NSException *e) {
-        AevonLogRaw([[NSString stringWithFormat:@"win: warm threw b=%@ %s", doneBundle,
-                      e.reason != nil ? [e.reason UTF8String] : "-"] UTF8String]);
-        if (!handedOff) [doneBundle release];
-        return 0;
     }
+    NSInteger door = AevonLaunchSuspended(application, bundleID);
+    AevonLogRaw([[NSString stringWithFormat:@"win: warm done b=%@ door=%ld at=%.0fms pid=%d",
+                  bundleID, (long)door,
+                  (CFAbsoluteTimeGetCurrent() - started) * 1000.0,
+                  AevonAppPid(bundleID)] UTF8String]);
+    return door == 1 ? 1 : 0;
 }
 
 // 0.4.0 — 这里原本是 `AevonOwnIsOwned`（「这张卡的 scene 是不是我们自己建的」）。

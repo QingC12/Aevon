@@ -3998,11 +3998,37 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             AevonSceneFrameSet(bundle, 0, Double(y),
                                Double(visible.width), Double(height))
             var door: Int = 0
+            // 0.4.3 — **0.2.43 的补推从来没实现过。**
+            //
+            // 这里原来留着「写不了就补推（见 `pushSceneLater`）」这句注释，但
+            // `pushSceneLater` 在 0.4.x 的减法里被删掉了，`door` 算完只进了日志。
+            // 于是 0.2.69 的 `afterSceneAck` 成了唯一兜底 —— 而它等的是**回执**，
+            // 一次没写成就永远等不到回执，只能等满 120 ms 超时后照常张开：
+            //
+            //   12:35:28 win: keyboard native on card=430x717 at 0,215 scene=215 crop=0 push=0
+            //   12:35:28 win: frame drift now=430x717@0 want=430x717@215 door=3
+            //
+            // 卡片已经铺到 215..932，场景还停在 0..717 —— 卡片下半段那 215 pt
+            // 没有任何内容，就是用户截图里键盘下面那块黑。这与 0.2.68 的现场
+            // 一字不差（那段注释还在 `afterSceneAck` 上面）。
+            //
+            // 补推三次。只在我们自己这一推没写成时发生，且每次都先判重
+            // （`AevonPushSceneFrame` 在目标已等于实际时返回 0），稳态下一次都不会多花。
             if let sc = window.windowScene {
                 door = Int(AevonPushSceneFrame(sc))
-                // 0.2.43 — 写不了就补推（见 `pushSceneLater`）。原来这里只等
-                // 守护循环那 200 ms，而 `fill on … push=0` 后面紧接着就是一条
-                // `frame drift`，错位正好落在放大动画的前半段。
+                if door == 0 {
+                    for delay in [0.03, 0.07, 0.15] {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                            guard let self = self, self.kbFilled else { return }
+                            guard let scene = self.window?.windowScene else { return }
+                            let again = Int(AevonPushSceneFrame(scene))
+                            if again != 0 {
+                                Log.write(String(format: "win: kb scene pushed late door=%d at=%.0fms",
+                                                 again, delay * 1000))
+                            }
+                        }
+                    }
+                }
             }
             // 0.2.43 — 场景原点一变，系统那一次「把承载视图 frame 重设成 scene
             // frame」就会把画面推走 215 pt（见 `reapplySoon`）。连对四次，别等
@@ -4067,7 +4093,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 0.2.69 — 等回执再张开（见 `afterSceneAck`）：卡片与场景必须
             // **同一次上屏**，否则卡片先铺满底边、场景还在 0..717，底部露出
             // 一块黑。回执最多等 120 ms，等不到也照常张开。
-            self.afterSceneAck(bundle, tries: 0, limit: 6) { grow() }
+            // 0.4.3 — 上限从 6 拍（120 ms）提到 15 拍（300 ms）。
+            //
+            // 120 ms 是 0.2.69 按当时的量级定的，但 Aevon(289) 的现场里
+            // `scene ack slot=0` 落在 `keyboard native on` **之后** —— 也就是说
+            // 这一拍的回执到得比 120 ms 晚。等到就张开（`wrote || screen` 那条路
+            // 一定会有回执）；等不到才走兜底，所以放宽上限只影响最坏情况，
+            // 正常路径一拍都不会多花。
+            self.afterSceneAck(bundle, tries: 0, limit: 15) { grow() }
         } else {
             guard kbFilled else { return }
             // 0.1.83 — **先挂起一小段，再决定要不要真收。**

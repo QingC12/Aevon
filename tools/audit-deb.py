@@ -704,12 +704,14 @@ def main():
                   # 这两行是**拼接**出来的（`String(format:)` 在那个闭包里会让
                   # 类型检查器超时），所以 `__cstring` 里只有前缀，没有 `%d` 尾巴。
                   # 0.2.59 — 五件事各有自己的一行证词，缺哪条就等于那一步没接上：
-                  #   `warm start/done` = 圆盘悬停预热（抖音冷启动那 749 ms 从这里挪走）；
+                  #   `warm done` = 圆盘悬停预热（抖音冷启动那 749 ms 从这里挪走）。
+                  #   0.4.3 — 只剩 done 一条：预热改走母版的
+                  #   `launchApplicationWithIdentifier:suspended:`，不再有
+                  #   「start（事务已发起）/ refused / threw」三个中间态。
                   #   `auth card close` = 授权交接完成后收微信/QQ 卡；
                   #   `share swap nogate` = 来源顶不回来时提前走兜底（那 1.2 s 的乱跳）；
                   #   `card closed after auth` = Swift 侧真的把那张卡拆了。
-                  b"win: warm start b=%@",
-                  b"win: warm done b=%@ at=%.0fms pid=%d",
+                  b"win: warm done b=%@ door=%ld at=%.0fms pid=%d",
                   # 0.2.80 — 承载层只读普查。这是 Stheno 的 presenter 路线在
                   # 本机能不能走的唯一证词，少了这几行就只剩推断：
                   #   class     每个类在不在、方法数、ivar 数、父类
@@ -932,9 +934,14 @@ def main():
                   #   no deliver    卡片 3 秒内一次投递都没发起 ⇒ 就地销毁
                   #   appurl stuck  投递挂满 6 秒 ⇒ 也算失败，仍然不交回 SB
                   b"setDisplayConfiguration:",
-                  # 这一字典的字面量是「自建」这件事在产物里的锚：三个类名任何一个
-                  # 拼错，工程就编译成一条永远走不进去的路，而日志只会说 gate miss。
-                  b"FBApplicationProcessLaunchTransaction",
+                  # 0.4.3 — 这里原本断言的是 `FBApplicationProcessLaunchTransaction`：
+                  # 那条「自建进程启动事务」的路（TrollOpen / FrontBoardAppLauncher
+                  # 那套）在 0.4.3 整条删掉了，因为它正是 Aevon(289) 安全模式的成因
+                  # （`FBProcess _executeBlockAfterBootstrap:` 里 PC=-1，MRC 手工堆化
+                  # 的 block 失效）。预热改走母版那条系统选择子，锚换成它：
+                  # 串在产物里 ⇒ 这次预热真的是走 `launchApplicationWithIdentifier:`
+                  # 而不是某条私有构造器。
+                  b"launchApplicationWithIdentifier:suspended:",
                   # Mango 的「判内容就绪」：空壳不建卡，继续等。
                   b" shell=1 (deferred, no black card)",
                   # 0.1.93 — 主线程看门狗。这一整版的价值就是「下次卡死能被一句话

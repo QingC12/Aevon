@@ -194,9 +194,30 @@ enum SceneProbe {
         // （圆盘在全屏 App 里点它自己）。那时把 scene 搬进卡片会抽空全屏页 ⇒ 黑。
         // 其余局面（来源 App 全屏、目标是另一个 App）都不该动 Home —— 卡片是
         // level 101 的独立窗口，本来就浮得在来源 App 之上，这正是用户要的效果。
+        // 0.4.3 — **判过一次就是判过了。**
+        //
+        // 这一行是「桌面第二页开卡 → 被拽回第一页」的根。
+        //
+        // 0.4.2 把 `frontSceneBundle()` 改成「SpringBoard 可见 且 没有 App scene
+        // 报可见」才认定桌面，于是这里的门判对了 —— Aevon(289) 的
+        // `12:34:56 win: home first skip why=front b=com.ss.iphone.ugc.Aweme
+        // front=com.apple.springboard` 就是它。但 `homed` 是**入参**，跳过之后
+        // 没有任何人把它变成 true，于是 310 / 363 两处照样把 `homed: false`
+        // 交给 `pollForScene`，那边的老门（576 行）再判一次 —— 而那时
+        // `AevonLaunchSuspended` 已经把 scene 建出来了，`frontSceneBundle()`
+        // 这一次答的是目标 App，于是白发一下 `AevonHomeStep(1, nil)`：
+        //
+        //   12:34:56 win: home first step1 SBUIController single-press-up …
+        //   12:34:57 win: home first ready waited=500ms springboard=1 front=-1 …
+        //
+        // 用户看到的就是「在第二页开卡，桌面自己回到第一页」。
+        // 下面所有分支走完都算「home 这件事已经处理过」，所以用一个局部量带下去。
+        var homeDone = homed
         if !homed {
             let front = frontSceneBundle()
             if front != bundleID {
+                // 屏上不是目标 ⇒ 不需要 Home，但**这件事已经判过了**。
+                homeDone = true
                 Log.write("win: home first skip why=front b=" + bundleID
                           + " front=" + (front ?? "-"))
             } else {
@@ -307,7 +328,7 @@ enum SceneProbe {
             // 0.2.34 — `homed` 必须一路带下去。0.2.33 在这里丢了它：`openCard`
             // 已经等过一次 home，`pollForScene` 的老门又判一次 scene 可见、
             // 再等 1.4 秒 —— 真机日志里 QQ 那次就是连着两组 `home first …`。
-            pollForScene(bundleID, ticks: 0, start: Date(), homed: homed,
+            pollForScene(bundleID, ticks: 0, start: Date(), homed: homeDone,
                          fallback: fallback)
             return
         }
@@ -360,7 +381,7 @@ enum SceneProbe {
         }
         mark("OWN-retired")
         markHosted(bundleID)
-        pollForScene(bundleID, ticks: 0, start: Date(), homed: homed, fallback: fallback)
+        pollForScene(bundleID, ticks: 0, start: Date(), homed: homeDone, fallback: fallback)
     }
 
     // MARK: - 0.0.44 hosted mark
