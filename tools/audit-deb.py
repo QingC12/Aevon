@@ -1426,11 +1426,11 @@ def main():
                       # 也是 (0,0)，那 215 这个偏移从头到尾不在 `UIScreen` 上，
                       # 键盘贴 0..717 就是必然，下一版该动的是 scene 落点不是窗。
                       b"app: kb: bounds sys=%.0fx%.0f@%.0f,%.0f (hook off)",
-                      # 钩子 1 —— 交集高度换算。`orig` / `screen` / `kb` 三个数必须
-                      # 不同源：screen 读的是**钩过的** bounds，kb 读的是键盘窗 frame。
-                      # 0.4.12 起两者都等于承载面高（717）⇒ 公式退化成恒等 = 真值，
-                      # 这正是「输入框落回键盘上沿」的依据，读数不许一致以外的样子。
-                      b"app: kb: inter orig=%.0f screen=%.0f kb=%.0f hf=%.2f -> %.0f",
+                      # 钩子 1 —— 交集高度换算。母版公式一字未改，但 0.4.17 起在它
+                      # 之后加一道「量出来的键盘占高」：`orig` 是 932 世界的口径（316），
+                      # `UIInputSetHostView` 实占 431，两者差 115 ⇒ 输入框被盖。
+                      # `src=meas|formula` 就地标明这一次用的是哪个值。
+                      b"app: kb: inter orig=%.0f screen=%.0f kb=%.0f hf=%.2f formula=%.0f meas=%.0f host=%.0f,%.0f src=%s -> %.0f",
                       # 钩子 2 —— 建键盘窗那一拍把 frame 写成承载面尺寸。`scale=0.0`
                       # 是横屏「不显示」，母版原样，不是 bug。
                       b"app: kb: win frame=%.0fx%.0f@%.0f,%.0f scale=%.1f hosted=%d",

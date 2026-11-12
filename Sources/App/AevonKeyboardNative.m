@@ -1,5 +1,5 @@
 // ===========================================================================
-// AevonKeyboardNative.m — 0.4.7 / 0.4.9 / 0.4.10 / 0.4.12 / 0.4.13 / 0.4.14
+// AevonKeyboardNative.m — 0.4.7 / 0.4.9 / 0.4.10 / 0.4.12 / 0.4.13 / 0.4.14 / 0.4.17
 //
 // 键盘的承载面接管。**1:1 复刻 Stheno 母版的 `SthenoKeyboard.dylib`**
 // （0.1.23；修复版 final.3 的键盘组件与母版只差 1 处：`0x4de8` 那个「首启打开
@@ -7,6 +7,17 @@
 //
 // 逆向数据：`stheno-逆向分析/final3/analysis/hooks-SthenoKeyboard.md`
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
+//
+// ---------------------------------------------------------------------------
+// 0.4.17 — 交集返回值改用「量出来的键盘占高」（Aevon(301)）
+// ---------------------------------------------------------------------------
+// 300/301 两版取证把四个钩子全部洗清了：
+//   · `bounds sys=430x717` ⇒ `-bounds` 钩子是空操作（系统原值就等于我们返回的值）；
+//   · scene 落点 215 补写成功（`frame drift` 收起时反向）；
+//   · 键盘窗 717、root 717、`content`(=`_UIScenePresentationView`) 717 摆在 card 0,0，
+//     card 在 215 —— 宿主侧与 App 侧数字完全自洽。
+// 唯一对不上的量是**键盘自己**：`orig` 报 316，`UIInputSetHostView` 实占 431。
+// 详见本文件 0.4.17 那一段的推导。本版只改这一处返回值，几何一行未动。
 //
 // ---------------------------------------------------------------------------
 // 0.4.14 — 删掉我自己发明的 215 pt「窗下移」（Aevon(298)）
@@ -563,6 +574,71 @@ static CGRect AevonKbBounds(id self, SEL _cmd) {
 }
 
 // ===========================================================================
+// 0.4.17 — 键盘在这一块屏上的**真实占高**
+// ===========================================================================
+//
+// 301 的现场（Preferences，键盘带 accessory）：
+//
+//   app: kb: inter orig=316 screen=717 kb=717 hf=1.00 -> 316      ← 公式给 316
+//   app: kb: tree UIInputSetHostView f=0,286,430x431               ← 键盘真占 431
+//   app: kb: tree   UIView           f=0,0,430x361                 ← 键区只有 361
+//   app: kb: tree     UIKBInputBackdropView f=0,0,430x431          ← 背景 431 被父级裁到 361
+//   app: kb: tree   UIKeyboardDockView      f=0,0,430x431          ← 底部 70 只剩按钮，没有背景
+//
+// 拿三份日志并排，缺口的量不固定，缺口的方向却永远是「公式 < 真实」或「公式 > 真实」
+// 由 `kbH` 决定：
+//
+//   299 (0.4.14) 公式 316 / 真实 386 ⇒ 少 70   ⇒ 键盘盖住输入框
+//   301 (0.4.16) 公式 316 / 真实 431 ⇒ 少 115  ⇒ 盖住 + 底部 70 透明
+//   296 (0.4.11) 公式 458 / 真实 386 ⇒ 多 72   ⇒ 输入框被抬高
+//
+// ⚠ 这不是母版公式写错了，而是母版公式的**前提**在我们这里不成立：母版的 `orig`
+// 与 `kbH` 同源（都来自物理 932 那个世界），所以 `(orig*S/W)+W−S` 那一段是它的
+// 换算项；Aevon 从 0.2.46 起把 display 改成卡片尺寸，`screenH` 与 `kbH` 双双变成
+// 717 ⇒ 公式恒等 ⇒ `orig` 被原样透传，可它仍然是 932 的口径（316）。
+// 换句话说：**母版四个钩子到这个配置下已经数学恒等，坏的是喂进去的量。**
+//
+// 所以这里不再猜系数，只量一个客观量：键盘窗内部 `InputSetHostView` 的顶边。
+//   footprint = screenH − (窗 frame.y + host 在窗内的 y)
+// 窗底与屏底对齐时它等于 host 的高度；不对齐时它仍然是「键盘遮住了屏幕多少」。
+// 只用公开的 view 接口（`subviews` / `convertRect:toView:` / `frame`），不调任何
+// 私有选择子、不写任何几何 ⇒ 量错最多是数值不对，不会杀进程。
+static UIView *AevonKbFindHostView(UIView *root, int depth) {
+    if (root == nil || depth < 0) return nil;
+    NSString *cls = NSStringFromClass([root class]);
+    if (cls != nil && [cls rangeOfString:@"InputSetHost"].location != NSNotFound) {
+        return root;
+    }
+    NSArray *subs = [root subviews];
+    NSUInteger count = [subs count];
+    for (NSUInteger i = 0; i < count && i < 8; i++) {
+        UIView *found = AevonKbFindHostView([subs objectAtIndex:i], depth - 1);
+        if (found != nil) return found;
+    }
+    return nil;
+}
+
+static CGFloat AevonKbMeasuredCoverage(id keyboardWindow, CGFloat screenHeight,
+                                       CGFloat *outHostY, CGFloat *outHostH) {
+    if (outHostY != NULL) *outHostY = 0.0;
+    if (outHostH != NULL) *outHostH = 0.0;
+    if (keyboardWindow == nil || ![keyboardWindow isKindOfClass:[UIView class]]) return 0.0;
+    if (screenHeight < 1.0) return 0.0;
+    UIView *win = (UIView *)keyboardWindow;
+    UIView *host = AevonKbFindHostView(win, 3);
+    if (host == nil) return 0.0;
+    CGRect inWindow = [host convertRect:[host bounds] toView:win];
+    if (outHostY != NULL) *outHostY = inWindow.origin.y;
+    if (outHostH != NULL) *outHostH = inWindow.size.height;
+    if (inWindow.size.height < 8.0) return 0.0;
+    CGRect winFrame = [win frame];
+    CGFloat top = winFrame.origin.y + inWindow.origin.y;
+    CGFloat footprint = screenHeight - top;
+    if (footprint < 8.0 || footprint > screenHeight + 1.0) return 0.0;
+    return footprint;
+}
+
+// ===========================================================================
 // 钩子 1：`-[_UIRemoteKeyboards intersectionHeightForWindowScene:
 //             isLocalMinimumHeightOut:ignoreHorizontalOffset:]`（母版 0x5128，264 B）
 // ===========================================================================
@@ -583,8 +659,13 @@ static CGRect AevonKbBounds(id self, SEL _cmd) {
 //           0x5204 `fmadd d0,d0,d1,d3` / 0x5208 `fsub d9,d0,d9`。
 //
 // 这条钩子的输入量里有一件容易看漏的事：`screenH` 读的是**钩过的** `UIScreen.bounds`
-// （717），而 `kbH` 读的是键盘窗 frame（932，由 0x5230 在建窗时纠正过）。
-// 两个数不同源 —— 公式正是为这个差而存在的。照抄，不要「统一」它们。
+// （717），而 `kbH` 读的是键盘窗 frame。母版里这两个数不同源（717 vs 932），公式正是
+// 为这个差而存在的。
+//
+// ⛔ 0.4.17 起这个差在 Aevon 里**恒为 0**（display 被改成卡片尺寸后，键盘窗也是 717），
+// 于是母版公式退化成恒等、`orig` 原样透传。301 已证 `orig` 是 932 那个世界的口径
+// （316），透传进 717 的世界就短了 115 —— 这就是「键盘盖住输入框」。所以本版在公式
+// 之后加一道「量出来的占高」，见上面 0.4.17 那一段。公式本身**一个字符没改**。
 static CGFloat AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BOOL ignore) {
     CGFloat orig = 0.0;
     if (AevonKbOrigIntersection != NULL) {
@@ -608,15 +689,29 @@ static CGFloat AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, B
     CGFloat answer = (orig * screenHeight / keyboardHeight) * (CGFloat)AevonKbHeightFraction
                    + keyboardHeight - screenHeight;
 
+    // 0.4.17 — 量出来的占高优先，公式只在量不到时兜底。
+    // 判据：>8 pt（排除未布局的 0）且与公式差 >2 pt 才接管 —— 差 2 pt 以内是取整
+    // 噪声，不值得为它改 App 的排版。
+    CGFloat hostY = 0.0;
+    CGFloat hostH = 0.0;
+    CGFloat measured = AevonKbMeasuredCoverage(keyboardWindow, screenHeight, &hostY, &hostH);
+    CGFloat chosen = answer;
+    const char *source = "formula";
+    if (measured > 8.0 && fabs(measured - answer) > 2.0) {
+        chosen = measured;
+        source = "meas";
+    }
+
     if (AevonKbInterNotes < 10) {
         AevonKbInterNotes += 1;
-        char line[224];
+        char line[256];
         snprintf(line, sizeof(line),
-                 "app: kb: inter orig=%.0f screen=%.0f kb=%.0f hf=%.2f -> %.0f\n",
-                 orig, screenHeight, keyboardHeight, AevonKbHeightFraction, answer);
+                 "app: kb: inter orig=%.0f screen=%.0f kb=%.0f hf=%.2f formula=%.0f meas=%.0f host=%.0f,%.0f src=%s -> %.0f\n",
+                 orig, screenHeight, keyboardHeight, AevonKbHeightFraction,
+                 answer, measured, hostY, hostH, source, chosen);
         AevonKbLog(line);
     }
-    return answer;
+    return chosen;
 }
 
 // ===========================================================================
