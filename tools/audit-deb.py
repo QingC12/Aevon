@@ -699,6 +699,18 @@ def main():
                   #     每开一次键盘就出现一次，说明 `AevonPushSceneFrame` 一直在
                   #     hook 里被拒，得回头看那条死锁纪律的边界。
                   b"win: kb spring t=%.2f zeta=%.2f v=%.2f",
+                  # 0.4.4 — 「场景帧落地」的两条读数。键盘张开/收起与关卡交还
+                  # 都以它们为准：
+                  #   `landed retries=` = 严格推重试了几次才把门敲开（0 次不打）。
+                  #   `never landed`   = 8 拍都没门。这一行出现就说明 `push=0`
+                  #     那种「写了没门」还在，卡片那一拍会与画面错开 215 pt
+                  #     （Aevon(290) 用户截图里键盘下面那一条）。
+                  b"win: scene frame landed retries=%d door=%d",
+                  b"win: scene frame never landed tries=%d",
+                  # 0.4.4 — 交还整屏的强制写 + 回读。`frame=` 是写完立刻读回来的
+                  # scene 尺寸：读到 `430x717` 就说明这个 App 还没拿回整屏，
+                  # 用户回到全屏时底下就是那条 215 pt 黑。
+                  b"win: screen back b=%s door=%ld frame=%.0fx%.0f@%.0f want=%.0fx%.0f",
                   # 0.2.57 — 放弃那一行带上了原因码。旧串 `gave up door=0` 已经
                   # 不存在：它分不开「已经等于目标」与「被钩子挡了」。
                   # 这两行是**拼接**出来的（`String(format:)` 在那个闭包里会让

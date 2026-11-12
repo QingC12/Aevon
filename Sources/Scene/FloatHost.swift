@@ -3903,6 +3903,37 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
+    /// 0.4.4 — 「场景帧送到」为止。
+    ///
+    /// `AevonPushSceneFrame` 的返回值是**门号**：0 既可能是「不用写」，也可能是
+    /// 「写进那份 settings 了，但三道门一个都没开」—— 后者系统收不到，App 也就
+    /// 不会重排。0.4.3 及以前把它一律当「已经落地」，于是卡片照常动，卡片与画面
+    /// 之间那条 215 pt 的空当就一直留在屏幕上（Aevon(290) 的 `push=0` 紧跟
+    /// `frame drift … want=@215 door=3 wrote=8`）。
+    ///
+    /// 这里用严格推：`-1` 每 25 ms 重试一次，最多 `limit` 拍。落地就往下走；
+    /// 始终不落地也只记一行、照旧往下走 —— 一条门不开不应该把键盘态锁死。
+    private func landSceneFrame(tries: Int, limit: Int, then: @escaping () -> Void) {
+        guard isUp else { return }
+        guard let scene = window?.windowScene else {
+            then()
+            return
+        }
+        let door = Int(AevonPushSceneFrameStrict(scene))
+        if door < 0, tries < limit {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { [weak self] in
+                self?.landSceneFrame(tries: tries + 1, limit: limit, then: then)
+            }
+            return
+        }
+        if door < 0 {
+            Log.write(String(format: "win: scene frame never landed tries=%d", tries))
+        } else if tries > 0 {
+            Log.write(String(format: "win: scene frame landed retries=%d door=%d", tries, door))
+        }
+        then()
+    }
+
     func setKeyboardFill(_ on: Bool) {
         guard let card = card, let window = window, visible.height > 16 else { return }
         // 0.2.62 — 「键盘保持浮窗尺寸」把这个开关关掉才生效。
@@ -3998,41 +4029,29 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             AevonSceneFrameSet(bundle, 0, Double(y),
                                Double(visible.width), Double(height))
             var door: Int = 0
-            // 0.4.3 — **0.2.43 的补推从来没实现过。**
+            // 0.4.4 — **卡片等场景真的落地再动。**
             //
-            // 这里原来留着「写不了就补推（见 `pushSceneLater`）」这句注释，但
-            // `pushSceneLater` 在 0.4.x 的减法里被删掉了，`door` 算完只进了日志。
-            // 于是 0.2.69 的 `afterSceneAck` 成了唯一兜底 —— 而它等的是**回执**，
-            // 一次没写成就永远等不到回执，只能等满 120 ms 超时后照常张开：
+            // 0.4.3 在这里补了三拍（30/70/150 ms），但只写日志、不拦卡片：`grow()`
+            // 仍然在 `afterSceneAck` 超时之后照常跑。Aevon(290) 说明那不够：
             //
-            //   12:35:28 win: keyboard native on card=430x717 at 0,215 scene=215 crop=0 push=0
-            //   12:35:28 win: frame drift now=430x717@0 want=430x717@215 door=3
+            //   12:49:41 win: keyboard native on card=430x717 at 0,215 scene=215 crop=0 push=0
+            //   12:49:41 win: frame drift now=430x717@0 want=430x717@215 door=3 wrote=8 armed=1
             //
-            // 卡片已经铺到 215..932，场景还停在 0..717 —— 卡片下半段那 215 pt
-            // 没有任何内容，就是用户截图里键盘下面那块黑。这与 0.2.68 的现场
-            // 一字不差（那段注释还在 `afterSceneAck` 上面）。
+            // 两条同一秒，而且 `push=0` 后面紧跟 `wrote=8` —— 也就是说设置**写过**，
+            // 只是三道门一个都没开（`AevonPushSceneFrame` 的 0 是门号，不是
+            // 「不用写」）。那 100 ms 里卡片已经铺到 215..932、场景还在 0..717，
+            // 卡片下半段 215 pt 没有任何内容 —— 用户截图里键盘下面那一条
+            // （浅色是键盘窗自己的空底，深色是卡片底）。
             //
-            // 补推三次。只在我们自己这一推没写成时发生，且每次都先判重
-            // （`AevonPushSceneFrame` 在目标已等于实际时返回 0），稳态下一次都不会多花。
+            // 所以判据换成 `AevonPushSceneFrameStrict`：-1 就是「该写没门」，
+            // 每 25 ms 重试一次，**落地才往下走**。上限 8 拍（200 ms），等不到
+            // 也照旧张开 —— 绝不能因为一条门不开把键盘态卡死。
             if let sc = window.windowScene {
                 door = Int(AevonPushSceneFrame(sc))
-                if door == 0 {
-                    for delay in [0.03, 0.07, 0.15] {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                            guard let self = self, self.kbFilled else { return }
-                            guard let scene = self.window?.windowScene else { return }
-                            let again = Int(AevonPushSceneFrame(scene))
-                            if again != 0 {
-                                Log.write(String(format: "win: kb scene pushed late door=%d at=%.0fms",
-                                                 again, delay * 1000))
-                            }
-                        }
-                    }
-                }
             }
             // 0.2.43 — 场景原点一变，系统那一次「把承载视图 frame 重设成 scene
             // frame」就会把画面推走 215 pt（见 `reapplySoon`）。连对四次，别等
-            // 守卫循环那 200 ms。
+            // 守卫循环那一拍。
             self.reapplySoon("kb-up")
             // 0.1.80 — **撤掉 0.1.78 的「等两拍再动卡片」。**
             //
@@ -4077,6 +4096,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                     // 光晕贴到终点等于又造一次闪。等真正落地的那一次再来。
                     guard let self = self, done else { return }
                     self.applyGlow()
+                    // 0.4.4 — 收尾再对一次账。动画这 0.24 s 里系统可能又按
+                    // scene 的 frame 把承载面重设过一次（见 `reapplySoon` 那段），
+                    // 而对账阶梯只排到 0.30 s、拍间隔 40~150 ms —— 落地那一拍
+                    // 未必被覆盖到。落地后再对一次是零成本的：值一样就直接返回。
+                    _ = self.reapplyPlacement("kb-up done")
                 })
                 Log.write("win: keyboard native on card=" + self.size(card.frame.size)
                           + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
@@ -4100,7 +4124,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 这一拍的回执到得比 120 ms 晚。等到就张开（`wrote || screen` 那条路
             // 一定会有回执）；等不到才走兜底，所以放宽上限只影响最坏情况，
             // 正常路径一拍都不会多花。
-            self.afterSceneAck(bundle, tries: 0, limit: 15) { grow() }
+            //
+            // 0.4.4 — **0.4.3 这段放宽白等了。** 回执只在门开过的时候才有，
+            // 而这次要挡的恰恰是「门没开」（`push=0` + `wrote` 照涨）。所以先
+            // 用严格推把落地坐实（见上面那段），再走回执这一层。
+            self.landSceneFrame(tries: 0, limit: 8) { [weak self] in
+                guard let self = self, self.kbFilled else { return }
+                self.afterSceneAck(bundle, tries: 0, limit: 15) { grow() }
+            }
         } else {
             guard kbFilled else { return }
             // 0.1.83 — **先挂起一小段，再决定要不要真收。**
@@ -4190,12 +4221,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 就拿**时间**换：重推一次（幂等，几何没变自己返回 0）再等 0.15 s。两拍之内
     /// 系统的 scene 更新一定落地，这期间卡片保持键盘态几何，两边始终对齐。
     private func finishKeyboardUnfill(bundle: String, door: Int, tries: Int) {
-        guard let card = card, let window = window else { return }
+        guard let card = card, window != nil else { return }
         if kbFilled { return }              // 期间又开了 ⇒ 这次收起作废
         if tries == 0 {
-            _ = window.windowScene.map { AevonPushSceneFrame($0) }
-            DispatchQueue.main.asyncAfter(deadline: .now() + AevonMotion.unfillSettle) { [weak self] in
-                self?.finishKeyboardUnfill(bundle: bundle, door: door, tries: tries + 1)
+            // 0.4.4 — 卡片缩回去之前场景必须**真的**回到 0（见 `landSceneFrame`）。
+            //
+            // 0.1.67 在这里重推一次然后干等 0.15 s，赌「两拍之内系统一定落地」。
+            // Aevon(290) 证明这个赌有输的时候：`keyboard fill off … push=0` 之后
+            // 紧跟 `frame drift now=430x717@215 want=430x717@0 door=3` —— 卡片已经
+            // 收成 352x587@44,167，场景还压在 215 上，那一拍画面整体偏下 215 pt。
+            // 现在改成「送到才缩」，超时也照缩（不锁死）。
+            landSceneFrame(tries: 0, limit: 8) { [weak self] in
+                guard let self = self, !self.kbFilled else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + AevonMotion.unfillSettle) { [weak self] in
+                    self?.finishKeyboardUnfill(bundle: bundle, door: door, tries: 1)
+                }
             }
             return
         }

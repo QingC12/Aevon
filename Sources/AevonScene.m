@@ -1743,6 +1743,119 @@ NSInteger AevonPushSceneFrame(id scene) {
     return (wrote || screen) ? path : 0;
 }
 
+// 0.4.4 — 「写进了那份 settings」与「系统收到了」是两件事，这个函数只回答后者。
+//
+// Aevon(290) 把两件事摊开了：
+//
+//   12:49:41 win: keyboard native on card=430x717 at 0,215 scene=215 crop=0 push=0 saved=352x587 at 44,167
+//   12:49:41 win: frame drift now=430x717@0 want=430x717@215 door=3 wrote=8 armed=1
+//
+// 卡片已经铺到 215..932，场景还在 0..717 —— 一百毫秒之后才由守护循环补上。那
+// 一百毫秒里卡片下半段（215 pt）没有任何内容，露出来的是卡片底板/键盘窗的空底，
+// 也就是用户截图里键盘下面那一条。同一份日志里回写也失效了一次
+// （`keyboard fill off … push=0` 之后紧跟 `frame drift … want=@0 door=3`）。
+//
+// `push=0` 不是「不用写」：`AevonPushSceneFrame` 返回的是**门号**，设置写进去了
+// 但三道门一个都没开时它也返回 0（`wrote=8` 就是证据 —— 那份 settings 改过）。
+// 调用方把它当成「已经落地」，于是卡片照常动 —— 错位就是这么来的。
+//
+// 严格模式两处不同：
+//   ① 值已经等于目标也**照样提交一次**（上一趟可能写了没门，系统根本没收到）；
+//   ② 回答 -1 = 该写但没门，调用方必须重试；0 = 没有目标（真的不用跑这趟）。
+//
+// 只在「必须落地」的几个时刻调用（键盘张开/收起、交还整屏），稳态一拍都不花。
+NSInteger AevonPushSceneFrameStrict(id scene) {
+    if (scene == nil) return 0;
+    if (![NSThread isMainThread]) return -1;
+    if (AevonHookDepth > 0) return -1;
+    if (AevonInPush) return -1;
+    int slot = AevonSlotOfScene(scene);
+    if (slot < 0 || !(AevonFrameMask & (1 << slot))) return 0;
+    SEL settingsSel = sel_registerName("settings");
+    if (![scene respondsToSelector:settingsSel]) return -1;
+    id current = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
+    id candidate = [current mutableCopy];
+    if (candidate == nil) candidate = current;
+    AevonInPush = 1;
+    (void)AevonWriteFrame(candidate, slot);
+    (void)AevonWriteDisplay(candidate, slot);
+    NSInteger path = AevonCallSettingsAck(scene, candidate, slot);
+    if (path == 0) path = AevonCallSettingsTransition(scene, candidate);
+    if (path == 0 && AevonCallSettings(scene, candidate)) path = 1;
+    AevonInPush = 0;
+    return path == 0 ? -1 : path;
+}
+
+/// 0.4.4 — 交还整屏：frame / display / 参考尺寸三个数一起，**强制**写回去。
+///
+/// 与 `AevonPushSceneFrame` 的差别有三条，三条都是「这一次不许省」：
+///   · 不吃 0.20 s 节流 —— 关卡往往紧跟在一次键盘让位之后，那一格刚被写过，
+///     节流会把这次归还直接丢掉；
+///   · 不判重（见 `AevonPushSceneFrameStrict`）—— 「写了没门」的那一趟之后
+///     值已经等于目标，判重会让第二次归还连门都不去敲；
+///   · **不吃登记表**。`closeCard` 收尾会 `AevonHookDisarm` 把这个 App 从
+///     `AevonArmed` 里摘掉，而补写阶梯要跑到 0.9 s —— 那时查不到槽是常态，
+///     不是「这个 scene 不归我们管」。所以这里直接改那份 settings、直接敲门。
+///
+/// 回读写进日志（`win: screen back …`）：下一份日志能一眼看出这个 App 交还之后
+/// 到底是整屏还是 717，不必再从「全屏底部黑不黑」反推。
+NSInteger AevonScreenBack(NSString *bundle, id scene) {
+    if (scene == nil) return 0;
+    CGSize full = [UIScreen mainScreen].bounds.size;
+    if (full.width < 80.0 || full.height < 80.0) return 0;
+    if (![NSThread isMainThread]) return 0;
+    if (AevonHookDepth > 0) return 0;
+    if (AevonInPush) return 0;
+    SEL settingsSel = sel_registerName("settings");
+    if (![scene respondsToSelector:settingsSel]) return 0;
+    id current = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
+    id candidate = [current mutableCopy];
+    if (candidate == nil) candidate = current;
+    if (!AevonSettingsMutable(candidate)) return 0;
+
+    // frame
+    SEL frameSetter = sel_registerName("setFrame:");
+    if ([candidate respondsToSelector:frameSetter]) {
+        ((void (*)(id, SEL, CGRect))objc_msgSend)(
+            candidate, frameSetter, CGRectMake(0, 0, full.width, full.height));
+    }
+    // display —— 必须一起走：只还 frame 的话 App 的 `UIScreen` 还是 717，
+    // 全屏页只会按 717 排，下面 215 pt 没人画（0.3.61 的黑底就是这个形状）。
+    SEL displayGetter = sel_registerName("displayConfiguration");
+    SEL displaySetter = sel_registerName("setDisplayConfiguration:");
+    if ([candidate respondsToSelector:displayGetter] &&
+        [candidate respondsToSelector:displaySetter]) {
+        id now = ((id (*)(id, SEL))objc_msgSend)(candidate, displayGetter);
+        if (now != nil) {
+            id copy = AevonOwnDisplayOverride(
+                now, CGRectMake(0, 0, full.width, full.height));
+            if (copy != nil) {
+                ((void (*)(id, SEL, id))objc_msgSend)(candidate, displaySetter, copy);
+                [copy release];
+            }
+        }
+    }
+    AevonOwnRefSet(candidate, full, "back");
+
+    AevonInPush = 1;
+    int slot = AevonSlotOfScene(scene);
+    if (slot < 0) slot = AevonSlotOfBundle(bundle);
+    NSInteger door = 0;
+    if (slot >= 0) door = AevonCallSettingsAck(scene, candidate, slot);
+    if (door == 0) door = AevonCallSettingsTransition(scene, candidate);
+    if (door == 0 && AevonCallSettings(scene, candidate)) door = 1;
+    AevonInPush = 0;
+    CGRect back = AevonSceneFrameOf(scene);
+    const char *name = bundle != nil ? [bundle UTF8String] : "-";
+    if (name == NULL) name = "-";
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"win: screen back b=%s door=%ld frame=%.0fx%.0f@%.0f want=%.0fx%.0f",
+                  name, (long)(door == 0 ? -1 : door),
+                  back.size.width, back.size.height, back.origin.y,
+                  full.width, full.height] UTF8String]);
+    return door == 0 ? -1 : door;
+}
+
 /// One attempt at "you are in front". Answers the door it used so the log can
 /// say where the chain stops:
 ///

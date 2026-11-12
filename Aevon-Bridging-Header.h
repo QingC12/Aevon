@@ -132,6 +132,19 @@ long AevonFrameOrphanCount(void);
 /// `win: scene ack slot=N`。`AevonSceneFrameAcked` 就是读这个回执 —— 拿到了
 /// 就别再用「四拍定时重推」去赌它到底送到没有。
 NSInteger AevonPushSceneFrame(id _Nullable scene);
+/// 0.4.4 — 严格版：只回答「送到没有」。
+///
+///   `0`  没有目标（真的不用跑这一趟）
+///   `-1` 该写但三道门一个都没开 —— 那份 settings 改了也不会到 App 手上，必须重试
+///   `1/2/3` 门号，落地了
+///
+/// `AevonPushSceneFrame` 的 0 有两个含义（不用写 / 写了没门），把「写了没门」
+/// 当成「已经落地」正是 0.4.3 键盘态那一百毫秒错位的来源，见
+/// `AevonScene.m` 里这个函数上面的现场。值已经等于目标时它**照样提交一次**。
+NSInteger AevonPushSceneFrameStrict(id _Nullable scene);
+/// 0.4.4 — 交还整屏：frame / display / 参考尺寸一起强制写回，并回读一次进日志
+/// （`win: screen back …`）。返回门号，`-1` = 写了没门（调用方应当重试）。
+NSInteger AevonScreenBack(NSString *_Nullable bundle, id _Nullable scene);
 /// 这个 bundle 的目标尺寸有没有拿到过回执（1 = 拿到）。`AevonSceneFrameSet`
 /// 登记新目标时会把回执作废，所以「拿到」永远指的是当前这个目标。
 int AevonSceneFrameAcked(const char *_Nullable bundle);

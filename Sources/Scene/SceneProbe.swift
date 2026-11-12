@@ -1024,21 +1024,25 @@ enum SceneProbe {
             // 授权这条路永远不会有「系统接着把这张 scene 拉成全屏」的下文：
             // 用户要的是回发起方。交还没有任何收益。
             let handover = yielding && reason != "auth done"
-            let screenSize = UIScreen.main.bounds.size
-            if !closingBundle.isEmpty {
-                AevonSceneFrameSet(closingBundle, 0, 0,
-                                   Double(screenSize.width), Double(screenSize.height))
-            }
             // 让路时也要真的写一次整屏：系统接下来要的就是这张 932，提前给它，
             // 接管那一拍就不会出现「717 摆在 932 窗口里」。
-            let restoreDoor = AevonPushSceneFrame(scene)
-            if closingBundle.isEmpty {
-                AevonSceneFrameClear()
-            } else {
-                AevonSceneFrameClearBundle(closingBundle)
-            }
+            //
+            // 0.4.4 — **交还改成「强制 + 校验 + 阶梯补写」，落地之前不清掩码。**
+            //
+            // 旧代码这里先 `AevonSceneFrameSet(932)` 再 `AevonPushSceneFrame`，
+            // 然后**立刻**清掩码。而 `AevonPushSceneFrame` 的 0 有两个含义：
+            // 「不用写」与「写了但三道门都没开」（`wrote` 计数会涨，值也确实改了
+            // 那份 settings，可系统没收到）。把它当成「不用写」，后面的清掩码就
+            // 把最后一次补救机会也撤掉了 —— 那个 App 从此在系统眼里还是 717，
+            // 回到全屏就是用户截图里那条 215 pt 黑。
+            //
+            // 现在：写、回读、门没开就 0.15 / 0.45 / 0.90 s 各补一次，落地即止；
+            // 掩码在补写阶梯收尾时才清（`restoreScreenBack`）。
+            let restoreDoor = AevonScreenBack(closingBundle.isEmpty ? nil : closingBundle,
+                                              scene)
             Log.write("win: scene frame restored door=" + String(restoreDoor)
                       + " wrote=" + String(AevonFrameWriteCount()))
+            restoreScreenBack(closingBundle: closingBundle, scene: scene)
             _ = AevonCallVoid(presenter, "deactivate")
             _ = AevonCallVoid(presenter, "invalidate")
             // 0.0.68 — 顺序回到「先拆 presenter，再摘卡片」。0.0.67 把它提到
@@ -1096,39 +1100,15 @@ enum SceneProbe {
             // 0.0.99 — 名字取自这张卡自己（见上面 `closingBundle` 那段）。
             // 0.0.69 — presenter 拆掉之后再交一次整屏尺寸。
             //
-            // 上面那次 `AevonPushSceneFrame` 发生在承载面还在的时候，那时 App 的
-            // 窗口还是 717 —— 它可能把这次 settings 变化当成「卡片里的重排」而
-            // 不是「回到整屏」。Aevon(58) 的「关窗后全屏打开抖音整体偏下、顶上
-            // 露出上一页的底」就是 App 带着 717 的排版回到桌面的样子。
+            // 原话（0.0.69）：上面那次推发生在承载面还在的时候，那时 App 的窗口
+            // 还是 717 —— 它可能把这次 settings 变化当成「卡片里的重排」而不是
+            // 「回到整屏」。Aevon(58) 的「关窗后全屏打开抖音整体偏下」就是 App
+            // 带着 717 的排版回到桌面的样子。
             //
-            // 这一次只写 scene 的 frame（我们本来就拥有这个量），不碰任何视图，
-            // 0.30 s 后执行，此时 presenter 已经 invalidate。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) { [weak scene] in
-                // 0.0.98 — 判据从「有没有卡」换成「这一个 App 有没有被重新登记」。
-                //
-                // 0.0.75 起这里写的是 `!cardUp`，当时「有卡」就等于「那个 App 又被
-                // 打开了」。多窗之后 `cardUp` 变成「至少还有一个窗」，关掉主窗而
-                // 留着一个停靠小窗时，这条保留的整屏恢复会被无谓地跳过；反过来
-                // 真正要防的「0.3 s 内重开同一个 App」也必须按名字判，不能按数量判。
-                guard let scene = scene else { return }
-                let armed = AevonHookArmedList()
-                if !closingBundle.isEmpty, armed != "no", armed.contains(closingBundle) {
-                    Log.write("win: frame restore skipped, " + closingBundle + " reopened")
-                    return
-                }
-                let full = UIScreen.main.bounds.size
-                if !closingBundle.isEmpty {
-                    AevonSceneFrameSet(closingBundle, 0, 0,
-                                       Double(full.width), Double(full.height))
-                }
-                let door = AevonPushSceneFrame(scene)
-                if closingBundle.isEmpty {
-                    AevonSceneFrameClear()
-                } else {
-                    AevonSceneFrameClearBundle(closingBundle)
-                }
-                Log.write("win: frame restore again door=" + String(door))
-            }
+            // 0.4.4 — 这一段搬去 `restoreScreenBack`：0.30 s 只补一次不够（那一次
+            // 也可能「写了没门」），而且它只认时间、不认落地。现在的阶梯是
+            // 0.15 / 0.45 / 0.90 s，用 `AevonScreenBack` 强制提交并回读，
+            // 落地即止、收尾才清掩码。判据（`frame restore skipped`）原样搬了过去。
             // 0.0.55 — 卡片没了，右缘带重新接触摸。
             AevonRingGrip.cardUp = false
             RingHost.shared.setEdgeActive(true)
@@ -2057,6 +2037,60 @@ enum SceneProbe {
 
 
 
+
+/// 0.4.4 — 交还整屏的补写阶梯。
+///
+/// 关卡那一拍写完**不算完**：`AevonPushSceneFrame` 的 0 有两个含义，「不用写」
+/// 和「写了但三道门都没开」。旧代码把 0 当「不用写」，随后立刻清掩码 —— 于是
+/// 「写了没门」的那一趟之后既没有补写、也没有目标了，那个 App 在系统眼里永远
+/// 是 717：回到全屏时只剩上面 717 有内容，下面 215 pt 是窗口的黑色
+/// （Aevon(290) 用户截图，黑边精确起在 717）。
+///
+/// 三级阶梯（0.15 / 0.45 / 0.90 s）各强制提交一次（`AevonScreenBack`：frame +
+/// display + 参考尺寸一起、不吃节流、不判重、不吃登记表），**落地即止**；最后一拍
+/// 无论如何清掩码 —— 不清，intercept 钩子会一直按我们登记的目标改它，那个 App
+/// 就再也拿不回整屏。
+///
+/// 三拍是**各自独立**排的，不是「上一拍失败才排下一拍」：`AevonScreenBack` 幂等，
+/// 而递推会把时间叠成 0.15 → 0.60 → 1.50 s，比用户手里的动作还慢。
+///
+/// 判据沿用 0.0.98：按名字看这个 App 有没有被重新登记。0.0.75 起这里是
+/// `!cardUp`，多窗之后「有卡」不等于「这个 App 又被打开了」，关掉主窗而留着一个
+/// 停靠小窗时那条整屏恢复会被无谓地跳过；真正要防的「0.3 s 内重开同一个 App」
+/// 必须按名字判，不能按数量判。
+private func restoreScreenBack(closingBundle: String, scene: NSObject?) {
+    let ladders: [Double] = [0.15, 0.45, 0.90]
+    for (index, delay) in ladders.enumerated() {
+        let step = index + 1
+        let last = step == ladders.count
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak scene] in
+            guard let scene = scene else {
+                if last { clearFrameTarget(closingBundle) }
+                return
+            }
+            let armed = AevonHookArmedList()
+            if !closingBundle.isEmpty, armed != "no", armed.contains(closingBundle) {
+                if last {
+                    Log.write("win: frame restore skipped, " + closingBundle + " reopened")
+                }
+                return
+            }
+            let door = AevonScreenBack(closingBundle.isEmpty ? nil : closingBundle, scene)
+            if last || door > 0 { clearFrameTarget(closingBundle) }
+            Log.write("win: frame restore again door=" + String(door)
+                      + " step=" + String(step))
+        }
+    }
+}
+
+/// 只抹掉这一次交还的目标（`closingBundle` 为空 = 全局）。
+private func clearFrameTarget(_ closingBundle: String) {
+    if closingBundle.isEmpty {
+        AevonSceneFrameClear()
+    } else {
+        AevonSceneFrameClearBundle(closingBundle)
+    }
+}
 
 /// 0.2.36 — 「系统要全屏打开这个 App 了，把正在承载它的卡片让开」。
 ///
