@@ -673,8 +673,9 @@ static CGFloat AevonKbMeasuredCoverage(id keyboardWindow, CGFloat screenHeight,
 // 于是母版公式退化成恒等、`orig` 原样透传。301 已证 `orig` 是 932 那个世界的口径
 // （316），透传进 717 的世界就短了 115 —— 这就是「键盘盖住输入框」。所以本版在公式
 // 之后加一道「量出来的占高」，见上面 0.4.17 那一段。公式本身**一个字符没改**。
-/// 0.4.21 — inset 的采样锁存（三个量：本次会话已采纳值 / 上一拍原始采样 / 采样拍数）。
-/// 只在 `AevonKbIntersection` 里读写；键盘收起时整体归零，见那里 0.4.21 那一段。
+/// 0.4.21 — inset 的采样锁存（三个量：本次会话已采纳值 / 上一拍原始采样 /
+/// 连续同值计数）。只在 `AevonKbIntersection` 里读写；键盘收起时整体归零。
+/// 0.4.22 把采纳方向改成「上行立即、下行连续两次同值」，见那里 0.4.22 那一段。
 static CGFloat AevonKbAdopted = 0.0;
 static CGFloat AevonKbPrevMeas = 0.0;
 static int AevonKbMeasCount = 0;
@@ -706,27 +707,45 @@ static CGFloat AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, B
     CGFloat hostY = 0.0;
     CGFloat hostH = 0.0;
     CGFloat measured = AevonKbMeasuredCoverage(keyboardWindow, screenHeight, &hostY, &hostH);
-    // 0.4.21 — 采样锁存：**首样采纳，之后连续两次同值才更新。**
+    // 遮挡不可能超过屏幕本身：某次量歪（host 取到外层容器、或量在窗口换 frame 的那一拍）
+    // 也不会把 App 的内容顶出屏幕。
+    if (measured > screenHeight) measured = screenHeight;
+    // 0.4.22 — 采样锁存的**方向**反了，这一版改过来。
     //
-    // 305 的「输入框随机抬高或被盖住」不是几何算错，是采到了键盘升起动画的中途值
-    // （386 / 404 / 431 在 0.3 s 内轮着来），每条通知都把 App 的
-    // `keyboardWillChangeFrame` 重算一次，输入框就跟着跳。开源 `niw/KeyboardGuide`
-    // 对同一件事的结论也一样：屏幕尺寸变动期间的通知帧一律丢弃，同值连续两次才算稳态。
+    // 0.4.21 写的规则是「首样采纳，之后连续两次同值才更新」，实际效果是让第一帧
+    // 拥有否决权。306 的序列正好踩在它的反面：
     //
-    // 这里照同一条纪律做，但**不阻塞首样** —— 有些 App 一次输入会话只问一次，
-    // 阻塞首样等于永远拿不到真值。首样先采纳，后续只接受「与上一拍同值」的样本，
-    // 于是 386→404→431→431 这条链会在最后一个 431 上收敛，中途值不会回流。
+    //   app: kb: inter … meas=386 adopt=386 host=546,386   ← 首样，键盘升起动画中途
+    //   app: kb: inter … meas=431 adopt=386 host=501,431   ← 真值到了，被锁存否决
+    //   app: kb: tree  UIInputSetHostView f=0,501,430x431  ← 视图树印证真值 431
+    //
+    // 键盘升起是**单调向上**的（386 → 431），所以「第一次采样」永远是最小的那个。
+    // 让首样一锤定音 = 永远锁死在动画第一帧，比真值少 45 pt ⇒ 输入框被盖住。
+    //
+    // 正确的不对称（这也是物理上的不对称）：
+    //   · 量到的**比已采纳的大** ⇒ 遮挡正在变大，必须立即采纳；慢一拍就是被盖住。
+    //   · 量到的**比已采纳的小** ⇒ 连续两次同值才采纳。高度变小通常是键盘换形态
+    //     （候选条收起 431 → 359），单帧变小多半是收起动画的路过值，等一拍再认。
+    // 上限由 `screenHeight` 夹住，某次量歪也不会把内容顶出屏幕。
     if (measured < 8.0) {
         // 键盘不在：整条会话作废，下一次重新学。
         AevonKbAdopted = 0.0;
         AevonKbPrevMeas = 0.0;
         AevonKbMeasCount = 0;
     } else {
-        BOOL first = (AevonKbMeasCount == 0);
-        BOOL same = (fabs(measured - AevonKbPrevMeas) < 0.5);
-        AevonKbMeasCount += 1;
+        if (AevonKbAdopted < 8.0 || measured > AevonKbAdopted + 0.5) {
+            // 首样，或遮挡变大 ⇒ 立即采纳。
+            AevonKbAdopted = measured;
+            AevonKbMeasCount = 1;
+        } else if (fabs(measured - AevonKbPrevMeas) < 0.5) {
+            // 与上一拍同值 ⇒ 计数；连续两次同值才承认「真的变小了」。
+            AevonKbMeasCount += 1;
+            if (AevonKbMeasCount >= 2) AevonKbAdopted = measured;
+        } else {
+            // 换了个值，计数重来。
+            AevonKbMeasCount = 1;
+        }
         AevonKbPrevMeas = measured;
-        if (first || same) AevonKbAdopted = measured;
     }
     CGFloat chosen = answer;
     const char *source = "formula";
