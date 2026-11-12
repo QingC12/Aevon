@@ -1431,10 +1431,13 @@ def main():
                       # 关闭态也要有证词，否则分不清「开关关了」与「钩子没装上」。
                       b"app: kb: native off, inject=0",
                       b"app: kb: native skipped, springboard",
-                      # 0.4.9 — 母版 `0x4f4c` 的第二道闸（`_ringAppsContains`）。
-                      # 这是 Aevon(293) 白屏事故的唯一修复点，也是「名单外的进程连
-                      # 一个类都不碰」这件事的唯一证词：日志里看到它 ⇒ 该进程没装钩子。
-                      b"app: kb: native skipped, notinlist",
+                      # 0.4.10 — 安装闸换成「宿主真的把我托起来了」。两条新证词：
+                      # 排上队、以及排队期间卡片被关掉。名单闸（`notinlist`）连同
+                      # `RingApps` 一起删了 —— Aevon(294) 证明它在刚起来的 App 进程
+                      # 里读不到值，宿主日志里 `选中 QQ`、QQ 进程里 `notinlist`，
+                      # 于是最常用的 App 根本没装钩子。
+                      b"app: kb: install armed (hosted)",
+                      b"app: kb: install drop, nothosted",
                       # 0.1.35 — 判不中的时候把坐标与两个矩形写下来。V111 里
                       # `app: band touch at` 是 0，而带子的值明明是对的 ⇒ 分不出
                       # 「这一拍没进来」还是「进来了被几何否掉」。有这一行就分得开。

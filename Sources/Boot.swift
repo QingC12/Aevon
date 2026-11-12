@@ -172,7 +172,7 @@ public func AevonStart() {
     // 里遍历窗口树并把「类名带 Keyboard」的视图按全屏 bounds 摆正，0.1.40 真机
     // 第一下点输入框就进了安全模式（`__NSMallocBlock__ countByEnumerating...`）。
     // 母本 `SthenoKb.dylib` 注入 SpringBoard 却连 UIView 都没导入 —— 键盘几何
-    // 全在键盘进程（`AevonAppHook.m` 的 `AevonKbNativeInstall`），这里不该有活。
+    // 全在键盘进程（`AevonAppHook.m` 的 `AevonKbEnsureInstalled`），这里不该有活。
 
     // 0.1.85 — 通知点击观察器。0.4.0 删除，理由同上。
 

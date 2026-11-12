@@ -91,20 +91,11 @@
 /// 0.4.7 — 跨文件的键盘接口。
 ///
 /// 实现在 `Sources/App/AevonKeyboardNative.m`（1:1 复刻母版 `SthenoKeyboard.dylib`）。
-/// 这里只留两条：装钩子，以及「本 App 是否被卡片托着」翻转时通知它重算开关。
-extern void AevonKbNativeInstall(void);
+/// 这里只留两条：
+///   · `AevonKbRefreshShell` —— band 翻转时通知它重算 `_hookUIScreen`；
+///   · `AevonKbEnsureInstalled` —— band 说「我被托着」时才装钩子（0.4.10）。
 extern void AevonKbRefreshShell(void);
-
-/// 0.4.9 — `AevonKbNativeInstall` 的唯一入口（主队列、构造之后 0.15 s）。
-///
-/// 为什么不直接在构造函数里调：`Aevon(293)` 的 90 条 `app: hang` 全部 `gap=-1ms`，
-/// 主线程心跳一拍未跑 ⇒ 构造函数没回来。装钩子要提前 realize UIKit 私有类，
-/// 那一步在 `main()` 之前做会把 objc runtimeLock 带进 UIKit 的 `+initialize`。
-/// 完整理由写在构造函数里调用点上方那段注释。
-static void AevonKbInstallDeferredTick(void *context) {
-    (void)context;
-    AevonKbNativeInstall();
-}
+extern void AevonKbEnsureInstalled(void);
 
 static CFStringRef const AevonDomain = CFSTR("com.aevon");
 static CFStringRef const AevonKey = CFSTR("!ring.appHook");
@@ -4875,6 +4866,12 @@ static void AevonKbArm(BOOL on) {
 }
 
 static void AevonKbEvaluate(NSDictionary *info) {
+    // 0.4.10 — 兜底安装点。正常情况下钩子早在开卡那一拍就装好了（band 通知驱动），
+    // 走到这里还在「没装 + 被托着」只有一个原因：开卡时那几通通知没收到（宿主写
+    // band 早于本进程起来，或者通知恰好丢了一拍）。键盘起来了就得接住，否则这一
+    // 次弹键盘一定还是旧形状。`AevonKbEnsureInstalled` 装过 / 排过 / 没被托着时
+    // 都是一次内存判断，可以每个键盘事件都问。
+    AevonKbEnsureInstalled();
     NSValue *value = info[UIKeyboardFrameEndUserInfoKey];
     if (value == nil) return;
     CGRect frame = [value CGRectValue];
@@ -5594,7 +5591,7 @@ static void AevonAppBoot(void) {
     // 改写 + 安全区让位 + 参考线兜底 + 窗口收放」已整条删除，理由见
     // `AevonKeyboardNative.m` 文件头。
     //
-    // ⛔ 0.4.9 — **不在构造函数里装，延后到主队列第一拍之后。**
+    // ⛔ 0.4.9 / 0.4.10 — **构造函数里一条钩子都不装，这里也不再排。**
     //
     // Aevon(293) 里 0.4.8 一装就白屏：90 条 `app: hang` 全部 `gap=-1ms`，即
     // `AevonMainBeatTick`（挂在主队列上、0.25 s 后第一拍）一次都没跑过 —— 构造
@@ -5604,12 +5601,18 @@ static void AevonAppBoot(void) {
     // `+initialize`；里面只要有一处 `dispatch_sync` 到主队列，主队列还没被 runloop
     // 服务，主线程就自己等自己。
     //
-    // 母版能在构造里做，是因为它是一支 170 KB、只含键盘逻辑的独立 dylib；我们这
-    // 支 dylib 前面还有 5,500 行、已经把进程带到某个状态，同一件事的代价不同。
-    // 延后 0.15 s 不影响任何时序：键盘要用户点输入框才出现，远晚于此；而
-    // `UIScreen.bounds` 在这 0.15 s 内保持系统值，正是 App 首帧该有的值。
-    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
-                     dispatch_get_main_queue(), NULL, AevonKbInstallDeferredTick);
+    // 0.4.9 把它挪到「构造之后 0.15 s」—— 白屏没了，但**装得太早**：那时的闸是
+    // 圆盘名单，而名单在刚起来的 App 进程里读不到（Aevon(294)：宿主日志里
+    // `选中 QQ (com.tencent.mqq)`，QQ 进程里却是 `native skipped, notinlist`），
+    // 于是最常用的 App 根本没装钩子，键盘原样坏着。
+    //
+    // 0.4.10 改成**由 band 驱动**：`AevonBandObserve()` 在上面已经注册好并读过
+    // 一次；从这一刻起，宿主每次说「这个 App 被托着」（`AevonBandSetOn(1)`）都会
+    // 经 `AevonKbRefreshShell` → `AevonKbEnsureInstalled` 排一次安装（0.15 s、
+    // 主队列）。没被托起来的进程一次类查找都不做 —— 比名单闸更严，也是 0.4.8
+    // 白屏的根因所在。
+    //
+    // 不再需要在这里主动调任何东西：`AevonBandObserve()` 的首次读值就会走同一条路。
 
     // Both getters, both chained: a process that is not hosted keeps the
     // system's answers byte for byte.
