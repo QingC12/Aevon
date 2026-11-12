@@ -417,6 +417,47 @@ def check_actions():
         ok(f"actions: {len(actions)} 个动作全部有实现")
 
 
+def strip_comments(text):
+    """去掉 C / Swift / ObjC 的行注释与块注释；字符串与字符字面量原样保留。
+
+    只为一个用途服务：判断「这条字面量还在不在代码里」。所以宁可少删 ——
+    引号内的 `//` 一律当字符串，不去碰它。
+    """
+    out = []
+    i, n = 0, len(text)
+    quote = None
+    while i < n:
+        ch = text[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = n if end < 0 else end + 2
+            out.append("\n" * text.count("\n", i, end))
+            i = end
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 # ---------------------------------------------------------------------------
 # 8  审计断言 vs 源码：这是前几次构建失败的唯一来源
 # ---------------------------------------------------------------------------
@@ -432,7 +473,16 @@ def check_audit_tokens():
             for name in filenames:
                 path = os.path.join(dirpath, name)
                 if name.endswith((".swift", ".m", ".h")):
-                    parts.append(read(path))
+                    # 0.4.0 — 源码先去掉注释再参与比对。
+                    #
+                    # 这一栏问的是「这条断言的字面量会不会真的编进二进制」，
+                    # 而注释永远不编进去。0.4.0 的减法在源码里留下大量
+                    # 「这里原本是 `win: own handed over %@`」式的说明，
+                    # 照原样比对等于让那些说明给断言背书 —— 0.3.61 那次
+                    # 十一条断言全红，有六条就是这么蒙过去的（SB 侧其实早就
+                    # 没有那些串，注释里有）。去掉注释之后，这一栏第一次
+                    # 真的在问「代码里有没有」。
+                    parts.append(strip_comments(read(path)))
                 elif name.endswith(".plist"):
                     try:
                         parts.append(repr(plistlib.loads(open(path, "rb").read())))
@@ -472,7 +522,12 @@ def check_audit_tokens():
                 continue
             tokens.add(token)
 
-    missing = sorted(t for t in tokens if t not in blob)
+    # 0.4.0 — 这几条断言的是**链接器事实**，不是源码里的字面量，所以这一栏
+    # 不该要求「源码里看得见」：
+    #   libswiftCore  是 dylib 的 LC_LOAD_DYLIB 名字，只有产物里才有；
+    #                 断言的语义是「这个二进制确实是 Swift 编出来的」。
+    BINARY_ONLY = {"libswiftCore"}
+    missing = sorted(t for t in tokens if t not in blob and t not in BINARY_ONLY)
     if missing:
         for token in missing:
             bad(f"audit: 断言了「{token}」，但源码里找不到这个字符串 —— "

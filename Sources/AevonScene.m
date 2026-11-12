@@ -344,44 +344,29 @@ NSInteger AevonLaunchSuspended(id application, NSString *bundleID) {
 /// `FBProcessManager -registerProcessForAuditToken:` 之间的那个结构体。
 typedef struct { uint32_t word[8]; } AevonAuditToken;
 
-/// 0 idle / 1 building / 2 ready（等取） / 3 failed
-static NSInteger AevonOwnPhase = 0;
-static id AevonOwnScene = nil;
-static NSString *AevonOwnBundle = nil;
-static NSString *AevonOwnIdentity = nil;
-/// 这一次开始建的时刻。超时兜底用它 —— 一个永不回调的启动事务会把 phase 冻在
-/// 「在建」，那之后自建这条路就永久不再被尝试，而这在日志里看起来只是「没走自建」。
-static CFAbsoluteTime AevonOwnAt = 0;
-static int AevonOwnNotes = 0;
-/// 1 = 屏幕上这张卡的 scene **确实是**我们自己建的那个。
-///
-/// 不能用「bundle 名对得上」来判断：自建 → 关卡（销毁）→ 用户从桌面全屏打开
-/// → 圆盘再开卡（这次复用系统那个 scene），名字还是同一个 bundle，而
-/// `destroyScene:` 要的 identity 也还是 `sceneID:<bundle>-default` —— 按名字判
-/// 会把系统那个正在显示的 scene 销毁掉，画面直接消失。所以「谁建的」必须由
-/// 建它的那一刻记下来，并且在每一次重新决定来源时清掉。
-static int AevonOwnHeld = 0;
+// 0.4.0 — 这里原本是自建承载的整套状态：`AevonOwnPhase` / `AevonOwnScene` /
+// `AevonOwnBundle` / `AevonOwnIdentity` / `AevonOwnAt` / `AevonOwnNotes` /
+// `AevonOwnHeld`。
+//
+// 自建 scene 在 **0.3.1 就整条下线了**（`openCard` 里那句「⛔ 0.3.1 — 自建
+// scene 整条下线」还在）。生产者 `AevonOwnStart` 随 URL 链一起删掉之后，这一组
+// 变量只剩下读方，永远停在初值。这不是「日志少了一行」，是编译期就能看见的
+// 事实：`clang -Osize` 已经把 `AevonOwnHandOver` 与 `AevonOwnDestroy` 折叠成
+// 两个 `return 0` 桩（0.4.0 的包里两者只差 8 字节），`win: own handed over` /
+// `win: own destroyed` 这两条日志永远打不出来。
+//
+// 所以整组删除。留下来的只有下面这对预热去重 —— `AevonOwnWarm` 还在用，它是
+// 真正有用的那一条（圆盘悬停时先把 App 进程拉起来）。
+//
 // 0.2.59 — 预热去重：同一个 bundle 8 s 内只热一次（来回划圆盘不该连开三条启动链）。
 static char AevonWarmBundle[64] = {0};
 static double AevonWarmAt = 0;
 
-/// 一条现场行，带独立预算。这个工程里每一条现场行都得有自己的计数器：
-/// 跟别人共用一个，就会在几次操作之后静默，而静默和「没发生」长得一样。
-static void AevonOwnLog(NSString *format, ...) {
-    // 40 = 35 条 gate 明细 + 汇总 + 几次调用现场。预算比需要的多留几格：
-    // 这条路一次真机要回答的问题全在这几行里，被自己的预算吃掉是最贵的失败。
-    if (AevonOwnNotes >= 40) return;
-    AevonOwnNotes++;
-    va_list args;
-    va_start(args, format);
-    NSString *line = [[NSString alloc] initWithFormat:format arguments:args];
-    va_end(args);
-    // 这个文件是 MRC（Makefile 里没有 `-fobjc-arc`），`alloc` 出来的东西要自己
-    // 交回去。`AevonLogRaw` 在 Swift 侧第一句就是 `String(cString:)`，取完即复制，
-    // 所以这里 release 之后没有人会再读那段 UTF-8。
-    AevonLogRaw([line UTF8String]);
-    [line release];
-}
+// 0.4.0 — 这里原本是 `AevonOwnLog`（自建承载专用的带预算现场行，40 条）。
+// 它的四个读方全部在下面被删掉的 `AevonOwnState` / `AevonOwnHandOver` /
+// `AevonOwnDestroy` 里，零读方的 static 函数会被 `-Werror -Wunused-function`
+// 直接判死。显示覆盖那一族用的是另一个预算（`AevonOwnDisplayLog`，48 条），
+// 与本函数无关，照旧保留。
 
 // 0.4.0 — 这里原本有一张 `AevonOwnNeeds[]`（RBSProcess / FBProcess 的最小类面，
 // 自建承载「自己把 App 拉起来」那一步用的）和它的 `AevonOwnNeed` 结构。
@@ -515,41 +500,14 @@ static int AevonOwnRefSet(id host, CGSize size, const char *tag) {
 
 
 
-/// 0 = 没在跑 / 1 = 在建 / 2 = 建好了（等取） / 3 = 失败。**不消费状态。**
-///
-/// 拆成「问状态」和「取对象」两个而不是一个带出参的函数，是因为 `id *` 在 Swift
-/// 里会被导入成 `AutoreleasingUnsafeMutablePointer`，那是个每一版 SDK 都可能换
-/// 写法的形状。两个返回值都是标量/对象，没有指针可猜。
-NSInteger AevonOwnState(void) {
-    // 超时自阉。启动事务不回调时 phase 会冻在「在建」，而下一张卡会因此以为
-    // 「已经有一次在跑」直接落到老路 —— 那是个看不见的永久降级，必须自己结束。
-    if (AevonOwnPhase == 1 && AevonOwnAt > 0) {
-        double waited = CFAbsoluteTimeGetCurrent() - AevonOwnAt;
-        if (waited > 6.0) {
-            AevonOwnLog(@"win: own timeout after %.1fs, falling back", waited);
-            AevonOwnPhase = 3;
-        }
-    }
-    return AevonOwnPhase;
-}
-
-/// 取走建好的 scene（phase 回到 idle）。没有就返回 nil。
-id AevonOwnFetch(void) {
-    if (AevonOwnPhase != 2 || AevonOwnScene == nil) return nil;
-    id scene = AevonOwnScene;
-    // 一个 scene 只交给一张卡：第二次 `fetch` 拿到的是「没有」，不是上一次那张。
-    AevonOwnScene = nil;
-    AevonOwnPhase = 0;
-    // 从这一刻起，屏幕上那张卡的 scene 归我们管 —— 关卡要销毁它。
-    AevonOwnHeld = 1;
-    return scene;
-}
-
-/// 这一次卡片**没有**用自建的 scene（复用了系统那个，或者走了老路）。
-/// 由 `openCard` 在决定来源之后调一次，否则上一次的「持有」会留到下一次关卡。
-void AevonOwnClear(void) {
-    AevonOwnHeld = 0;
-}
+// 0.4.0 — 这里原本是自建承载的「问状态 / 取对象 / 清账」三个入口：
+//   `AevonOwnState`  0 idle / 1 building / 2 ready / 3 failed
+//   `AevonOwnFetch`  取走建好的 scene
+//   `AevonOwnClear`  清掉「这张卡的 scene 是我们建的」那一笔账
+// 自建 scene 在 0.3.1 下线之后没人再写这些状态，三个函数分别恒答 0 / nil /
+// 什么都不做。Swift 侧对它们的三处读方（`openCard` 与 `pollForScene` 里的
+// `ownState == 2` / `ownState == 3` 两个分支、以及 `owned` 判定）在这一版
+// 一并删掉，行为一个字都不变 —— 那两个分支本来就永远进不去。
 
 // 0.2.59 — 前向声明：真身在分流那一段（`AevonOpenDecide` 上面），预热要用它。
 static BOOL AevonWindowBlacklisted(const char *bundle);
@@ -563,16 +521,16 @@ static BOOL AevonWindowBlacklisted(const char *bundle);
 /// 在划圆盘**的时候去付：悬停 0.18 s 就开始拉进程，松手选中时进程往往已经在跑，
 /// `own start` 的等待就只剩建 scene 那一小截。
 ///
-/// 与 `AevonOwnStart` 的关系：这条**完全不碰** `AevonOwnPhase / AevonOwnScene`。
-/// 它只做启动事务，completion 里什么都不建 —— 这样就算预热之后用户没选这个 App，
-/// 也不会留下一个「有 scene 没人取」的孤儿把下一次打开顶掉。
+/// 与自建承载的关系：那条路在 0.3.1 就整条下线了（`AevonOwnStart` 已删），
+/// 所以这条现在是**唯一**会把 App 进程拉起来的旁路。它只做启动事务，
+/// completion 里什么都不建 —— 就算预热之后用户没选这个 App，也不会留下任何
+/// 需要收尾的东西。
 ///
 /// 闸（少一条都会变成为难用户）：
 ///   · 总闸 `notify.off` 在；
 ///   · 黑名单里的 App 不预热（那是「别碰我的路」）；
 ///   · 进程已经在跑 ⇒ 预热没有意义，直接返回；
-///   · 同一个 bundle 8 s 内只热一次（来回划不会连开三次）；
-///   · `AevonOwnPhase` 不是 idle 时不动（另一条启动链正在跑，别开第二条）。
+///   · 同一个 bundle 8 s 内只热一次（来回划不会连开三次）。
 NSInteger AevonOwnWarm(NSString *bundleID) {
     if (![bundleID isKindOfClass:[NSString class]] || bundleID.length < 3) return 0;
     if (![NSThread isMainThread]) {
@@ -586,7 +544,6 @@ NSInteger AevonOwnWarm(NSString *bundleID) {
     const char *raw = [bundleID UTF8String];
     if (raw == NULL) return 0;
     if (AevonWindowBlacklisted(raw)) return 0;
-    if (AevonOwnPhase == 1 || AevonOwnPhase == 2) return 0;
     // `> 0` 才是「在跑」；`-1/-2` 是「查不到」，那种情况预热正好有用。
     if (AevonAppPid(bundleID) > 0) return 0;
     double now = CFAbsoluteTimeGetCurrent();
@@ -665,15 +622,9 @@ NSInteger AevonOwnWarm(NSString *bundleID) {
     }
 }
 
-/// 这张卡上的 scene 是不是我们建的。关卡的动作完全不同：
-/// 借来的 scene 要「推回后台」，自建的要**销毁**（`destroyScene:`），
-/// 否则它会带着一个 presenter 一直挂在 SpringBoard 里，下一次打开同一个 App
-/// 就会跟系统自己那个撞名。
-NSInteger AevonOwnIsOwned(NSString *bundleID) {
-    if (!AevonOwnHeld) return 0;
-    if (bundleID.length == 0) return 0;
-    return [bundleID isEqualToString:AevonOwnBundle] ? 1 : 0;
-}
+// 0.4.0 — 这里原本是 `AevonOwnIsOwned`（「这张卡的 scene 是不是我们自己建的」）。
+// 自建 scene 0.3.1 下线之后它恒答 0：关卡于是永远走「借来的 scene 要推回后台」
+// 那一支。Swift 侧 `owned` 判定在这一版一并化简，函数删除。
 
 /// 0.2.25 — 「回桌面」的三级阶梯。
 ///
@@ -850,50 +801,13 @@ int AevonSpringboardActive(void) {
     }
 }
 
-/// 0.2.38 — 「把自建 scene 原样交给系统」，**不销毁**。
-///
-/// 0.2.37 的真机把这条路拍死了：用户从卡片里点桌面图标全屏打开**系统设置**时，
-/// 卡片让路 → `AevonOwnDestroy` 在系统正要把这张 scene 拉成全屏的那一拍把它
-/// destroy 掉，设置直接闪退；其它 App 没那么脆，但也常常要重新建 scene，中间
-/// 那一段就是「全屏底部黑」。
-/// 让路的语义是**松手**，不是**拆掉**：清掉我们这边的账（`AevonOwnHeld`），
-/// scene 留给系统接着用 —— 它的 identity 就是 `sceneID:<bundle>-default`，
-/// 正是系统要的那一张。
-NSInteger AevonOwnHandOver(NSString *bundleID) {
-    if (!AevonOwnHeld) return 0;
-    if (bundleID.length == 0) return 0;
-    if (![bundleID isEqualToString:AevonOwnBundle]) return 0;
-    AevonOwnPhase = 0;
-    AevonOwnScene = nil;
-    AevonOwnHeld = 0;
-    AevonOwnLog(@"win: own handed over %@", AevonOwnIdentity != nil ? AevonOwnIdentity : @"-");
-    return 1;
-}
-
-/// 销毁自建 scene。返回 1 表示这一句发出去了。
-NSInteger AevonOwnDestroy(NSString *bundleID) {
-    if (bundleID.length == 0 || AevonOwnIdentity == nil) return 0;
-    if (![bundleID isEqualToString:AevonOwnBundle]) return 0;
-    Class mgrCls = NSClassFromString(@"FBSceneManager");
-    if (mgrCls == Nil) return 0;
-    @try {
-        id manager = ((id (*)(id, SEL))objc_msgSend)(
-            mgrCls, sel_registerName("sharedInstance"));
-        if (manager == nil) return 0;
-        ((void (*)(id, SEL, id, id))objc_msgSend)(
-            manager, sel_registerName("destroyScene:withTransitionContext:"),
-            AevonOwnIdentity, nil);
-        AevonOwnLog(@"win: own destroyed %@", AevonOwnIdentity);
-        AevonOwnPhase = 0;
-        AevonOwnScene = nil;
-        AevonOwnHeld = 0;
-        return 1;
-    } @catch (NSException *e) {
-        AevonOwnLog(@"win: own destroy threw %s",
-                    e.reason != nil ? [e.reason UTF8String] : "-");
-        return 0;
-    }
-}
+// 0.4.0 — 这里原本是自建承载的两个收尾动作：
+//   `AevonOwnHandOver`  让路时把自建 scene 原样交给系统
+//   `AevonOwnDestroy`   关卡时 `destroyScene:` 掉自建 scene
+// 两者都以 `AevonOwnHeld` / `AevonOwnIdentity` 为门，而这两个变量自 0.3.1
+// 起没有任何写入点 —— 编译器在 0.4.0 的包里已经把它们折叠成两个 `return 0`
+// 桩（符号地址相差 8 字节）。Swift 侧 `handover` 那一支随之化简成
+// `AevonPushBackground(scene)`，这两条日志永远不会再有输出。
 
 // MARK: - Reading the real method table (0.0.28)
 
@@ -1290,19 +1204,12 @@ static long AevonPushWrote = 0;
 /// 1 = pushed through the scene's own update method, 2 = through the
 /// manager's amendment entry, 0 = no door opened.
 static long AevonPushPath = 0;
-/// 0.2.57 — 上一次 `AevonPushSceneFrame` 返回 0 的**原因**。
-///
-/// Aevon(198) 里这条函数有五个不同的 0：键盘每一拍都是 `push=0`、补推四次
-/// 全 `0`，最后一行只写 `kb push late gave up door=0` —— 从这行读不出是「已经
-/// 等于目标，不用写」还是「被钩子挡了，五次都没进去」。前者应当立刻收手，
-/// 后者应当继续等，而当时的代码分不开，只能两者都按同一个次数硬扛。
-///
-/// 现在每个返回点先落一格原因：
-///   0 写成了            1 scene 是 nil        2 不在主线程
-///   3 在钩子里（深度）   4 上一次推送还没收尾  5 这一格没登记
-///   6 scene 没有 settings 7 已经是目标，不必写 8 写了但没有门
-static volatile int AevonPushWhy = 0;
-int AevonPushSceneFrameWhy(void) { return AevonPushWhy; }
+// 0.4.0 — 这里原本是 `AevonPushWhy`（上一次 `AevonPushSceneFrame` 返回 0 的
+// 原因码，0~8 九格）和它的唯一读方 `AevonPushSceneFrameWhy`。
+// 那个读方没有任何调用方，而 `volatile` 让 8 处写点一个都省不掉 —— 读方删掉
+// 之后它们就是八条纯浪费的 store。变量、写点、读方一起删；
+// `AevonPushSceneFrame` 的返回值（门号）本来就够判，「为什么是 0」这件事
+// 现在由调用方按 `door=0` 与回读读数自己分。
 static CFAbsoluteTime AevonLastPush = 0;
 /// Re-entry is not theoretical: the amendment entry calls back into the
 /// deactivation setter this file hooks, and that hook pushes again.
@@ -1825,19 +1732,12 @@ static BOOL AevonWriteFrame(id settings, int slot) {
 ///
 /// 返回用过的门（3 = transition，1 = 普通），0 = 没写成或没有门。
 NSInteger AevonPushSceneFrame(id scene) {
-    // 0.2.57 — 每个返回点先落一格原因，见 `AevonPushWhy` 那张表。
-    AevonPushWhy = 1;
     if (scene == nil) return 0;
-    AevonPushWhy = 2;
     if (![NSThread isMainThread]) return 0;
-    AevonPushWhy = 3;
     if (AevonHookDepth > 0) return 0;
-    AevonPushWhy = 4;
     if (AevonInPush) return 0;
-    AevonPushWhy = 5;
     int slot = AevonSlotOfScene(scene);
     if (slot < 0 || !(AevonFrameMask & (1 << slot))) return 0;
-    AevonPushWhy = 6;
     SEL settingsSel = sel_registerName("settings");
     if (![scene respondsToSelector:settingsSel]) return 0;
     id current = ((id (*)(id, SEL))objc_msgSend)(scene, settingsSel);
@@ -1866,12 +1766,7 @@ NSInteger AevonPushSceneFrame(id scene) {
     AevonInPush = 0;
     // 只有屏幕、没有 frame 的那一次也算「写成了」：它是 staged 之后的那一次
     // display 纠正，调用方（`pushSceneLater` / 守护循环）要看见它真的落了地。
-    //
-    // 0.2.57 — `7` 与 `8` 是两种完全不同的「0」：`7` 说明 frame 与屏幕都已经
-    // 等于目标（一次 settings 也没花），调用方应当立刻收手；`8` 是值写进了
-    // candidate 却没有门把它交出去，下一次还得再试。分不开这两个数，补推就
-    // 只能按次数硬扛 —— Aevon(198) 里四次全撞在同一格上。
-    AevonPushWhy = (wrote || screen) ? (path != 0 ? 0 : 8) : 7;
+    // 两边都是假就是「一次 settings 也没花」—— 返回 0，调用方应当立刻收手。
     return (wrote || screen) ? path : 0;
 }
 
@@ -2694,7 +2589,8 @@ static long AevonWakeTried = 0;
 static long AevonWakeWrote = 0;
 static CFAbsoluteTime AevonLastWake = 0;
 
-long AevonWakeCount(void) { return AevonWakeWrote; }
+// 0.4.0 — `AevonWakeCount` 在这个包里没有任何读方（它只是把 `AevonWakeWrote`
+// 交出去给日志用）。计数器本身留着：`AevonWakeReset` 与那条写入路径还在用。
 
 /// 画面回来的那一刻把额度还回去。
 ///
@@ -3820,161 +3716,20 @@ NSInteger AevonDrainAppLog(NSString *bundleID, long cap) {
 
 
 
-/// 0.1.99 — 同上。清通知那两件（取 dispatcher、打能力地图）定义在下面几千行处，
-/// 而开机取证要在这里排期。
-
-
-// MARK: - 0.1.87 激活入口观察器（只读，四方法同形）
+// 0.4.0 — 这里原本是两段只读取证加一套分流熔断，全部随 URL 链与通知接管删除：
 //
-// 0.1.86 的真机普查（Aevon(154)，19:27:53）把真名一次答完了：
+//   · 0.1.87 激活入口观察器 —— 四条 `SBMainWorkspace` 打开请求钩子的空壳替身，
+//     连同它的形状宏 `AEVON_OPEN_SHAPE`（`v56@0:8@16@24@32@40@?48`）。那个宏在
+//     这一版已经**零读方**，字面量被 dead_strip 剥掉，审计报「串不在包里」的
+//     就是它。四条替身当年只做「读参数 → 原样转发 → 落盘」，没有功能。
+//   · 0.1.88 通知点击分流 —— 用户在这一版明确选择「通知 → 浮窗一并删掉」。
+//   · `AEVON_DIVERT_*` / `AEVON_LOOP_*` 与 `AevonLoopSlot` —— 分流熔断（全局
+//     60 次/60 s、同 App 3 s/6 次）。没有分流就没有要熔断的东西，五个宏加一个
+//     结构全是零读方。
 //
-//   surf: chain SBMainWorkspace > SBWorkspace > NSObject
-//   surf: SBMainWorkspace~activ n=16/170
-//     _handleOpenApplicationRequest:options:activationSettings:origin:withResult:              {v56@0:8@16@24@32@40@?48}
-//     _handleUntrustedOpenRequestForApplication:options:...                                     {v56@0:8@16@24@32@40@?48}
-//     _handleTrustedOpenRequestForApplication:options:...                                       {v56@0:8@16@24@32@40@?48}
-//     _handleUserActionRequest:options:activationSettings:origin:withResult:                    {v56@0:8@16@24@32@40@?48}
-//
-// ⛔ 0.1.87 当年在这里写的是「母本那个 `_activateBundleID:...` 确实不存在」。
-//    **这条结论是错的，0.2.87 推翻。**
-//
-// Aevon(219) 的全类普查（99452 个类 × 自有方法表）读到的是：
-//
-//   carrier: own _activateBundleID:requestID:isTrusted:options:source:originalSource:withResult:
-//            n=1 | FBSystemService v68@0:8@16@24B32@36@44@52@?60
-//
-// 它**存在**，只是不在 `SBMainWorkspace` 上，而在 **`FBSystemService`** 上；
-// 参数不是 5 个而是 7 个：bundleID(@16) / requestID(@24) / isTrusted(B32) /
-// **options(@36)** / source(@44) / originalSource(@52) / withResult(@?60)。
-// 母本二进制里这条命中 2 次，`FBSystemService` 字符串命中 14 次，还有一个
-// `FBSystemServiceHook` 钩子类 —— 三处独立证据指向同一格。
-//
-// 当年只在 SBWorkspace 那一支里找，找到的是另一族「按信任分叉」的入口，于是把
-// 「我这一支没有」误记成「这台机器没有」。这正是「探针找不到 ≠ 不存在」的样本。
-//
-// 两个层要分开：`SBMainWorkspace` 这四条是「SpringBoard 收到打开请求之后怎么办」，
-// `FBSystemService` 那条是「FrontBoard 怎么把一个 App 激活起来」。
-// **URL 装在后者的 options 里**，这就是母版从不自己投 URL 的原因 —— 系统会投。
-//
-// 为什么四条一起装：现在还说不准点通知走哪一条。`_handleOpenApplicationRequest:` 像
-// 总入口，trusted / untrusted 像按信任分叉，`_handleUserActionRequest:` 像「用户动作」
-// （URL 与通知回应都属于用户动作）。分开装要装四次机，而四条形状相同、替身相同，
-// 一次装四个、每条各写一行命中，一份日志就能答「到底走哪条」。
-//
-// 安全设计这次比 0.1.85 更硬，因为名字不是猜的：
-//   闸一 · 存在性 四条逐个查，缺哪条记哪条，不影响其余；
-//   闸二 · 形状   **逐字节等于** `v56@0:8@16@24@32@40@?48` 才装。这一版没有任何 ABI
-//                 推算：字符串不等就是不装，并把真实编码写进日志，下一版按它改；
-//   闸三 · 归属   `class_copyMethodList` 确认是 SBMainWorkspace 自己实现的；
-//   闸四 · 闩     Swift 侧的 `notify.armed`（180 秒）；
-//   闸五 · 预算   四条合计 32 行、每条 10 行，用满就闭嘴（钩子留着，不再取证）；
-//   闸六 · 延迟   装载后 3 秒。
-// 替身只做三件事：读一遍参数 → 原样转发 → 异步落盘。不改参数、不拦调用、不改返回值。
-//
-// 判据一句话：`notify: hit op=<哪条>` 的 op 就是分支名；b / src / act / url 就是母本
-// 当年那三个字段在这台机器上的真值；req / opt / set / org 是四个参数的真实类名 ——
-// 它们决定下一版从哪个对象里取「这是不是一次通知点击」。
-// 四条一次都不命中，才轮到通知栈（`NCNotificationDispatcher -destination:executeAction:
-// forNotificationRequest:...`，0.1.86 已确认存在）。
-
-/// 四条共用的参数编码，逐字取自真机普查。写成宏是因为它同时在两道闸（比较）和
-/// 日志（判据）里出现 —— 三处必须逐字一致。
-#define AEVON_OPEN_SHAPE "v56@0:8@16@24@32@40@?48"
-
-
-
-
-/// 原实现。**只在换 IMP 的前一行赋值**，赋不上就不换 —— 一个拿不到原实现的
-/// 替身会把整条 App 激活吞掉，那不是「观察」，是让手机打不开应用。
-
-/// 注册时的 SEL 地址。替身靠它反查「这一拍是四条里的哪条」——比在热路径上
-/// `sel_getName` 再比字符串便宜得多。
-
-
-/// `options` 的键名只在前三拍打。母本用的是 `__PayloadOptions` / `__Actions` 两个
-/// 私有键，而它们出自 iOS 15/16 —— 键名一变，字段就全是 nil，而那与「没有通知
-/// 点击」在日志里长得一模一样。这一行是唯一能把两者分开的东西。
-
-// MARK: - 0.1.88 分流：通知点击不再全屏打开
-//
-// 0.1.87 的真机日志（Aevon(155)，19:37:47）把三件事一次答完了：
-//
-//   notify: hit op=open    b=- src=- act=#UINotificationResponseAction n=1 url=- req=com.tencent.mqq …
-//   notify: hit op=open    … keys=__Actions,__PromptUnlockDevice,__LaunchOrigin,__LaunchImage,__UnlockDevice
-//   notify: hit op=trusted b=- src=- act=#UINotificationResponseAction n=1 url=- req=com.tencent.mqq …
-//
-//   ① 点通知确实走 `_handleOpenApplicationRequest:`，再进 `_handleTrustedOpenRequestForApplication:`；
-//   ② `act=#UINotificationResponseAction` 就是「这是通知点击」的判据 —— 同一天从
-//      sharingd 分享面板打开 Sileo 也是这两条，但 `act=- n=0`，两者在日志里分得开；
-//   ③ `req` **本身就是 bundle id 字符串**（`com.tencent.mqq`），不是带 `application`
-//      的对象 —— 0.1.87 的 `b=-` 就是按对象取值取空了，不是没有值。
-//
-// 有了这三条，「通知 → 浮窗」的识别部分不需要再取证。剩下的是动作：SpringBoard
-// 收到这个请求会自己把 App 全屏推上前台，所以要么跟着它走，要么**不交给它**。
-// 这一版选后者 —— 和母本同一条思路（它 hook 的也是这一层，接管之后自己排布局），
-// 只是 Aevon 的布局早就有了（`openCard` / `FloatHost`），不必再写一套。
-//
-// 于是替身第一次有了「不原样转发」的分支。它被四道闸夹住：
-//
-//   闸一 · 开关      `notify.off` 在 ⇒ 一个字节都不改，和 0.1.87 完全一样；
-//   闸二 · 判据      `__Actions.firstObject` 的类名必须含 `NotificationResponseAction`。
-//                    分享面板、URL、点图标都不含，一律照旧全屏；
-//   闸三 · 目标      bundle 必须是从 `request` 直接取到的非空串，且不是 SpringBoard 自己。
-//
-// 0.2.1 — 原来的「闸四 · 兜底」整段删掉了：吞掉之后 2.5 秒查一次卡片、没起来就把原
-// 实现补调一次。Aevon(169) 证明它会**自己喂自己** —— 补调会让原实现再走一遍同样被
-// 接管的入口，于是又分流、又建卡、又失败、又补调，每轮还带一次 10 秒整的同步 XPC。
-// 母版 Stheno 没有这一条：它只在「失败/排除表命中」时回落一次全屏，不回灌原实现。
-//
-// 现在最坏的结果是「卡片没建起来，这一下没有反应」，而不是「整机卡住等它自己恢复」。
-// 全屏兜底只剩 `openCard` 那条 `ring: card route declined`，一次点击最多一次。
-
-/// 上一次分流的时刻与目标。同一次点击会连着走 open → trusted 两条，第一条被吞掉
-/// 之后第二条通常不会再来（链条在替身里就断了）；真来了也不能再开一次卡片。
-
-/// 分流频率上限。真机上「点了通知却什么都没有」是最难受的失败，所以宁可少分几次。
-///
-/// 0.1.93 — 这里原来是「**一次开机**最多 24 次」。Aevon(161) 把它照出来了：
-/// 十二小时里 n 一路加到最后一次 `n=23`（12:07:08），再点一条就是第 24 次，
-/// 之后整台机器上所有通知、所有分享都会走 `why=cap` 原样转发 —— 浮窗再也打不开，
-/// 而用户看不出任何原因，只能重启。上限的用意是「万一分流逻辑坏了，别一直吞」，
-/// 而「坏」是**当下**的事，不是「今天失败过 24 次」的事。
-///
-/// 所以换成滑动窗口：24 次 / 10 分钟。窗口一过自动归零，不需要重启。
-///
-/// 0.2.77 — **这个形状本身错了，24 次也是错的。**
-///
-/// Aevon(211) 的读数：11:57:05 起三分钟里用户正常开了 24 次卡 —— Safari 四次、
-/// Sileo 一次、QQ 分享一次、微信登录两次、QQ 登录两次、TCL 登录两次 ——
-/// 12:00:17 走到支付那一步正好是第 25 次，于是
-///
-///     notify: pass b=- op=untrusted why=cap src=com.chinaunicom.mobilebusiness
-///     notify: pass b=- op=user      why=cap src=com.alipay.iphoneclient
-///
-/// 联通与支付宝整屏，之后每一次打开都 `why=cap`，要等窗口滑过去才恢复。
-/// **支付小窗是被自己的保险丝掐掉的**，不是支付这条链有 bug。
-///
-/// 保险丝要拦的从来不是「多」，是「同一条反复」：我们的分流自己又触发一次打开，
-/// 再被自己分流。那件事的形状是**同一个 bundle 在几百毫秒里连着来**；而十分钟里
-/// 来了二十几个**不同**的 App，那是一台手机的正常用法，不是故障。
-///
-/// 所以换两把尺：
-///   · 每个 bundle 一条 3 秒 / 6 次的连击计数 —— 只有这一种算「坏了」；
-///   · 全局上限抬到 60 次 / 60 秒 —— 真跑飞了一秒一次也够撞上，正常用撞不到。
-#define AEVON_DIVERT_MAX 60
-#define AEVON_DIVERT_WINDOW 60.0
-
-#define AEVON_LOOP_SLOTS 4
-#define AEVON_LOOP_MAX 6
-#define AEVON_LOOP_WINDOW 3.0
-
-typedef struct {
-    char bundle[56];
-    double at;
-    int streak;
-} AevonLoopSlot;
-
-
+// 这些注释里唯一还有价值的历史结论（`_activateBundleID:…withResult:` 在
+// `FBSystemService` 上而不在 `SBMainWorkspace`、编码 `v68@0:8@16@24B32@36@44@52@?60`）
+// 已经记进工作区记忆，不在源码里留重复的一份。
 
 // MARK: - 浮窗黑名单（0.2.4）
 

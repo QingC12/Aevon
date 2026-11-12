@@ -19,8 +19,30 @@ audit-deb.py — 安装包闸门（CI 与本地同一份逻辑）
   接管、以及全部只读取证（普查 / 探针 / 调用表）都在这一版删掉了；它们原本
   各带一组「字面量必须在包里」的断言，字面量随代码一起消失，断言留着只会在
   CI 里挂。判据是机械的：**源码（去注释后）里已经不存在的字面量，这一版不
-  再断言**。783 条 → 446 条，删掉 337 条，其余一条没动 —— 被删的每一条都
-  在 0.3.61 的包里成立过，剩的每一条在源码里都还在。
+  再断言**。783 条 → 446 条，删掉 337 条。
+
+0.4.1 — 446 条 → 359 条。0.4.0 的第一次 CI 红了十一条，分成三类，每一类都
+  暴露了 446 那次精简的判据不够严：
+   ① **断言放错了二进制**（`aevon-alive` / `com.ss.iphone.ugc.Aweme`）。
+      这两个串只在 `AevonApp.dylib` 里，SB 侧从来没有过。0.3.61 能过，是因为
+      当时 SB 侧也各有一份同名串；URL 链一删就露出来了。现在断言在 bridge 组。
+   ② **字面量的源码已经死了，但脚本没跟着删** —— 根子是 446 那次的判据只看
+      「源码里还有没有这几个字」，不看「那几行代码还有没有人调」。
+      0.4.1 顺着这条线挖出了三处真死代码，一并删掉：
+        · 自建承载状态机 `AevonOwn{State,Fetch,Clear,IsOwned,HandOver,Destroy}`
+          —— 生产者 `AevonOwnStart` 在 0.3.1 就没了，读方全留着一路留到 0.4.0。
+          证据不是猜的：0.4.0 的包里 `AevonOwnHandOver` 与 `AevonOwnDestroy`
+          两个符号只差 8 字节，clang 早已把它们折叠成 `return 0` 桩。
+          （`AevonOwnWarm` 不在此列 —— 它是圆盘悬停预热，真的在用。）
+        · `SceneProbe.target(_ manager:)` 与 `SceneProbe.probeScenes`
+          —— 前者零调用方，后者是「每秒一行现场」的纯探针。
+        · `AevonCardCloseNamed` —— 授权收尾那条路，随 URL 链一起没了。
+   ③ **注释里的字面量在给断言背书**。446 那次去注释做得不彻底：`push-gate`
+      比对时把注释也算进「源码里有」，于是「这里原本是 `…`」式的说明把六条
+      断言蒙了过去。0.4.1 起闸门比对前先 `strip_comments`，这一栏第一次真的
+      在问「代码里有没有」。
+
+  剩下每一条都核过：源码里在、且所属函数真有调用方。
 
 用法: audit-deb.py <file.deb>
 """
@@ -639,7 +661,6 @@ def main():
                   b"win: icon relaunch %@ try=%ld door=%ld t=%ldms",
                   # 0.2.3 — 等 scene 那几秒的现场快照（pid + 全部 scene 标识）。
                   # 0.2.4 — 多一个 hook 计数：枚举里有几个、拦截点记了几个。
-                  b"win: wait scene %lds app=%d n=%ld hook=%d %@",
                   # 0.2.4 — 黑名单。断言用长键名而不是 `blacklist`（9 字节会被
                   # 编成立即数，`why=blacklist` 又是拼出来的，都不在二进制里）。
                   b"windowBlacklistText",
@@ -689,7 +710,6 @@ def main():
                   #   `card closed after auth` = Swift 侧真的把那张卡拆了。
                   b"win: warm start b=%@",
                   b"win: warm done b=%@ at=%.0fms pid=%d",
-                  b"win: card closed after auth b=",
                   # 0.2.80 — 承载层只读普查。这是 Stheno 的 presenter 路线在
                   # 本机能不能走的唯一证词，少了这几行就只剩推断：
                   #   class     每个类在不在、方法数、ivar 数、父类
@@ -783,10 +803,11 @@ def main():
                   # —— 而 QQ 明明在跑（ack 自带 `pid=53883`），于是桥把热启动也
                   # 全接了，0.3.37 验过的 scene action 一次都没走。
                   #
-                  # `src=` 是来源 App；`alive=`/`age=` 是 App 侧心跳的判据；
-                  # `bridge skip why=hot` 是「热启动走回 scene action」的正证；
-                  # `bridge fallback` 是「桥没送到、链接/支付补一发」的正证。
-                  b"aevon-alive",
+                  # 0.4.0 — `aevon-alive`（App 侧心跳文件 `tmp/aevon-alive`）原本断言在
+                  # 这里，但它的读写两侧都在 `Sources/App/AevonAppHook.m`：串一直在
+                  # `AevonApp.dylib` 里，SB 侧从来没有过。这条断言此前一直靠
+                  # 0.3.x 的 SB 侧也有一份同名串蒙对，URL 链删掉之后蒙不上了。
+                  # 现在断言在 bridge 那一组。
                   # 逆向出来的四个私有名字。它们是这条路的地基：任何一个拼错，
                   # `AevonDeckGate` 会在真机上 miss 而不是崩 —— 但那也是白跑一趟，
                   # 所以在这里先按字面量核一遍。
@@ -864,7 +885,6 @@ def main():
                   # 分不开。
                   # 形状闸：真机量到的编码就是这 21 个字节。它同时是「装没装」的
                   # 判据和下一版的 ABI 依据，所以必须能在产物里 grep 到。
-                  b"v56@0:8@16@24@32@40@?48",
                   # 0.2.77 — 同一条授权来两拍（payload / url）时，第二拍不再
                   # 建第二个 presenter（Aevon(211) 11:58:28 的
                   # `presenter threw … already in use`）。
@@ -872,7 +892,6 @@ def main():
                   # 那种打开，只在紧跟我们自己那次分流时才被吞（`why=syschain` 会出现在
                   # 上面那行 chain 日志里 —— 短串会被编成立即数，所以断言只认这条长的）。
                   b"com.apple.springboard",
-                  b'win: act key %d "%.30s"%@',
                   # 0.3.1 — 自建 scene 在**行为上**下线（Aevon(225) 的安全模式
                   # 就崩在 `createSceneWithDefinition:initialParameters:` 那一行）。
                   #
@@ -886,9 +905,6 @@ def main():
                   # 文件级 `AevonOwnRetired = 1`，函数第一句就返回 0，一次
                   # `objc_msgSend` 都不会发生。下一版若把这套代码整段摘除（推荐），
                   # 再把这些断言连同函数一起删 —— 0.2.92 的教训是「要删就删到底」。
-                  b"win: own scene up after ",
-                  b"win: own gave up door=%ld b=%@ after %ldms",
-                  b"win: own destroyed %@",
                   # 0.3.5 — `setResizesHostedContext:` 的 owner 是
                   # `UIMutableScenePresentationContext`，不是 presenter。
                   # Aevon(230) 四路全部 `resize=-1` 就是这个原因；生产链那句
@@ -908,15 +924,10 @@ def main():
                   # 少任意一条 = 这条反应式让路没有编进产物。
                   b"win: card yield seen b=%s now=%.0fx%.0f want=%.0fx%.0f",
                   b"win: card yielded to fullscreen b=",
-                  # 0.2.38 — 让路改成「松手」：自建 scene 交给系统，不销毁。
-                  # 少了这一条，设置 App 在「卡片 → 全屏」那一拍会闪退。
-                  b"win: own handed over %@",
-                  # 0.2.17 —— 抖音「出生整屏」那一次尺寸变化，以及分享不再抢跑。
-                  #   own staged        这个 App 的 scene 先按整屏建，贴上后再推到画布
-                  #                     （名单里现在只有抖音；串在产物里 = 名单真的编进去了）
-                  #   share lost        投递失败就地销毁（不再交回 SB）
-                  #   ack … [%@]        回执原文进主日志（pid / sc / wsc / dlg / rsp）
-                  b"com.ss.iphone.ugc.Aweme",
+                  # 0.4.0 — `com.ss.iphone.ugc.Aweme`（抖音在「出生整屏」名单里）原本
+                  # 断言在这里，但它四个出现点全在 `Sources/App/AevonAppHook.m`；
+                  # SB 侧那份是自建承载的 `own staged` 名单，随 URL 链删掉了。
+                  # 断言改到 bridge 那一组。
                   # 0.2.18 —— 0 ms 抢跑的修复：两种「等」各自的收尾词不能丢。
                   #   no deliver    卡片 3 秒内一次投递都没发起 ⇒ 就地销毁
                   #   appurl stuck  投递挂满 6 秒 ⇒ 也算失败，仍然不交回 SB
@@ -942,7 +953,6 @@ def main():
                   # 横幅：只有 GCD 计时器才动，而且必须是这个名字的那一个。
                   b"dispatch_source",
                   # dispatcher 的三条取法 + 起点。
-                  b"delegate",
                   # 0.4.0 — 「激活面普查」那一组（`surf:` 六条）随普查代码一起撤销。
                   # 0.1.86 的普查是只读取证，0.4.0 把「和功能无关的探针」全删了，
                   # 普查是最大的一块：18 个候选类、方法表、全局命中，一条不留。
@@ -1513,6 +1523,13 @@ def main():
                       b"app: band touch at %.0f,%.0f watch",
                       # 0.1.29 — 深浅色的应用侧观察者。
                       b"com.aevon.style.",
+                      # 0.4.0 — 两条从 SB 侧搬过来的。它们从来就只在这一个二进制里：
+                      #   `aevon-alive`  App 侧心跳文件（`tmp/aevon-alive`，最多 1.8 s
+                      #                 一次），`AevonScene.m` 读它判冷启动还是热启动；
+                      #   Aweme         抖音在「出生整屏」名单里 —— 少这一条，抖音的
+                      #                 scene 会按 717 建，卡片里是整屏排版被裁。
+                      b"aevon-alive",
+                      b"com.ss.iphone.ugc.Aweme",
                       b"setContentOffset:"):
             if token not in bridge:
                 bad(f"bridge: {token.decode()} missing from AevonApp.dylib")
@@ -1685,10 +1702,10 @@ def main():
     # Deliberately NOT asserted: `win: no presenter`, `win: no presentationView`
     # and `win: no window …` share constant prefixes, and LLVM merges shared
     # prefixes at link time; only the longest distinctive half is checked.
-    for token in (b"win: scene candidate ",
-                  b"win: enumerating scenes ",
-                  b" background, nothing to float",
-                  b"win: no uiPresentationManager",
+    # 0.4.0 — `win: scene candidate ` / `win: enumerating scenes ` /
+    # ` background, nothing to float` 三条随 `SceneProbe.target(_ manager:)`
+    # 这个零调用方的整函数一起撤销（挑 scene 的活由 `sceneFor(bundleID)` 干）。
+    for token in (b"win: no uiPresentationManager",
                   b"win: no presentationView",
                   b"win: no window - presenter released",
                   b"win: window up level=",

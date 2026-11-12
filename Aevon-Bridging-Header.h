@@ -326,41 +326,26 @@ NSInteger AevonLaunchSuspended(id _Nullable application, NSString *_Nullable bun
 /// 真正生效的投递口是 `AevonTctxInjectURL`（createScene 那一拍往 transitionContext
 /// 里装 `UIOpenURLAction`），它在 C 侧内部完成，Swift 不需要知道。
 
-// MARK: - 0.2.13 自建 scene
+// MARK: - 0.2.59 预热
 
-// 这一组是整条链上第一次「scene 不是系统给的」。路线来自开源母本
-// FrontBoardAppLauncher，每一样东西都先问再说（`AevonOwnGate`），整条包在
-// ObjC 的 `@try` 里。四个入口的分工：
-//   AevonOwnGate  只问不调，返回缺多少样（0 = 这条路接得上）
-//   AevonOwnStart 起进程 + 建 scene（异步），返回 0/1/2
-//   AevonOwnState / AevonOwnFetch  轮询那一格：0 没在跑 / 1 在建 / 2 建好了 / 3 失败
-//   AevonOwnDestroy / AevonOwnIsOwned  关卡时走哪一半
+// 0.4.0 — 这一节原本是整条「自建 scene」（0.2.13 起）：
+//   `AevonOwnGate`   只问不调，答「这条路接不接得上」
+//   `AevonOwnStart`  起进程 + 建 scene（异步）
+//   `AevonOwnState` / `AevonOwnFetch`     轮询那一格：0 没在跑 / 1 在建 / 2 好了 / 3 失败
+//   `AevonOwnClear` / `AevonOwnIsOwned`   关卡时走哪一半
+//   `AevonOwnDestroy` / `AevonOwnHandOver` 关卡时的两个收尾动作
+//
+// 那条路是 URL 落点链的一部分，0.3.1 就整条下线。0.4.0 删 URL 链时，建 scene 的
+// 生产者 `AevonOwnStart` 先没了，剩下七个入口只剩读方、恒答 0 / nil（编译器已经把
+// `AevonOwnHandOver` / `AevonOwnDestroy` 折叠成两个 `return 0` 桩）。这一版把七个
+// 入口连同它们在 Swift 侧的八处读方一起删掉，只留下面这一个 —— 它不建 scene，
+// 真的还在用。
 
 /// 0.2.59 — 只把进程拉起来，**不建 scene、不上屏**（圆盘悬停预热）。
-/// 返回 1 = 已开始 / 0 = 不必热（在跑 / 黑名单 / 刚热过 / 另一条链在跑）。
-/// 刻意不碰 `AevonOwnState` 那套状态机：预热没被用上也不会留下孤儿 scene。
+/// 返回 1 = 已开始 / 0 = 不必热（在跑 / 黑名单 / 8 s 内刚热过）。
+/// 调用方在 `Sources/Ring/AevonRingMenu.swift` 里用 `dlsym` 取它 —— 那个文件同时
+/// 编进宿主与设置包，而设置包里没有 `Aevon.dylib`，所以不能静态链接。
 NSInteger AevonOwnWarm(NSString *_Nullable bundleID);
-
-/// 0 = 没在跑 / 1 = 在建 / 2 = 建好了（等取） / 3 = 失败。不消费状态。
-NSInteger AevonOwnState(void);
-
-/// 取走建好的 scene（状态回到 idle）。没有就返回 nil。
-id _Nullable AevonOwnFetch(void);
-
-// MARK: - 0.2.14 分享转发延后
-/// 这一次卡片没有用自建的 scene（复用系统那个 / 走了老路）—— 关卡时不许销毁。
-void AevonOwnClear(void);
-
-/// 1 = 这张卡上的 scene 是自建的（关卡要销毁，不是推回后台）。
-NSInteger AevonOwnIsOwned(NSString *_Nullable bundleID);
-
-/// 销毁自建 scene。返回 1 表示这一句发出去了。
-NSInteger AevonOwnDestroy(NSString *_Nullable bundleID);
-
-/// 0.2.38 — 让路时把自建 scene **原样交给系统**（不销毁）。返回 1 = 账清了。
-/// 0.2.37 在让路时调 `AevonOwnDestroy`，系统正要把这张 scene 拉成全屏，
-/// 设置 App 就是这样闪退的；其它 App 则是「全屏底部黑」。
-NSInteger AevonOwnHandOver(NSString *_Nullable bundleID);
 
 /// 0.2.25 — 回桌面的三级阶梯，一次只调用一级（1 = 硬件 home 键那条、
 /// 2 = 收起主切换器、3 = 切换器 controller 的 home 处理）。`page` 只有第 3 级

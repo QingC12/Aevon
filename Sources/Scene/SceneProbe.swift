@@ -299,7 +299,6 @@ enum SceneProbe {
         // 「下一拍会立刻贴上」。这里直接贴，一个启动请求都不发。
         let alreadyLive = sceneFor(bundleID) != nil
         if alreadyLive {
-            AevonOwnClear()
             Log.write(String(format: "win: own live attach %@ t=%ldms wait=%ldms",
                              bundleID, Int((CFAbsoluteTimeGetCurrent() - ownAt) * 1000),
                              Int((CFAbsoluteTimeGetCurrent() - openedAt) * 1000)))
@@ -538,51 +537,16 @@ enum SceneProbe {
     /// pid=-1 = 进程没起；pid 有值但列表里没有它 = 起了没 scene；列表里有但
     /// 名字不含 bundle id = 我们的匹配口径错了。
     private static func pollForScene(_ bundleID: String, ticks: Int, start: Date,
-                                     probed: Int = 0, retried: Int = 0, fell: Bool = false,
+                                     retried: Int = 0,
                                      homed: Bool = false,
                                      fallback: @escaping (String) -> Void) {
-        // 0.2.13 — 自建 scene 是**第一个**来源，排在系统 scene 之前。
-        //
-        // 三种答案分别走：「2 建好了」接过来 —— 它就是这一版要的东西；
-        // 「1 还在建」继续等，不发任何请求；「3 失败」落回老路，而且只落一次
-        // （`fell` 兜住递归）。失败之后仍然靠下面 `sceneFor` 找系统那个 scene，
-        // 所以这一格最坏的后果只是「慢一点」，不是「没有卡」。
-        let ownState = AevonOwnState()
-        if ownState == 2, let built = AevonOwnFetch() as? NSObject {
-            unmark()
-            let ms = Int(Date().timeIntervalSince(start) * 1000)
-            Log.write("win: own scene up after " + String(ms) + "ms ticks=" + String(ticks))
-            emitNotes(AevonTakeNotes())
-            float(built, bundleID: bundleID)
-            guard FloatHost.mainBundle == bundleID else {
-                AevonHookDisarm(bundleID)
-                if AevonSystemCovered() {
-                    Log.write("win: own card closed by cover, no fallback")
-                    return
-                }
-                Log.write("win: own card did not come up, hold released")
-                fallback("own card did not come up")
-                return
-            }
-            return
-        }
-        var fellOver = fell
-        if ownState == 3, !fellOver {
-            fellOver = true
-            unmark()
-            let door = AevonLaunchSuspended(sharedApplication(), bundleID)
-            Log.write(String(format: "win: own gave up door=%ld b=%@ after %ldms", door,
-                             bundleID, Int(Date().timeIntervalSince(start) * 1000)))
-            if door != 1 {
-                AevonHookDisarm(bundleID)
-                if AevonSystemCovered() {
-                    Log.write("win: own gave up under cover, no fallback")
-                    return
-                }
-                fallback("own failed and suspended door=" + String(door))
-                return
-            }
-        }
+        // 0.4.0 — 这里原本排在系统 scene 之前问一次自建承载：「2 建好了」接过
+        // 它、「3 失败」落一次老路（`AevonLaunchSuspended` 兜底）。
+        // 建 scene 的生产者 `AevonOwnStart` 在 0.3.1 下线、这一版把
+        // `AevonOwnState` / `AevonOwnFetch` 一起删掉，那两种答案都不可达：
+        // 两个分支从来没有进去过。`fell` 这个递归参数只服务于「失败只落一次」，
+        // 分支删掉之后它恒等于 `false`，四代调用点一并去掉。
+        // 现在唯一的来源就是下面那个 `sceneFor(bundleID)`。
         if let scene = sceneFor(bundleID) {
             // 0.2.30 — **先回桌面，再建卡**。这是「全屏黑屏 + 浮窗黑闪」的根因修复。
             //
@@ -609,8 +573,7 @@ enum SceneProbe {
             // 全屏页」才发 Home。`sceneFG`（scene 自己报前台）在这一格用不了 ——
             // 挂起启动出来的 scene 一样答 1，Aevon(257) 的每一次 `deny card` 都被
             // 它带进 Home 分支，那就是用户看到的「卡出现前桌面闪一下」。
-            if !homed, AevonOwnIsOwned(bundleID) == 0,
-               frontSceneBundle() == bundleID {
+            if !homed, frontSceneBundle() == bundleID {
                 unmark()
                 let step = AevonHomeStep(1, nil)
                 Log.write("win: home first " + (step ?? "step nil") + " b=" + bundleID)
@@ -627,8 +590,8 @@ enum SceneProbe {
                     if ((active == 1 || front != 1 || fgNow != 1) && waited >= 10) || waited >= 28 {
                         Log.write(String(format: "win: home first ready waited=%ldms springboard=%ld front=%ld scene_fg=%ld",
                                          waited * 50, Int(active), Int(front), Int(fgNow)))
-                        pollForScene(bundleID, ticks: 0, start: start, probed: probed,
-                                     retried: retried, fell: fellOver, homed: true,
+                        pollForScene(bundleID, ticks: 0, start: start,
+                                     retried: retried, homed: true,
                                      fallback: fallback)
                         return
                     }
@@ -667,13 +630,9 @@ enum SceneProbe {
             }
             return
         }
-        // 0.2.3 — 每秒一行现场（第 0 秒不打，那一拍必然还没有）。
-        let elapsed = Int(Date().timeIntervalSince(start))
-        var seen = probed
-        if elapsed > seen {
-            seen = elapsed
-            probeScenes(bundleID, seconds: elapsed)
-        }
+        // 0.4.0 — 这一段原本是「每秒一行现场」的节流（`probed` / `seen` 两个
+        // 计数器，只服务 `probeScenes`）。探针随本版删除，两个计数器与
+        // `probed:` 这个递归参数一并去掉。
         // 0.2.4 —— 挂起启动不是「叫一次就成」的。
         //
         // 母版取宿主是 `obtainHostViewForBundle:frame:maxAttempts:delay:with169:completion:`
@@ -714,36 +673,19 @@ enum SceneProbe {
         // 这一拍白等的时间；前 30 拍（1.2 s）覆盖了「scene 该出现」的全部窗口。
         let gap: Double = ticks < 30 ? 0.04 : 0.25
         DispatchQueue.main.asyncAfter(deadline: .now() + gap) {
-            pollForScene(bundleID, ticks: ticks + 1, start: start, probed: seen,
-                         retried: again, fell: fellOver, homed: homed, fallback: fallback)
+            pollForScene(bundleID, ticks: ticks + 1, start: start,
+                         retried: again, homed: homed, fallback: fallback)
         }
     }
 
-    /// 0.2.3 — 「等 scene」这条路上的一次现场快照。**只读，只写日志。**
-    ///
-    /// 三个读数回答三个不同的问题，缺一个就分不开失败：
-    /// - `app=`  该 bundle 的进程 pid；`-1` = 进程根本没起（挂起启动被吞掉了）。
-    /// - `n=`    manager 里 scene 的总数。0 说明连桌面都不在（不该发生）。
-    /// - 列表    每条 scene 的标识（去掉 `sceneID:` 前缀，只留前 56 字节）。
-    ///   pid 有值但列表里没有这个 App ⇒ 进程在、scene 没建（挂起启动对这类
-    ///   App 无效）。列表里有但名字不含 bundle id ⇒ `sceneFor` 的匹配口径错。
-    ///
-    /// 每次等待最多 12 行（第 1~12 秒），一行十几个字节的读数，不打程序结构。
-    private static func probeScenes(_ bundleID: String, seconds: Int) {
-        let pid = AevonAppPid(bundleID)
-        var names: [String] = []
-        if let manager = AevonSceneManager() as? NSObject {
-            AevonEnumerateScenes(manager) { scene in
-                guard let scene = scene as? NSObject else { return }
-                let ident = value(of: scene, "identifier").map { String(describing: $0) } ?? "?"
-                let short = ident.replacingOccurrences(of: "sceneID:", with: "")
-                names.append(String(short.prefix(56)))
-            }
-        }
-        let joined = names.prefix(6).joined(separator: "|")
-        Log.write(String(format: "win: wait scene %lds app=%d n=%ld hook=%d %@",
-                         seconds, pid, names.count, AevonSeenCountOf(), joined))
-    }
+    // 0.4.0 — 这里原本是 `probeScenes`：「等 scene」这条路上每秒一行的现场快照
+    // （`win: wait scene %lds app=%d n=%ld hook=%d ...`），最多 12 行。
+    // 纯探针 —— 只读 scene manager、只写日志，不参与任何判定。它的调用点是
+    // `pollForScene` 主循环里 `elapsed > seen` 那一支，随函数一起删。
+    //
+    // 「进程没起 / 起了没 scene / 匹配口径错」这三种失败现在由
+    // `win: launch state cs=%ld layers=%ld seen=%ld held=%ld` 与
+    // `win: listed scene all shell b=` 两行分开，不再需要这条每秒快照。
 
     /// The scene that answers to this bundle id. Matched on the identifier
     /// rather than on the app object: `sceneID:com.x.y-default` is the one
@@ -893,75 +835,14 @@ enum SceneProbe {
         return value == UInt64.max ? "absent" : String(value)
     }
 
-    /// The scene a floating window would host.
-    ///
-    /// 0.0.21 picked 抖音 while Settings was in front, simply because it was the
-    /// first scene that was neither SpringBoard nor Settings. A background scene
-    /// is exactly the case where a presenter has nothing to show, so the choice
-    /// is made by the scene's own settings now, and the fallback says in the log
-    /// that it fell back.
-    private static func target(_ manager: NSObject) -> NSObject? {
-        var front: NSObject?
-        var frontName = "?"
-        var spare: NSObject?
-        var spareName = "?"
-        var seen = 0
-        var listed = 0
-        let visit: (Any?) -> Void = { scene in
-            guard let scene = scene as? NSObject else { return }
-            seen += 1
-            let ident = value(of: scene, "identifier").map { String(describing: $0) } ?? "?"
-            guard ident.hasPrefix("sceneID:"),
-                  !ident.contains("com.apple.springboard"),
-                  !ident.contains("com.apple.Preferences") else { return }
-            listed += 1
-            if spare == nil { spare = scene; spareName = ident }
-
-            // Four independent answers to "is this scene in front". 0.0.22
-            // asked `settings` alone and got -1 back from both spellings —
-            // which is how a background scene came to be hosted: the question
-            // failed, not the scene. The accessibility pair is what FBScene
-            // declares for exactly this question, so it is read first; the
-            // settings readings are kept because a disagreement between the
-            // four is worth seeing in the log rather than averaging away.
-            let running = AevonBoolOf(scene, "accessibilitySceneIsRunningInForeground")
-            let visible = AevonBoolOf(scene, "accessibilitySceneIsForegroundVisible")
-            let settings = value(of: scene, "settings")
-            let foreground = settings.map { AevonBoolOf($0, "isForeground") } ?? -1
-            let plain = settings.map { AevonBoolOf($0, "foreground") } ?? -1
-            if listed <= 6 {
-                Log.write("win: scene candidate " + ident
-                          + " running=" + flag(running)
-                          + " visible=" + flag(visible)
-                          + " fg=" + flag(foreground) + "/" + flag(plain)
-                          + " settings=" + (settings.map { NSStringFromClass(type(of: $0)) } ?? "nil"))
-            }
-            guard front == nil else { return }
-            if running == 1 || visible == 1 || foreground == 1 || plain == 1 {
-                front = scene
-                frontName = ident
-            }
-        }
-        AevonEnumerateScenes(manager, visit)
-        Log.write("win: enumerating scenes " + String(seen) + " apps=" + String(listed))
-        if let scene = front {
-            Log.write("win: target " + frontName + " foreground=yes")
-            return scene
-        }
-        // Aevon(24) made the shape of this case unmistakable: the operator stayed
-        // in Settings, and 6 seconds later Settings was full screen while the
-        // card sat black. A background scene pushes no layers to anybody, so the
-        // card cannot hold a picture no matter what is activated. Falling back to
-        // "the best available scene" only ever produced that black card, so the
-        // run now says so and builds nothing.
-        if spare != nil {
-            Log.write("win: target " + spareName + " is in the background, nothing to float")
-        } else {
-            Log.write("win: no app scene at all this run")
-        }
-        return nil
-    }
-
+    // 0.4.0 — 这里原本是 `target(_ manager:)`：从 scene manager 里挑「前台那个
+    // scene」的整套打分（四条读数 + 前六条候选逐条落日志 + 后台兜底）。
+    //
+    // 它在这个包里**一个调用方都没有** —— 挑 scene 的活早就是 `sceneFor(bundleID)`
+    // 在干（按 bundle 精确匹配，见下），`target` 只在 0.0.2x 的「从一堆 scene 里
+    // 猜哪个能用」那个年代被用过。`-Osize` 每次都把它连同四条日志一起剥掉，审计
+    // 于是报 `win: scene candidate` / `win: enumerating scenes` / `nothing to float`
+    // 三条串不在包里。整函数删除。
 
     private static func float(_ scene: NSObject, bundleID: String? = nil,
                               holdFirst: Bool = false) {
@@ -1074,14 +955,11 @@ enum SceneProbe {
             // `hosted mark cleared for com.apple.DocumentsApp` 出现在关别的窗那一拍）。
             // `bundleID` 是这个 scene 自己的，唯一正确。
             let closingBundle = bundleID ?? hostedBundle ?? ""
-            // 0.2.13 — **这张卡的 scene 是谁的**，决定了关卡要做的事完全相反。
-            //
-            // 借来的（系统的）要继续活在后台，所以要还画布、要 `AevonPushBackground`；
-            // 自建的必须销毁 —— 它没有「后台」这个状态，留着就是一个带着 presenter
-            // 挂在 SpringBoard 里的孤儿，下一次打开同一个 App 还会跟系统自己那个
-            // scene 撞同一个 identity。反过来对自建 scene 推后台也是错的：
-            // `AevonPushBackground` 会把一个「本不该存在」的 scene 交给系统去管理。
-            let owned = !closingBundle.isEmpty && AevonOwnIsOwned(closingBundle) == 1
+            // 0.4.0 — 这里原本有一个 `owned`（「这张卡的 scene 是不是我们自己建的」），
+            // 它决定关卡做哪件事：借来的要 `AevonPushBackground` 推回后台，自建的
+            // 要 `destroyScene:`。自建 scene 在 0.3.1 就下线了，`AevonOwnIsOwned`
+            // 在 0.4.0 删除，它恒为 false —— 下面每一处都只剩「借来的」那一支，
+            // 逐处化简，行为一个字节都不变。
             // 0.2.38 — 「让路」= 松手，不是拆掉。自建 scene 也不再销毁：
             // 0.2.37 在系统正要把这张 scene 拉成全屏的那一拍 destroy 它，
             // 设置 App 直接闪退，其它 App 常常变成「全屏底部黑」。
@@ -1101,13 +979,13 @@ enum SceneProbe {
             // 用户要的是回发起方。交还没有任何收益。
             let handover = yielding && reason != "auth done"
             let screenSize = UIScreen.main.bounds.size
-            if !closingBundle.isEmpty && (!owned || handover) {
+            if !closingBundle.isEmpty {
                 AevonSceneFrameSet(closingBundle, 0, 0,
                                    Double(screenSize.width), Double(screenSize.height))
             }
-            // 0.2.38 — 让路时自建 scene 也要真的写一次整屏：系统接下来要的
-            // 就是这张 932，提前给它，接管那一拍就不会出现「717 摆在 932 窗口里」。
-            let restoreDoor = (owned && !handover) ? -1 : AevonPushSceneFrame(scene)
+            // 让路时也要真的写一次整屏：系统接下来要的就是这张 932，提前给它，
+            // 接管那一拍就不会出现「717 摆在 932 窗口里」。
+            let restoreDoor = AevonPushSceneFrame(scene)
             if closingBundle.isEmpty {
                 AevonSceneFrameClear()
             } else {
@@ -1149,13 +1027,13 @@ enum SceneProbe {
             // 第一次写不进去，是因为写的时候 presenter 还活着（`deactivate` 还没
             // 调），场景的归属权还在我们手里。拆完 presenter 再写，一次就够；
             // 下面那条 0.35 s 的补写留着，万一这一次也没落地。
-            // 0.2.13 — 自建 scene 的关卡动作只有一个：销毁。`destroyScene:` 只解绑
-            // scene，进程留着（母本已知的这个行为对我们正好：下次打开省一次冷启动）。
-            let door = handover
-                ? (owned ? AevonOwnHandOver(closingBundle) : 0)
-                : (owned ? AevonOwnDestroy(closingBundle) : AevonPushBackground(scene))
+            // 0.4.0 — 关卡动作只剩一种：`AevonPushBackground(scene)`。自建 scene
+            // 的两个收尾（交还 `AevonOwnHandOver` / 销毁 `AevonOwnDestroy`）随 0.3.1
+            // 的下线一起失效，函数在这一版删掉。`handover` 只留在日志里 —— 它还能
+            // 区分「让路」与「正常关卡」，是关卡时序唯一的读数。
+            let door = AevonPushBackground(scene)
             Log.write("win: background after teardown door=" + String(door)
-                      + (owned ? " own=1" : "") + (handover ? " handover=1" : ""))
+                      + (handover ? " handover=1" : ""))
             // 0.0.70 — 关卡这一拍把 App 写的读数取回来。必须在 `clearHosted()`
             // 之前：那个函数会把 `hostedBundle` 清空，之后就不知道去哪个容器里取了。
             drainAppLog("on close")
@@ -1180,8 +1058,6 @@ enum SceneProbe {
             // 这一次只写 scene 的 frame（我们本来就拥有这个量），不碰任何视图，
             // 0.30 s 后执行，此时 presenter 已经 invalidate。
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) { [weak scene] in
-                // 0.2.13 — 自建的 scene 0.30 s 前已经销毁，这一段对它没有意义。
-                guard !owned else { return }
                 // 0.0.98 — 判据从「有没有卡」换成「这一个 App 有没有被重新登记」。
                 //
                 // 0.0.75 起这里写的是 `!cardUp`，当时「有卡」就等于「那个 App 又被
@@ -1232,8 +1108,7 @@ enum SceneProbe {
             emitNotes(AevonHookSummary())
             let back = value(of: scene, "settings").map { AevonBoolOf($0, "isForeground") } ?? -1
             Log.write("win: card closed by " + reason + ", background door=" + String(door)
-                      + " fg=" + flag(back) + " live=" + (stillUp ? "yes" : "no")
-                      + (owned ? " own=1" : ""))
+                      + " fg=" + flag(back) + " live=" + (stillUp ? "yes" : "no"))
             // A hand-back that did not land is the same defect one layer down:
             // the app would spend the rest of the session believing it is in
             // front. One retry, a third of a second later, and then the log says so.
@@ -1242,7 +1117,7 @@ enum SceneProbe {
             // 与「用户关掉卡片立刻点图标」撞在一起，补写把刚被系统拉起来的 App
             // 又按回后台。窗口越短越不会撞上；真撞上（新卡已经开出来）就不补了
             // —— 那时 scene 属于新的一张卡，再写后台就是错的。
-            if back != 0 && !owned && !yielding {
+            if back != 0 && !yielding {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                     // 0.0.98 — 判据按名字，不按「有没有卡」。多窗时 `cardUp` 大概
                     // 率还是 true（停靠小窗还在），用它判等于这条补写永远不执行；
@@ -2158,15 +2033,12 @@ public func AevonCardYieldForFullscreen(_ bundle: UnsafePointer<CChar>?) -> Int3
 }
 
 
-private func AevonCardCloseNamed(_ identifier: String) -> Int32 {
-    guard identifier.count > 2 else { return 0 }
-    guard Thread.isMainThread else {
-        DispatchQueue.main.async { _ = AevonCardCloseNamed(identifier) }
-        return 0
-    }
-    guard let close = FloatHost.cardClosers[identifier] else { return 0 }
-    Log.write("win: card closed after auth b=" + identifier)
-    close("auth done")
-    return 1
-}
+// 0.4.0 — 这里原本是 `AevonCardCloseNamed`：授权收尾那一拍按 bundle 收卡
+// （`Log.write("win: card closed after auth b=…")` + `close("auth done")`）。
+// 它的调用方是 URL 落点链里「授权回来 → 收掉那张卡」那一步，随 URL 链一起删掉
+// 之后，这个 `private` 函数零调用方 —— `-Osize` 直接剥掉，审计报
+// `win: card closed after auth b=` 不在包里。函数删除。
+//
+// 让路那条 `AevonCardYieldForFullscreen` 不一样：它由 ObjC 侧
+// `AevonScene.m` 在 `AevonOpenDecide` 的 `plain` 分支里 `extern` 调用，还在用。
 
