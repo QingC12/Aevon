@@ -227,6 +227,25 @@ static volatile int AevonKbInterNotes = 0;
 /// 退回 0.4.26 的平移会给 App 一个错高度，而它未必再收到第二条通知去纠正。
 /// 用上次的已知值顶上：同一台设备同一输入法，高度就那么几个值。
 static volatile CGFloat AevonKbLastRealH = 0.0;
+/// 0.4.31 — 我们**自己**记的键盘状态（世界坐标），专门用来生成 `begin`。
+///
+/// 314 的症状是「第一次正常、关掉再开就消失」，五家 App 里四家复现、QQ 不复现。
+/// 唯一在两次之间变了的东西是**系统给的 `begin`**：
+///   · 第一次升起：键盘原本在屏外，`begin` 是「收起时那个位置」；
+///   · 关掉再开：键盘「上次的位置」被我们改写过（我们发出去的是 358 底 717），
+///     而系统记的是它自己那套（503 / 718 / 1147 口径）。于是第二拍开始
+///     `end.y − begin.y` 是一个几百点的假差值 —— 按「位移量」排版的那类 App
+///     （评论区的输入条几乎都是这一种）照它加减，输入条一次就滑出可视区，
+///     而且之后再来的通知 begin==end、差值恒 0，它再也回不来。
+///
+/// 所以 begin 不再用系统那个（它在三套口径之间跳），改成用**我们已经报出去的上一个矩形**：
+///   键盘已经在屏上 ⇒ begin = 上次那个矩形（候选条升降时差值就是那 45 pt）
+///   键盘不在屏上 ⇒ begin = (x, 世界底, w, 0)（从屏底外升起，差值 = 真实占高）
+/// 这样 `begin → end` 这段位移在任何时刻都等于真实位移，App 加减都不会错。
+static volatile CGFloat AevonKbLastTop = 0.0;
+static volatile CGFloat AevonKbLastHeight = 0.0;
+/// 0 表示「此刻我们报告的是键盘不在屏上」。
+static volatile int AevonKbShown = 0;
 static volatile int AevonKbBoundsNotes = 0;
 // 0.4.15 — 系统原值只打一次（`-bounds` 没被我们接手的那个数）。配额 1，不刷屏。
 static volatile int AevonKbSysNotes = 0;
@@ -1027,6 +1046,82 @@ static void AevonKbScheduleChannelProbes(void) {
                    dispatch_get_main_queue(), ^{ AevonKbProbeChannels("t1"); });
 }
 
+// ===========================================================================
+// 0.4.31 — 输入条到底被摆到哪儿了（只读，每次弹键盘两拍）
+// ===========================================================================
+//
+// 314 的症状是「第一次正常、关掉再开就消失」，但那一版的日志配额（24 条）在第
+// 一次会话里就用光了 —— **第二次开键盘发生在日志之外**，于是只能看到「键盘起来了」
+// 看不到「输入条去哪儿了」。这一组把判据放在结果上，而不是推理上：
+//
+//   bar t=… txt=<类名> 宽x高@x,y bot=…  （窗口坐标，y 从上往下）
+//   · `bot <= 键盘顶边`  ⇒ 输入条在键盘之上，正常
+//   · `bot >  键盘顶边`  ⇒ 输入条压在键盘底下 —— 就是用户说的「消失」
+//
+// 找的是 `UITextField` / `UITextView`（评论区的输入条几乎都是这两种），深度优先
+// 第一个命中。窗口坐标系里 b = 0 在上，和 `UIScreen.bounds` 同一套（钩过 ⇒ 717）。
+static volatile int AevonKbBarProbes = 0;
+
+static UIView *AevonKbFindTextInput(UIView *root, int depth) {
+    if (root == nil || depth < 0) return nil;
+    NSString *cls = NSStringFromClass([root class]);
+    if (cls != nil && ([cls rangeOfString:@"TextField"].location != NSNotFound
+                       || [cls rangeOfString:@"TextView"].location != NSNotFound)) {
+        return root;
+    }
+    NSArray *subs = [root subviews];
+    NSUInteger count = [subs count];
+    for (NSUInteger i = 0; i < count && i < 32; i++) {
+        UIView *found = AevonKbFindTextInput([subs objectAtIndex:i], depth - 1);
+        if (found != nil) return found;
+    }
+    return nil;
+}
+
+static void AevonKbProbeBarText(const char *tag) {
+    if (AevonKbBarProbes >= 24) return;
+    if (![NSThread isMainThread]) return;
+    UIWindow *appWin = AevonKbAppMainWindow();
+    if (appWin == nil) return;
+    AevonKbBarProbes += 1;
+    UIView *rootView = nil;
+    id rvc = ((id (*)(id, SEL))objc_msgSend)(appWin, @selector(rootViewController));
+    if (rvc != nil) {
+        rootView = (UIView *)((id (*)(id, SEL))objc_msgSend)(rvc, @selector(view));
+    }
+    if (rootView == nil) rootView = appWin;
+    UIView *field = AevonKbFindTextInput(rootView, 16);
+    CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
+    CGFloat kbTop = (CGFloat)AevonKbShown ? (CGFloat)AevonKbLastTop : worldH;
+    char line[320];
+    if (field == nil) {
+        snprintf(line, sizeof(line),
+                 "app: kb: bar %s txt=none world=%.0f kbtop=%.0f vis=%d probes=%d\n",
+                 tag, worldH, kbTop, (int)AevonKbShown, (int)AevonKbBarProbes);
+        AevonKbLog(line);
+        return;
+    }
+    // 转进窗口坐标 —— `toView:appWin` 就是窗口坐标（appWin 的 bounds.origin 恒 0,0）。
+    CGRect r = [field convertRect:[field bounds] toView:appWin];
+    CGFloat bottom = r.origin.y + r.size.height;
+    snprintf(line, sizeof(line),
+             "app: kb: bar %s txt=%s %.0fx%.0f@%.0f,%.0f bot=%.0f kbtop=%.0f ok=%d hid=%d a=%.2f\n",
+             tag, class_getName([field class]),
+             r.size.width, r.size.height, r.origin.x, r.origin.y,
+             bottom, kbTop, (int)(bottom <= kbTop + 1.0),
+             (int)[field isHidden], (double)[field alpha]);
+    AevonKbLog(line);
+}
+
+static void AevonKbScheduleBarProbes(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.70 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbProbeBarText("t0.7"); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.70 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbProbeBarText("t1.7"); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.90 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbProbeBarText("t2.9"); });
+}
+
 // 0.4.27 — 通知里那个 frame，**y 用什么、高用什么**。
 //
 // 311 把两条通道的错法同时钉死了。同一拍的三组读数：
@@ -1156,15 +1251,16 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
         }
     }
 
-    if (AevonKbNoteNotes < 24) {
+    if (AevonKbNoteNotes < 96) {
         AevonKbNoteNotes += 1;
-        char line[320];
+        char line[360];
         const char *noteName = [(NSString *)name UTF8String];
         snprintf(line, sizeof(line),
-                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f in=%s src=%s fix=%d\n",
+                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f in=%s src=%s fix=%d vis=%d\n",
                  noteName != NULL ? noteName : "?",
                  end.size.width, end.size.height, end.origin.x, end.origin.y,
-                 worldH, physicalH, shift, realH, hostY, hostH, inSpace, src, (int)visible);
+                 worldH, physicalH, shift, realH, hostY, hostH, inSpace, src,
+                 (int)visible, (int)AevonKbShown);
         AevonKbLog(line);
     }
 
@@ -1178,6 +1274,13 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     }
 
     if (!visible || !AevonKbNoteFixOn || realH < 8.0) {
+        // 这一拍之后键盘就不在屏上了 ⇒ 下一次升起要重新「从屏底升上来」。
+        // 只认真正收起的形状：高度 < 40，或顶边落在世界底之下（含 (0,932,430,359)
+        // 那种「整块在屏底下方」的收起帧）。`Hide` 那几条通知本身也走这一支。
+        if (!visible && (hideNote || end.size.height < 40.0
+                         || end.origin.y >= worldH - 40.0)) {
+            AevonKbShown = 0;
+        }
         orig(self, _cmd, name, object, userInfo);
         return;
     }
@@ -1193,23 +1296,35 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     end2.origin.y = worldH - realH;
     end2.size.height = realH;
     [fixed setObject:[NSValue valueWithCGRect:end2] forKey:UIKeyboardFrameEndUserInfoKey];
+    // 0.4.31 — `begin` 不再用系统那个，用**我们自己上次报出去的矩形**（原因见
+    // `AevonKbLastTop` 那一段：系统那个值在 503 / 718 / 1147 三套口径之间跳，
+    // 关掉再开时它给出的差值会把输入条一次推出去，而且之后再也回不来）。
+    CGRect begin2;
+    if (AevonKbShown && AevonKbLastHeight > 8.0) {
+        begin2 = CGRectMake(end.origin.x, (CGFloat)AevonKbLastTop,
+                            end.size.width, (CGFloat)AevonKbLastHeight);
+    } else {
+        // 从屏底外升上来：底边 = 世界底、高度 0。差值正好是真实占高。
+        begin2 = CGRectMake(end.origin.x, worldH, end.size.width, 0.0);
+    }
     NSValue *beginValue = [info objectForKey:UIKeyboardFrameBeginUserInfoKey];
     if (beginValue != nil && [beginValue isKindOfClass:[NSValue class]]) {
-        CGRect begin = [beginValue CGRectValue];
-        // begin 只在同样贴屏底时才平移 —— 键盘从屏外升起那一拍它的底边就是屏底。
-        if (fabs((begin.origin.y + begin.size.height) - physicalH) < 2.0) {
-            begin.origin.y -= shift;
-        }
-        [fixed setObject:[NSValue valueWithCGRect:begin] forKey:UIKeyboardFrameBeginUserInfoKey];
+        [fixed setObject:[NSValue valueWithCGRect:begin2] forKey:UIKeyboardFrameBeginUserInfoKey];
     }
-    if (AevonKbNoteFixes < 24) {
+    AevonKbLastTop = end2.origin.y;
+    AevonKbLastHeight = end2.size.height;
+    // 0.4.31 — 新的一次「弹键盘」：从 0→1 这一拍排三拍输入条读数。
+    if (AevonKbShown == 0) AevonKbScheduleBarProbes();
+    AevonKbShown = 1;
+    if (AevonKbNoteFixes < 96) {
         AevonKbNoteFixes += 1;
-        char line[256];
+        char line[320];
         snprintf(line, sizeof(line),
-                 "app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f\n",
+                 "app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f bgn=%.0fx%.0f@%.0f,%.0f\n",
                  end.size.width, end.size.height, end.origin.x, end.origin.y,
                  end2.size.width, end2.size.height, end2.origin.x, end2.origin.y,
-                 src, worldH - end2.origin.y);
+                 src, worldH - end2.origin.y,
+                 begin2.size.width, begin2.size.height, begin2.origin.x, begin2.origin.y);
         AevonKbLog(line);
     }
     orig(self, _cmd, name, object, fixed);

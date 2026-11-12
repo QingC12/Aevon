@@ -1497,14 +1497,29 @@ def main():
                       #   src=       真值从哪来：`meas` 现场量到 / `last` 用上次已知 /
                       #              `none` 量不到（这一拍不动）
                       #   fix=       本版是否会重写（1 = 键盘在屏幕上）
-                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f in=%s src=%s fix=%d",
+                      #   vis=       改写前我们认为「键盘在屏上」（1 = 在）
+                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f in=%s src=%s fix=%d vis=%d",
                       # 修正那一拍：0.4.29 起只有一种写法 —— 整块换成真值
                       # （y = world − meas、高 = meas、底边恒 = world 底）。
                       # `src=` 标明真值来源（`meas` 现场量 / `last` 上次已知），
                       # `rem=` 是让位高度，必须等于 `meas`（386/431/359/404）。
+                      # `bgn=` 是 0.4.31 起我们自己生成的 begin：键盘已在屏上时等于
+                      # 上一拍报出去的矩形，不在屏上时等于 (x, world 底, w, 0)。
+                      # 理由：系统那个 begin 在 503/718/1147 三套口径之间跳，关掉再开
+                      # 时它给出的差值会把输入条一次推出去，且之后差值恒 0 回不来。
                       # ⛔ 0.4.26 的 `src=shift`（只减 215 不改高度）已整条删除：
                       # 311 证明它留下 142 pt 黑边，猜值比不动更坏。
-                      b"app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f",
+                      b"app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f bgn=%.0fx%.0f@%.0f,%.0f",
+                      # 0.4.31 — 输入条被摆到哪儿了（只读，每次弹键盘三拍）。
+                      # 314 里 24 条的配额在第一次会话就用光，第二次开键盘整段在
+                      # 日志之外 ⇒ 只能看到「键盘起来了」，看不到「输入条去哪儿了」。
+                      # 这一组把判据放在结果上：`bot <= kbtop` 才算正常。
+                      #   txt=   第一个 UITextField / UITextView（窗口坐标）
+                      #   bot=   它在这个窗口里的底边
+                      #   kbtop= 我们此刻报出去的键盘顶边（`AevonKbShown` 为 0 时取世界底）
+                      #   ok=    bot ≤ kbtop + 1
+                      b"app: kb: bar %s txt=%s %.0fx%.0f@%.0f,%.0f bot=%.0f kbtop=%.0f ok=%d hid=%d a=%.2f",
+                      b"app: kb: bar %s txt=none world=%.0f kbtop=%.0f vis=%d probes=%d",
                       # 0.4.28 — 「第二条通道」取证（**只读**，一次会话两拍）。
                       # 312：QQ 正确、微信先对后错，而 App 主窗十次都是 430x717
                       # ⇒ 不是悬浮窗的事，是微信自己又排了一次版、没走通知。
