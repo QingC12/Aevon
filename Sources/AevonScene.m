@@ -2669,7 +2669,7 @@ static int AevonBGArmedFor(const char *bundle);
 /// 所以让路这一拍要同时把 display 和参考尺寸写回整屏。三个数（frame / display /
 /// 参考尺寸）必须一直是同一个，这条纪律在 0.2.46 就定过，这里只是把它补到
 /// 「交还系统」这一侧。
-static void AevonYieldDisplayBack(id settings, CGRect screen, const char *bundle) {
+static void AevonYieldDisplayBack(id settings, CGSize screen, const char *bundle) {
     if (settings == nil) return;
     if (!AevonSettingsMutable(settings)) return;
     SEL getter = sel_registerName("displayConfiguration");
@@ -2681,17 +2681,17 @@ static void AevonYieldDisplayBack(id settings, CGRect screen, const char *bundle
     SEL boundsSel = sel_registerName("bounds");
     if (![now respondsToSelector:boundsSel]) return;
     CGRect current = ((CGRect (*)(id, SEL))objc_msgSend)(now, boundsSel);
-    if (fabs(current.size.width - screen.size.width) < 0.5 &&
-        fabs(current.size.height - screen.size.height) < 0.5) return;
-    id copy = AevonOwnDisplayOverride(now, CGRectMake(0, 0, screen.size.width, screen.size.height));
+    if (fabs(current.size.width - screen.width) < 0.5 &&
+        fabs(current.size.height - screen.height) < 0.5) return;
+    id copy = AevonOwnDisplayOverride(now, CGRectMake(0, 0, screen.width, screen.height));
     if (copy == nil) return;
     ((void (*)(id, SEL, id))objc_msgSend)(settings, setter, copy);
     [copy release];
-    AevonOwnRefSet(settings, screen.size, "yield");
+    AevonOwnRefSet(settings, screen, "yield");
     AevonLogRaw([[NSString stringWithFormat:
                   @"win: card yield display back %.0fx%.0f -> %.0fx%.0f b=%s",
                   current.size.width, current.size.height,
-                  screen.size.width, screen.size.height,
+                  screen.width, screen.height,
                   bundle != NULL ? bundle : "-"] UTF8String]);
 }
 
