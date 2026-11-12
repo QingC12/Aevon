@@ -934,6 +934,70 @@ static UIWindow *AevonKbKeyboardWindowLive(void) {
     return AevonKbWindowKeep;
 }
 
+// 0.4.32 — 在**所有**候选键盘窗里取占屏最多的那一个。
+//
+// 315 把这个坑照得很清楚。同一个进程里，`[UIApplication windows]` 表里不止一个
+// 类名带 `Keyboard` 的窗，而「第一个」在不同会话里不是同一个：
+//
+//   会话一（正常）   note … meas=386 host=546,386     ← 拿到的是真的那个
+//   会话二/三        note … meas=0   host=932,289     ← 拿到的是另一个（宿主整块在屏下）
+//
+// `host=932,289` 里 289 这个高度不是任何一个键盘的高度（键盘是 386/431/359/426/471…），
+// 所以它不是「键盘收起了」，是**量错了窗**。而同一拍的 `inter` 钩子是 `host=573,359`
+// —— 它问的是母版的 `[self keyboardWindow]`，那才是活的。
+//
+// 判据不猜：键盘是「露在屏幕上的那一块」，所以取 footprint 最大的候选。量不出
+// （全 0）就返回 0，由调用方决定怎么办，这里绝不编一个数。
+#define AEVON_KB_MAX_WINS 8
+static CGFloat AevonKbMeasureBest(CGFloat physicalH,
+                                  CGFloat *outHostY, CGFloat *outHostH, int *outCount) {
+    if (outHostY != NULL) *outHostY = 0.0;
+    if (outHostH != NULL) *outHostH = 0.0;
+    if (outCount != NULL) *outCount = 0;
+    id wins[AEVON_KB_MAX_WINS];
+    int n = 0;
+    Class appCls = objc_getClass("UIApplication");
+    if (appCls != Nil) {
+        id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, @selector(sharedApplication));
+        if (app != nil) {
+            NSArray *list = ((id (*)(id, SEL))objc_msgSend)(app, @selector(windows));
+            NSUInteger count = [list count];
+            for (NSUInteger i = 0; i < count && i < 24; i++) {
+                id w = [list objectAtIndex:i];
+                if (![w isKindOfClass:[UIWindow class]]) continue;
+                if (((CGFloat (*)(id, SEL))objc_msgSend)((id)w, @selector(windowLevel)) < 1.0) continue;
+                NSString *cls = NSStringFromClass([w class]);
+                if (cls == nil || [cls rangeOfString:@"Keyboard"].location == NSNotFound) continue;
+                if (n < AEVON_KB_MAX_WINS) wins[n++] = w;
+            }
+        }
+    }
+    if (AevonKbWindowKeep != nil && n < AEVON_KB_MAX_WINS) {
+        BOOL dup = NO;
+        for (int i = 0; i < n; i++) {
+            if (wins[i] == AevonKbWindowKeep) { dup = YES; break; }
+        }
+        if (!dup) wins[n++] = AevonKbWindowKeep;
+    }
+    if (outCount != NULL) *outCount = n;
+    CGFloat best = 0.0;
+    CGFloat bestY = 0.0;
+    CGFloat bestH = 0.0;
+    for (int i = 0; i < n; i++) {
+        CGFloat hy = 0.0;
+        CGFloat hh = 0.0;
+        CGFloat footprint = AevonKbMeasuredCoverage(wins[i], physicalH, &hy, &hh);
+        if (footprint > best) {
+            best = footprint;
+            bestY = hy;
+            bestH = hh;
+        }
+    }
+    if (outHostY != NULL) *outHostY = bestY;
+    if (outHostH != NULL) *outHostH = bestH;
+    return best;
+}
+
 // ===========================================================================
 // 0.4.28 — 「第二条通道」取证：App 到底从哪儿读到键盘顶边
 // ===========================================================================
@@ -1062,20 +1126,27 @@ static void AevonKbScheduleChannelProbes(void) {
 // 第一个命中。窗口坐标系里 b = 0 在上，和 `UIScreen.bounds` 同一套（钩过 ⇒ 717）。
 static volatile int AevonKbBarProbes = 0;
 
-static UIView *AevonKbFindTextInput(UIView *root, int depth) {
-    if (root == nil || depth < 0) return nil;
+static void AevonKbScanTextInput(UIView *root, int depth, UIView **best,
+                                 CGFloat *bestArea, UIView **first, int *seen) {
+    if (root == nil || depth < 0 || best == NULL || bestArea == NULL
+        || first == NULL || seen == NULL) return;
     NSString *cls = NSStringFromClass([root class]);
     if (cls != nil && ([cls rangeOfString:@"TextField"].location != NSNotFound
                        || [cls rangeOfString:@"TextView"].location != NSNotFound)) {
-        return root;
+        *seen += 1;
+        if (*first == nil) *first = root;
+        CGRect b = [root bounds];
+        CGFloat area = b.size.width * b.size.height;
+        if (area > 1.0 && area > *bestArea) {
+            *best = root;
+            *bestArea = area;
+        }
     }
     NSArray *subs = [root subviews];
     NSUInteger count = [subs count];
     for (NSUInteger i = 0; i < count && i < 32; i++) {
-        UIView *found = AevonKbFindTextInput([subs objectAtIndex:i], depth - 1);
-        if (found != nil) return found;
+        AevonKbScanTextInput([subs objectAtIndex:i], depth - 1, best, bestArea, first, seen);
     }
-    return nil;
 }
 
 static void AevonKbProbeBarText(const char *tag) {
@@ -1090,10 +1161,21 @@ static void AevonKbProbeBarText(const char *tag) {
         rootView = (UIView *)((id (*)(id, SEL))objc_msgSend)(rvc, @selector(view));
     }
     if (rootView == nil) rootView = appWin;
-    UIView *field = AevonKbFindTextInput(rootView, 16);
+    // 0.4.32 — 取「面积最大的那个」而不是「第一个」。
+    //
+    // 315 里微信打出来的是 `CTRichTextView 0x0@74,-46`：命中了一个 0x0 的
+    // 富文本视图，它的位置跟输入条没关系，读数等于废的。评论区输入条几乎都是
+    // 有尺寸的 `UITextField` / `UITextView`，所以按面积取最大的那个；
+    // 实在全是 0 尺寸就退回第一个，并用 `z=1` 标出来（那种读数不能当判据）。
+    UIView *bestInput = nil;
+    UIView *firstInput = nil;
+    CGFloat bestArea = 0.0;
+    int seen = 0;
+    AevonKbScanTextInput(rootView, 16, &bestInput, &bestArea, &firstInput, &seen);
+    UIView *field = (bestInput != nil) ? bestInput : firstInput;
     CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
     CGFloat kbTop = (CGFloat)AevonKbShown ? (CGFloat)AevonKbLastTop : worldH;
-    char line[320];
+    char line[360];
     if (field == nil) {
         snprintf(line, sizeof(line),
                  "app: kb: bar %s txt=none world=%.0f kbtop=%.0f vis=%d probes=%d\n",
@@ -1105,10 +1187,11 @@ static void AevonKbProbeBarText(const char *tag) {
     CGRect r = [field convertRect:[field bounds] toView:appWin];
     CGFloat bottom = r.origin.y + r.size.height;
     snprintf(line, sizeof(line),
-             "app: kb: bar %s txt=%s %.0fx%.0f@%.0f,%.0f bot=%.0f kbtop=%.0f ok=%d hid=%d a=%.2f\n",
+             "app: kb: bar %s txt=%s %.0fx%.0f@%.0f,%.0f bot=%.0f kbtop=%.0f ok=%d z=%d sc=%d hid=%d a=%.2f\n",
              tag, class_getName([field class]),
              r.size.width, r.size.height, r.origin.x, r.origin.y,
              bottom, kbTop, (int)(bottom <= kbTop + 1.0),
+             (int)(bestArea <= 1.0), seen,
              (int)[field isHidden], (double)[field alpha]);
     AevonKbLog(line);
 }
@@ -1224,42 +1307,61 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
 
     // 量「这一刻」键盘真实占多少 —— 这是唯一的数据来源。
     //
-    // ⛔ 量不到时**什么都不做**，不要退回 0.4.26 那种「减 215」的平移：311 已经证明
-    // 平移只改 y、不改高度，App 按错的高度让位，中间那 142 pt 就是黑屏。猜一个值
-    // 一定比不动更坏，因为不动至少和没装钩子时一样。
+    // ⛔ 量不到时**不要退回 0.4.26 那种「减 215」的平移**：311 已经证明平移只改 y、
+    // 不改高度，App 按错的高度让位，中间那 142 pt 就是黑屏。
+    // 0.4.29 起改成「量不到就不动」，但 315 证明这条也有洞：不动 = 把系统那条
+    // `y=718`（键盘在世界底之下）原样交给 App，而那一刻键盘其实好好地在屏上
+    // （同一拍 `AevonKbShown=1`、`inter` 量到 359）。App 收下「键盘在窗口底下」
+    // 就把输入条放回窗口底 ⇒ 被真键盘盖住。所以「不动」只在**键盘确实不在**
+    // 的时候才对，而不是在我们量不到的时候。
     CGFloat realH = 0.0;
     CGFloat hostY = 0.0;
     CGFloat hostH = 0.0;
+    int winCount = 0;
     const char *src = "none";
+    BOOL showNote = [(NSString *)name rangeOfString:@"Show"].location != NSNotFound;
+    // frame 自己说「键盘顶边在我世界的底之下」—— 一个已经在屏外的位置。
+    BOOL offFrame = (end.origin.y >= worldH - 1.0);
     if (visible && [NSThread isMainThread]) {
         // `[UIApplication windows]` 只能在主线程问；不在主线程就整段跳过。
-        UIWindow *kbWin = AevonKbKeyboardWindowLive();
-        realH = AevonKbMeasuredCoverage(kbWin, physicalH, &hostY, &hostH);
+        realH = AevonKbMeasureBest(physicalH, &hostY, &hostH, &winCount);
         // 比 App 世界还高的读数只能是量错（多窗重叠 / 非竖屏），不参与决策。
         if (realH > worldH + 1.0) realH = 0.0;
         if (realH >= 8.0) {
             src = "meas";
             AevonKbLastRealH = realH;
-        } else if (end.origin.y <= worldH - 40.0 && AevonKbLastRealH >= 8.0) {
+        } else if (AevonKbLastRealH >= 8.0 && !offFrame) {
             // 宿主还没建出来（全新进程弹第一拍）。这一批 frame 自己说「键盘在我的
-            // 世界里」（顶边在 world 底之上 40 以上），那就用上次已知的高顶着 ——
-            // 同一台设备同一输入法，高就那么几个值。反过来说：一个**说不清**的
-            // frame（顶边在 world 底之下）绝不用旧值去猜，那会把「已经收起」重新
-            // 说成「还开着」，输入条就再也不下来了。
+            // 世界里」（顶边在 world 底之上），那就用上次已知的高顶着 ——
+            // 同一台设备同一输入法，高就那么几个值。
             realH = AevonKbLastRealH;
             src = "last";
+        } else if (AevonKbLastRealH >= 8.0 && showNote) {
+            // 0.4.32 — `showNote` 这一支就是 315 的那个洞。
+            //
+            // 名字里带 `Show`（`WillShow` / `PrivateWillShow` / `DidShow` /
+            // `PrivateDidShow`）说明系统在说「键盘正在显示」，可这一拍量不到
+            // （宿主被拆、或拿错窗）而 frame 又说键盘在屏外 —— 两者只能有一个是真的，
+            // 而「名字说显示」不会骗人：真正收起的那一批里一定带 `Hide`，早被
+            // `hideNote` 挡在外面了。所以这里报上次已知的真实占高，
+            // **绝不把「看不到键盘」递给 App**。
+            //
+            // 反过来说：不带 `Show` 又不带 `Hide` 的 `WillChangeFrame`（收起那一批的
+            // 第一拍）走不到这里，原样放行 ⇒ 收起动画不受影响。
+            realH = AevonKbLastRealH;
+            src = "lastshow";
         }
     }
 
     if (AevonKbNoteNotes < 96) {
         AevonKbNoteNotes += 1;
-        char line[360];
+        char line[368];
         const char *noteName = [(NSString *)name UTF8String];
         snprintf(line, sizeof(line),
-                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f in=%s src=%s fix=%d vis=%d\n",
+                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f n=%d in=%s src=%s fix=%d vis=%d\n",
                  noteName != NULL ? noteName : "?",
                  end.size.width, end.size.height, end.origin.x, end.origin.y,
-                 worldH, physicalH, shift, realH, hostY, hostH, inSpace, src,
+                 worldH, physicalH, shift, realH, hostY, hostH, winCount, inSpace, src,
                  (int)visible, (int)AevonKbShown);
         AevonKbLog(line);
     }
@@ -1368,9 +1470,15 @@ static CGFloat AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, B
     id keyboardWindow = ((id (*)(id, SEL))objc_msgSend)(self,
                                                        NSSelectorFromString(@"keyboardWindow"));
     // 0.4.29 — 把窗留住给通知钩子用（见 `AevonKbWindowKeep` 的说明）。
-    if (keyboardWindow != nil && AevonKbWindowKeep == nil
-        && [keyboardWindow isKindOfClass:[UIWindow class]]) {
+    // 0.4.32 — 从「只在为 nil 时留」改成**永远留最新的那个**。315 证明这个窗会换：
+    // 第一次会话里 `[UIApplication windows]` 扫到的是真的那个（host=546/386），
+    // 收起再开之后就变成另一个（host=932/289），而 `[self keyboardWindow]` 一直是
+    // 真的。留最新 + `AevonKbMeasureBest` 取最大 footprint，两道一起兜住。
+    if (keyboardWindow != nil && [keyboardWindow isKindOfClass:[UIWindow class]]
+        && AevonKbWindowKeep != keyboardWindow) {
+        UIWindow *old = AevonKbWindowKeep;
         AevonKbWindowKeep = [(UIWindow *)keyboardWindow retain];
+        if (old != nil) [(id)old release];
     }
     if (sameApp || keyboardWindow == nil) return orig;
 

@@ -1495,10 +1495,15 @@ def main():
                       #   in=world   这一批贴 App 世界底
                       #   in=off     两套都不是（W2/W3 都在这一档）
                       #   src=       真值从哪来：`meas` 现场量到 / `last` 用上次已知 /
+                      #              `lastshow` 名字说显示但量不到、用上次已知 /
                       #              `none` 量不到（这一拍不动）
                       #   fix=       本版是否会重写（1 = 键盘在屏幕上）
                       #   vis=       改写前我们认为「键盘在屏上」（1 = 在）
-                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f in=%s src=%s fix=%d vis=%d",
+                      #   n=         0.4.32 起扫到的候选键盘窗个数（含缓存那个）。
+                      #              315 在第二次会话里恒为 `host=932,289`：那不是键盘
+                      #              的高度（289），是量错了窗 ⇒ 改成「所有候选里取
+                      #              footprint 最大」。`n=1` 却仍 `meas=0` 才算真的没有。
+                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f n=%d in=%s src=%s fix=%d vis=%d",
                       # 修正那一拍：0.4.29 起只有一种写法 —— 整块换成真值
                       # （y = world − meas、高 = meas、底边恒 = world 底）。
                       # `src=` 标明真值来源（`meas` 现场量 / `last` 上次已知），
@@ -1514,11 +1519,14 @@ def main():
                       # 314 里 24 条的配额在第一次会话就用光，第二次开键盘整段在
                       # 日志之外 ⇒ 只能看到「键盘起来了」，看不到「输入条去哪儿了」。
                       # 这一组把判据放在结果上：`bot <= kbtop` 才算正常。
-                      #   txt=   第一个 UITextField / UITextView（窗口坐标）
+                      #   txt=   面积最大的那个 UITextField / UITextView（窗口坐标）
                       #   bot=   它在这个窗口里的底边
                       #   kbtop= 我们此刻报出去的键盘顶边（`AevonKbShown` 为 0 时取世界底）
                       #   ok=    bot ≤ kbtop + 1
-                      b"app: kb: bar %s txt=%s %.0fx%.0f@%.0f,%.0f bot=%.0f kbtop=%.0f ok=%d hid=%d a=%.2f",
+                      #   z=     0.4.32 起：1 表示全部命中项都是 0 尺寸，这条读数不作判据
+                      #          （315 微信打出的 `CTRichTextView 0x0@74,-46` 就是这种废读数）
+                      #   sc=    命中项个数
+                      b"app: kb: bar %s txt=%s %.0fx%.0f@%.0f,%.0f bot=%.0f kbtop=%.0f ok=%d z=%d sc=%d hid=%d a=%.2f",
                       b"app: kb: bar %s txt=none world=%.0f kbtop=%.0f vis=%d probes=%d",
                       # 0.4.28 — 「第二条通道」取证（**只读**，一次会话两拍）。
                       # 312：QQ 正确、微信先对后错，而 App 主窗十次都是 430x717
