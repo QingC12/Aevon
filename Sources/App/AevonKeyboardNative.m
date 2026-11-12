@@ -631,9 +631,15 @@ static CGFloat AevonKbMeasuredCoverage(id keyboardWindow, CGFloat screenHeight,
     if (outHostY != NULL) *outHostY = inWindow.origin.y;
     if (outHostH != NULL) *outHostH = inWindow.size.height;
     if (inWindow.size.height < 8.0) return 0.0;
+    // 0.4.20 — 口径改成「窗底到键盘顶」，**对窗的 origin 免疫**。
+    //
+    // 旧写法 `screenHeight − (win.y + host.y)` 默认窗底 = App 世界底（win.y=0）。
+    // 0.4.20 起窗底对齐物理屏底、win.y=215 ⇒ 旧式会算出 717−501=216，
+    // 而键盘实际占 431，inset 少 215，输入框又会被盖住。
+    // 新式 = 窗高 − host 在窗内的 y：win.y 是多少都成立（窗底永远对齐 App 世界底，
+    // 这是 0.4.20 建窗那一步保证的）。
     CGRect winFrame = [win frame];
-    CGFloat top = winFrame.origin.y + inWindow.origin.y;
-    CGFloat footprint = screenHeight - top;
+    CGFloat footprint = winFrame.size.height - inWindow.origin.y;
     if (footprint < 8.0 || footprint > screenHeight + 1.0) return 0.0;
     return footprint;
 }
@@ -974,12 +980,11 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
     // 所以 `setFrame:[main bounds]` 在 Aevon 里的语义与母版完全一致：
     // 「键盘窗 = App 的整个屏幕」。
     //
-    // ⛔ 0.4.12 / 0.4.13 我在这里加过一个 `dy` 补偿：系统把窗建在 y=0 时，把它往下
-    // 搬 215，理由是「让窗底对齐屏幕底」。**那一步是我自己发明的，母版没有。**
-    // 它正是 Aevon(297)/(298) 的病因：键盘窗里的键盘视图按**窗底**摆，窗整体下移
-    // 215 ⇒ 键盘跟着下移 215 ⇒ 超出卡片下沿 215 pt 被裁掉、也点不到，屏幕上看就是
-    // 「只显示上半截、下半透明」。系统原样建在 (0,0,430,717) 时，窗底 = 承载面底
-    // = 卡片底 = 屏幕底 932，本来就是对的。
+    // ⛔ 0.4.12 / 0.4.13 我在这里加过一个 `dy` 补偿，0.4.14 因为「母版没有」把它删了；
+    // 0.4.20 又加回来 —— 差别在于当时的判据是错的。0.4.12 那次失败的真实原因是
+    // `setBounds:[win frame]` 把 bounds.origin 也写成了 215（窗内坐标系整体上移，
+    // 与窗下移互相抵消又错位），不是「不能挪窗」。0.4.13 已经把 bounds.origin
+    // 归零，下面那一段保留了这条纪律；挪窗本身现在有 304 的 `was=430x932@0,0` 撑着。
     CGRect box = [main bounds];          // 冻结态 ⇒ 承载面（430x717）/ 全屏（430x932）
     CGFloat height = box.size.height;
     CGFloat width = box.size.width;
@@ -997,14 +1002,34 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
     }
 
     CGRect asked = CGRectZero;
-    // `dy` 字段留着只为日志格式稳定（审计断言钉住了那一行），0.4.14 起恒为 0：
-    // 不再有任何「把窗搬到别处」的补偿。
+    // 0.4.20 — `dy` 回来了，但这次有真机依据，而且和 0.4.12 那一版**不是同一个组合**。
+    //
+    // Aevon(304) 的 `win: kb scene frame com.apple.UIKit.remote-keyboard
+    // was=430x932@0,0` 是这条线的判据：**键盘属于一个 932 高的独立 scene**，
+    // 而且它的 frame 我们改不动（四次改写，四次 `was` 都还是 932 —— 系统每次都
+    // 按 display 重算回来）。也就是说键盘窗虽然在 App 的 717 世界里，
+    // **它真正被合成的位置在那个 932 的世界里**。
+    //
+    // 窗建在 (0,0,430,717) ⇒ 在那个 932 的世界里也占 0..717 ⇒ 键盘内容
+    // （窗内贴底 286..717）落到屏幕 286..717，屏幕底下 717..932 空 215 ——
+    // 这就是用户从 296 一直报到现在的那条「悬空 + 下方透明」。
+    //
+    // 让窗底对齐**物理屏底**：shift = 932 − 717 = 215 ⇒ 窗 215..932，
+    // 内容 501..932，贴屏幕底。全屏 App（height = 932）shift = 0，行为与母版
+    // 完全一致 —— 母版没有这一步，是因为它的 scene 本来就是整屏。
+    //
+    // ⛔ 0.4.12 那次失败不是 `dy` 的错，是它和 `setBounds:[win frame]` 一起用：
+    // bounds.origin 被写成 215 ⇒ 窗内坐标系整体上移 215，两个偏移互相打架。
+    // 0.4.13 已经把 bounds.origin 归零（下面那一段），这次只动 frame。
     int lifted = 0;
     if (AevonKbIsFrontMost()
         || (AevonKbAppScene != nil && [AevonKbAppScene interfaceOrientation] == 1)) {
         // 竖屏（母版 0x5280 / 0x52d8 两路的合并语义）：窗 = App 的整个屏幕。
-        // 全屏 App 这里就是 (0,0,430,932)，被卡片托着时是 (0,0,430,717)。
-        asked = CGRectMake(box.origin.x, box.origin.y, width, height);
+        // 全屏 App 这里就是 (0,0,430,932)，被卡片托着时是 (0,215,430,717)。
+        CGFloat shiftY = physicalH - height;
+        if (shiftY < 0.5 || shiftY > physicalH) shiftY = 0.0;
+        if (shiftY > 0.5) lifted = 1;
+        asked = CGRectMake(box.origin.x, shiftY, width, height);
         ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setFrame:), asked);
         CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(frame));
         // ⛔ 0.4.13 — bounds **只给尺寸，origin 必须是 (0,0)**。

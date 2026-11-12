@@ -2170,7 +2170,12 @@ static int AevonAmendSettings(id settings, int slot) {
 ///
 /// 母版没有这一步，因为母版从不改 display，App 世界就是整屏，键盘 scene 天然
 /// 对齐。这是 Aevon 从 0.2.46 起改 display 带来的结构性差异，母版数据里没有
-/// 对应实现 —— 所以这一条只做一件事：把 system 已经算好的 frame 换成承载面。
+/// 对应实现。
+///
+/// **0.4.20 结论：改不动。** 304 的四份日志里 `was` 全是 `430x932@0,0` ——
+/// 我们每次写进去的 717 都被系统按 display 重算回来。既然这个 scene 属于系统，
+/// 就只在旁边看着（`wrote=` 恒 0），真正的修正放到 App 侧：
+/// 建键盘窗时把窗底对齐物理屏底（`AevonKeyboardNative.m` 的 `shiftY`）。
 ///
 /// ⛔ 这里**不能复用 `AevonWriteFrame`**：那个函数带「让路」判据
 /// （`now.height > 850 && target.height < 800` ⇒ 撤 frame 目标并异步拆卡），
@@ -2199,34 +2204,35 @@ static int AevonWriteKeyboardSceneFrame(id settings, const char *sceneName) {
     const char *cls = object_getClassName(settings);
     if (cls == NULL || strstr(cls, "Mutable") == NULL) return 0;
     int slot = AevonActiveCardSlot();
-    if (slot < 0) return 0;
-    CGRect want = AevonFrameTargets[slot];
-    SEL setter = sel_registerName("setFrame:");
     SEL getter = sel_registerName("frame");
-    if (![settings respondsToSelector:setter]) return 0;
     CGRect now = CGRectZero;
+    BOOL read = NO;
     if ([settings respondsToSelector:getter]) {
         now = ((CGRect (*)(id, SEL))objc_msgSend)(settings, getter);
-        if (fabs(now.origin.x - want.origin.x) < 0.5
-            && fabs(now.origin.y - want.origin.y) < 0.5
-            && fabs(now.size.width - want.size.width) < 0.5
-            && fabs(now.size.height - want.size.height) < 0.5) {
-            return 0;
-        }
+        read = YES;
     }
-    ((void (*)(id, SEL, CGRect))objc_msgSend)(settings, setter, want);
-    if (AevonKbSceneNotes < 8) {
+    // 0.4.20 — **不再写**。
+    //
+    // 0.4.19 试过把这里的 frame 改成承载面，304 的四份日志给了同一个答案：
+    // 四次改写、四次 `was` 都还是 `430x932@0,0` —— 这个 scene 的 frame 每次都由
+    // 系统按 display 重新算，写进去当场生效、下一拍又被覆盖。既然改不动它，
+    // 就改我们唯一能控制的那一侧：App 侧建键盘窗时把窗底对齐物理屏底
+    // （见 `AevonKeyboardNative.m` 的 `shiftY`）。
+    //
+    // ⛔ 两条路必须只留一条：scene 一旦真的被改成 215，而窗也下移 215，
+    // 就是双重偏移、键盘出屏。所以这里降级成纯观测。
+    if (read && AevonKbSceneNotes < 8) {
         AevonKbSceneNotes += 1;
+        CGRect want = slot >= 0 ? AevonFrameTargets[slot] : CGRectZero;
         AevonLogRaw([[NSString stringWithFormat:
-                      @"win: kb scene frame %s was=%.0fx%.0f@%.0f,%.0f want=%.0fx%.0f@%.0f,%.0f wrote=1",
+                      @"win: kb scene frame %s was=%.0fx%.0f@%.0f,%.0f want=%.0fx%.0f@%.0f,%.0f wrote=0",
                       sceneName,
                       now.size.width, now.size.height,
                       now.origin.x, now.origin.y,
                       want.size.width, want.size.height,
                       want.origin.x, want.origin.y] UTF8String]);
     }
-    __sync_fetch_and_add(&AevonKbSceneWrites, 1);
-    return 1;
+    return 0;
 }
 
 

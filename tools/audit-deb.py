@@ -646,7 +646,7 @@ def main():
                   # 没人管 ⇒ 键盘窗 frame 正确、内容贴自己的底，合成到屏幕却按另一个
                   # 原点落 = 「悬空 + 键盘底到屏底一条透明」。这一行记录改写前后的
                   # frame，是判断病根是否在此的唯一凭据，缺失等于这一版白做。
-                  b"win: kb scene frame %s was=%.0fx%.0f@%.0f,%.0f want=%.0fx%.0f@%.0f,%.0f wrote=1",
+                  b"win: kb scene frame %s was=%.0fx%.0f@%.0f,%.0f want=%.0fx%.0f@%.0f,%.0f",
                   b"kb_scene=%ld armed=",
                   b"win: style follow ",
                   # 0.1.31 — 锁屏 / 通知中心 / 控制中心盖上来时整层让开，
