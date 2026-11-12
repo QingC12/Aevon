@@ -423,6 +423,16 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
 
     UIViewController *root = ((id (*)(id, SEL))objc_msgSend)(window,
                                                             @selector(rootViewController));
+    // 母版在这里直接读 `_appScene`。它由 `0x54f4`（bounds 钩子）懒填充，正常情况
+    // 下早就不是 nil 了；但「建键盘窗」这一拍如果恰好还没问过 `bounds`（后台 App
+    // 第一次被托起来、或者 scene 刚换过），`_appScene` 会是 nil ⇒ 走进下面那个
+    // 横屏分支 ⇒ `setTransform:` scale 到 0 ⇒ **键盘整块不显示**。
+    //
+    // 这里只是把母版在 `0x54f4` 里做的那件事提前做一次（同一个 `_mainScene`），
+    // 不是新机制。取不到仍然保持 nil，走母版原路。
+    if (AevonKbAppScene == nil) {
+        AevonKbAppScene = AevonKbMainScene();
+    }
     AevonKbHookUIScreen = NO;
     UIScreen *main = [UIScreen mainScreen];
     CGAffineTransform scale = CGAffineTransformMakeScale(1, 1);
