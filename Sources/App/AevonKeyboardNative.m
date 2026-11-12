@@ -221,6 +221,12 @@ static void AevonKbLog(const char *line) {
 
 /// 每类读数各有配额：一次输入会反复问交集高度，日志本身不能变成负担。
 static volatile int AevonKbInterNotes = 0;
+/// 0.4.27 — 本进程最近一次量到的键盘真实占高。
+///
+/// 通知有可能比宿主视图早一拍到（全新进程第一次弹键盘），那一拍量出来是 0。
+/// 退回 0.4.26 的平移会给 App 一个错高度，而它未必再收到第二条通知去纠正。
+/// 用上次的已知值顶上：同一台设备同一输入法，高度就那么几个值。
+static volatile CGFloat AevonKbLastRealH = 0.0;
 static volatile int AevonKbBoundsNotes = 0;
 // 0.4.15 — 系统原值只打一次（`-bounds` 没被我们接手的那个数）。配额 1，不刷屏。
 static volatile int AevonKbSysNotes = 0;
@@ -836,9 +842,9 @@ static void AevonKbProbeAppInsets(id keyboardWindow) {
 //   · `end.y ≈ 546` 而 `hostm=331` ⇒ 通知是屏幕坐标，App 算错 215（确诊，本版即修）
 //   · `end.y ≈ 331` 且等于 `hostm`  ⇒ 通知本来就是对的，问题不在这一层
 //
-// 修正只在确诊时生效：把 `end` / `begin` 的 origin.y 减去 `shift`，让它们落进
-// App 世界的坐标系。命中判据是「frame 的底边贴在**物理屏底**」—— 全屏 App
-// （`shift=0`）和横屏（世界高度 = 430）都不会命中，行为与没装钩子时一致。
+// ⛔ 0.4.26 只把 `origin.y` 减了 215，**高度原样留着 528** —— 311 证明那是错的另一半：
+// App 按 528 让位，输入条升到 189，比真顶边 331 高 142，中间那片空当就是黑屏。
+// 0.4.27 改成整块换成量出来的真值（y = world − meas、高 = meas），见下面 `AevonKbPostNote`。
 static IMP AevonKbOrigPostNote = NULL;
 static volatile int AevonKbNoteNotes = 0;
 static volatile int AevonKbNoteFixes = 0;
@@ -871,7 +877,55 @@ static CGFloat AevonKbPhysicalHeight(void) {
     return native.size.height / scale;
 }
 
-/// 0.4.26 — 通知帧的坐标系校正。**只改 `UIKeyboard*` 系列**，其余通知一律透传。
+/// 0.4.27 — 窗口表里那个键盘窗（level > 0 且类名带 `Keyboard`）。
+///
+/// 通知钩子里没有 `_UIRemoteKeyboards` 这个 `self`，拿不到 `-keyboardWindow`；而
+/// 「键盘此刻真实占多少」必须在**收到通知的那一拍**量，晚一拍就是旧值。App 的窗口
+/// 表只有十几项，扫一遍是常数级开销，也省掉一份会失效的缓存。
+static UIWindow *AevonKbKeyboardWindowLive(void) {
+    Class appCls = objc_getClass("UIApplication");
+    if (appCls == Nil) return nil;
+    id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, @selector(sharedApplication));
+    if (app == nil) return nil;
+    NSArray *wins = ((id (*)(id, SEL))objc_msgSend)(app, @selector(windows));
+    NSUInteger count = [wins count];
+    for (NSUInteger i = 0; i < count && i < 24; i++) {
+        id w = [wins objectAtIndex:i];
+        if (![w isKindOfClass:[UIWindow class]]) continue;
+        if (((CGFloat (*)(id, SEL))objc_msgSend)((id)w, @selector(windowLevel)) < 1.0) continue;
+        NSString *cls = NSStringFromClass([w class]);
+        if (cls != nil && [cls rangeOfString:@"Keyboard"].location != NSNotFound) {
+            return (UIWindow *)w;
+        }
+    }
+    return nil;
+}
+
+// 0.4.27 — 通知里那个 frame，**y 用什么、高用什么**。
+//
+// 311 把两条通道的错法同时钉死了。同一拍的三组读数：
+//   inter  orig=316 screen=717 kb=932 hf=1.00 formula=458 meas=386 host=546,386
+//   probe  host=430x386@0,546 hostm=331
+//   note   end=430x528@0,404 world=717 phys=932 shift=215 screen=1
+//
+// 键盘真实位置（相对 App 自己的世界）：宿主顶边 = 717 − 386 → `hostm=331`，
+// 也就是键盘占 `331..717`，高 386。而通知里那个 404 是**屏幕坐标**，App 直接当
+// 自己的 717 世界用 ⇒ 它以为键盘顶在 404：
+//   · 306~310（0.4.22~0.4.25）用的是 404 ⇒ 输入条落在 404，比真顶边 331 低 73 pt
+//     ⇒ 被键盘（含顶部工具栏）压住，正是那六版的症状；
+//   · 0.4.26 只把 y 减了 shift（404−215=189），**高度还是 528**：App 让位 528，
+//     输入条升到 189，比真顶边 331 高 142 pt ⇒ 中间那段是 App 自己的窗口底色，
+//     就是用户看到的「抬高之后一片黑」；
+// 两个症状是同一个错的两种表现：**报出去的量不是键盘真实大小**。
+//
+// 所以这一版不再「平移」，而是**换成量出来的真值**：
+//   realH = `InputSetHostView` 的高度（386 / 431，含候选条与顶层工具栏）
+//   y     = worldH − realH  ⇒  331 / 286，底边正好落在 App 世界的底 717
+// 两条通道（本钩子 + `intersectionHeightForWindowScene:`）从此同值，不会再出现
+// 「有时按这个排、有时按那个排」。量不到（宿主还没建）才退回 0.4.26 的平移。
+//
+// ⛔ 别再用 `end.size.height − shift` 当高度：528−215=313，比真实 386 少 73 ——
+// 那 73 正好是键盘顶部工具栏 + 它上面那一条，等于把输入条重新塞回键盘里。
 static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) {
     if (AevonKbOrigPostNote == NULL) return;
     void (*orig)(id, SEL, id, id, id) = (void (*)(id, SEL, id, id, id))AevonKbOrigPostNote;
@@ -896,17 +950,36 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     BOOL canFix = (shift > 20.0 && shift < 400.0);
     CGFloat bottom = end.origin.y + end.size.height;
     // 屏幕坐标的特征：frame 底边贴在物理屏底。2 pt 容差吸收取整噪声。
-    BOOL screenSpace = canFix && fabs(bottom - physicalH) < 2.0;
+    // 另加两条：键盘必须真的露在屏幕上（高 ≥ 40、顶边在屏底之上 40），否则收起那一拍
+    // 的 `(0,932,430,0)` 一类也会命中，被我们改写成「键盘还在」。
+    BOOL screenSpace = canFix && fabs(bottom - physicalH) < 2.0
+                       && end.size.height >= 40.0 && end.origin.y <= physicalH - 40.0;
 
-    if (AevonKbNoteNotes < 8) {
+    // 量「这一刻」键盘真实占多少。宿主还没建出来就是 0，下面退回平移那条老路。
+    CGFloat realH = 0.0;
+    CGFloat hostY = 0.0;
+    CGFloat hostH = 0.0;
+    if (screenSpace && [NSThread isMainThread]) {
+        // `[UIApplication windows]` 只能在主线程问；不在主线程就退回平移那条老路，
+        // 不拿线程安全去换一个精度。
+        UIWindow *kbWin = AevonKbKeyboardWindowLive();
+        realH = AevonKbMeasuredCoverage(kbWin, physicalH, &hostY, &hostH);
+        // 比 App 世界还高的读数只能是量错（多窗重叠 / 非竖屏），不参与决策。
+        if (realH > worldH + 1.0) realH = 0.0;
+        if (realH > 8.0) AevonKbLastRealH = realH;
+    }
+    // 通知比宿主早一拍（全新进程弹第一次键盘）时用上次的已知值，不用 0 冒充。
+    if (realH < 8.0 && AevonKbLastRealH > 8.0) realH = AevonKbLastRealH;
+
+    if (AevonKbNoteNotes < 24) {
         AevonKbNoteNotes += 1;
-        char line[256];
+        char line[288];
         const char *noteName = [(NSString *)name UTF8String];
         snprintf(line, sizeof(line),
-                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f screen=%d\n",
+                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f screen=%d\n",
                  noteName != NULL ? noteName : "?",
                  end.size.width, end.size.height, end.origin.x, end.origin.y,
-                 worldH, physicalH, shift, (int)screenSpace);
+                 worldH, physicalH, shift, realH, hostY, hostH, (int)screenSpace);
         AevonKbLog(line);
     }
 
@@ -921,7 +994,14 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
         return;
     }
     CGRect end2 = end;
-    end2.origin.y -= shift;
+    const char *src = "shift";
+    if (realH > 8.0) {
+        end2.origin.y = worldH - realH;      // 底边落在 App 世界的底（= 卡片底）
+        end2.size.height = realH;
+        src = "meas";
+    } else {
+        end2.origin.y -= shift;              // 量不到：只平移，至少不再整块偏 215
+    }
     [fixed setObject:[NSValue valueWithCGRect:end2] forKey:UIKeyboardFrameEndUserInfoKey];
     NSValue *beginValue = [info objectForKey:UIKeyboardFrameBeginUserInfoKey];
     if (beginValue != nil && [beginValue isKindOfClass:[NSValue class]]) {
@@ -932,13 +1012,14 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
         }
         [fixed setObject:[NSValue valueWithCGRect:begin] forKey:UIKeyboardFrameBeginUserInfoKey];
     }
-    if (AevonKbNoteFixes < 8) {
+    if (AevonKbNoteFixes < 24) {
         AevonKbNoteFixes += 1;
-        char line[208];
+        char line[256];
         snprintf(line, sizeof(line),
-                 "app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> @%.0f,%.0f rem=%.0f\n",
+                 "app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f\n",
                  end.size.width, end.size.height, end.origin.x, end.origin.y,
-                 end2.origin.x, end2.origin.y, worldH - end2.origin.y);
+                 end2.size.width, end2.size.height, end2.origin.x, end2.origin.y,
+                 src, worldH - end2.origin.y);
         AevonKbLog(line);
     }
     orig(self, _cmd, name, object, fixed);
@@ -1023,13 +1104,28 @@ static CGFloat AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, B
     // 我只删了自己记得的那几条补偿，0.4.17 这条留在原地，又烧了一版才看出来。
     CGFloat chosen = answer;
     // 只读取证：量出来的真实占高仍然打日志，方便对照公式的余量够不够。
-    // **它不参与决策** —— 这一版起 inset 只有一个来源。
     CGFloat hostY = 0.0;
     CGFloat hostH = 0.0;
     CGFloat measured = AevonKbMeasuredCoverage(keyboardWindow, screenHeight, &hostY, &hostH);
     if (measured > screenHeight) measured = screenHeight;
+    if (measured > 8.0) AevonKbLastRealH = measured;
 
-    if (AevonKbInterNotes < 10) {
+    // 0.4.27 — **两条通道必须同值。**
+    //
+    // 311 的病灶是「同一拍里两个数不一样」：本钩子答 458，通知那条答 528（平移后 313），
+    // 而键盘真实占 386。App 用哪个，取决于它在哪一刻读哪一条 —— 这就是用户说的
+    // 「有时被盖住，有时被抬高」。只要两条都等于量出来的真值，就不会再有时有时：
+    //   本钩子 → 386（键盘在 App 世界里遮住多少）
+    //   通知   → y=331、h=386（键盘顶边 331，底边 717）
+    // 量不到（宿主未建 / 横竖屏切换的空档）才退回母版公式，公式本身一个字符没改。
+    //
+    // 只在「承载面比真屏矮」时接管（卡片态）。全屏 App 的 `screenHeight` 就是物理屏高，
+    // 那时母版公式退化成 `orig` 透传，是母版对全屏的既有行为，不要动。
+    CGFloat physicalH = AevonKbPhysicalHeight();
+    BOOL hosted = (physicalH - screenHeight > 20.0 && physicalH - screenHeight < 400.0);
+    if (hosted && measured > 8.0) chosen = measured;
+
+    if (AevonKbInterNotes < 16) {
         AevonKbInterNotes += 1;
         char line[288];
         snprintf(line, sizeof(line),

@@ -1485,10 +1485,15 @@ def main():
                       #   phys=  nativeBounds/nativeScale（932）
                       #   shift= phys − world（215）
                       #   screen= 判据是否命中（1 = 需要换算）
-                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f screen=%d",
-                      # 修正那一拍：`rem=` 是换算后的让位高度，必须等于
-                      # `App 世界高 − hostm`（310 四个样本全部吻合，386/431/359/313）。
-                      b"app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> @%.0f,%.0f rem=%.0f",
+                      # 0.4.27 加了两个读数：`meas=` 是这一拍量到的键盘真实占高
+                      # （`InputSetHostView` 高），`host=` 是宿主在键盘窗里的顶边与高。
+                      # 判据：`meas` 必须等于 `probe hostm` 那个方向上的值
+                      # （`world − meas == hostm`），否则说明量错了窗。
+                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f screen=%d",
+                      # 修正那一拍：0.4.27 起不再只平移 —— `src=meas` 表示用真值重写了
+                      # 整个矩形（y = world − meas、高 = meas），`src=shift` 是量不到时的
+                      # 退回。`rem=` 是让位高度，必须等于 `meas`（386/431/359/404）。
+                      b"app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f",
                       # 钩子 2 —— 建键盘窗那一拍把 frame 写成承载面尺寸。`scale=0.0`
                       # 是横屏「不显示」，母版原样，不是 bug。
                       b"app: kb: win frame=%.0fx%.0f@%.0f,%.0f scale=%.1f hosted=%d",
