@@ -37,6 +37,39 @@
 // 会把输入条放在窗口底 ⇒ 正好被键盘盖住。先把「scene 落点 / 坐标空间 / 指南」
 // 三个数按正确时机（0.7 / 1.7 / 2.9 s）打出来，再决定要不要动它。
 // ---------------------------------------------------------------------------
+// 0.4.36 — 319：落点全对，`gap` 全废；把判据换成「输入条容器的底边」
+// ---------------------------------------------------------------------------
+// 319 先把上一版的两个怀疑都判了：
+//
+// ① `ph=44` 扣得对。树里 `_UIRemoteKeyboardPlaceholderView f=0,0,430x44 n=0`
+//    —— 零子视图；宿主的其它所有层（`UIKeyboardDockView` / `_UIKBCompatInputView` /
+//    `TUISystemInputAssistantView`）全都从 **y=44** 开始，被它整体下推。
+//    所以可见键盘顶 = 529+44 = 573（物理）= 358（世界），与 `rem=359` 一致。
+// ② 落点没有一处不自洽：340 条 `note fix` 全是 `rem == meas`；
+//    `chan t0 host=430x403@0,529 … world=314` 里 `314 + ph 44 = 358 = rem`。
+//
+// 剩下的唯一矛盾是 `keyboardLayoutGuide`，它给出**三种互不相同的错值**：
+//
+//    威锋   guide=430x403@0,314   ← 含那 44，顶边比真实键盘高 44 ⇒ 抬高 44
+//    minis/QQ guide=430x144@0,573  ← 573 是物理坐标没换算 ⇒ 低 215
+//    备忘录/酷安 guide=430x34@0,683 ← 等于「键盘没出现」
+//
+// 吃它的 App 必然错，方向随它错的方向走；不吃的（QQ）一直正常。这条线**不由我们
+// 控制**（它读键盘 scene 的 geometry，母版四个钩子里没有它），所以本版不碰。
+//
+// 本版要解决的是「拿不到真读数」这件事本身 —— 319 里三个 App 打了 `view=none`，
+// 说明 0.4.35 只扫主窗是错的。此外 `gap` 在备忘录（整屏文档视图）与 minis
+// （顶部搜索框）上天然离谱，不能当判据。改成：
+//
+//   `app: kb: fr  <tag> view=<类> … gap=… win=<窗口类>`   ← 扫**全部窗口**
+//   `app: kb: fr  <tag> anc=<父链五层>`
+//   `app: kb: fr  <tag> bar=<横满容器类> <底边> d=<kbtop−底边> depth=<第几层>`
+//
+// `bar` 是父链里第一个「横向占满、高 ≥ 20、且不到半屏」的祖先 —— 输入条/工具栏本体，
+// 整屏页面容器被半屏那道闸排除。QQ 正常时 `barBot` 恒 = 358 = kbtop ⇒ `d=0`，
+// 这是目前唯一的「好样本」。判据：`d` 0~10 正常、>10 抬高、<0 被盖。
+// ⛔ 判据只用 `bar` 的 `d`，不要再用 `view` 的 `gap`。
+// ---------------------------------------------------------------------------
 // 0.4.34 — 同一份 userInfo 里还有第三个矩形：`UIKeyboardBoundsUserInfoKey`
 // ---------------------------------------------------------------------------
 // 317 的症状第一次把 App 分成两拨：
@@ -1274,9 +1307,41 @@ static UIView *AevonKbFindFirstResponder(UIView *root, int depth) {
     if ([root isFirstResponder]) return root;
     NSArray *subs = [root subviews];
     NSUInteger n = [subs count];
-    for (NSUInteger i = 0; i < n && i < 32; i++) {
+    for (NSUInteger i = 0; i < n && i < 64; i++) {
         UIView *hit = AevonKbFindFirstResponder([subs objectAtIndex:i], depth - 1);
         if (hit != nil) return hit;
+    }
+    return nil;
+}
+
+/// 0.4.36 — 在**全部窗口**里找第一响应者。
+///
+/// 0.4.35 只扫主窗，319 里威锋与酷安都打了 `view=none`。那不是「没有输入框」，
+/// 是**扫的范围不对**：威锋的输入框在 `WKContentView`（WebKit 的容器，挂在它自己的
+/// 子树上），酷安的输入条挂在扩展/浮层窗口，两者都不在 `rootViewController.view`
+/// 的可见子树里。键盘弹着就一定有第一响应者，所以「找不到」只能说明找错地方。
+///
+/// `windows` 在 iOS 15 起标了 deprecated，`-Werror` 会拦，所以走 `respondsToSelector:`
+/// + `objc_msgSend` 取，不直接调属性。
+static UIView *AevonKbFindFirstResponderAnyWindow(UIWindow **outWin) {
+    if (outWin != NULL) *outWin = nil;
+    UIApplication *app = [UIApplication sharedApplication];
+    if (app == nil) return nil;
+    SEL wsel = NSSelectorFromString(@"windows");
+    if (![app respondsToSelector:wsel]) return nil;
+    id raw = ((id (*)(id, SEL))objc_msgSend)(app, wsel);
+    if (raw == nil || ![raw isKindOfClass:[NSArray class]]) return nil;
+    NSArray *wins = (NSArray *)raw;
+    NSUInteger n = [wins count];
+    for (NSUInteger i = 0; i < n && i < 12; i++) {
+        id obj = [wins objectAtIndex:i];
+        if (obj == nil || ![obj isKindOfClass:[UIWindow class]]) continue;
+        UIWindow *w = (UIWindow *)obj;
+        UIView *hit = AevonKbFindFirstResponder(w, 24);
+        if (hit != nil) {
+            if (outWin != NULL) *outWin = w;
+            return hit;
+        }
     }
     return nil;
 }
@@ -1317,42 +1382,86 @@ static BOOL AevonKbSceneRect(UIWindowScene *scene, CGRect *out, const char **out
 }
 
 /// 0.4.35 — 两行只读取证：焦点视图（含父链）与 App 主窗 scene 的落点。
+/// 0.4.36 — 焦点改成扫**全部窗口**，并多打一行「输入条容器」的底边。
+///
+/// 319 证明「焦点视图自己」不够用：
+///   · 备忘录 `ICTK2TextView 430x717@0,0` —— 整屏文档视图，`gap=-359` 是必然的，不是症状；
+///   · minis `PastableUITextView 374x21@28,51` —— 顶部搜索框，`gap=287` 也不是症状；
+///   · 威锋/酷安 `view=none` —— 压根没扫到（输入框不在主窗可见子树里）。
+/// 三种情形下 `gap` 都不能当判据，唯一能用的是**承载输入条那个横满容器的底边**：
+/// QQ 正常时它恒等于 358（= 我们报出去的 kbtop），这是目前唯一的「好样本」基线。
+/// 所以这里把「父链里第一个横满、且高 ≥ 20 的容器」单独打出来，`d = kbtop − barBot`：
+/// 0~10 正常、>10 抬高、<0 被盖。
 static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
                                       UIView *rootView, CGFloat kbTop) {
     if (appWin == nil) return;
-    UIView *focus = AevonKbFindFirstResponder(((rootView != nil) ? rootView : appWin), 20);
+    UIWindow *focusWin = nil;
+    UIView *focus = AevonKbFindFirstResponderAnyWindow(&focusWin);
+    if (focus == nil) {
+        focus = AevonKbFindFirstResponder(((rootView != nil) ? rootView : appWin), 24);
+        if (focus != nil) focusWin = appWin;
+    }
+    if (focusWin == nil) focusWin = appWin;
+    CGFloat worldW = [UIScreen mainScreen].bounds.size.width;
     char line[400];
     if (focus == nil) {
         snprintf(line, sizeof(line),
                  "app: kb: fr %s view=none kbtop=%.0f\n", tag, kbTop);
         AevonKbLog(line);
     } else {
-        CGRect fr = [focus convertRect:[focus bounds] toView:appWin];
+        CGRect fr = [focus convertRect:[focus bounds] toView:focusWin];
         CGFloat bot = fr.origin.y + fr.size.height;
         // `gap` 与 `bar` 同义：正 = 在键盘之上（越大越「抬高」），负 = 压在键盘底下。
         snprintf(line, sizeof(line),
-                 "app: kb: fr %s view=%.28s %.0fx%.0f@%.0f,%.0f bot=%.0f gap=%.0f kbtop=%.0f\n",
+                 "app: kb: fr %s view=%.28s %.0fx%.0f@%.0f,%.0f bot=%.0f gap=%.0f kbtop=%.0f win=%.22s\n",
                  tag, class_getName([focus class]),
                  fr.size.width, fr.size.height, fr.origin.x, fr.origin.y,
-                 bot, kbTop - bot, kbTop);
+                 bot, kbTop - bot, kbTop, class_getName([focusWin class]));
         AevonKbLog(line);
 
-        // 父链三层。SwiftUI 的类名很长，每段截 28 字符，够认出「是不是整套被移动的容器」。
-        char chain[240] = "";
+        // 父链五层 + 「输入条容器」。SwiftUI 的类名很长，每段截 28 字符，
+        // 够认出「是不是整套被移动的容器」。
+        char chain[300] = "";
+        CGFloat barBot = -1.0;
+        int barDepth = -1;
+        const char *barCls = "";
         UIView *p = [focus superview];
-        for (int i = 0; i < 3 && p != nil; i++) {
-            CGRect pr = [p convertRect:[p bounds] toView:appWin];
+        int i;
+        for (i = 0; i < 5 && p != nil; i++) {
+            CGRect pr = [p convertRect:[p bounds] toView:focusWin];
             char bit[96];
             snprintf(bit, sizeof(bit), "%s%.28s %.0fx%.0f@%.0f,%.0f",
                      (i == 0) ? "" : " > ", class_getName([p class]),
                      pr.size.width, pr.size.height, pr.origin.x, pr.origin.y);
             size_t room = sizeof(chain) - strlen(chain) - 1;
             if (room > 1) strncat(chain, bit, room);
+            // 第一个「横向占满、且有高度」的祖先就是输入条/工具栏本体。
+            // 排除那些整屏容器：世界高 717 的祖先不是输入条，是页面。
+            if (barDepth < 0
+                && pr.size.width >= worldW - 8.0
+                && pr.size.height >= 20.0
+                && pr.size.height <= [UIScreen mainScreen].bounds.size.height * 0.5) {
+                barBot = pr.origin.y + pr.size.height;
+                barDepth = i;
+                barCls = class_getName([p class]);
+            }
             p = [p superview];
         }
         snprintf(line, sizeof(line),
                  "app: kb: fr %s anc=%s\n", tag, (chain[0] != '\0') ? chain : "none");
         AevonKbLog(line);
+        if (barDepth >= 0) {
+            // `d = kbtop − barBot`，与 `gap` 同向：正 = 抬高、负 = 被盖。
+            // 这条取代 `gap` 当判据 —— QQ 正常时 barBot 恒 = 358 = kbtop ⇒ d=0。
+            snprintf(line, sizeof(line),
+                     "app: kb: fr %s bar=%.28s %.0f d=%.0f depth=%d\n",
+                     tag, barCls, barBot, kbTop - barBot, barDepth);
+            AevonKbLog(line);
+        } else {
+            snprintf(line, sizeof(line),
+                     "app: kb: fr %s bar=none d=999\n", tag);
+            AevonKbLog(line);
+        }
     }
 
     UIWindowScene *scene = [appWin windowScene];
@@ -1371,13 +1480,29 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
     if (!hasGuide) hasGuide = AevonKbGuideFrame(appWin, &guide);
     CGRect wf = [appWin frame];
     UIEdgeInsets ins = [appWin safeAreaInsets];
+    // 0.4.36 — 两个「坐标系」读数。319 里 `kb: win ask=430x932@0,0` 说明键盘窗是
+    // **物理屏尺寸 (0,0,430,932)**，而 App 世界只有 717 —— 键盘窗比 App 的世界高 215。
+    // UIKit 算 `keyboardLayoutGuide` 用的是「键盘顶（窗坐标）→ 世界底」，两者底座不同
+    // 就会算出三种错值里的任意一种（见文首 0.4.36 那一段）。把这两个数并排打出来，
+    // 320 就能一眼确认「guide 的错值是不是就是这 215 / 44 换算出来的」。
+    CGRect uin = [[UIScreen mainScreen] bounds];
+    UIWindow *kbw = AevonKbKeyboardWindowLive();
+    CGRect kbwf = CGRectZero;
+    CGRect kbwb = CGRectZero;
+    if (kbw != nil) {
+        kbwf = [kbw frame];
+        kbwb = [kbw bounds];
+    }
     snprintf(line, sizeof(line),
-             "app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f\n",
+             "app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f uin=%.0fx%.0f kbw=%.0fx%.0f@%.0f,%.0f b=%.0f,%.0f\n",
              tag, wf.size.width, wf.size.height,
              sf.size.width, sf.size.height, sf.origin.x, sf.origin.y, ssrc,
              co.size.width, co.size.height, co.origin.x, co.origin.y,
              guide.size.width, guide.size.height, guide.origin.x, guide.origin.y,
-             (int)hasGuide, ins.top, ins.bottom);
+             (int)hasGuide, ins.top, ins.bottom,
+             uin.size.width, uin.size.height,
+             kbwf.size.width, kbwf.size.height, kbwf.origin.x, kbwf.origin.y,
+             kbwb.origin.x, kbwb.origin.y);
     AevonKbLog(line);
 }
 

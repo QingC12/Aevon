@@ -1559,12 +1559,21 @@ def main():
                       #   备忘录 `ICTK2TextView 430x717@0,0`（整屏文档视图）、
                       #   酷安   `txt=none`（一个都没扫到）。拿它判「抬高/被盖」不成立。
                       # `isFirstResponder` 才是「用户此刻在打字的那个框」。
-                      #   view=  焦点视图类名（截 28 字符）+ 窗口坐标矩形 + 底边
+                      #   view=  焦点视图类名（截 28 字符）+ 那个窗口里的矩形 + 底边
                       #   gap=   同 `bar`：正 = 在键盘之上，负 = 压在键盘底下
-                      #   anc=   父链三层，看是「App 抬了整个容器」还是「框本来就在那儿」
-                      b"app: kb: fr %s view=%.28s %.0fx%.0f@%.0f,%.0f bot=%.0f gap=%.0f kbtop=%.0f",
+                      #   win=   焦点所在的窗口类名（0.4.36：扫全部窗口，不再只看主窗）
+                      #   anc=   父链五层（0.4.36：三层不够，输入条容器常在第 4 层）
+                      #   bar=   父链里第一个「横向占满、高 ≥20、不到半屏」的容器（截 28）
+                      #   d=     kbtop − 那个容器的底边：**这才是判据**
+                      #          0~10 正常 / >10 抬高 / <0 被盖。QQ 正常时 d=0。
+                      #   depth= 那个容器在父链第几层
+                      # 319 的教训：`gap` 在备忘录（整屏文档视图）与 minis（顶部搜索框）
+                      # 上天然离谱，只能看 `bar` 的 `d`。
+                      b"app: kb: fr %s view=%.28s %.0fx%.0f@%.0f,%.0f bot=%.0f gap=%.0f kbtop=%.0f win=%.22s",
                       b"app: kb: fr %s view=none kbtop=%.0f",
                       b"app: kb: fr %s anc=%s",
+                      b"app: kb: fr %s bar=%.28s %.0f d=%.0f depth=%d",
+                      b"app: kb: fr %s bar=none d=999",
                       # 0.4.35 — App 主窗 scene 的落点 + 坐标空间 + 指南（同一拍）。
                       # 318 里六个 App 的 `guide` 全是 `430x34@0,683`（窗口底减安全区
                       # = 「键盘没出现」），而宿主明明已量到 359/403/475 ⇒ 用指南排版
@@ -1574,7 +1583,11 @@ def main():
                       #   co=    scene 坐标空间 bounds（判「世界」是 717 还是 932）
                       #   guide= keyboardLayoutGuide.layoutFrame
                       #   safe=  窗口上下安全区，判 guide 是不是退成了「底部安全区」
-                      b"app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f",
+                      #   uin=   UIScreen.bounds（钩过 ⇒ 717）
+                      #   kbw=   键盘窗 frame / b= 它的 bounds.origin（0.4.36）
+                      #          319 的 `kb: win ask=430x932@0,0` 说明键盘窗是**物理屏**
+                      #          尺寸，比 App 世界高 215 —— guide 的三种错值都出在这里。
+                      b"app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f uin=%.0fx%.0f kbw=%.0fx%.0f@%.0f,%.0f b=%.0f,%.0f",
                       # 0.4.28 — 「第二条通道」取证（**只读**，一次会话两拍）。
                       # 312：QQ 正确、微信先对后错，而 App 主窗十次都是 430x717
                       # ⇒ 不是悬浮窗的事，是微信自己又排了一次版、没走通知。
