@@ -189,6 +189,16 @@ final class RingHost: NSObject {
 
     private var config = RingConfig()
     private var expanded = false
+    /// 0.4.2 — `expanded` 上一次被置 true 的时刻，只服务超时自愈。
+    ///
+    /// `expanded` 的复位只写在 `handleEdgePhase` 的 `.ended` / `.cancelled` 两格。
+    /// 但抬手那帧不一定会到这里：圆盘自己的视图一旦接管了触摸（或者浮窗的
+    /// `AevonFloatTouch` 先把那一帧吃掉），`edgeTouch` 就再也收不到 ended ——
+    /// 用户报的「图标定在空中 + 之后手势全废」就是 `expanded` 卡住的样子。
+    /// 8 s 远大于任何一次真实呼盘（跟手到抬手通常 < 2 s），到点还没有 ended
+    /// 就说明这一根手指的回执丢了。
+    private var edgeExpandedAt: CFTimeInterval = 0
+    private let edgeStuckAfter: CFTimeInterval = 8.0
 
     /// Cheap change detectors. Comparing a string costs nothing and lets a
     /// rotation or a slider drag skip the rebuild entirely.
@@ -261,6 +271,15 @@ final class RingHost: NSObject {
         }
         AevonEdgeEntry.openPanelHandler = { [weak self] in
             self?.openPanel()
+        }
+        // 0.4.2 — 圆盘从**任何路径**收起时把这一轮呼盘的状态归零。
+        //
+        // 原来 `ringDidDismiss` 是空实现，`expanded` 只能靠 `handleEdgePhase`
+        // 的 `.ended` / `.cancelled` 复位。点击图标选中、静默看门狗自收、面板
+        // 打开这几条路都收不到那一帧 —— 卡住之后 `edgeTouch` 的 `.moved` 会
+        // 一直走 `if expanded { return false }`，圆盘再也唤不出来。
+        AevonEdgeEntry.ringDidDismissHandler = { [weak self] in
+            self?.resetEdgeState("ring dismissed")
         }
         // 0.1.24 — `AevonRingGrip.setVisibleHandler` 不再注册：它唯一的用途是
         // 「圆盘收起时把竖条亮回来」，而竖条这一版整个下线条了。`AevonRingGrip`
@@ -865,6 +884,34 @@ final class RingHost: NSObject {
      *   3 ended / 4 cancelled）。
      * - Returns: 这一拍要不要吞掉（不往应用传）。
      */
+    /// 0.4.2 — 把「这一轮呼盘」的状态全部归零。
+    ///
+    /// 三个调用点，都在「抬手回执可能丢了」这一侧：
+    ///   · `AevonEdgeEntry.ringDidDismiss`（圆盘从任何路径收起）；
+    ///   · 下一次落指时发现盘已经不在屏上（`presented == nil`）；
+    ///   · 8 s 超时（`edgeStuckAfter`）。
+    ///
+    /// 只在这四个量里至少有一个还没归零时才写日志：这条会随每一次落指被问，
+    /// 稳态下它不该产生任何输出。
+    func resetEdgeState(_ why: String) {
+        guard expanded || barHeld || edgeWatching || edgeOwned else { return }
+        expanded = false
+        barHeld = false
+        edgeWatching = false
+        edgeOwned = false
+        edgeExpandedAt = 0
+        Log.write("ring: edge state reset why=" + why)
+    }
+
+    /// 0.4.2 — 这一轮呼盘还在跟手吗。`AevonRingTracking` 把它交给 `sendEvent:`，
+    /// 让触摸先问圆盘、再问浮窗（见 `AevonScene.m` 那个替身）。
+    ///
+    /// 判据用 `barHeld` 而不是 `expanded`：`barHeld` 正是「这根手指已经被圆盘
+    /// 接管」的那一段（`.began` 置位、`.ended` / `.cancelled` 复位），而
+    /// `expanded` 只表示「盘开着」—— 固定住的盘再划边缘时它是 false，
+    /// 那一段时间里手指仍归圆盘。
+    var isTrackingEdge: Bool { barHeld || edgeOwned }
+
     func edgeTouch(phase: Int32, x: Double, y: Double) -> Bool {
         guard let window = window, window.bounds.width > 0,
               let pad = edgePad else { return false }
@@ -872,6 +919,19 @@ final class RingHost: NSObject {
 
         switch phase {
         case 0:  // began
+            // 0.4.2 — **落指先自愈。**
+            //
+            // 上一根手指的 ended 丢掉时 `expanded` 会停在 true，而下面 `.moved`
+            // 那一格的第一句就是 `if expanded { edgeWatching = false; return false }`
+            // —— 于是这一整轮手势被当成「盘已经开着」，圆盘再也唤不出来，用户只能
+            // 注销。判据只认一条硬事实：盘在不在屏幕上。
+            if expanded, AevonRingMenu.presented == nil {
+                resetEdgeState("stale")
+            }
+            if expanded, edgeExpandedAt > 0,
+               CACurrentMediaTime() - edgeExpandedAt > edgeStuckAfter {
+                resetEdgeState("timeout")
+            }
             // 键盘 / 面板在屏时带子收走，右缘整条还给应用。
             guard !pad.isHidden, pad.isUserInteractionEnabled,
                   stripRect(in: window.bounds).contains(point) else {
@@ -971,6 +1031,7 @@ final class RingHost: NSObject {
              * （`dismiss()` 会同步写 `current = nil`），再走正常开盘。
              */
             if let menu = AevonRingMenu.presented, menu.superview != nil, menu.window != nil {
+                edgeExpandedAt = CACurrentMediaTime()
                 menu.beginRemoteTracking(at: point, source: "edge")
             } else {
                 if AevonRingMenu.presented != nil {
@@ -978,6 +1039,7 @@ final class RingHost: NSObject {
                     AevonRingMenu.dismissCurrent()
                 }
                 expanded = true
+                edgeExpandedAt = CACurrentMediaTime()
                 AevonRingMenu.presentTracking(in: host, at: point, source: "edge")
                 // 0.1.24 — 带子的高度一起报。热区定稿在「底部往上 35 %」之后，
                 // 这一行是「手指那条高度到底在不在带子里」的唯一判据：
@@ -1000,6 +1062,7 @@ final class RingHost: NSObject {
             guard barHeld else { return }
             barHeld = false
             expanded = false
+            edgeExpandedAt = 0
             guard let menu = AevonRingMenu.presented else { return }
             menu.remoteLift(at: point, source: "edge")
             Log.write("ring: edge swipe released at "
@@ -1009,6 +1072,7 @@ final class RingHost: NSObject {
             guard barHeld else { return }
             barHeld = false
             expanded = false
+            edgeExpandedAt = 0
             guard let menu = AevonRingMenu.presented else { return }
             // 系统抢断（来电、控制中心、来电浮层、别的识别器优先）时要有证词，
             // 否则「滑到一半圆盘没了」和「我们自己的 bug」分不开。
@@ -1908,4 +1972,18 @@ public func AevonRingEdgeTouch(_ phase: Int32, _ x: Double, _ y: Double) -> Int3
     // 认领触摸的地方，漏掉它，「闸门都无法制止」就还留着一半。
     if Gate.runtimeOff { return 0 }
     return RingHost.shared.edgeTouch(phase: phase, x: x, y: y) ? 1 : 0
+}
+
+/// 0.4.2 — 这一轮呼盘是不是正在跟手（`RingHost.expanded`）。
+///
+/// `sendEvent:` 用它决定**先问谁**。原来它固定先问 `AevonFloatTouch`，再问
+/// 圆盘 —— 圆盘从右缘展开、手指划到某张卡片上时，那一帧就被浮窗接走了：
+///   · 圆盘收不到 `moved`，图标停在高亮位（用户看到「一个图标升起后定在空中」）；
+///   · 抬手那帧同样被接走，`expanded` 停在 true ⇒ 之后每次边缘滑动都走
+///     `if expanded { return false }`，圆盘再也唤不出来（用户只能注销）。
+/// 只回答一个问题，不读任何几何 —— 它每一帧都会被问一次。
+@_cdecl("AevonRingTracking")
+public func AevonRingTracking() -> Int32 {
+    if Gate.runtimeOff { return 0 }
+    return RingHost.shared.isTrackingEdge ? 1 : 0
 }

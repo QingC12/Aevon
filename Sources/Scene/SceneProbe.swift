@@ -768,6 +768,22 @@ enum SceneProbe {
         guard let manager = AevonSceneManager() as? NSObject else { return nil }
         var best: String?
         var bestRank = -1
+        // 0.4.2 — **桌面在屏时，屏幕属于 SpringBoard，不属于任何 App。**
+        //
+        // 用户报的「在桌面第二页呼出圆盘、选中图标开卡之后桌面跳回第一页」，
+        // 就是这里判错了：桌面在屏时，目标 App 的 scene 仍然答 `isForeground=1`
+        // （挂起启动出来的 scene 更是从第一拍就答 1），而它的
+        // `accessibilitySceneIsForegroundVisible` / `contentState` 排名比
+        // SpringBoard 的图标 scene 高，于是这个函数返回的是**目标 App**。
+        // 调用方看到「目标就是屏上那个」⇒ 发 `AevonHomeStep(1)` ⇒ 系统收桌面
+        // ⇒ 图标界面回第一页。
+        //
+        // 判据用 SpringBoard 自己的可见位：它在屏 = 桌面真的在用户眼前，
+        // 那一拍去按 Home 没有任何意义（我们已经在家了）。App 全屏时
+        // SpringBoard 的图标 scene 不可见，这一条不会误伤 0.2.30 那个
+        // 「全屏 App → 卡片，先把 scene 从全屏页里让出来」的修复。
+        var springboardUp = false
+        var appVisible = false
         AevonEnumerateScenes(manager) { scene in
             guard let scene = scene as? NSObject else { return }
             let settings = value(of: scene, "settings")
@@ -779,12 +795,21 @@ enum SceneProbe {
             // 一定在第一个 `-` 之前。
             if let dash = name.firstIndex(of: "-") { name = String(name[..<dash]) }
             guard name.contains(".") else { return }
+            let visible = AevonBoolOf(scene, "accessibilitySceneIsForegroundVisible") == 1
+            if name.hasPrefix("com.apple.springboard") {
+                if visible { springboardUp = true }
+            } else if visible {
+                appVisible = true
+            }
             var rank = 0
-            if AevonBoolOf(scene, "accessibilitySceneIsForegroundVisible") == 1 { rank += 2 }
+            if visible { rank += 2 }
             if AevonContentStateOf(scene) >= 2 { rank += 1 }
             if rank > bestRank { bestRank = rank; best = name }
         }
-        return best
+        // 双向约束：只有「SpringBoard 可见、且没有任何 App 的 scene 报可见」才
+        // 认定桌面在屏。全屏 App 里 `appVisible` 会被那一个 App 立起来，这一条
+        // 因此不会把 0.2.30 的「先回桌面再建卡」误关掉。
+        return (springboardUp && !appVisible) ? "com.apple.springboard" : best
     }
 
 
@@ -2026,6 +2051,22 @@ public func AevonCardYieldForFullscreen(_ bundle: UnsafePointer<CChar>?) -> Int3
     let identifier = String(cString: bundle)
     guard identifier.count > 2 else { return 0 }
     guard Thread.isMainThread else { return 0 }
+    // 0.4.2 — **停靠小窗里的 App 被系统整屏激活：升成主窗，不要关掉。**
+    //
+    // 用户报的是 QQ：它停在小窗里，点「QQ 登录」跳到 QQ 时，应该自动变回主
+    // 悬浮窗。这条函数是这条路上唯一的观测点（`AevonWriteFrame` 的让路判据：
+    // 我们的小窗目标高度 < 800，系统写进来的整屏 frame > 850，两条同时成立
+    // 就是「系统要这个 App 上屏」）。原来它一律 `close(...)` —— 把卡拆掉，
+    // 用户的观感是「小窗没了，也没变成主窗」。
+    //
+    // 升窗走 `promoteFromRing()`：它自己会处理「谁给谁让位」
+    // （`performUndock` → `demoteMain(except:)`），与圆盘选中已经停靠的
+    // 图标是同一条路，不需要第二套几何。
+    if let docked = FloatHost.dockedHost(of: identifier) {
+        Log.write("win: docked card promoted for fullscreen launch b=" + identifier)
+        docked.promoteFromRing()
+        return 1
+    }
     guard let close = FloatHost.cardClosers[identifier] else { return 0 }
     Log.write("win: card yielded to fullscreen b=" + identifier)
     close("fullscreen launch")

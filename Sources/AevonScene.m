@@ -2690,6 +2690,10 @@ extern int AevonFloatTouchMini(int phase, double x, double y, double stamp);
 /// 在 Aevon(106) 里**一次都没被调用**，而这一层一直是通的 —— 浮窗的五个手势
 /// 就是证据。定义在 `RingHost.swift` 末尾（`@_cdecl`）。
 extern int AevonRingEdgeTouch(int phase, double x, double y);
+/// 0.4.2 — 「这一轮呼盘还在跟手吗」。定义在 `RingHost.swift` 末尾（`@_cdecl`）。
+///
+/// 每一根单指触摸都会问它一次，所以它只读一个 Bool，不碰任何几何 / 类表。
+extern int AevonRingTracking(void);
 
 /// 0.2.75 — 运行期闸快照。定义在 `Sources/Core/Gate.swift` 末尾（`@_cdecl`）。
 ///
@@ -2727,14 +2731,30 @@ static void AevonSendEventReplacement(id self, SEL _cmd, UIEvent *event) {
         // 相位原样交过去，包括 Stationary：那一条也得跟着吞，否则 UIKit 会收到
         // 一根它从没见过的「静止的」手指。
         CGPoint point = [touch locationInView:nil];
-        eaten = AevonFloatTouch((int)[touch phase], point.x, point.y,
-                                [touch timestamp]) != 0;
+        // 0.4.2 — **圆盘正在跟手时，先问圆盘。**
+        //
+        // 原来的顺序是「浮窗 → 圆盘」，而圆盘是从右缘展开、手指一路往屏幕中间
+        // 划的：只要中途压到任何一张卡片（主窗、停靠小窗、光晕那一层），
+        // `AevonFloatTouch` 就会把那一帧接走 ——
+        //   · 圆盘收不到 moved ⇒ 图标停在高亮位（用户看到的「升起后定在空中」）；
+        //   · 抬手帧同样被接走 ⇒ `RingHost.expanded` 停在 true ⇒ 之后每一次
+        //     边缘滑动都走 `if expanded { return false }`，圆盘再也唤不出来。
+        // 一次呼盘已经把这个手势认领了，这一整根手指就该归它 —— 与「小窗优先」
+        // 不冲突：圆盘没展开时 `AevonRingTracking` 恒 0，顺序和以前一模一样。
+        BOOL ringing = AevonRingTracking() != 0;
+        if (ringing) {
+            eaten = AevonRingEdgeTouch((int)[touch phase], point.x, point.y) != 0;
+        }
+        if (!eaten) {
+            eaten = AevonFloatTouch((int)[touch phase], point.x, point.y,
+                                    [touch timestamp]) != 0;
+        }
         // 0.1.23 — 浮窗没吃掉，再问右缘呼盘。
         //
         // 放在浮窗**之后**：小窗真的压在右缘上时，那根手指该归小窗（用户看得见
         // 的那个东西优先）。`AevonFloatTouch` 在手指不在任何卡上时立刻回 0，
-        // 所以正常情况这里只是一次矩形判断。
-        if (!eaten) {
+        // 所以正常情况这里只是一次矩形判断。圆盘已经在上面问过一次的不再重复。
+        if (!eaten && !ringing) {
             eaten = AevonRingEdgeTouch((int)[touch phase], point.x, point.y) != 0;
         }
     } else if ([touches count] > 1) {

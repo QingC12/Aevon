@@ -230,10 +230,17 @@ enum AevonEdgeEntry {
     static var openPanelHandler: (() -> Void)?
     static func openPanel() { openPanelHandler?() }
 
-    /// The old call tore the summon finger's adoption down. There is no adopter
-    /// here, so there is nothing to tear down — kept as a call site so the
-    /// menu's dismiss path stays byte-identical.
-    static func ringDidDismiss() {}
+    /// 圆盘收起时由 `AevonRingMenu.dismiss()` 调一次（唯一调用点，1361 行附近）。
+    ///
+    /// 0.4.2 — 这里原本是空实现（注释写着「没有 adopter，没什么可拆的」），
+    /// 但 `RingHost.expanded` 正是那个 adopter：它只在 `handleEdgePhase` 的
+    /// `.ended` / `.cancelled` 两格里复位。圆盘被**别的路径**收起时（点击图标、
+    /// 静默看门狗、面板、选中后自动收），这两格一条都收不到 —— `expanded`
+    /// 就停在 true，`edgeTouch` 的 `.moved` 分支于是每次都走
+    /// `if expanded { edgeWatching = false; return false }`，表现正是用户报的
+    /// 「圆盘恢复后手势再也唤不出，只能注销」。挂一个 handler 让它归零。
+    static var ringDidDismissHandler: (() -> Void)?
+    static func ringDidDismiss() { ringDidDismissHandler?() }
 
     /// The old 1.5 s re-summon guard for the swipe entry. The entry here is a
     /// deliberate tap on a dot, not a swipe that can double-fire, so the guard
