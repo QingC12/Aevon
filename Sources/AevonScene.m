@@ -383,55 +383,10 @@ static void AevonOwnLog(NSString *format, ...) {
     [line release];
 }
 
-/// 自建 scene 需要的最小类面。`meta=1` 是类方法。
-///
-/// 名字全部来自真机普查（0.2.11 的 `surf: scn host` 已经把
-/// `createSceneWithDefinition:initialParameters:` 钉在 `FBSceneManager` 上，
-/// 形状 `i{@32@0:8@16@24}`），不是从字符串表里猜的。
-typedef struct {
-    const char *cls;
-    const char *sel;
-    int meta;
-} AevonOwnNeed;
-
-static const AevonOwnNeed AevonOwnNeeds[] = {
-    {"RBSProcessIdentity", "identityForEmbeddedApplicationIdentifier:", 1},
-    {"RBSProcessPredicate", "predicateMatchingIdentity:", 1},
-    {"RBSProcessHandle", "handleForPredicate:error:", 1},
-    {"RBSProcessHandle", "auditToken", 0},
-    {"FBProcessManager", "sharedInstance", 1},
-    {"FBProcessManager", "launchProcessWithContext:", 0},
-    {"FBProcessManager", "registerProcessForAuditToken:", 0},
-    {"FBMutableProcessExecutionContext", "setIdentity:", 0},
-    {"FBMutableProcessExecutionContext", "setEnvironment:", 0},
-    {"FBMutableProcessExecutionContext", "setLaunchIntent:", 0},
-    {"FBApplicationProcessLaunchTransaction",
-        "initWithProcessIdentity:executionContextProvider:", 0},
-    {"FBApplicationProcessLaunchTransaction", "setCompletionBlock:", 0},
-    {"FBApplicationProcessLaunchTransaction", "begin", 0},
-    {"FBSSceneIdentity", "identityForIdentifier:", 1},
-    {"FBSSceneClientIdentity", "identityForProcessIdentity:", 1},
-    {"FBSMutableSceneDefinition", "definition", 1},
-    {"FBSMutableSceneDefinition", "setIdentity:", 0},
-    {"FBSMutableSceneDefinition", "setClientIdentity:", 0},
-    {"FBSMutableSceneDefinition", "setSpecification:", 0},
-    {"UIApplicationSceneSpecification", "specification", 1},
-    {"FBSMutableSceneParameters", "parametersForSpecification:", 1},
-    {"FBSMutableSceneParameters", "setSettings:", 0},
-    {"FBSMutableSceneParameters", "setClientSettings:", 0},
-    {"UIMutableApplicationSceneSettings", "setDisplayConfiguration:", 0},
-    {"UIMutableApplicationSceneSettings", "setForeground:", 0},
-    {"UIMutableApplicationSceneSettings", "setFrame:", 0},
-    {"UIMutableApplicationSceneSettings", "setLevel:", 0},
-    {"UIMutableApplicationSceneSettings", "setInterfaceOrientation:", 0},
-    {"UIMutableApplicationSceneSettings", "setPersistenceIdentifier:", 0},
-    {"UIMutableApplicationSceneSettings", "setSafeAreaInsetsPortrait:", 0},
-    {"UIMutableApplicationSceneClientSettings", "setInterfaceOrientation:", 0},
-    {"FBSceneManager", "sharedInstance", 1},
-    {"FBSceneManager", "createSceneWithDefinition:initialParameters:", 0},
-    {"FBSceneManager", "destroyScene:withTransitionContext:", 0},
-    {"FBScene", "uiPresentationManager", 0},
-};
+// 0.4.0 — 这里原本有一张 `AevonOwnNeeds[]`（RBSProcess / FBProcess 的最小类面，
+// 自建承载「自己把 App 拉起来」那一步用的）和它的 `AevonOwnNeed` 结构。
+// 自建承载随 URL 链一起删掉之后，这张表没有任何读方 —— `-Werror` 的
+// `-Wunused-const-variable` 会在 CI 里直接判死，所以整块拿掉。
 
 
 

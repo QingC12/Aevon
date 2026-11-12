@@ -708,13 +708,11 @@ def main():
                   #     新增五个类，方法名以 `carrier: m <类> <选择子> <编码>` 落地；
                   #   · 母本那个构造器长在哪个类上 —— 只有全类扫描能答。
                   # 前缀全部长过 15 字节，理由同上：短的会被编成立即数搜不到。
-                  b"parametersForSpecification:",
                   # 0.2.87 — 三条 `shape:` 断言随 `AevonOpenShapeDump` 一起删除。
                   # 它跑过一轮（Aevon(219)）并且答完了：第一个参数是 bundle id
                   # 字符串，URL 只在 options 的 `__PayloadURL` 里、且是裸 NSURL。
                   # 函数已从源码移除 —— 未调用的静态函数会被 `-Osize` 整段消除，
                   # 留断言必然落空（这一版就是这么被 CI 挡下来的）。
-                  b"FBSMutableSceneDefinition",
                   # 0.2.86 — 方案 S 判死之后的一轮「URL 装哪」取证。这一轮不再问
                   # 「谁实现了什么」，而是问「action 投进哪个容器」：
                   #   · 七类 `carrier: class` —— parameters / transitionContext /
@@ -925,10 +923,7 @@ def main():
                   b"setDisplayConfiguration:",
                   # 这一字典的字面量是「自建」这件事在产物里的锚：三个类名任何一个
                   # 拼错，工程就编译成一条永远走不进去的路，而日志只会说 gate miss。
-                  b"FBSMutableSceneDefinition",
                   b"FBApplicationProcessLaunchTransaction",
-                  b"registerProcessForAuditToken:",
-                  b"createSceneWithDefinition:initialParameters:",
                   # Mango 的「判内容就绪」：空壳不建卡，继续等。
                   b" shell=1 (deferred, no black card)",
                   # 0.1.93 — 主线程看门狗。这一整版的价值就是「下次卡死能被一句话
