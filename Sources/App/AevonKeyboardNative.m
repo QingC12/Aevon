@@ -192,6 +192,11 @@ static BOOL AevonKbTakeOver = NO;
 /// 建键盘窗那一拍它被临时清 0（`0x5230`），为了读到**真**屏幕 bounds。
 static BOOL AevonKbHookUIScreen = NO;
 
+/// 0.4.11 — 建键盘窗那一拍的冻结计数器（>0 时 `UIScreen -bounds` 一律返回系统值）。
+/// 理由见 `AevonKbBounds` 与 `AevonKbRemoteWindow` 里的注释：Aevon 比母版多一个
+/// 写 `AevonKbHookUIScreen` 的线程（band 的 Darwin 通知），必须挡住。
+static volatile int AevonKbWinFreeze = 0;
+
 /// 0xc3b0 `_appScene`。缓存承载面那个 `UIWindowScene`。
 ///
 /// 母版是 strong（`0x54f4` 取到之后存进全局槽，覆盖时 release 旧值）。这里同样
@@ -438,7 +443,19 @@ static CGRect AevonKbSceneBounds(UIWindowScene *scene) {
 // Aevon 照抄三条，一个都不省。另外这个文件只编进 `AevonApp.dylib`（App 进程），
 // 而 `AevonApp.plist` 的 Filter 排除了 SpringBoard —— 桌面进程里根本没有这条代码。
 static CGRect AevonKbBounds(id self, SEL _cmd) {
-    if (AevonKbTakeOver && AevonKbHookUIScreen) {
+    // 0.4.11 — `AevonKbWinFreeze`：建键盘窗那一拍**必须**读到真屏高度。
+    //
+    // 母版只写 `_hookUIScreen = 0` 就够了，因为它有两个前提：
+    //   ① `_upadteFrontMost` 只在 `0x5430`（scene settings 回调）里跑，与建窗同一线程；
+    //   ② 没有第二个写 `_hookUIScreen` 的地方。
+    // Aevon 多了一个写者：band 的 Darwin 通知回调（不保证主线程）。宿主在**键盘弹起
+    // 那一拍**正好会发 band（日志里 `win: band report 430x717 at 0,215` 就在
+    // `keyboard native on` 旁边），于是它可以在 `_hookUIScreen = 0` 与 `[main bounds]`
+    // 之间把这面旗子翻回 1 ⇒ 读到的是承载面的 717 ⇒ 键盘窗按 717 建 ⇒ 键盘的「底」
+    // 落在屏幕 y=717 而不是 932 ⇒ 悬空 215 pt、下方一条白（Aevon(295) 的形状）。
+    //
+    // 冻结计数器把这一拍变成原子的：期间无论谁来写旗子，本函数都按「关」处理。
+    if (AevonKbWinFreeze == 0 && AevonKbTakeOver && AevonKbHookUIScreen) {
         if (AevonKbAppScene == nil) {
             AevonKbAppScene = AevonKbMainScene();
         }
@@ -450,7 +467,8 @@ static CGRect AevonKbBounds(id self, SEL _cmd) {
                     char line[192];
                     snprintf(line, sizeof(line),
                              "app: kb: bounds -> %.0fx%.0f (hosted=%d)\n",
-                             box.size.width, box.size.height, (int)AevonKbIsFrontMost());
+                             box.size.width, box.size.height,
+                             1 - (int)AevonKbIsFrontMost());
                     AevonKbLog(line);
                 }
                 return box;
@@ -565,31 +583,46 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
     if (AevonKbAppScene == nil) {
         AevonKbAppScene = AevonKbMainScene();
     }
+    // 0.4.11 — 冻结 + 关旗子，两个一起。冻结挡住并发写者（band 通知线程、scene
+    // settings 回调），关旗子是母版原作者的动作。只关旗子不冻结 ⇒ Aevon(295) 的
+    // `win frame=430x717@0,0`：读到的是承载面高，键盘窗按承载面建，键盘的「底」
+    // 落在屏幕 y=717 而不是 932 ⇒ 悬空 215 pt、下方一条白。
+    AevonKbWinFreeze += 1;
     AevonKbHookUIScreen = NO;
     UIScreen *main = [UIScreen mainScreen];
     CGAffineTransform scale = CGAffineTransformMakeScale(1, 1);
 
-    if (AevonKbIsFrontMost()) {
-        CGRect box = [main bounds];
-        ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setFrame:), box);
+    CGRect box = [main bounds];          // 冻结态 ⇒ 一定是**系统值**
+    CGFloat readH = box.size.height;
+    // 兜底：若这一读仍等于承载面高（说明有别的钩子/系统把 bounds 压成了场景尺寸），
+    // 就用物理屏高（`nativeBounds / nativeScale` = 430×932）。母版这一拍的目的就是
+    // 「拿到真屏高度给键盘窗」，物理屏高就是那个数的定义本身。
+    CGRect native = [main nativeBounds];
+    CGFloat nativeScale = [main nativeScale];
+    CGFloat physicalH = nativeScale > 0.0 ? native.size.height / nativeScale : readH;
+    int fallback = 0;
+    if (physicalH > readH + 1.0) {
+        readH = physicalH;
+        fallback = 1;
+    }
+    CGFloat height = readH;
+    CGFloat width = box.size.width;
+
+    CGRect asked = CGRectZero;
+    if (AevonKbIsFrontMost()
+        || (AevonKbAppScene != nil && [AevonKbAppScene interfaceOrientation] == 1)) {
+        // 竖屏两条分支（母版 0x5230 的 0x5280 / 0x52d8）：窗口 = 真屏尺寸。
+        asked = CGRectMake(box.origin.x, box.origin.y, width, height);
+        ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setFrame:), asked);
         CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(frame));
         ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setBounds:), now);
     } else {
-        CGRect box = [main bounds];
-        CGFloat height = box.size.height;
-        if (AevonKbAppScene != nil && [AevonKbAppScene interfaceOrientation] == 1) {
-            CGRect target = CGRectMake(box.origin.x, box.origin.y, box.size.width, height);
-            ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setFrame:), target);
-            CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(frame));
-            ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setBounds:), now);
-        } else {
-            CGFloat width = box.size.width;
-            CGRect target = CGRectMake(-0.5 * height + 0.5 * width, 0.0, height, height);
-            ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setFrame:), target);
-            ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setBounds:),
-                                                     CGRectMake(0, 0, height, height));
-            scale = CGAffineTransformMakeScale(0, 0);
-        }
+        // 横屏：母版把内容 scale 到 0（不显示）。
+        asked = CGRectMake(-0.5 * height + 0.5 * width, 0.0, height, height);
+        ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setFrame:), asked);
+        ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setBounds:),
+                                                 CGRectMake(0, 0, height, height));
+        scale = CGAffineTransformMakeScale(0, 0);
     }
 
     if (root != nil) {
@@ -600,6 +633,7 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
                                                                 scale);
         }
     }
+    AevonKbWinFreeze -= 1;
     AevonKbHookUIScreen = YES;
 
     if (AevonKbWinNotes < 6) {
@@ -609,7 +643,16 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
         snprintf(line, sizeof(line),
                  "app: kb: win frame=%.0fx%.0f@%.0f,%.0f scale=%.1f hosted=%d\n",
                  now.size.width, now.size.height, now.origin.x, now.origin.y,
-                 scale.a, (int)AevonKbIsFrontMost());
+                 scale.a, 1 - (int)AevonKbIsFrontMost());
+        AevonKbLog(line);
+        // 0.4.11 — 三个数分开写，下一份日志能直接指出是哪一环断的：
+        //   ask  我们要求窗口多大（= 真屏高，母版语义）
+        //   real 冻结后读到的屏高 / fallback 为 1 说明读到的是场景尺寸
+        //   frame 系统最终给窗口多大（比 ask 小 ⇒ 窗口被场景夹住了，问题不在公式）
+        snprintf(line, sizeof(line),
+                 "app: kb: win ask=%.0fx%.0f real=%.0fx%.0f frame=%.0fx%.0f fb=%d\n",
+                 asked.size.width, asked.size.height, width, height,
+                 now.size.width, now.size.height, fallback);
         AevonKbLog(line);
     }
     return window;
