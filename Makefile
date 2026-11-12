@@ -74,7 +74,7 @@ Aevon_SWIFTFLAGS := -Osize
 # ObjC with no Swift runtime behind it, which is the only shape that is fair to
 # load everywhere.
 # ---------------------------------------------------------------------------
-AevonApp_FILES := Sources/App/AevonAppHook.m
+AevonApp_FILES := Sources/App/AevonAppHook.m Sources/App/AevonKeyboardNative.m
 AevonApp_FRAMEWORKS := Foundation UIKit
 AevonApp_LDFLAGS := -Wl,-dead_strip -Wl,-x
 
