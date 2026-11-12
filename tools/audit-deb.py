@@ -1551,6 +1551,30 @@ def main():
                       #   sc=    命中项个数
                       b"app: kb: bar %s txt=%s %.0fx%.0f@%.0f,%.0f bot=%.0f kbtop=%.0f gap=%.0f ok=%d z=%d sc=%d hid=%d a=%.2f",
                       b"app: kb: bar %s txt=none world=%.0f kbtop=%.0f vis=%d probes=%d seen=%d",
+                      # 0.4.35 — 「谁把输入条放错了」：焦点视图 + 它所在的父链 + scene 落点。
+                      #
+                      # 318 证明 `bar`（面积最大的文本框）**不是**输入条：
+                      #   minis  `PastableTextView @28,32`（在屏幕顶上）、
+                      #   Safari `UITextView @51,164`（网页表单）、
+                      #   备忘录 `ICTK2TextView 430x717@0,0`（整屏文档视图）、
+                      #   酷安   `txt=none`（一个都没扫到）。拿它判「抬高/被盖」不成立。
+                      # `isFirstResponder` 才是「用户此刻在打字的那个框」。
+                      #   view=  焦点视图类名（截 28 字符）+ 窗口坐标矩形 + 底边
+                      #   gap=   同 `bar`：正 = 在键盘之上，负 = 压在键盘底下
+                      #   anc=   父链三层，看是「App 抬了整个容器」还是「框本来就在那儿」
+                      b"app: kb: fr %s view=%.28s %.0fx%.0f@%.0f,%.0f bot=%.0f gap=%.0f kbtop=%.0f",
+                      b"app: kb: fr %s view=none kbtop=%.0f",
+                      b"app: kb: fr %s anc=%s",
+                      # 0.4.35 — App 主窗 scene 的落点 + 坐标空间 + 指南（同一拍）。
+                      # 318 里六个 App 的 `guide` 全是 `430x34@0,683`（窗口底减安全区
+                      # = 「键盘没出现」），而宿主明明已量到 359/403/475 ⇒ 用指南排版
+                      # 的 App（系统应用居多）会把输入条放到窗口底、正好被盖住。
+                      #   scene= scene 的物理落点（判 0..717 还是 215..932，`src=` 说明
+                      #          读的是哪一级：ui / fbs / none）
+                      #   co=    scene 坐标空间 bounds（判「世界」是 717 还是 932）
+                      #   guide= keyboardLayoutGuide.layoutFrame
+                      #   safe=  窗口上下安全区，判 guide 是不是退成了「底部安全区」
+                      b"app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f",
                       # 0.4.28 — 「第二条通道」取证（**只读**，一次会话两拍）。
                       # 312：QQ 正确、微信先对后错，而 App 主窗十次都是 430x717
                       # ⇒ 不是悬浮窗的事，是微信自己又排了一次版、没走通知。

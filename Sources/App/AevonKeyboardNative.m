@@ -9,6 +9,34 @@
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
 //
 // ---------------------------------------------------------------------------
+// 0.4.35 — 318 把「谁错了」缩小到两个候选：焦点视图与 `keyboardLayoutGuide`
+// ---------------------------------------------------------------------------
+// 0.4.34 之后五条矩形通道（End / Begin / Bounds / CenterEnd / CenterBegin）已经
+// 同值：318 的 340 条 `note fix` 全部 `rem == meas`，没有一条再把 456 / 429 透传。
+// 但**症状还在**，说明剩下的错不在我们发出去的那份通知里。
+//
+// 318 里 `bar` 探针的读数说明它自己也靠不住（这就是本版要换掉它的原因）：
+//   威锋   `WeiFeng.FeedTextView 398x40@16,354`   —— 可能是回复条，也可能是信息流里的编辑框
+//   minis  `PastableTextView 374x21@28,32`        —— y=32，在屏幕顶上，不可能是输入条
+//   Safari `UITextView 328x76@51,164`             —— y=164，网页里的表单
+//   备忘录 `ICTK2TextView 430x717@0,0`            —— 整屏文档视图，bot 恒等于窗口底
+//   酷安   `txt=none`                             —— 一个都没扫到
+// 「面积最大的文本框」不是「用户正在打字的那个」，所以拿它判「抬高/被盖」根本不成立。
+//
+// 本版只加两行只读取证，**不动任何几何**：
+//
+//   `app: kb: fr  <tag> view=<类> w x h@x,y bot=… gap=… kbtop=…`  ← `isFirstResponder`
+//   `app: kb: fr  <tag> anc=<父链三层>`                          ← 焦点视图在谁里面
+//   `app: kb: scn <tag> win=… scene=…@… src=… co=… guide=… safe=…`
+//
+// `fr` 是唯一能代表「用户此刻在打字的那个框」的视图；`anc` 给出它的父链，
+// 一眼就能看出是「App 把它抬了」还是「它本来就在这个位置」。
+// `scn` 要回答的是 0.4.28 留下的那条线：318 里六个 App 的 `guide` **全是**
+// `430x34@0,683`（= 窗口底减安全区，等于「键盘没出现」），而同一拍的宿主明明
+// 已经量到 359/403/475。用 `keyboardLayoutGuide` 排版的 App（系统应用居多）
+// 会把输入条放在窗口底 ⇒ 正好被键盘盖住。先把「scene 落点 / 坐标空间 / 指南」
+// 三个数按正确时机（0.7 / 1.7 / 2.9 s）打出来，再决定要不要动它。
+// ---------------------------------------------------------------------------
 // 0.4.34 — 同一份 userInfo 里还有第三个矩形：`UIKeyboardBoundsUserInfoKey`
 // ---------------------------------------------------------------------------
 // 317 的症状第一次把 App 分成两拨：
@@ -1236,6 +1264,123 @@ static void AevonKbCollectTextInput(UIView *root, int depth,
     }
 }
 
+/// 0.4.35 — 找 `isFirstResponder`。
+///
+/// 这是唯一「用户此刻真的在这个框里打字」的判据。文本框面积、可视性、
+/// 类名都只是间接线索（318 里四个 App 全部猜错）。深度 20 够：UIKit 的
+/// 输入视图层级再深也不会超过这个数，超了说明扫的是别的树。
+static UIView *AevonKbFindFirstResponder(UIView *root, int depth) {
+    if (root == nil || depth < 0) return nil;
+    if ([root isFirstResponder]) return root;
+    NSArray *subs = [root subviews];
+    NSUInteger n = [subs count];
+    for (NSUInteger i = 0; i < n && i < 32; i++) {
+        UIView *hit = AevonKbFindFirstResponder([subs objectAtIndex:i], depth - 1);
+        if (hit != nil) return hit;
+    }
+    return nil;
+}
+
+/// 0.4.35 — scene 的**物理落点**（三级回落，全部先 `respondsToSelector:`）。
+///
+/// 与 `AevonKbKeyboardTree` 里那段同源，但对象是 **App 主窗自己的 scene** ——
+/// 键盘窗那个 scene 答不出 frame（318 的 `tree settled scene=0x0@0,0 src=none`），
+/// 而「App 的 scene 到底摆在屏幕 0..717 还是 215..932」只有主窗能答。
+static BOOL AevonKbSceneRect(UIWindowScene *scene, CGRect *out, const char **outSrc) {
+    if (out != NULL) *out = CGRectZero;
+    if (outSrc != NULL) *outSrc = "none";
+    if (scene == nil || out == NULL) return NO;
+    SEL frameSel = NSSelectorFromString(@"frame");
+    SEL uiSel = NSSelectorFromString(@"uiSettings");
+    if ([scene respondsToSelector:uiSel]) {
+        id us = ((id (*)(id, SEL))objc_msgSend)(scene, uiSel);
+        if (us != nil && [us respondsToSelector:frameSel]) {
+            *out = ((CGRect (*)(id, SEL))objc_msgSend)(us, frameSel);
+            if (outSrc != NULL) *outSrc = "ui";
+            return YES;
+        }
+    }
+    SEL fbsSel = NSSelectorFromString(@"_scene");
+    SEL setSel = NSSelectorFromString(@"settings");
+    if ([scene respondsToSelector:fbsSel]) {
+        id fb = ((id (*)(id, SEL))objc_msgSend)(scene, fbsSel);
+        if (fb != nil && [fb respondsToSelector:setSel]) {
+            id st = ((id (*)(id, SEL))objc_msgSend)(fb, setSel);
+            if (st != nil && [st respondsToSelector:frameSel]) {
+                *out = ((CGRect (*)(id, SEL))objc_msgSend)(st, frameSel);
+                if (outSrc != NULL) *outSrc = "fbs";
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
+/// 0.4.35 — 两行只读取证：焦点视图（含父链）与 App 主窗 scene 的落点。
+static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
+                                      UIView *rootView, CGFloat kbTop) {
+    if (appWin == nil) return;
+    UIView *focus = AevonKbFindFirstResponder(((rootView != nil) ? rootView : appWin), 20);
+    char line[400];
+    if (focus == nil) {
+        snprintf(line, sizeof(line),
+                 "app: kb: fr %s view=none kbtop=%.0f\n", tag, kbTop);
+        AevonKbLog(line);
+    } else {
+        CGRect fr = [focus convertRect:[focus bounds] toView:appWin];
+        CGFloat bot = fr.origin.y + fr.size.height;
+        // `gap` 与 `bar` 同义：正 = 在键盘之上（越大越「抬高」），负 = 压在键盘底下。
+        snprintf(line, sizeof(line),
+                 "app: kb: fr %s view=%.28s %.0fx%.0f@%.0f,%.0f bot=%.0f gap=%.0f kbtop=%.0f\n",
+                 tag, class_getName([focus class]),
+                 fr.size.width, fr.size.height, fr.origin.x, fr.origin.y,
+                 bot, kbTop - bot, kbTop);
+        AevonKbLog(line);
+
+        // 父链三层。SwiftUI 的类名很长，每段截 28 字符，够认出「是不是整套被移动的容器」。
+        char chain[240] = "";
+        UIView *p = [focus superview];
+        for (int i = 0; i < 3 && p != nil; i++) {
+            CGRect pr = [p convertRect:[p bounds] toView:appWin];
+            char bit[96];
+            snprintf(bit, sizeof(bit), "%s%.28s %.0fx%.0f@%.0f,%.0f",
+                     (i == 0) ? "" : " > ", class_getName([p class]),
+                     pr.size.width, pr.size.height, pr.origin.x, pr.origin.y);
+            size_t room = sizeof(chain) - strlen(chain) - 1;
+            if (room > 1) strncat(chain, bit, room);
+            p = [p superview];
+        }
+        snprintf(line, sizeof(line),
+                 "app: kb: fr %s anc=%s\n", tag, (chain[0] != '\0') ? chain : "none");
+        AevonKbLog(line);
+    }
+
+    UIWindowScene *scene = [appWin windowScene];
+    CGRect sf = CGRectZero;
+    const char *ssrc = "none";
+    AevonKbSceneRect(scene, &sf, &ssrc);
+    CGRect co = CGRectZero;
+    if (scene != nil) {
+        id space = ((id (*)(id, SEL))objc_msgSend)(scene, @selector(coordinateSpace));
+        if (space != nil) {
+            co = ((CGRect (*)(id, SEL))objc_msgSend)(space, @selector(bounds));
+        }
+    }
+    CGRect guide = CGRectZero;
+    BOOL hasGuide = AevonKbGuideFrame(rootView, &guide);
+    if (!hasGuide) hasGuide = AevonKbGuideFrame(appWin, &guide);
+    CGRect wf = [appWin frame];
+    UIEdgeInsets ins = [appWin safeAreaInsets];
+    snprintf(line, sizeof(line),
+             "app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f\n",
+             tag, wf.size.width, wf.size.height,
+             sf.size.width, sf.size.height, sf.origin.x, sf.origin.y, ssrc,
+             co.size.width, co.size.height, co.origin.x, co.origin.y,
+             guide.size.width, guide.size.height, guide.origin.x, guide.origin.y,
+             (int)hasGuide, ins.top, ins.bottom);
+    AevonKbLog(line);
+}
+
 static void AevonKbProbeBarText(const char *tag) {
     if (AevonKbBarProbes >= 24) return;
     if (![NSThread isMainThread]) return;
@@ -1293,6 +1438,8 @@ static void AevonKbProbeBarText(const char *tag) {
                  "app: kb: bar %s txt=none world=%.0f kbtop=%.0f vis=%d probes=%d seen=%d\n",
                  tag, worldH, kbTop, (int)AevonKbShown, (int)AevonKbBarProbes, candCount);
         AevonKbLog(line);
+        // 酷安这一支就是 `txt=none`：一个文本框都没扫到，恰恰是最需要看焦点的情形。
+        AevonKbProbeFocusAndScene(tag, appWin, rootView, kbTop);
         return;
     }
     // 转进窗口坐标 —— `toView:appWin` 就是窗口坐标（appWin 的 bounds.origin 恒 0,0）。
@@ -1308,6 +1455,7 @@ static void AevonKbProbeBarText(const char *tag) {
              (int)offScreen, candCount,
              (int)[field isHidden], (double)[field alpha]);
     AevonKbLog(line);
+    AevonKbProbeFocusAndScene(tag, appWin, rootView, kbTop);
 }
 
 static void AevonKbScheduleBarProbes(void) {
