@@ -1,5 +1,5 @@
 // ===========================================================================
-// AevonKeyboardNative.m — 0.4.7 / 0.4.9 / 0.4.10 / 0.4.12 / 0.4.13
+// AevonKeyboardNative.m — 0.4.7 / 0.4.9 / 0.4.10 / 0.4.12 / 0.4.13 / 0.4.14
 //
 // 键盘的承载面接管。**1:1 复刻 Stheno 母版的 `SthenoKeyboard.dylib`**
 // （0.1.23；修复版 final.3 的键盘组件与母版只差 1 处：`0x4de8` 那个「首启打开
@@ -9,24 +9,48 @@
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
 //
 // ---------------------------------------------------------------------------
-// 0.4.13 — `setBounds:` 不能带 origin（Aevon(297)）
+// 0.4.14 — 删掉我自己发明的 215 pt「窗下移」（Aevon(298)）
+// ---------------------------------------------------------------------------
+// 症状与 297 一模一样：键盘只露上半截、下半透明且点不到。
+//
+// 0.4.13 已经把 `bounds.origin` 归零（298 读数 `bnd=0,0 root=430x717@0,0` 证明
+// 那一步真的生效了），症状不变 ⇒ 平移/裁切不在 bounds，而在**窗本身被我们挪了**。
+// 298 的第一条读数就是铁证：
+//
+//   app: kb: win orig=430x717@0,0 … ask=430x717@0,215 frame=430x717@0,215 dy=1
+//
+// 系统把键盘窗建在 (0,0,430,717) —— **它本来就是对的**：窗底 = 承载面底 = 卡片底
+// = 屏幕底 932。`dy=1` 是我在 0.4.12 加的「补偿」：看到原点在 0 就往下搬 215。窗里
+// 的键盘视图按**窗底**摆，窗往下搬 215 ⇒ 键盘整个跟着下移 215 ⇒ 越过卡片下沿的
+// 215 pt 被裁掉、也点不到。
+//
+// 母版从来没搬过窗：`0x5230` 竖屏两条分支都是 `setFrame:[UIScreen mainScreen].bounds`
+// 一个分量都不改。本版回到那一句。⛔ 纪律：**补偿只能来自母版，不能来自「我觉得
+// 应该对齐」** —— 这是第三次在同一个函数里调参数（0.4.10 拽窗顶、0.4.11 改窗高、
+// 0.4.12 搬窗底），三次同一个形状。
+//
+// 同时加一份**只读**取证（`app: kb: tree …`）：若还有一层内部裁切，下一份日志能
+// 直接指认是谁，不必再从截图反推。
+//
+// ---------------------------------------------------------------------------
+// 0.4.13 — `setBounds:` 不能带 origin（Aevon(297)）—— **结论仍成立，但不充分**
 // ---------------------------------------------------------------------------
 // 症状：输入框已经正常（0.4.12 的恒等公式生效），但键盘只显示上半部分、下半透明
 // 且无法触摸。
 //
-// 原因不在窗的 frame，而在 **bounds.origin**。母版写
-// `[win setBounds:[win frame]]`，那行能成立是因为母版那一拍 frame 原点恒为 (0,0)
-// ⇒ bounds.origin 也是 0，等于「只改尺寸」。0.4.12 把窗原点挪到 y=215 之后照抄
-// 这一行，bounds.origin 就成了 (0,215) —— 它是**内容坐标系**的偏移，于是窗内所有
-// 内容整体上移 215：键盘本应渲染在屏幕 573..932，被画到 358..717，717 以下既无
-// 像素也不接收触摸。
+// 当时的判断：母版写 `[win setBounds:[win frame]]`，那行能成立是因为母版那一拍
+// frame 原点恒为 (0,0) ⇒ bounds.origin 也是 0，等于「只改尺寸」。0.4.12 把窗原点
+// 挪到 y=215 之后照抄这一行，bounds.origin 就成了 (0,215) —— 它是**内容坐标系**的
+// 偏移，会把窗内所有内容整体上移 215。
 //
-// 修法：bounds 尺寸 = frame 尺寸、origin 归零。这与母版语义等价，不是新机制。
+// 这一条本身没错（bounds.origin 非 0 一定有害），但它不是 297 的全部原因：298 的
+// 读数 `bnd=0,0 root=430x717@0,0` 证明归零已经生效，症状却一模一样 ⇒ 真正那一层
+// 是 0.4.12 加的「把窗往下搬 215」，见文首 0.4.14 段。
 // ⛔ 纪律：**照抄母版的一行语句之前，先确认它依赖的前提（这里是 frame.origin=0）
-// 在我们这里也成立。**
+// 在我们这里也成立。** 归零这一条保留，它是母版语义，不是补偿。
 //
 // ---------------------------------------------------------------------------
-// 0.4.12 — 键盘窗必须按**承载面**建，且 x/y 沿用系统给的（Aevon(296)）
+// 0.4.12 — 键盘窗按**承载面高**建（Aevon(296)）—— 高度结论保留，x/y 结论已废
 // ---------------------------------------------------------------------------
 // 症状：键盘贴到屏幕底了，但只露出上面一截，下半面透明；输入框被抬高。
 //
@@ -34,19 +58,13 @@
 //   卡片顶边 215.0 pt（= `band report 430x717 at 0,215`，精确吻合）
 //   键盘内容顶边 573.0 pt（= 932 − 359，**位置已经对了**）
 //   键盘在 **717.0 pt 被一条水平线硬切**，717.9 起全宽 #F1F1F1 到 932
-// 717 正是 `UIScreen.bounds` 钩后的返回值（承载面高）。⇒ 键盘内容的「底」按
-// **窗高 932** 算（贴到屏底 ✓），而窗里 root view 只有 **717**（按 `UIScreen.bounds`
-// 建的）⇒ root view 把内容裁在 717 ✗。两把尺子，两个结果。
+// 717 正是 `UIScreen.bounds` 钩后的返回值（承载面高）。
 //
-// 修法是回到母版字面值：`0x5230` 竖屏分支是「x/y/宽 沿用系统建好的原框，只把高
-// 改成 H」，而 H 是 `[main bounds].size.height` —— 在 Aevon 里就是**承载面高 717**
-// （不是物理屏高 932）。于是窗 = (0,215,430,717)：窗底 = 215+717 = 屏幕底 932 ✓，
-// root view 717 = 窗高 ✓，而且 `kbH`(717) == `screenH`(717) ⇒ intersection 公式
-// `(orig×screen÷kb)×hf + kb − screen` 自动退化成**恒等** = 真值 ⇒ 输入框落回键盘上沿。
-//
-// 0.4.7~0.4.11 的两处偏离：① 写 `[main bounds].origin`（= 0,0）把窗顶拽到屏幕上沿
-// ⇒ 0.4.10 的「键盘悬空 426..717 + 下面一条白」；② 0.4.11 又把高改成物理屏高 932
-// ⇒ 本版要修的裁剪。**这两次都是我在「调参数」，母版从来没这么做过。**
+// ✅ 仍成立的部分：`H` 必须取**承载面高 717**（不是物理屏高 932），所以
+//    `kbH(717) == screenH(717)` ⇒ intersection 公式退化成恒等 = 真值 ⇒ 输入框
+//    落回键盘上沿（297 起用户确认输入框正常）。这一条一直有效。
+// ⛔ 已废的部分：把窗写到 (0,215,430,717)。母版竖屏分支的 x/y 取自
+//    `[UIScreen mainScreen].bounds`，在 Aevon 里就是 (0,0) —— 见 0.4.14。
 //
 // ---------------------------------------------------------------------------
 // 0.4.9 — 补上母版 `0x4f4c` 的第二道闸（Aevon(293) 的真机事故）
@@ -580,6 +598,110 @@ static CGFloat AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, B
 }
 
 // ===========================================================================
+// 0.4.14 — 键盘窗视图树取证（**只读，不改任何几何**）
+// ===========================================================================
+//
+// 0.4.11 / 0.4.12 / 0.4.13 三版都死在同一处：屏幕 717 那条硬切线。而三版的读数
+// （`win frame=` / `bnd=` / `root=`）每次都显示「我们写的三层几何完全正确」——
+// 说明裁切或平移发生在**窗口内部某一层**，不在我们下笔的那几层。
+//
+// 这组读数只做一件事：把键盘窗真实的视图树按层打出来（类名 / frame / bounds.origin /
+// clipsToBounds / 子视图数），并附上 window 自身、它所在的 windowScene、以及 App 主窗
+// 的矩形。下一份日志就能指认「是谁把内容裁在 717」，不用再从截图反推。
+//
+// 配额：每进程 3 次、深度 3、总行 20。一次输入会话最多三屏，日志不会变负担。
+static volatile int AevonKbTreeDumps = 0;
+static UIWindow *AevonKbTreeTarget = nil;
+
+static void AevonKbDumpView(UIView *view, int depth, int *budget) {
+    if (view == nil || budget == NULL || *budget <= 0 || depth > 3) return;
+    *budget -= 1;
+    CGRect frame = view.frame;
+    CGRect bounds = view.bounds;
+    NSUInteger count = [[view subviews] count];
+    char line[240];
+    snprintf(line, sizeof(line),
+             "app: kb: tree %*s%s f=%.0f,%.0f,%.0fx%.0f b=%.0f,%.0f,%.0fx%.0f cl=%d n=%d\n",
+             depth * 2, "", class_getName([view class]),
+             frame.origin.x, frame.origin.y, frame.size.width, frame.size.height,
+             bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height,
+             [view clipsToBounds] ? 1 : 0, (int)count);
+    AevonKbLog(line);
+    for (UIView *child in [view subviews]) {
+        AevonKbDumpView(child, depth + 1, budget);
+    }
+}
+
+static void AevonKbDumpChain(UIWindow *window, const char *why) {
+    if (window == nil || why == NULL) return;
+    if (AevonKbTreeDumps >= 3) return;
+    AevonKbTreeDumps += 1;
+    char line[256];
+    CGRect wf = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(frame));
+    CGRect wb = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(bounds));
+    snprintf(line, sizeof(line),
+             "app: kb: tree %s win=%.0fx%.0f@%.0f,%.0f bnd=%.0f,%.0f,%.0fx%.0f lvl=%.0f\n",
+             why, wf.size.width, wf.size.height, wf.origin.x, wf.origin.y,
+             wb.origin.x, wb.origin.y, wb.size.width, wb.size.height,
+             ((CGFloat (*)(id, SEL))objc_msgSend)(window, @selector(windowLevel)));
+    AevonKbLog(line);
+
+    UIWindowScene *scene = ((id (*)(id, SEL))objc_msgSend)(window, @selector(windowScene));
+    if (scene != nil) {
+        CGRect sf = CGRectZero;
+        SEL frameSel = NSSelectorFromString(@"_frame");
+        if ([scene respondsToSelector:frameSel]) {
+            sf = ((CGRect (*)(id, SEL))objc_msgSend)(scene, frameSel);
+        }
+        CGRect cb = CGRectZero;
+        id space = ((id (*)(id, SEL))objc_msgSend)(scene, @selector(coordinateSpace));
+        if (space != nil) {
+            cb = ((CGRect (*)(id, SEL))objc_msgSend)(space, @selector(bounds));
+        }
+        snprintf(line, sizeof(line),
+                 "app: kb: tree %s scene=%.0fx%.0f@%.0f,%.0f co=%.0fx%.0f@%.0f,%.0f\n",
+                 why, sf.size.width, sf.size.height, sf.origin.x, sf.origin.y,
+                 cb.size.width, cb.size.height, cb.origin.x, cb.origin.y);
+        AevonKbLog(line);
+    }
+
+    // App 主窗：它的尺寸就是 App 认为的屏幕。与键盘窗并排看，才知道谁短了。
+    Class appClass = (Class)objc_getClass("UIApplication");
+    id app = nil;
+    if (appClass != Nil && [(id)appClass respondsToSelector:@selector(sharedApplication)]) {
+        app = ((id (*)(id, SEL))objc_msgSend)((id)appClass, @selector(sharedApplication));
+    }
+    if (app != nil && [app respondsToSelector:@selector(windows)]) {
+        NSArray *all = ((id (*)(id, SEL))objc_msgSend)(app, @selector(windows));
+        for (id item in all) {
+            if (item == window) continue;
+            CGRect mf = ((CGRect (*)(id, SEL))objc_msgSend)(item, @selector(frame));
+            snprintf(line, sizeof(line),
+                     "app: kb: tree %s main=%.0fx%.0f@%.0f,%.0f %s\n",
+                     why, mf.size.width, mf.size.height, mf.origin.x, mf.origin.y,
+                     class_getName([item class]));
+            AevonKbLog(line);
+            break;
+        }
+    }
+
+    UIViewController *root = ((id (*)(id, SEL))objc_msgSend)(window,
+                                                            @selector(rootViewController));
+    UIView *top = window;
+    if (root != nil) {
+        UIView *rv = [root view];
+        if (rv != nil) top = rv;
+    }
+    int budget = 20;
+    AevonKbDumpView(top, 0, &budget);
+}
+
+static void AevonKbDumpTick(void *context) {
+    (void)context;
+    AevonKbDumpChain(AevonKbTreeTarget, "settled");
+}
+
+// ===========================================================================
 // 钩子 2：`+[UIRemoteKeyboardWindow remoteKeyboardWindowForScreen:create:]`
 //         （母版 0x5230，512 B）
 // ===========================================================================
@@ -641,20 +763,29 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
     UIScreen *main = [UIScreen mainScreen];
     CGAffineTransform scale = CGAffineTransformMakeScale(1, 1);
 
-    // 系统建好这一拍的原框。母版 `0x5230` 竖屏分支是 **x/y/宽 沿用、只把高改成 H**
-    // （反汇编注释写作「x/y 沿用」）。这一条是关键：UIKit 把键盘窗建在**承载面**的
-    // 原点上（Aevon 里是 0,215），沿用之后窗底才落在屏幕底 932。
-    //
-    // 0.4.7~0.4.11 都写 `[main bounds].origin`（= 0,0），把窗顶拽到了屏幕上沿 ——
-    // 0.4.10 的 `win frame=430x717@0,0` 就是那个形状：键盘悬在 426..717、下面一条
-    // 白（Aevon(295) 用户报的「键盘悬空盖住输入框」）。
+    // 系统建好这一拍的原框 —— **只用于证词，不参与计算**（0.4.14 起）。
     CGRect orig = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(frame));
 
-    CGRect box = [main bounds];          // 冻结态 ⇒ 承载面（430x717）
+    // 0.4.14 — **窗就用 `[main bounds]`，一个分量都不改。**
+    //
+    // 母版两条竖屏分支（`0x5280` / `0x52d8`）合起来只有一句话：把窗设成
+    // `[UIScreen mainScreen].bounds`（`_hookUIScreen` 关着那一拍读到的矩形）。
+    // 在 Aevon 里这一拍读到的是**承载面** (0,0,430,717)，而它同时是两件事：
+    //   · UIKit 认为的「屏幕」—— `-bounds` 钩子返回的就是它；
+    //   · 卡片在 App 坐标系里的位置 —— 宿主把 scene 的 frame 设成 0,215,430,717。
+    // 所以 `setFrame:[main bounds]` 在 Aevon 里的语义与母版完全一致：
+    // 「键盘窗 = App 的整个屏幕」。
+    //
+    // ⛔ 0.4.12 / 0.4.13 我在这里加过一个 `dy` 补偿：系统把窗建在 y=0 时，把它往下
+    // 搬 215，理由是「让窗底对齐屏幕底」。**那一步是我自己发明的，母版没有。**
+    // 它正是 Aevon(297)/(298) 的病因：键盘窗里的键盘视图按**窗底**摆，窗整体下移
+    // 215 ⇒ 键盘跟着下移 215 ⇒ 超出卡片下沿 215 pt 被裁掉、也点不到，屏幕上看就是
+    // 「只显示上半截、下半透明」。系统原样建在 (0,0,430,717) 时，窗底 = 承载面底
+    // = 卡片底 = 屏幕底 932，本来就是对的。
+    CGRect box = [main bounds];          // 冻结态 ⇒ 承载面（430x717）/ 全屏（430x932）
     CGFloat height = box.size.height;
-    CGFloat width = orig.size.width > 1.0 ? orig.size.width : box.size.width;
-    // 屏幕底与承载面底之间的那段（932 − 717 = 215）。宿主永远把卡片铺到屏底
-    // （日志 `keyboard fill on card=430x717 at 0,215`），所以「窗底 = 原点 + 高」。
+    CGFloat width = box.size.width;
+    // 物理屏高只做一件事：判断「这一拍读到的到底是不是承载面」。
     CGRect native = [main nativeBounds];
     CGFloat nativeScale = [main nativeScale];
     CGFloat physicalH = nativeScale > 0.0 ? native.size.height / nativeScale : height;
@@ -666,21 +797,16 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
             height = sceneBox.size.height;
         }
     }
-    CGFloat fillBottom = physicalH > height + 1.0 ? physicalH - height : 0.0;
 
     CGRect asked = CGRectZero;
+    // `dy` 字段留着只为日志格式稳定（审计断言钉住了那一行），0.4.14 起恒为 0：
+    // 不再有任何「把窗搬到别处」的补偿。
     int lifted = 0;
     if (AevonKbIsFrontMost()
         || (AevonKbAppScene != nil && [AevonKbAppScene interfaceOrientation] == 1)) {
-        // 竖屏两条分支（母版 0x5230 的 0x5280 / 0x52d8）：x/y/宽 沿用，高 = H。
-        CGFloat y = orig.origin.y;
-        if (y < 1.0 && fillBottom > 0.0) {
-            // 系统给的窗顶在 0（说明它按物理屏建）⇒ 往下补到承载面原点，让窗底
-            // 正好落在屏幕底。证词里的 `dy=1` 就是走了这条路。
-            y = fillBottom;
-            lifted = 1;
-        }
-        asked = CGRectMake(orig.origin.x, y, width, height);
+        // 竖屏（母版 0x5280 / 0x52d8 两路的合并语义）：窗 = App 的整个屏幕。
+        // 全屏 App 这里就是 (0,0,430,932)，被卡片托着时是 (0,0,430,717)。
+        asked = CGRectMake(box.origin.x, box.origin.y, width, height);
         ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setFrame:), asked);
         CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(frame));
         // ⛔ 0.4.13 — bounds **只给尺寸，origin 必须是 (0,0)**。
@@ -760,6 +886,14 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
                  lifted, bnd.origin.x, bnd.origin.y,
                  rvf.size.width, rvf.size.height, rvf.origin.x, rvf.origin.y);
         AevonKbLog(line);
+    }
+    // 0.4.14 — 0.55 s 后打一次「落地态」的视图树。键盘窗由 UIKit 长期持有，
+    // 这个静态槽只是记「打哪一扇窗」，不增加它的生命周期。
+    if (AevonKbTreeDumps < 3) {
+        AevonKbTreeTarget = (UIWindow *)window;
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,
+                                       (int64_t)(0.55 * NSEC_PER_SEC)),
+                         dispatch_get_main_queue(), NULL, AevonKbDumpTick);
     }
     return window;
 }

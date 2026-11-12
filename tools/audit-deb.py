@@ -1433,6 +1433,19 @@ def main():
                       # `bnd=0,215` 的形状：bounds.origin 是内容坐标系偏移，非 0 就把
                       # 整窗内容平移，和 frame 无关，所以只查 frame 查不出来。
                       b"app: kb: win orig=%.0fx%.0f@%.0f,%.0f host=%.0fx%.0f phys=%.0f ask=%.0fx%.0f@%.0f,%.0f frame=%.0fx%.0f@%.0f,%.0f dy=%d bnd=%.0f,%.0f root=%.0fx%.0f@%.0f,%.0f",
+                      # 0.4.14 — 落地态的键盘窗视图树（只读取证）。前三版的读数都显示
+                      # 「我们写的三层几何正确」，症状却不变 ⇒ 裁切在窗内某一层。
+                      # 这四条必须都在产物里，缺一条那份日志就白抓：
+                      #   win=   窗自身 frame/bounds/windowLevel
+                      #   scene= 它所在 windowScene 的 frame（带 origin）
+                      #   co=    coordinateSpace.bounds（App 认为的屏幕）
+                      #   main=  App 主窗（与键盘窗并排看，才知道谁短了）
+                      b"app: kb: tree %s win=%.0fx%.0f@%.0f,%.0f bnd=%.0f,%.0f,%.0fx%.0f lvl=%.0f",
+                      b"app: kb: tree %s scene=%.0fx%.0f@%.0f,%.0f co=%.0fx%.0f@%.0f,%.0f",
+                      b"app: kb: tree %s main=%.0fx%.0f@%.0f,%.0f %s",
+                      # 逐层：类名 / frame / bounds.origin / clipsToBounds / 子视图数。
+                      # `cl=1` 的那一层就是裁刀候选。
+                      b"app: kb: tree %*s%s f=%.0f,%.0f,%.0fx%.0f b=%.0f,%.0f,%.0fx%.0f cl=%d n=%d",
                       # 钩子 3 —— `_hookUIScreen` 的同寿命刷新源。它每次 settings 回调
                       # 都重算，所以开关永远跟得上「这个 App 现在有没有被浮起来」。
                       # 写成一次性开关就是 0.4.x 反复复发的形状。
