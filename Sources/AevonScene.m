@@ -1925,6 +1925,14 @@ static char AevonArmed[AEVON_ARMED_MAX][128];
 /// 的年龄闸用：建卡那一两百毫秒里系统本来就会把 scene 从整屏改成卡片尺寸，
 /// 那一次不是「系统要全屏接管它」。卡片活过 0.9 秒还收到整屏 frame 才是。
 static CFAbsoluteTime AevonArmedAt[AEVON_ARMED_MAX];
+/// 0.3.61 — 冷分享静默期里，这一槽被系统的整屏 frame 顶到了几次。
+///
+/// Aevon(286) 的 5/7 次失败全是同一件事：卡已经出帧，`land: url fire` 之后
+/// 系统又对同一个 scene 写了一次 `430x932`，年龄超过 0.40 s ⇒ 被让路判据当成
+/// 「用户要全屏」。那一次不是用户操作，是我们自己放过去的那次延迟激活在提交。
+///
+/// 计数只在 `AevonHookArm` 登记时清零，上限 8：真的跟系统拉锯起来也不能无限改。
+static int AevonHoldTicks[AEVON_ARMED_MAX];
 static int AevonArmedCount = 0;
 static long AevonArmedRefused = 0;
 
@@ -2165,6 +2173,7 @@ void AevonHookArm(NSString *bundle) {
         if (AevonArmed[i][0] != '\0') continue;
         strlcpy(AevonArmed[i], text, sizeof(AevonArmed[i]));
         AevonArmedAt[i] = CFAbsoluteTimeGetCurrent();
+        AevonHoldTicks[i] = 0;
         __sync_fetch_and_add(&AevonArmedCount, 1);
         return;
     }
@@ -2178,6 +2187,7 @@ void AevonHookDisarm(NSString *bundle) {
         for (int i = 0; i < AEVON_ARMED_MAX; i++) {
             AevonArmed[i][0] = '\0';
             AevonArmedAt[i] = 0;
+            AevonHoldTicks[i] = 0;
         }
         AevonArmedCount = 0;
         return;
@@ -2189,6 +2199,7 @@ void AevonHookDisarm(NSString *bundle) {
         if (strcmp(AevonArmed[i], text) != 0) continue;
         AevonArmed[i][0] = '\0';
         AevonArmedAt[i] = 0;
+        AevonHoldTicks[i] = 0;
         if (AevonArmedCount > 0) __sync_fetch_and_sub(&AevonArmedCount, 1);
     }
 }
@@ -2643,6 +2654,47 @@ static BOOL AevonWriteDisplay(id settings, int slot) {
     return YES;
 }
 
+/// 0.3.61 — 冷分享窗口的判定（定义在 0.3.58 那一段，这里只是提前声明：
+/// 让路判据在它之前，C 里不能先用后定义）。
+static int AevonBGArmedFor(const char *bundle);
+
+/// 0.3.61 — **让路之后把屏幕也还回去。**
+///
+/// Aevon(286) 的黑底就是这么来的：出生那一拍我们把 scene 写成 717，QQ 按 717
+/// 建了自己的窗口（`app: geom early … scene=430x932 win=430x717`）；让路之后
+/// 我们只把 **frame** 写回 932（`win: scene frame after=430x932`），
+/// `displayConfiguration` 还是 717 —— App 的 `UIScreen` 没变，分享面板照旧按
+/// 717 排，下面 215 pt 没人画。
+///
+/// 所以让路这一拍要同时把 display 和参考尺寸写回整屏。三个数（frame / display /
+/// 参考尺寸）必须一直是同一个，这条纪律在 0.2.46 就定过，这里只是把它补到
+/// 「交还系统」这一侧。
+static void AevonYieldDisplayBack(id settings, CGRect screen, const char *bundle) {
+    if (settings == nil) return;
+    if (!AevonSettingsMutable(settings)) return;
+    SEL getter = sel_registerName("displayConfiguration");
+    SEL setter = sel_registerName("setDisplayConfiguration:");
+    if (![settings respondsToSelector:getter] ||
+        ![settings respondsToSelector:setter]) return;
+    id now = ((id (*)(id, SEL))objc_msgSend)(settings, getter);
+    if (now == nil) return;
+    SEL boundsSel = sel_registerName("bounds");
+    if (![now respondsToSelector:boundsSel]) return;
+    CGRect current = ((CGRect (*)(id, SEL))objc_msgSend)(now, boundsSel);
+    if (fabs(current.size.width - screen.size.width) < 0.5 &&
+        fabs(current.size.height - screen.size.height) < 0.5) return;
+    id copy = AevonOwnDisplayOverride(now, CGRectMake(0, 0, screen.size.width, screen.size.height));
+    if (copy == nil) return;
+    ((void (*)(id, SEL, id))objc_msgSend)(settings, setter, copy);
+    [copy release];
+    AevonOwnRefSet(settings, screen.size, "yield");
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"win: card yield display back %.0fx%.0f -> %.0fx%.0f b=%s",
+                  current.size.width, current.size.height,
+                  screen.size.width, screen.size.height,
+                  bundle != NULL ? bundle : "-"] UTF8String]);
+}
+
 /// 把目标尺寸写进一份 settings。返回「这一次真的写了」。
 ///
 /// 先读再比：已经是目标值就不写。这是 0.0.34 定下的 delta-first —— 一次什么都没
@@ -2684,23 +2736,57 @@ static BOOL AevonWriteFrame(id settings, int slot) {
         // 更新路径里，同步拆卡会重入，只能排到主队列下一拍。
         if (AevonInPush == 0
             && now.size.height > 850
-            && target.size.height < 800
-            && (CFAbsoluteTimeGetCurrent() - AevonArmedAt[slot]) > 0.40) {
-            __sync_fetch_and_and(&AevonFrameMask, ~(1 << slot));
-            AevonArmedAt[slot] = 0;
-            AevonLogRaw([[NSString stringWithFormat:
-                          @"win: card yield seen b=%s now=%.0fx%.0f want=%.0fx%.0f",
-                          AevonArmed[slot],
-                          now.size.width, now.size.height,
-                          target.size.width, target.size.height] UTF8String]);
-            char *name = strdup(AevonArmed[slot]);
-            if (name == NULL) return NO;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (name[0] == '\0') { free(name); return; }
-                AevonCardYieldForFullscreen(name);
-                free(name);
-            });
-            return NO;
+            && target.size.height < 800) {
+            CFAbsoluteTime age = CFAbsoluteTimeGetCurrent() - AevonArmedAt[slot];
+            // 0.3.61 — **冷分享静默期：这一拍不是「用户要整屏」。**
+            //
+            // Aevon(286) 七次冷分享里五次倒在这里：卡已经出帧（`first frame
+            // shown after 109ms`），`land: url fire` 之后系统又对同一个 scene
+            // 写了一次 `430x932`，年龄早已超过 0.40 s ⇒ 被下面那条让路判据当成
+            // 「用户点图标要全屏」⇒ 拆卡 ⇒ 整屏。
+            //
+            // 那一次 932 不是用户操作，是**我们自己放过去的那次延迟激活**在提交
+            // （`notify: pass why=cleared`）。FrontBoard 的事务什么时候落地是随机的，
+            // 这就是症状「有概率」的全部来源。
+            //
+            // 所以在冷分享窗口（8 s）内、卡确实在屏上、本槽按住次数 < 8、
+            // 建卡 2.5 s 以内：不改判、不拆卡，把 932 改回 717。
+            // 任一条不成立就回落到原来的让路 —— 静默期之后用户点桌面图标照样整屏。
+            int hold = 0;
+            if (age > 0.40
+                && age < 2.5
+                && AevonHoldTicks[slot] < 8
+                && AevonBGArmedFor(AevonArmed[slot]) == 1
+                && AevonCardIsUpFor(AevonArmed[slot]) == 1) {
+                hold = 1;
+            }
+            if (hold == 1) {
+                int n = __sync_fetch_and_add(&AevonHoldTicks[slot], 1) + 1;
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"win: card hold b=%s now=%.0fx%.0f want=%.0fx%.0f n=%d",
+                              AevonArmed[slot],
+                              now.size.width, now.size.height,
+                              target.size.width, target.size.height, n] UTF8String]);
+            } else if (age > 0.40) {
+                __sync_fetch_and_and(&AevonFrameMask, ~(1 << slot));
+                AevonArmedAt[slot] = 0;
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"win: card yield seen b=%s now=%.0fx%.0f want=%.0fx%.0f age=%.2f",
+                              AevonArmed[slot],
+                              now.size.width, now.size.height,
+                              target.size.width, target.size.height, age] UTF8String]);
+                // 让路之后 App 的窗口是按 717 建的，只还 frame 不还屏幕的话，
+                // 全屏页只剩上面 717 有内容（用户截图那条 215 pt 黑底）。
+                AevonYieldDisplayBack(settings, now.size, AevonArmed[slot]);
+                char *name = strdup(AevonArmed[slot]);
+                if (name == NULL) return NO;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (name[0] == '\0') { free(name); return; }
+                    AevonCardYieldForFullscreen(name);
+                    free(name);
+                });
+                return NO;
+            }
         }
         // 0.1.51 — **原点也要比。**
         //

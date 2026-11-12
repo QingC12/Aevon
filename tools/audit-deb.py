@@ -1313,6 +1313,15 @@ def main():
                   # Aevon(283) 的三次冷分享「无全屏、有卡、卡里零 panel」。
                   b"land: url defer wait=1 b=%s u=%.44s",
                   b"land: url fire t=%dms why=%s b=%s",
+                  # 0.3.61 — **冷分享静默期不让路。**
+                  #
+                  # Aevon(286) 七次冷分享里五次是这一条被判成让路：卡已出帧，
+                  # `land: url fire` 之后系统又对同一个 scene 写 430x932，年龄
+                  # 超过 0.40 s ⇒ 拆卡 ⇒ 整屏（而且 QQ 窗口按 717 建，下半 215 黑）。
+                  # 现在冷分享窗口内把 932 改回 717，读数就是这一行。
+                  b"win: card hold b=%s now=%.0fx%.0f want=%.0fx%.0f n=%d",
+                  # 让路之后把屏幕也还回去（否则全屏页只剩上面 717 有内容）。
+                  b"win: card yield display back %.0fx%.0f -> %.0fx%.0f b=%s",
                   b"AevonURLDeferOff",
                   b"/var/mobile/Library/Logs/Aevon/url.core.defer.off",
                   b"AevonBGOn",
