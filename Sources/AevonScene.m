@@ -3820,9 +3820,21 @@ static void AevonURLCoreBody(id self, SEL _cmd, id url, id display,
             armed = 0;
         }
     }
+    // 0.3.59 — **R2 判死。**
+    //
+    // 0.3.58 按 R2 把 `display:` 清成 nil，Aevon(279) 当场给出反证：
+    //   `land: url hit display=SBApplication … cut=1`
+    //   `landing: url threw _openURLCore: called with no application`
+    // 也就是说它**不是**一个可选的开关位，而是这次打开要落到的那个 App 对象；
+    // 清掉之后原实现直接抛异常，第一次投递失败（同一次分享里 QQ 侧零
+    // `app: openurl`），要靠外层 catch 拿原值再调一次才走通。那个 catch 只是
+    // 兜底，不该是常态路。
+    //
+    // 所以默认原样透传。闸 `url.display.keep` **反过来用**：存在 = 再做一次
+    // nil 切，留给 A/B（想复现 0.3.58 的症状就建这个文件）。
     id sendDisplay = display;
     int cut = 0;
-    if (display != nil && AevonBGKeepDisplay() == 0) {
+    if (display != nil && AevonBGKeepDisplay() == 1) {
         sendDisplay = nil;
         cut = 1;
     }
@@ -5739,9 +5751,13 @@ static void AevonColdAdoptTick(char *bundle, long seq, int tick) {
     if (AevonDeckHolds(bundle) == 1) { free(bundle); return; }
     NSString *bu = [NSString stringWithUTF8String:bundle];
     if (bu == nil) { free(bundle); return; }
-    double age = -1.0;
-    int alive = AevonTargetAlive(bu, &age);
-    int live = (AevonLiveSceneForBundle(bu) != nil) ? 1 : 0;
+    // 0.3.59 — **每拍先只做那一次便宜的读。**
+    //
+    // Aevon(279) 的 51 拍里每拍都跑 `AevonTargetAlive` + `AevonLiveSceneForBundle`
+    // + `AevonSeenSceneForBundle`：后两个各自要遍历整张 scene 表、逐个问
+    // accessibility 属性；目标冷启动、scene 还没就绪时这几问每次都贵。45 次
+    // 累计成了 `win: main stall` 三次（3 s × 3）—— 这才是「卡出得慢」的真正
+    // 来源，不是后台显示层本身。`AevonFrontBundleCopy` 只读一次前台位，便宜。
     int front = 0;
     char *fb = AevonFrontBundleCopy();
     if (fb != NULL) {
@@ -5751,6 +5767,16 @@ static void AevonColdAdoptTick(char *bundle, long seq, int tick) {
     int ms = (tick - 1) * AevonColdAdoptStepMs;
     int delay = AevonColdAdoptDelayMs();
     int late = AevonColdAdoptLateOn();
+    int bg = AevonBGArmedFor(bundle);
+    // 重活按需做：bg 路一拍都不查 scene（它本来就不看 scene，见下面那段），
+    // 非 bg 路每 4 拍一次（前 12 拍保留逐拍，日志要它）。
+    double age = -1.0;
+    int alive = 0;
+    int live = 0;
+    if (bg != 1 && ((tick % 4) == 0 || tick <= 12)) {
+        alive = AevonTargetAlive(bu, &age);
+        live = (AevonLiveSceneForBundle(bu) != nil) ? 1 : 0;
+    }
     if (front == 1 && AevonColdAdoptFrontTick == 0) AevonColdAdoptFrontTick = tick;
     int sinceFront = (AevonColdAdoptFrontTick > 0)
                    ? (tick - AevonColdAdoptFrontTick) * AevonColdAdoptStepMs : -1;
@@ -5763,25 +5789,20 @@ static void AevonColdAdoptTick(char *bundle, long seq, int tick) {
                       tick, ms, front, live, alive, sinceFront, bundle] UTF8String]);
     }
 
-    // 0.3.58 — 显示层接管了这一拍：目标**不会**成为屏上那一个。
+    // 0.3.59 — bg 路：**第 8 拍（560 ms）到点就收，不再看 scene。**
     //
-    // 0.3.50~0.3.57 的收卡判据是「等 front 翻 1 再按 Home」，而按后台提交之后
-    // front 永远不会翻 —— 那条路会一直等到 4 s 超时，结果比不放行更糟（App 在
-    // 后台、桌面上什么都没有）。所以这里换判据：**scene 一起来就收**。
-    // 它本来就没占屏，`openCard(homed:false)` 检查到目标不在前台就不会按 Home，
-    // 用户看到的直接是卡，一次整屏都没有。
+    // 0.3.58 在这里等 `live || seen`，而按后台提交的 scene 四条打分全是 0
+    // （Aevon(279) 里 openCard 自己也打了 `win: listed scene all shell …
+    // best=0`），两个判据恒答 0 ⇒ 51 拍空转到底。而同一份日志的
+    // `act: scene n=8 t=406073 gap=461` 说明 scene 定义在第 461 ms 就建好了，
+    // 560 ms 留 100 ms 余量。到点直接 go：`openCard(homed:false)` 看到目标不在
+    // 前台就不按 Home，桌面不动、卡直接起，一次整屏都没有。
     //
     // `delay=-2` 是这条路在日志上的标记（`-1` 是 0.3.51 的 late 路）。
-    if (AevonBGArmedFor(bundle) == 1 && front == 0 && tick >= 4) {
-        // `live` 只认「打分 > 0」的 scene；按后台提交的那一张可能四条里只中一条
-        // （有内容但不可见），所以这里再用 `AevonSeenSceneForBundle` 兜一层 ——
-        // 它认的是「登记过、且不是空壳」。
-        int seen = (AevonSeenSceneForBundle(bu) != nil) ? 1 : 0;
-        if (live == 1 || seen == 1) {
-            AevonColdAdoptGo(bundle, tick, ms, -2, live, alive, front);
-            free(bundle);
-            return;
-        }
+    if (bg == 1 && front == 0 && tick >= 8) {
+        AevonColdAdoptGo(bundle, tick, ms, -2, live, alive, front);
+        free(bundle);
+        return;
     }
 
     if (late == 1) {
@@ -5797,13 +5818,17 @@ static void AevonColdAdoptTick(char *bundle, long seq, int tick) {
         return;
     }
 
-    // 4 s 还没轮到（用户切走了 / 目标没上屏 / 一直没成前台）：放弃，什么都不做。
-    // 这一次分享就停在 0.3.49 的形状（整屏），不会比不放行更糟。
-    if (ms >= 4000) {
-        // 0.3.58 — 按了后台却一直没等到 scene：这一发就什么都不会显示。
-        // 唯一的收尾是把它拉回前台，回到 0.3.49 的形状（整屏），
-        // 总好过「桌面 + 后台里一个没人看得见的 App」。
-        if (AevonBGArmedFor(bundle) == 1) {
+    // 0.3.59 — 超时从 4000 ms 收到 1600 ms（第 20 拍）。
+    //
+    // 原来那 4 s 在 bg 路上是纯浪费：判据恒不成立，只能等到超时才收尾，而等待
+    // 期间每拍的重活又把主线程拖住（Aevon(279)：4 s 的定时器跑了 15 s）。现在
+    // 8 拍就该 go；走到这里说明 go 那一发没落地（scene 没建出来 / 起卡被拒），
+    // 20 拍足够判死，早收尾早把 App 拉回前台。
+    if (ms >= 1600) {
+        // bg 却一直没收到卡：这一发就什么都不会显示。唯一的收尾是把它拉回
+        // 前台，回到 0.3.49 的形状（整屏），总好过「桌面 + 后台里一个没人看
+        // 得见的 App」。
+        if (bg == 1) {
             int ok = AevonLandOpenApp(bundle);
             AevonLogRaw([[NSString stringWithFormat:
                           @"act: cold adopt bg giveup ok=%d b=%s", ok, bundle] UTF8String]);

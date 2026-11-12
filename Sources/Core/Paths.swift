@@ -15,7 +15,7 @@ public enum Aevon {
 
     /// Must equal control:Version and the bundle's CFBundleShortVersionString.
     /// The CI preflight fails the build when the three drift apart.
-    public static let version = "0.3.58"
+    public static let version = "0.3.59"
 
     /// Preferences domain. Deliberately independent of the package name:
     /// renaming the package must never lose the operator's gate state.
@@ -495,11 +495,18 @@ public enum Aevon {
     public static let sceneBackgroundOffPath =
         "/var/mobile/Library/Logs/Aevon/scene.background.off"
 
-    /// 0.3.58 — A/B：`display:` 原样透传（存在 = 不切成 nil）。
+    /// 0.3.58 — A/B：`display:` 切成 nil。**0.3.59 起语义反转**：默认原样透传，
+    /// 存在这个文件才切。
     ///
     /// R2 那一刀在 0.2.63~0.3.7 已经写过十几版，可那时 `display` 本来就是 nil，
-    /// 等于什么都没做。这一版改成「只在非 nil 时才切」，并把它原本的类名写进
-    /// `land: url hit display=…`。想对照就把这个文件建上。
+    /// 等于什么都没做。0.3.58 改成「只在非 nil 时才切」，并把它原本的类名写进
+    /// `land: url hit display=…` —— 于是真机第一次读到它：`display=SBApplication`。
+    ///
+    /// Aevon(279) 的下一行就是 `landing: url threw _openURLCore: called with no
+    /// application`：清成 nil 之后原实现直接抛异常，第一次投递失败（同一次分享
+    /// 里 QQ 侧零 `app: openurl`），靠外层 catch 拿原值再调一次才走通。
+    /// 那个 catch 只是兜底，不该是常态路 —— 所以默认不切。
+    /// 想复现 0.3.58 的症状就把这个文件建上。
     public static let urlDisplayKeepPath =
         "/var/mobile/Library/Logs/Aevon/url.display.keep"
 
