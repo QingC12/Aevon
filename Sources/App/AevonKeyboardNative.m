@@ -1,5 +1,5 @@
 // ===========================================================================
-// AevonKeyboardNative.m — 0.4.7 / 0.4.9 / 0.4.10 / 0.4.12
+// AevonKeyboardNative.m — 0.4.7 / 0.4.9 / 0.4.10 / 0.4.12 / 0.4.13
 //
 // 键盘的承载面接管。**1:1 复刻 Stheno 母版的 `SthenoKeyboard.dylib`**
 // （0.1.23；修复版 final.3 的键盘组件与母版只差 1 处：`0x4de8` 那个「首启打开
@@ -7,6 +7,23 @@
 //
 // 逆向数据：`stheno-逆向分析/final3/analysis/hooks-SthenoKeyboard.md`
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
+//
+// ---------------------------------------------------------------------------
+// 0.4.13 — `setBounds:` 不能带 origin（Aevon(297)）
+// ---------------------------------------------------------------------------
+// 症状：输入框已经正常（0.4.12 的恒等公式生效），但键盘只显示上半部分、下半透明
+// 且无法触摸。
+//
+// 原因不在窗的 frame，而在 **bounds.origin**。母版写
+// `[win setBounds:[win frame]]`，那行能成立是因为母版那一拍 frame 原点恒为 (0,0)
+// ⇒ bounds.origin 也是 0，等于「只改尺寸」。0.4.12 把窗原点挪到 y=215 之后照抄
+// 这一行，bounds.origin 就成了 (0,215) —— 它是**内容坐标系**的偏移，于是窗内所有
+// 内容整体上移 215：键盘本应渲染在屏幕 573..932，被画到 358..717，717 以下既无
+// 像素也不接收触摸。
+//
+// 修法：bounds 尺寸 = frame 尺寸、origin 归零。这与母版语义等价，不是新机制。
+// ⛔ 纪律：**照抄母版的一行语句之前，先确认它依赖的前提（这里是 frame.origin=0）
+// 在我们这里也成立。**
 //
 // ---------------------------------------------------------------------------
 // 0.4.12 — 键盘窗必须按**承载面**建，且 x/y 沿用系统给的（Aevon(296)）
@@ -666,7 +683,25 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
         asked = CGRectMake(orig.origin.x, y, width, height);
         ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setFrame:), asked);
         CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(frame));
-        ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setBounds:), now);
+        // ⛔ 0.4.13 — bounds **只给尺寸，origin 必须是 (0,0)**。
+        //
+        // 母版原文是 `[win setBounds:[win frame]]`，那行能成立是因为母版这一拍
+        // `_hookUIScreen = 0`、系统原框原点恒为 (0,0) ⇒ `frame.origin` 是 0，
+        // `bounds.origin` 也就是 0 —— 等价于「只改尺寸」。
+        //
+        // 0.4.12 把窗原点挪到 y=215（让窗底对齐屏底），照抄这一行就把
+        // `bounds.origin` 写成了 (0,215)。bounds.origin 是**内容坐标系**的偏移，
+        // 于是窗里所有内容整体上移 215：本该渲染在屏幕 573..932 的键盘画到了
+        // 358..717，717 以下既没有像素、也不接收触摸 —— 这就是 Aevon(297) 的
+        // 「只显示上半部分、下半透明无法触摸」。窗自己的 frame 仍是 215..932，
+        // 所以从 `win frame=` 那行完全看不出异常。
+        //
+        // 正确写法：bounds 尺寸 = frame 尺寸、origin 归零。与母版语义等价
+        // （母版 origin 本来就是 0），不是新机制。
+        ((void (*)(id, SEL, CGRect))objc_msgSend)(window, @selector(setBounds:),
+                                                 CGRectMake(0, 0,
+                                                            now.size.width,
+                                                            now.size.height));
     } else {
         // 横屏：母版把内容 scale 到 0（不显示）。
         asked = CGRectMake(-0.5 * height + 0.5 * width, 0.0, height, height);
@@ -694,24 +729,36 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
     if (AevonKbWinNotes < 6) {
         AevonKbWinNotes += 1;
         CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(frame));
-        char line[256];
+        char line[320];
         snprintf(line, sizeof(line),
                  "app: kb: win frame=%.0fx%.0f@%.0f,%.0f scale=%.1f hosted=%d\n",
                  now.size.width, now.size.height, now.origin.x, now.origin.y,
                  scale.a, 1 - (int)AevonKbIsFrontMost());
         AevonKbLog(line);
-        // 0.4.12 — 四个数分开写，下一份日志能直接指出是哪一环断的：
+        // 0.4.12 — 各数分开写，下一份日志能直接指出是哪一环断的：
         //   orig  系统建好这一拍的原框（期望 430x717@0,215，x/y 沿用它的）
         //   host  承载面宽×高 与 物理屏高（期望 430x717 / 932）
         //   ask   我们要求窗口多大（期望 430x717@0,215）
         //   frame 系统最终给的框（比 ask 矮 ⇒ 被夹；`dy=1` ⇒ 补过 215 的偏移）
+        // 0.4.13 — 再补两个：
+        //   bnd   **窗的 bounds.origin，必须是 0,0**（非 0 ⇒ 整窗内容被平移，Aevon(297)）
+        //   root  root view 的 frame，尺寸必须等于 frame、origin 必须是 0,0
+        CGRect bnd = ((CGRect (*)(id, SEL))objc_msgSend)(window, @selector(bounds));
+        CGRect rvf = CGRectZero;
+        if (root != nil) {
+            UIView *probe = [root view];
+            if (probe != nil) {
+                rvf = ((CGRect (*)(id, SEL))objc_msgSend)(probe, @selector(frame));
+            }
+        }
         snprintf(line, sizeof(line),
-                 "app: kb: win orig=%.0fx%.0f@%.0f,%.0f host=%.0fx%.0f phys=%.0f ask=%.0fx%.0f@%.0f,%.0f frame=%.0fx%.0f@%.0f,%.0f dy=%d\n",
+                 "app: kb: win orig=%.0fx%.0f@%.0f,%.0f host=%.0fx%.0f phys=%.0f ask=%.0fx%.0f@%.0f,%.0f frame=%.0fx%.0f@%.0f,%.0f dy=%d bnd=%.0f,%.0f root=%.0fx%.0f@%.0f,%.0f\n",
                  orig.size.width, orig.size.height, orig.origin.x, orig.origin.y,
                  width, height, physicalH,
                  asked.size.width, asked.size.height, asked.origin.x, asked.origin.y,
                  now.size.width, now.size.height, now.origin.x, now.origin.y,
-                 lifted);
+                 lifted, bnd.origin.x, bnd.origin.y,
+                 rvf.size.width, rvf.size.height, rvf.origin.x, rvf.origin.y);
         AevonKbLog(line);
     }
     return window;

@@ -1428,8 +1428,11 @@ def main():
                       # 它的）/ host（承载面宽高 + 物理屏高）/ ask（我们要的框）/
                       # frame（系统最终给的）。`ask=430x717@0,215` 是唯一正确形状：
                       # 窗底 = 215 + 717 = 屏幕底 932，root view 717 = 窗高，键盘不被裁。
-                      # Aevon(296) 的「下半面透明」就是 ask 写成 430x932@0,0 的形状。
-                      b"app: kb: win orig=%.0fx%.0f@%.0f,%.0f host=%.0fx%.0f phys=%.0f ask=%.0fx%.0f@%.0f,%.0f frame=%.0fx%.0f@%.0f,%.0f dy=%d",
+                      # 0.4.13 — 末尾再补 `bnd`（bounds.origin，必须是 0,0）与 `root`
+                      # （root view 的 frame）。Aevon(297) 的「只显示上半部分」就是
+                      # `bnd=0,215` 的形状：bounds.origin 是内容坐标系偏移，非 0 就把
+                      # 整窗内容平移，和 frame 无关，所以只查 frame 查不出来。
+                      b"app: kb: win orig=%.0fx%.0f@%.0f,%.0f host=%.0fx%.0f phys=%.0f ask=%.0fx%.0f@%.0f,%.0f frame=%.0fx%.0f@%.0f,%.0f dy=%d bnd=%.0f,%.0f root=%.0fx%.0f@%.0f,%.0f",
                       # 钩子 3 —— `_hookUIScreen` 的同寿命刷新源。它每次 settings 回调
                       # 都重算，所以开关永远跟得上「这个 App 现在有没有被浮起来」。
                       # 写成一次性开关就是 0.4.x 反复复发的形状。
