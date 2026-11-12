@@ -1,5 +1,5 @@
 // ===========================================================================
-// AevonKeyboardNative.m — 0.4.7
+// AevonKeyboardNative.m — 0.4.7 / 0.4.9
 //
 // 键盘的承载面接管。**1:1 复刻 Stheno 母版的 `SthenoKeyboard.dylib`**
 // （0.1.23；修复版 final.3 的键盘组件与母版只差 1 处：`0x4de8` 那个「首启打开
@@ -7,6 +7,32 @@
 //
 // 逆向数据：`stheno-逆向分析/final3/analysis/hooks-SthenoKeyboard.md`
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
+//
+// ---------------------------------------------------------------------------
+// 0.4.9 — 补上母版 `0x4f4c` 的第二道闸（Aevon(293) 的真机事故）
+// ---------------------------------------------------------------------------
+// 0.4.8 的四条钩子本身没问题，坏在**安装入口少了一道 return**。母版：
+//
+//   _injectApp = _inject()                       // plist Inject，缺省 1
+//   if (!_injectApp) return
+//   if (!_ringAppsContains(bundleId)) return     // ← 0.4.8 漏了这一条
+//
+// `SthenoKeyboard.dylib` 的 Filter 也是 `com.apple.UIKit`（注入每个 App），母版
+// 之所以安全，全靠第二道闸：名单外的进程**一个类都不碰**，连
+// `_UIRemoteKeyboards` 都不去 realize。0.4.8 漏掉之后，`AevonApp.dylib` 在全机
+// 每个 UIKit 进程（日志里连 `com.apple.CarPlayApp` 都在装）的 `main()` 之前
+// realize 四个 UIKit / FrontBoard 私有类并改它们的 IMP。
+//
+// Aevon(293) 的证词：90 条 `app: hang`，全部 `gap=-1ms`（主线程心跳一拍未跑
+// ⇒ 构造函数没回来），而四条钩子的实际生效行（`bounds ->` / `inter` /
+// `win frame` / `shell hook`）**一条都没有**。用户看到的是「点开 App 白屏、
+// 桌面小组件不加载」—— 与 0.0.65 / 0.0.67 同一族故障。
+//
+// 两处修复：
+//   ① 补 `_ringAppsContains` 等价闸：读 `com.aevon` 域的 `RingApps`（圆盘名单，
+//      用户自选）+ `RingAppsSnapshot` 兜底，不在名单直接 return；
+//   ② 构造期不再 `CFPreferencesCopyAppValue`（cfprefsd XPC 不能在 `main()`
+//      之前做），改成第一次真正需要时懒读。
 //
 // ---------------------------------------------------------------------------
 // 为什么整条旧实现要删掉
@@ -189,7 +215,30 @@ static BOOL AevonKbIsFrontMost(void) {
 /// 这不是新增机制：它写的是母版同一个变量、用的是母版同一个表达式
 /// （`![_frontMost isEqualToString:_bundleId]`），只是把「什么时候重算」扩到
 /// Aevon 的事实源变更点。
+
+/// 0.4.9 — 懒读闸门（只读一次）。
+///
+/// 0.4.8 在构造函数里直接 `CFPreferencesCopyAppValue`。那是 `main()` 之前、
+/// 主线程上的一次 cfprefsd XPC —— 与「构造期提前 realize UIKit 私有类」是同一类
+/// 风险。Aevon(293) 的 90 条 `app: hang` 里 `gap=-1ms` 说明主线程心跳一拍未跑，
+/// 构造函数没回来。
+///
+/// 现在读盘推迟到「第一次真的需要这个值时」：要么 scene settings 回调
+/// （`AevonKbUpdateTakeOver`），要么 band 翻转（本函数）。两处都只读一次，
+/// 读到的仍是同一个值，行为不变。
+static volatile int AevonKbShellRead = 0;
+
+/// 定义在下面「配置读取」一节；这里只要一份声明（懒读要用它）。
+static BOOL AevonKbBridgeEnabled(void);
+
 void AevonKbRefreshShell(void) {
+    if (!AevonKbShellRead) {
+        AevonKbShellRead = 1;
+        AevonKbInjectApp = AevonKbBridgeEnabled();
+        AevonKbTakeOver = AevonKbInjectApp;
+        // 母版 `0x4f78` 那个分支的等价证词：开关关着 ⇒ 四条钩子体全部透传。
+        if (!AevonKbInjectApp) AevonKbLog("app: kb: native off, inject=0\n");
+    }
     if (!AevonKbTakeOver) return;
     AevonKbHookUIScreen = !AevonKbIsFrontMost();
 }
@@ -213,6 +262,49 @@ static BOOL AevonKbBridgeEnabled(void) {
         CFRelease(value);
     }
     return on;
+}
+
+/// 母版 `_ringAppsContains(bundleId)` —— `0x4f4c` 安装入口的**第二道 return**。
+///
+/// ```
+/// _injectApp = _inject()                       // plist Inject，缺省 1
+/// if (!_injectApp) return
+/// if (!_ringAppsContains(bundleId)) return     // plist Apps 数组里没有这个 App 就不接管
+/// ```
+///
+/// 0.4.8 漏了第二道。后果不是「多装了几个 App」，是**全机每个 UIKit 进程**（日志
+/// 里连 `com.apple.CarPlayApp` 都在装）都在 `main()` 之前去 realize
+/// `_UIRemoteKeyboards` / `UIRemoteKeyboardWindow` / `FBSWorkspaceScenesClient` /
+/// `UIScreen` 并改它们的 IMP。母版名单外的 App **一个类都不碰**，所以它安全 ——
+/// 同一条钩子搬到一个会注入所有 App 的 dylib 里，名单闸就不是优化项而是安全带。
+///
+/// Aevon 的等价物是圆盘名单：`AevonRingStore` 把用户自选的 App 存在 `com.aevon`
+/// 域的 `RingApps` 键（`AevonRingStore.swift` 的 `key` / `snapshotKey` 在这里是
+/// 硬编码的两个 NSString 字面量，跨语言只能这么接）。母版 plist 的 `Apps` 数组与
+/// 它语义相同：都是「用户选出来、要用悬浮窗的那几个 App」。
+static BOOL AevonKbRingAppsContains(NSString *bundleId) {
+    if (bundleId.length == 0) return NO;
+    // 与 `AevonRingStore.bundleIDs()` 同序：先 `RingApps`，空则读快照。
+    CFStringRef const keys[2] = { CFSTR("RingApps"), CFSTR("RingAppsSnapshot") };
+    CFStringRef want = (__bridge CFStringRef)bundleId;
+    for (int i = 0; i < 2; i++) {
+        CFPropertyListRef value = CFPreferencesCopyAppValue(keys[i], AevonKbDomain);
+        if (value == NULL) continue;
+        BOOL hit = NO;
+        if (CFGetTypeID(value) == CFArrayGetTypeID()) {
+            CFArrayRef list = (CFArrayRef)value;
+            CFIndex count = CFArrayGetCount(list);
+            for (CFIndex k = 0; k < count && !hit; k++) {
+                CFTypeRef item = CFArrayGetValueAtIndex(list, k);
+                if (item == NULL) continue;
+                if (CFGetTypeID(item) != CFStringGetTypeID()) continue;
+                if (CFStringCompare((CFStringRef)item, want, 0) == kCFCompareEqualTo) hit = YES;
+            }
+        }
+        CFRelease(value);
+        if (hit) return YES;
+    }
+    return NO;
 }
 
 /// 母版 `_updateHeightFraction`（0x4a00）：先把 1.0 写回去，再读 plist 覆盖。
@@ -247,6 +339,8 @@ static void AevonKbUpdateTakeOver(void) {
     last = now;
     AevonKbInjectApp = AevonKbBridgeEnabled();
     AevonKbTakeOver = AevonKbInjectApp;
+    // 已经在这里读过一次，`AevonKbRefreshShell` 不必再读（0.4.9）。
+    AevonKbShellRead = 1;
 }
 
 // ===========================================================================
@@ -553,16 +647,30 @@ void AevonKbNativeInstall(void) {
         AevonKbLog("app: kb: native skipped, springboard\n");
         return;
     }
-    AevonKbInjectApp = AevonKbBridgeEnabled();
-    AevonKbTakeOver = AevonKbInjectApp;
-    // 母版 0x4f78 那个分支：`_inject` 为假就一条钩子都不装。
-    if (!AevonKbInjectApp) {
-        AevonKbLog("app: kb: native off, inject=0\n");
+    // ⛔ 0.4.9 — 母版 `0x4f4c` 的**第二道 return**（`_ringAppsContains`）。
+    //
+    // 这道闸必须**排在所有 `NSClassFromString` 之前**：它的作用不是「少装几条
+    // 钩子」，而是「名单外的进程一次类查找都不做」。Aevon(293) 里白屏 / App
+    // 打不开 / 小组件不加载，全部来自 0.4.8 把这一步漏了之后在 CarPlayApp、
+    // Spotlight、Filza…… 每个进程里提前 realize UIKit 私有类。
+    if (!AevonKbRingAppsContains(AevonKbBundleId)) {
+        AevonKbLog("app: kb: native skipped, notinlist\n");
         return;
     }
-    // 装钩子这一拍还不知道自己会不会被托起来。母版的初值来自
-    // `_hookUIScreen = ![_frontMost isEqualToString:_bundleId]`（0x5050 附近），
-    // `_frontMost` 在那一刻是 nil ⇒ 初值为真。之后由 0x5430 与 band 翻转校正。
+    // 0.4.9 — **构造期不读盘。**
+    //
+    // 0.4.8 在这里直接 `CFPreferencesCopyAppValue`（cfprefsd XPC），而构造函数
+    // 跑在 `main()` 之前。改成懒读：`AevonKbUpdateTakeOver`（scene settings 回调）
+    // 与 `AevonKbRefreshShell`（band 翻转）各自在第一次真的需要时读一次。
+    // 在那之前 `AevonKbTakeOver = NO`，四条钩子逐字节透传 —— 与「没装」等价。
+    AevonKbInjectApp = NO;
+    AevonKbTakeOver = NO;
+    // 装钩子这一拍按当前事实算一次，与母版 `0x5050` 的
+    // `_hookUIScreen = ![_frontMost isEqualToString:_bundleId]` 同一表达式。
+    //
+    // 0.4.9 起安装延后到主队列 0.15 s 之后（理由见 `AevonAppHook.m` 调用点），
+    // 那时 band 可能已经翻转完，所以不能像 0.4.8 那样硬写 NO —— 那一刻的事实
+    // 才是对的。之后由 `AevonKbSceneSettings` 与 `AevonKbRefreshShell` 持续校正。
     AevonKbHookUIScreen = !AevonKbIsFrontMost();
 
     int installed = 0;

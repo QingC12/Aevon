@@ -95,6 +95,17 @@
 extern void AevonKbNativeInstall(void);
 extern void AevonKbRefreshShell(void);
 
+/// 0.4.9 — `AevonKbNativeInstall` 的唯一入口（主队列、构造之后 0.15 s）。
+///
+/// 为什么不直接在构造函数里调：`Aevon(293)` 的 90 条 `app: hang` 全部 `gap=-1ms`，
+/// 主线程心跳一拍未跑 ⇒ 构造函数没回来。装钩子要提前 realize UIKit 私有类，
+/// 那一步在 `main()` 之前做会把 objc runtimeLock 带进 UIKit 的 `+initialize`。
+/// 完整理由写在构造函数里调用点上方那段注释。
+static void AevonKbInstallDeferredTick(void *context) {
+    (void)context;
+    AevonKbNativeInstall();
+}
+
 static CFStringRef const AevonDomain = CFSTR("com.aevon");
 static CFStringRef const AevonKey = CFSTR("!ring.appHook");
 
@@ -5571,7 +5582,7 @@ static void AevonAppBoot(void) {
     // 0.1.17 — 键盘在屏的那一声。软键盘属于应用这一侧，桌面要等这里报才知道
     // （见上面 `AevonKbObserve`）。
     AevonKbObserve();
-    // 0.4.7 — 键盘承载面接管（`Sources/App/AevonKeyboardNative.m`）。
+    // 0.4.7 / 0.4.9 — 键盘承载面接管（`Sources/App/AevonKeyboardNative.m`）。
     //
     // 1:1 复刻母版 `SthenoKeyboard.dylib` 的四条钩子：`_UIRemoteKeyboards`
     // 的交集高度、`+UIRemoteKeyboardWindow remoteKeyboardWindowForScreen:create:`、
@@ -5582,7 +5593,23 @@ static void AevonAppBoot(void) {
     // 0.1.43 ~ 0.4.6 那套「intersection 换算 + 键盘窗平移 + 顶边发布 + 通知矩形
     // 改写 + 安全区让位 + 参考线兜底 + 窗口收放」已整条删除，理由见
     // `AevonKeyboardNative.m` 文件头。
-    AevonKbNativeInstall();
+    //
+    // ⛔ 0.4.9 — **不在构造函数里装，延后到主队列第一拍之后。**
+    //
+    // Aevon(293) 里 0.4.8 一装就白屏：90 条 `app: hang` 全部 `gap=-1ms`，即
+    // `AevonMainBeatTick`（挂在主队列上、0.25 s 后第一拍）一次都没跑过 —— 构造
+    // 函数没回来。装钩子要 `NSClassFromString` 拿 `_UIRemoteKeyboards` /
+    // `UIRemoteKeyboardWindow` / `FBSWorkspaceScenesClient` 并 `[UIScreen class]`，
+    // 这些在 `main()` 之前 realize 就是拿 objc runtimeLock 去跑 UIKit 的
+    // `+initialize`；里面只要有一处 `dispatch_sync` 到主队列，主队列还没被 runloop
+    // 服务，主线程就自己等自己。
+    //
+    // 母版能在构造里做，是因为它是一支 170 KB、只含键盘逻辑的独立 dylib；我们这
+    // 支 dylib 前面还有 5,500 行、已经把进程带到某个状态，同一件事的代价不同。
+    // 延后 0.15 s 不影响任何时序：键盘要用户点输入框才出现，远晚于此；而
+    // `UIScreen.bounds` 在这 0.15 s 内保持系统值，正是 App 首帧该有的值。
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), NULL, AevonKbInstallDeferredTick);
 
     // Both getters, both chained: a process that is not hosted keeps the
     // system's answers byte for byte.
