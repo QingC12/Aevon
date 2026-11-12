@@ -2148,6 +2148,87 @@ static int AevonAmendSettings(id settings, int slot) {
     return wrote;
 }
 
+// ===========================================================================
+// 0.4.19 — 键盘不属于 App 的 scene。
+// ===========================================================================
+//
+/// Aevon(303) 的日志里第一次看清这条线：
+///
+///     win: hook trace 9 intercept mine=0 fg=1 amend=0
+///                      cls=UIMutableApplicationSceneSettings
+///                      scene=com.apple.UIKit.remote-keyboard
+///
+/// iOS 17 把键盘放进一个**独立的 scene**（`com.apple.UIKit.remote-keyboard`），
+/// 它有自己的一份 `settings.frame`。我们把 App 的 `-default` scene 摆到卡片上
+/// （0,215,430,717），键盘那个 scene 从没被动过 —— 它还停在系统给的原点。
+///
+/// 这就解释了 296~303 全部「几何读数正确、画面就是不对」：
+/// 键盘窗自己的 frame 是 717（我们的 `0x5230` 设的），窗里的内容也贴自己的底
+/// （`UIInputSetHostView f=0,286,430x431`，286+431=717），可是**最终合成到屏幕
+/// 的哪个位置由它所属 scene 的 frame 决定**，不由卡片承载面决定。两套原点一错，
+/// 用户看到的就是「键盘悬空 + 键盘底到屏底一条透明」。
+///
+/// 母版没有这一步，因为母版从不改 display，App 世界就是整屏，键盘 scene 天然
+/// 对齐。这是 Aevon 从 0.2.46 起改 display 带来的结构性差异，母版数据里没有
+/// 对应实现 —— 所以这一条只做一件事：把 system 已经算好的 frame 换成承载面。
+///
+/// ⛔ 这里**不能复用 `AevonWriteFrame`**：那个函数带「让路」判据
+/// （`now.height > 850 && target.height < 800` ⇒ 撤 frame 目标并异步拆卡），
+/// 而键盘 scene 的现值正好是整屏高度，复用会把卡片当成「系统要接管」拆掉。
+static int AevonActiveCardSlot(void) {
+    int mask = AevonFrameMask;
+    if (mask == 0) return -1;
+    for (int i = 0; i < AEVON_ARMED_MAX; i++) {
+        if ((mask & (1 << i)) == 0) continue;
+        if (AevonArmed[i][0] == '\0') continue;
+        if (CGRectIsEmpty(AevonFrameTargets[i])) continue;
+        return i;
+    }
+    return -1;
+}
+
+static long AevonKbSceneWrites = 0;
+static int AevonKbSceneNotes = 0;
+
+/// 把键盘 scene 的 frame 写成当前卡片的承载面。返回 1 = 真的写了。
+///
+/// 只在「有卡片正在承载」时动手（`AevonActiveCardSlot() >= 0`）；撤卡后 mask
+/// 清 0，这条函数就自动变成 no-op，系统收回键盘时也不会被我们拽着。
+static int AevonWriteKeyboardSceneFrame(id settings, const char *sceneName) {
+    if (settings == nil || sceneName == NULL) return 0;
+    const char *cls = object_getClassName(settings);
+    if (cls == NULL || strstr(cls, "Mutable") == NULL) return 0;
+    int slot = AevonActiveCardSlot();
+    if (slot < 0) return 0;
+    CGRect want = AevonFrameTargets[slot];
+    SEL setter = sel_registerName("setFrame:");
+    SEL getter = sel_registerName("frame");
+    if (![settings respondsToSelector:setter]) return 0;
+    CGRect now = CGRectZero;
+    if ([settings respondsToSelector:getter]) {
+        now = ((CGRect (*)(id, SEL))objc_msgSend)(settings, getter);
+        if (fabs(now.origin.x - want.origin.x) < 0.5
+            && fabs(now.origin.y - want.origin.y) < 0.5
+            && fabs(now.size.width - want.size.width) < 0.5
+            && fabs(now.size.height - want.size.height) < 0.5) {
+            return 0;
+        }
+    }
+    ((void (*)(id, SEL, CGRect))objc_msgSend)(settings, setter, want);
+    if (AevonKbSceneNotes < 8) {
+        AevonKbSceneNotes += 1;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"win: kb scene frame %s was=%.0fx%.0f@%.0f,%.0f want=%.0fx%.0f@%.0f,%.0f wrote=1",
+                      sceneName,
+                      now.size.width, now.size.height,
+                      now.origin.x, now.origin.y,
+                      want.size.width, want.size.height,
+                      want.origin.x, want.origin.y] UTF8String]);
+    }
+    __sync_fetch_and_add(&AevonKbSceneWrites, 1);
+    return 1;
+}
+
 
 static AevonHookSlot *AevonReserve(const char *label) {
     if (AevonSlotCount >= AEVON_HOOK_SLOTS) return NULL;
@@ -2486,6 +2567,16 @@ NSString *AevonHookInstall(void) {
             if (ours) {
                 amended = AevonAmendSettings(settings, mineSlot);
                 if (amended > 0) __sync_fetch_and_add(&AevonInterceptRewrote, 1);
+            } else {
+                // 0.4.19 — 键盘那个 scene 不归任何 App 槽管，但它同样要摆到卡片上。
+                // 只认名字里带 `remote-keyboard` 的那一个；springboard 之类照旧放行。
+                const char *other = AevonSceneName(scene);
+                if (other != NULL && strstr(other, "remote-keyboard") != NULL) {
+                    if (AevonWriteKeyboardSceneFrame(settings, other) > 0) {
+                        amended = 1;
+                        __sync_fetch_and_add(&AevonInterceptRewrote, 1);
+                    }
+                }
             }
             if (seen < 6) {
                 AevonRawTrace("intercept", "mine=%d fg=%d amend=%d cls=%s scene=%s",
@@ -2520,10 +2611,11 @@ NSString *AevonHookSummary(void) {
     NSMutableString *out = [NSMutableString string];
     [out appendFormat:@"hook: live=%d deact_set=%ld stripped=%ld"
      " intercept=%ld/%ld"
-     " push=%ld/%ld door=%ld armed=%@\n",
+     " push=%ld/%ld door=%ld kb_scene=%ld armed=%@\n",
      AevonSlotCount, AevonDeactSetCalls, AevonDeactStripped,
      AevonInterceptRewrote, AevonInterceptCalls,
      AevonPushWrote, AevonPushTried, AevonPushPath,
+     AevonKbSceneWrites,
      AevonHookArmedList()];
     long total = AevonTraceCount;
     long limit = (long)(sizeof(AevonTrace) / sizeof(AevonTrace[0]));

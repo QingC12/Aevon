@@ -640,6 +640,14 @@ def main():
                   # 0.4.16 那条 `kb face` 已删（content 本身就是承载面，找子视图永远 none）。
                   b"win: kb surf cont=%.0fx%.0f@%.0f,%.0f bou=%.0fx%.0f t=%.3f,%.3f,%.3f,%.3f abs=",
                   b"win: kb surf sub=%@ f=%.0fx%.0f@%.0f,%.0f b=%.0fx%.0f l=%.0fx%.0f clip=%d nat=",
+                  # 0.4.19 — 键盘属于独立 scene（`com.apple.UIKit.remote-keyboard`）。
+                  # 303 的 `hook trace 9 intercept mine=0 ... scene=com.apple.UIKit.remote-keyboard`
+                  # 是这条线的起点：App 的 `-default` scene 被摆到卡片上，键盘那个 scene
+                  # 没人管 ⇒ 键盘窗 frame 正确、内容贴自己的底，合成到屏幕却按另一个
+                  # 原点落 = 「悬空 + 键盘底到屏底一条透明」。这一行记录改写前后的
+                  # frame，是判断病根是否在此的唯一凭据，缺失等于这一版白做。
+                  b"win: kb scene frame %s was=%.0fx%.0f@%.0f,%.0f want=%.0fx%.0f@%.0f,%.0f wrote=1",
+                  b"kb_scene=%ld armed=",
                   b"win: style follow ",
                   # 0.1.31 — 锁屏 / 通知中心 / 控制中心盖上来时整层让开，
                   # 以及恢复显示后那一次「把承载面动一下」。
