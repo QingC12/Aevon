@@ -1511,7 +1511,15 @@ def main():
                       #              316 五家 App 的宿主高减去它之后归一到同一组
                       #              `{359,386,404,431}` —— 抖音 40、Safari 60、
                       #              微信/酷安/贴吧 0。`meas` 已扣掉它。
-                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f ph=%.0f n=%d in=%s src=%s fix=%d vis=%d",
+                      #   bo=        0.4.34 起：`UIKeyboardBoundsUserInfoKey` 的**系统原值**。
+                      #              这一栏是 317 那一拨「输入框被抬高」的判据：
+                      #              QQ/微信 `bo=0`（通知不带这个键，只读 frame）；
+                      #              威锋/贴吧/系统应用 `bo=429/456`，而键盘实占 359 ——
+                      #              差 70~97 就是系统预留、卡片里没落出来的那一条。
+                      #              我们改了 frame / begin，**一直没改 bounds** ⇒ 读
+                      #              bounds 的 App 一直按 456 让位。0.4.34 起 `bo` 必须
+                      #              等于 `rem`。
+                      b"app: kb: note %s end=%.0fx%.0f@%.0f,%.0f bo=%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f ph=%.0f n=%d in=%s src=%s fix=%d vis=%d",
                       # 修正那一拍：0.4.29 起只有一种写法 —— 整块换成真值
                       # （y = world − meas、高 = meas、底边恒 = world 底）。
                       # `src=` 标明真值来源（`meas` 现场量 / `last` 上次已知），
@@ -1530,12 +1538,19 @@ def main():
                       #   txt=   面积最大的那个 UITextField / UITextView（窗口坐标）
                       #   bot=   它在这个窗口里的底边
                       #   kbtop= 我们此刻报出去的键盘顶边（`AevonKbShown` 为 0 时取世界底）
+                      #   gap=   0.4.34 起：`kbtop − bot`。**这一列就是判据本身** ——
+                      #          正数 = 输入条在键盘之上（越大越「抬高」），
+                      #          负数 = 压在键盘底下（用户说的「被盖住 / 消失」）。
+                      #          以前要拿 `bot` 与 `kbtop` 两个数在心里做减法，312~317
+                      #          六版都在这一步上反复读错方向。
                       #   ok=    bot ≤ kbtop + 1
-                      #   z=     0.4.32 起：1 表示全部命中项都是 0 尺寸，这条读数不作判据
-                      #          （315 微信打出的 `CTRichTextView 0x0@74,-46` 就是这种废读数）
+                      #   z=     0.4.32 起：1 表示没有一个命中项是看得见的（全部滚出世界
+                      #          矩形或 hidden/透明），这一条读数不作判据。315 微信打出的
+                      #          `CTRichTextView 0x0@74,-46`、317 威锋打出的
+                      #          `WeiFeng.FeedTextView @16,843 bot=883`（世界高 717）都是这种。
                       #   sc=    命中项个数
-                      b"app: kb: bar %s txt=%s %.0fx%.0f@%.0f,%.0f bot=%.0f kbtop=%.0f ok=%d z=%d sc=%d hid=%d a=%.2f",
-                      b"app: kb: bar %s txt=none world=%.0f kbtop=%.0f vis=%d probes=%d",
+                      b"app: kb: bar %s txt=%s %.0fx%.0f@%.0f,%.0f bot=%.0f kbtop=%.0f gap=%.0f ok=%d z=%d sc=%d hid=%d a=%.2f",
+                      b"app: kb: bar %s txt=none world=%.0f kbtop=%.0f vis=%d probes=%d seen=%d",
                       # 0.4.28 — 「第二条通道」取证（**只读**，一次会话两拍）。
                       # 312：QQ 正确、微信先对后错，而 App 主窗十次都是 430x717
                       # ⇒ 不是悬浮窗的事，是微信自己又排了一次版、没走通知。

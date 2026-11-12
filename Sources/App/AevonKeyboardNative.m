@@ -9,6 +9,29 @@
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
 //
 // ---------------------------------------------------------------------------
+// 0.4.34 — 同一份 userInfo 里还有第三个矩形：`UIKeyboardBoundsUserInfoKey`
+// ---------------------------------------------------------------------------
+// 317 的症状第一次把 App 分成两拨：
+//
+//   QQ / 微信                     正常（读 `UIKeyboardFrameEndUserInfoKey`）
+//   威锋 / 贴吧 / 系统应用         输入框被抬高（读 `UIKeyboardBoundsUserInfoKey`）
+//
+// 三条通道里我们只改了两条（End / Begin），第三条一直是**系统原值**：
+//
+//   end=430x456@0,476  bo=456      ← 系统认为键盘占 456
+//   end=430x429@0,718  bo=429      ← 或 429
+//   而宿主量出来只有 359 / 386 / 404 / 431
+//
+// 456 − 359 = 97，429 − 359 = 70 —— 系统为候选条 / 快捷栏预留、但在卡片里没有
+// 落出来的那一条。frame 那条我们削掉了，bounds 这条没削 ⇒ 读 bounds 的 App 仍然
+// 按 456 让位 ⇒ 输入条多抬 70~97 pt。
+//
+// 0.4.32 减占位、0.4.33 调判据都在改「落点」，而那些 App 根本不看落点那条通道。
+// 这不是参数问题，是**少改了一个键**。本版把三条矩形通道（End / Begin / Bounds）
+// 与两个老的中心点一起对齐到同一个 `realH`，落点口径一个字符没动。
+//
+// 判据（318 日志）：`bo=` 与 `end` 的高应该相等，且 `note fix` 之后它们都等于 `rem`。
+// ---------------------------------------------------------------------------
 // 0.4.17 — 交集返回值改用「量出来的键盘占高」（Aevon(301)）
 // ---------------------------------------------------------------------------
 // 300/301 两版取证把四个钩子全部洗清了：
@@ -1188,26 +1211,28 @@ static void AevonKbScheduleChannelProbes(void) {
 // 第一个命中。窗口坐标系里 b = 0 在上，和 `UIScreen.bounds` 同一套（钩过 ⇒ 717）。
 static volatile int AevonKbBarProbes = 0;
 
-static void AevonKbScanTextInput(UIView *root, int depth, UIView **best,
-                                 CGFloat *bestArea, UIView **first, int *seen) {
-    if (root == nil || depth < 0 || best == NULL || bestArea == NULL
-        || first == NULL || seen == NULL) return;
+/// 0.4.34 — 收集**全部**命中，不再边扫边选。
+///
+/// 317 里威锋打出 `WeiFeng.FeedTextView 398x40@16,843 bot=883`：那是一个已经滚出
+/// 屏幕（世界高 717）的编辑框，`bot=883` 在屏外。旧写法「按面积取最大」会把它当
+/// 输入条，读数等于废的 —— 而这一组读数正是判断「抬高还是被盖」的唯一依据。
+/// 所以先把候选都收下来，在窗口坐标里过滤掉不可见的，再按面积选。
+#define AEVON_KB_INPUT_MAX 24
+static void AevonKbCollectTextInput(UIView *root, int depth,
+                                    UIView **list, int *count) {
+    if (root == nil || depth < 0 || list == NULL || count == NULL) return;
+    if (*count >= AEVON_KB_INPUT_MAX) return;
     NSString *cls = NSStringFromClass([root class]);
     if (cls != nil && ([cls rangeOfString:@"TextField"].location != NSNotFound
                        || [cls rangeOfString:@"TextView"].location != NSNotFound)) {
-        *seen += 1;
-        if (*first == nil) *first = root;
-        CGRect b = [root bounds];
-        CGFloat area = b.size.width * b.size.height;
-        if (area > 1.0 && area > *bestArea) {
-            *best = root;
-            *bestArea = area;
-        }
+        list[*count] = root;
+        *count += 1;
     }
     NSArray *subs = [root subviews];
-    NSUInteger count = [subs count];
-    for (NSUInteger i = 0; i < count && i < 32; i++) {
-        AevonKbScanTextInput([subs objectAtIndex:i], depth - 1, best, bestArea, first, seen);
+    NSUInteger n = [subs count];
+    for (NSUInteger i = 0; i < n && i < 32; i++) {
+        AevonKbCollectTextInput([subs objectAtIndex:i], depth - 1, list, count);
+        if (*count >= AEVON_KB_INPUT_MAX) return;
     }
 }
 
@@ -1229,31 +1254,58 @@ static void AevonKbProbeBarText(const char *tag) {
     // 富文本视图，它的位置跟输入条没关系，读数等于废的。评论区输入条几乎都是
     // 有尺寸的 `UITextField` / `UITextView`，所以按面积取最大的那个；
     // 实在全是 0 尺寸就退回第一个，并用 `z=1` 标出来（那种读数不能当判据）。
-    UIView *bestInput = nil;
-    UIView *firstInput = nil;
-    CGFloat bestArea = 0.0;
-    int seen = 0;
-    AevonKbScanTextInput(rootView, 16, &bestInput, &bestArea, &firstInput, &seen);
-    UIView *field = (bestInput != nil) ? bestInput : firstInput;
+    //
+    // 0.4.34 — 加一道「看得见」的过滤（见 `AevonKbCollectTextInput`）。判据：
+    // `!hidden`、`alpha > 0.3`、转换到窗口后**整块落在世界矩形内**。满足的第一批
+    // 里按面积取最大；一个都不满足就照旧取面积最大并标 `off=1`，绝不悄悄打一条假读数。
+    UIView *cands[AEVON_KB_INPUT_MAX];
+    int candCount = 0;
+    AevonKbCollectTextInput(rootView, 16, cands, &candCount);
+    UIView *field = nil;
+    CGRect fieldRect = CGRectZero;
     CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
+    CGFloat bestArea = 0.0;
+    CGFloat fallbackArea = 0.0;
+    UIView *fallback = nil;
+    CGRect fallbackRect = CGRectZero;
+    for (int i = 0; i < candCount; i++) {
+        UIView *v = cands[i];
+        if (v == nil) continue;
+        CGRect r = [v convertRect:[v bounds] toView:appWin];
+        CGFloat area = r.size.width * r.size.height;
+        if (!isfinite(r.origin.x) || !isfinite(r.origin.y)) continue;
+        if (area <= 1.0) continue;
+        if (area > fallbackArea) { fallback = v; fallbackArea = area; fallbackRect = r; }
+        if ([v isHidden] || [v alpha] < 0.3) continue;
+        if (r.origin.y < -1.0 || r.origin.y + r.size.height > worldH + 1.0) continue;
+        if (area > bestArea) { field = v; bestArea = area; fieldRect = r; }
+    }
+    BOOL offScreen = NO;
+    if (field == nil) {
+        field = fallback;
+        fieldRect = fallbackRect;
+        offScreen = (fallback != nil);
+    }
     CGFloat kbTop = (CGFloat)AevonKbShown ? (CGFloat)AevonKbLastTop : worldH;
     char line[360];
     if (field == nil) {
         snprintf(line, sizeof(line),
-                 "app: kb: bar %s txt=none world=%.0f kbtop=%.0f vis=%d probes=%d\n",
-                 tag, worldH, kbTop, (int)AevonKbShown, (int)AevonKbBarProbes);
+                 "app: kb: bar %s txt=none world=%.0f kbtop=%.0f vis=%d probes=%d seen=%d\n",
+                 tag, worldH, kbTop, (int)AevonKbShown, (int)AevonKbBarProbes, candCount);
         AevonKbLog(line);
         return;
     }
     // 转进窗口坐标 —— `toView:appWin` 就是窗口坐标（appWin 的 bounds.origin 恒 0,0）。
-    CGRect r = [field convertRect:[field bounds] toView:appWin];
+    CGRect r = fieldRect;
     CGFloat bottom = r.origin.y + r.size.height;
+    // `gap = kbtop − bot`：正数 = 输入条在键盘之上（数值越大越「抬高」），
+    // 负数 = 压在键盘底下（就是用户说的「被盖住 / 消失」）。这一列是判据本身。
     snprintf(line, sizeof(line),
-             "app: kb: bar %s txt=%s %.0fx%.0f@%.0f,%.0f bot=%.0f kbtop=%.0f ok=%d z=%d sc=%d hid=%d a=%.2f\n",
+             "app: kb: bar %s txt=%s %.0fx%.0f@%.0f,%.0f bot=%.0f kbtop=%.0f gap=%.0f ok=%d z=%d sc=%d hid=%d a=%.2f\n",
              tag, class_getName([field class]),
              r.size.width, r.size.height, r.origin.x, r.origin.y,
-             bottom, kbTop, (int)(bottom <= kbTop + 1.0),
-             (int)(bestArea <= 1.0), seen,
+             bottom, kbTop, kbTop - bottom, (int)(bottom <= kbTop + 1.0),
+             (int)offScreen, candCount,
              (int)[field isHidden], (double)[field alpha]);
     AevonKbLog(line);
 }
@@ -1418,13 +1470,21 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
 
     if (AevonKbNoteNotes < 96) {
         AevonKbNoteNotes += 1;
-        char line[384];
+        char line[420];
         const char *noteName = [(NSString *)name UTF8String];
+        // 0.4.34 — `bo=` 是 **系统原值** 里 `UIKeyboardBoundsUserInfoKey` 的高。
+        // 它和 `end` 的高一起，能直接看出这一批通知带了几条「多留」通道：
+        // QQ/微信 `bo=0`（不带这个键）；威锋/贴吧/系统应用 `bo=429/456`（带，且含富余）。
+        CGFloat rawBoundsH = 0.0;
+        NSValue *braw = [info objectForKey:UIKeyboardBoundsUserInfoKey];
+        if (braw != nil && [braw isKindOfClass:[NSValue class]]) {
+            rawBoundsH = [braw CGRectValue].size.height;
+        }
         snprintf(line, sizeof(line),
-                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f ph=%.0f n=%d in=%s src=%s fix=%d vis=%d\n",
+                 "app: kb: note %s end=%.0fx%.0f@%.0f,%.0f bo=%.0f world=%.0f phys=%.0f shift=%.0f meas=%.0f host=%.0f,%.0f ph=%.0f n=%d in=%s src=%s fix=%d vis=%d\n",
                  noteName != NULL ? noteName : "?",
                  end.size.width, end.size.height, end.origin.x, end.origin.y,
-                 worldH, physicalH, shift, realH, hostY, hostH, spacer, winCount,
+                 rawBoundsH, worldH, physicalH, shift, realH, hostY, hostH, spacer, winCount,
                  inSpace, src, (int)visible, (int)AevonKbShown);
         AevonKbLog(line);
     }
@@ -1461,6 +1521,30 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     end2.origin.y = worldH - realH;
     end2.size.height = realH;
     [fixed setObject:[NSValue valueWithCGRect:end2] forKey:UIKeyboardFrameEndUserInfoKey];
+    // 0.4.34 — **同一份 userInfo 里还有第三个矩形，0.4.33 之前一直没改。**
+    //
+    // `UIKeyboardBoundsUserInfoKey` 是「键盘自身多大」，坐标系是键盘本地（origin 恒 0,0），
+    // 所以它不会随卡片的 215 pt 偏移而错 —— 也正因如此，它一直是**系统原值**：
+    //
+    //   end=430x456@0,476   ⇒ bounds 高 456
+    //   end=430x429@0,718   ⇒ bounds 高 429
+    //   而键盘实际只占 359 / 386 / 404 / 431
+    //
+    // 456 与 359 差 97、429 与 359 差 70 —— 这正是系统为「候选条 / 快捷键栏」预留、
+    // 但在卡片里根本没有落出来的那一条。我们用 frame 把富余削掉了，bounds 却没削：
+    // **读 bounds 的 App 仍然按 456 让位，输入条多抬 70~97 pt** —— 这就是 317 里
+    // 「威锋、minis 等第三方应用的输入框会被抬高」。
+    //
+    // QQ / 微信读 frame（已修），所以一直正常；系统应用与论坛类老 App 读 bounds，
+    // 于是一直被抬高。这也解释了为什么 0.4.27~0.4.33 连改七版落点都没治好它们：
+    // 改的是一个 App 未必看的那条通道。
+    //
+    // ⛔ 三条通道必须同值。以后再有 App 位置不对，先数 userInfo 里有几个矩形，不要先调落点。
+    NSValue *boundsValue = [info objectForKey:UIKeyboardBoundsUserInfoKey];
+    if (boundsValue != nil && [boundsValue isKindOfClass:[NSValue class]]) {
+        CGRect kbBounds = CGRectMake(0.0, 0.0, end.size.width, realH);
+        [fixed setObject:[NSValue valueWithCGRect:kbBounds] forKey:UIKeyboardBoundsUserInfoKey];
+    }
     // 0.4.31 — `begin` 不再用系统那个，用**我们自己上次报出去的矩形**（原因见
     // `AevonKbLastTop` 那一段：系统那个值在 503 / 718 / 1147 三套口径之间跳，
     // 关掉再开时它给出的差值会把输入条一次推出去，而且之后再也回不来）。
@@ -1475,6 +1559,18 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     NSValue *beginValue = [info objectForKey:UIKeyboardFrameBeginUserInfoKey];
     if (beginValue != nil && [beginValue isKindOfClass:[NSValue class]]) {
         [fixed setObject:[NSValue valueWithCGRect:begin2] forKey:UIKeyboardFrameBeginUserInfoKey];
+    }
+    // 0.4.34 — 老 API 的两个中心点（iOS 3.2 起就在，至今仍在 userInfo 里）。
+    // 它们和 frame 是同一件事的另一种写法，留着旧值就等于留了一条「多抬 70 pt」的路。
+    NSValue *centerEnd = [info objectForKey:UIKeyboardCenterEndUserInfoKey];
+    if (centerEnd != nil && [centerEnd isKindOfClass:[NSValue class]]) {
+        [fixed setObject:[NSValue valueWithCGPoint:CGPointMake(CGRectGetMidX(end2), CGRectGetMidY(end2))]
+                  forKey:UIKeyboardCenterEndUserInfoKey];
+    }
+    NSValue *centerBegin = [info objectForKey:UIKeyboardCenterBeginUserInfoKey];
+    if (centerBegin != nil && [centerBegin isKindOfClass:[NSValue class]]) {
+        [fixed setObject:[NSValue valueWithCGPoint:CGPointMake(CGRectGetMidX(begin2), CGRectGetMidY(begin2))]
+                  forKey:UIKeyboardCenterBeginUserInfoKey];
     }
     AevonKbLastTop = end2.origin.y;
     AevonKbLastHeight = end2.size.height;
