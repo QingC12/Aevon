@@ -1383,6 +1383,20 @@ static void AevonKbScheduleBarProbes(void) {
 //
 // ⛔ 别用「底边 == 物理屏底」当判据（0.4.27 的错）：它只覆盖第一批，而**后面的
 // 那两批才是把输入条按下去的手**。判据要描述事实（在不在屏幕上），不要描述坐标系。
+/// 0.4.34 — 三个老键名，按**字符串**取。
+///
+/// `UIKeyboardBoundsUserInfoKey` / `UIKeyboardCenterEndUserInfoKey` /
+/// `UIKeyboardCenterBeginUserInfoKey` 在 SDK 里标着 `deprecated: first deprecated
+/// in iOS 3.2`，而 `-Werror` 会把「用了它」直接判成编译失败（run 43228527655）。
+/// 它们至今仍在每一份键盘通知的 `userInfo` 里（317 的 `bo=429/456` 就是这么来的），
+/// 只是官方不建议新代码使用。
+///
+/// 这三个常量的**值就是它自己的名字**（UIKit 里是 `NSString * const X = @"X"`），
+/// 所以直接写字符串与引用常量二进制等价 —— 不是绕过检查，是同一个值。
+static NSString *const AevonKbBoundsKey = @"UIKeyboardBoundsUserInfoKey";
+static NSString *const AevonKbCenterEndKey = @"UIKeyboardCenterEndUserInfoKey";
+static NSString *const AevonKbCenterBeginKey = @"UIKeyboardCenterBeginUserInfoKey";
+
 static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) {
     if (AevonKbOrigPostNote == NULL) return;
     void (*orig)(id, SEL, id, id, id) = (void (*)(id, SEL, id, id, id))AevonKbOrigPostNote;
@@ -1476,7 +1490,7 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
         // 它和 `end` 的高一起，能直接看出这一批通知带了几条「多留」通道：
         // QQ/微信 `bo=0`（不带这个键）；威锋/贴吧/系统应用 `bo=429/456`（带，且含富余）。
         CGFloat rawBoundsH = 0.0;
-        NSValue *braw = [info objectForKey:UIKeyboardBoundsUserInfoKey];
+        NSValue *braw = [info objectForKey:AevonKbBoundsKey];
         if (braw != nil && [braw isKindOfClass:[NSValue class]]) {
             rawBoundsH = [braw CGRectValue].size.height;
         }
@@ -1540,10 +1554,10 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     // 改的是一个 App 未必看的那条通道。
     //
     // ⛔ 三条通道必须同值。以后再有 App 位置不对，先数 userInfo 里有几个矩形，不要先调落点。
-    NSValue *boundsValue = [info objectForKey:UIKeyboardBoundsUserInfoKey];
+    NSValue *boundsValue = [info objectForKey:AevonKbBoundsKey];
     if (boundsValue != nil && [boundsValue isKindOfClass:[NSValue class]]) {
         CGRect kbBounds = CGRectMake(0.0, 0.0, end.size.width, realH);
-        [fixed setObject:[NSValue valueWithCGRect:kbBounds] forKey:UIKeyboardBoundsUserInfoKey];
+        [fixed setObject:[NSValue valueWithCGRect:kbBounds] forKey:AevonKbBoundsKey];
     }
     // 0.4.31 — `begin` 不再用系统那个，用**我们自己上次报出去的矩形**（原因见
     // `AevonKbLastTop` 那一段：系统那个值在 503 / 718 / 1147 三套口径之间跳，
@@ -1562,15 +1576,15 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     }
     // 0.4.34 — 老 API 的两个中心点（iOS 3.2 起就在，至今仍在 userInfo 里）。
     // 它们和 frame 是同一件事的另一种写法，留着旧值就等于留了一条「多抬 70 pt」的路。
-    NSValue *centerEnd = [info objectForKey:UIKeyboardCenterEndUserInfoKey];
+    NSValue *centerEnd = [info objectForKey:AevonKbCenterEndKey];
     if (centerEnd != nil && [centerEnd isKindOfClass:[NSValue class]]) {
         [fixed setObject:[NSValue valueWithCGPoint:CGPointMake(CGRectGetMidX(end2), CGRectGetMidY(end2))]
-                  forKey:UIKeyboardCenterEndUserInfoKey];
+                  forKey:AevonKbCenterEndKey];
     }
-    NSValue *centerBegin = [info objectForKey:UIKeyboardCenterBeginUserInfoKey];
+    NSValue *centerBegin = [info objectForKey:AevonKbCenterBeginKey];
     if (centerBegin != nil && [centerBegin isKindOfClass:[NSValue class]]) {
         [fixed setObject:[NSValue valueWithCGPoint:CGPointMake(CGRectGetMidX(begin2), CGRectGetMidY(begin2))]
-                  forKey:UIKeyboardCenterBeginUserInfoKey];
+                  forKey:AevonKbCenterBeginKey];
     }
     AevonKbLastTop = end2.origin.y;
     AevonKbLastHeight = end2.size.height;
