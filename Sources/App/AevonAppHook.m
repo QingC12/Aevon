@@ -6758,6 +6758,8 @@ static BOOL AevonKbHostGate(void) {
 // bounds/center/transform」同源，但更严格：连 bounds 都不碰。
 
 static volatile int AevonKbLiftNotes = 0;
+/// 0.4.5 — 「按宿主卡片原点补一截」这条路的日志配额（每个键盘周期最多两三条）。
+static volatile int AevonKbShiftNotes = 0;
 
 /// intersection 钩子里取到的键盘窗（真机证实非空：`kb: lead … kbwin=932`）。
 ///
@@ -7244,27 +7246,55 @@ static void AevonKbLiftApply(BOOL on) {
     CGSize size = keyboardWindow.bounds.size;
     CGFloat bottom = keyboardWindow.center.y + size.height * 0.5;
     BOOL usable = on && AevonKbHostGate() && size.height > 200.0;
-    // 0.1.54 — **一个微米都不搬**。
+    // 0.4.5 — **键盘窗按「宿主把卡片摆在哪」平移，不再恒写 identity。**
     //
-    // 搬键盘是 0.1.48 的补丁：那时场景恒在 `0..717`，键盘底边 932 在场景外，
-    // 只能把键盘整体提上来（−215）。0.1.50 起改走「场景原点搬到 215」，键盘底边
-    // 932 与场景底边严丝合缝，**搬的理由已经不存在**。
+    // 0.1.54 写 identity 的前提是「场景原点真的搬到了 215」。Aevon(291) 的读数
+    // 说明这个前提在真机上不成立：
     //
-    // 而 Aevon(126) 证明这条路径现在只会害人：
-    //   kb: lift applied dy=-170 bottom=932 base=762 scene=717 top=0
-    //   kb: lift aligned dy=0    bottom=932 base=932 …
-    // 第一拍算出的 `base=762` 是 App 冷启动时持久化的旧 band（`373x543 at 32,219`
-    // 的底边），它比真实值小 170 ⇒ 键盘被提上去 170；宿主的新 band 一到，又搬回
-    // 0。用户看到的「开关键盘时悬浮窗布局跳动」就是这一来一回，而中间那几拍键盘
-    // 悬在半空。
+    //   13:19:26 keyboard native on card=430x717 at 0,215 scene=215 crop=0
+    //   app: kb: win hold h=358 top=358 raw=358 sceneY=0 sceneH=717 was=717
+    //   app: kb: lift aligned dy=0 bottom=717 base=744 scene=717 top=-1 kb=430x717
+    //   app: kb: caret cls=NTBaseAIO.NTAIOInputRichAndTextView … bar=487..511
     //
-    // 键盘态下宿主的契约是硬的：卡片 `(0, 215, 430, 717)`、场景同矩形 ⇒ 键盘窗
-    // 原生 616..932 整块落在场景内。所以这里恒写 identity —— 它同时负责把历史
-    // 版本可能留下的平移**清掉**（`transform` 是绝对值，写 identity 就是复位）。
+    // `kb=430x717` ⇒ 键盘窗与场景同高（键盘挂在场景上，0.1.56 就量到过）；
+    // `bottom=717` ⇒ 键盘底边贴的是**场景自己的**底边；`sceneY=0` ⇒ 这个场景在
+    // App 眼里仍从屏幕第 0 行开始。三条合起来：键盘整块落在屏幕 401..717，
+    // 底边离屏幕底还差 215 —— 就是用户报的「键盘悬空 + 下面一条白」，而它正好
+    // 压在 App 的输入条上（`bar` 底 511，落在 401..717 之间）。
+    //
+    // 成因是两套坐标系：承载面由**宿主**摆到 215..932（`settings.frame` 写了、
+    // 卡片也确实在那儿），键盘窗由 **UIKit 在 App 进程里**摆，而 App 进程的窗口
+    // 坐标系没有跟着搬 —— 差的正好是场景原点那一截。
+    //
+    // 平移量不猜：`App 窗口在屏幕上的 y` 与 `宿主说卡片在 215` 之差就是要补的那截。
+    // 两者一致时 dy = 0（写 identity，与 0.1.54 行为完全相同）；不一致才搬。
     CGFloat dy = 0.0;
+    CGFloat winScreenY = -1.0;
+    CGFloat hostY = AevonKbSceneOriginCache;
+    UIWindow *appWindow = AevonKbAppWindow();
+    if (appWindow != nil && appWindow.windowScene != nil
+        && hostY > 1.0 && hostY < 400.0 && usable) {
+        CGRect onScreen = [appWindow convertRect:appWindow.bounds
+                              toCoordinateSpace:appWindow.windowScene.screen.coordinateSpace];
+        // 尺寸必须与窗口自身一致，否则这次转换量到的是别的东西（旋转/空壳）。
+        if (!CGRectIsNull(onScreen)
+            && fabs(onScreen.size.height - appWindow.bounds.size.height) < 2.0) {
+            winScreenY = onScreen.origin.y;
+            CGFloat diff = hostY - winScreenY;
+            // 1..400 pt 之外的差值只可能是量错，宁可不动。
+            if (fabs(diff) > 1.0 && fabs(diff) < 400.0) dy = diff;
+        }
+    }
     // 每次都写**绝对值**（不是累加）：UIKit 在键盘布局时会重设这个窗口的
     // `transform`，重复通知必须能把状态重新拉回来。
-    keyboardWindow.transform = CGAffineTransformIdentity;
+    keyboardWindow.transform = CGAffineTransformMakeTranslation(0, dy);
+    if (dy != 0.0 && AevonKbShiftNotes < 10) {
+        AevonKbShiftNotes += 1;
+        char shift[200];
+        snprintf(shift, sizeof(shift), "kb: lift shift dy=%.0f winY=%.0f hostY=%.0f\n",
+                 dy, winScreenY, hostY);
+        AevonKbLog(shift);
+    }
     if (AevonKbLiftNotes < 10) {
         AevonKbLiftNotes += 1;
         char line[240];
