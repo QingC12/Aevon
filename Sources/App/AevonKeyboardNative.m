@@ -604,6 +604,13 @@ static CGRect AevonKbBounds(id self, SEL _cmd) {
 // 窗底与屏底对齐时它等于 host 的高度；不对齐时它仍然是「键盘遮住了屏幕多少」。
 // 只用公开的 view 接口（`subviews` / `convertRect:toView:` / `frame`），不调任何
 // 私有选择子、不写任何几何 ⇒ 量错最多是数值不对，不会杀进程。
+//
+// ⛔ **0.4.23：上面那整段前提已经不成立，这个测量不再参与任何决策。**
+// 0.4.21 把 display 还给系统之后 `kbH` 回到 932，母版公式重新成立，而且它量的是
+// 「这一刻」的键盘 —— 键盘升起与候选条到达是两个时刻，用「此刻」的值去答一个
+// 一次性的问句，就会漏掉后来那 45 pt。现在这里**只打日志**，inset 的唯一来源是
+// 母版公式。保留它是因为日志里 `formula=` 与 `meas=` 并排能直接看出余量够不够；
+// 哪天母版公式真的不够了，这份读数就是第一个证据，而不是又一轮猜系数。
 static UIView *AevonKbFindHostView(UIView *root, int depth) {
     if (root == nil || depth < 0) return nil;
     NSString *cls = NSStringFromClass([root class]);
@@ -673,13 +680,6 @@ static CGFloat AevonKbMeasuredCoverage(id keyboardWindow, CGFloat screenHeight,
 // 于是母版公式退化成恒等、`orig` 原样透传。301 已证 `orig` 是 932 那个世界的口径
 // （316），透传进 717 的世界就短了 115 —— 这就是「键盘盖住输入框」。所以本版在公式
 // 之后加一道「量出来的占高」，见上面 0.4.17 那一段。公式本身**一个字符没改**。
-/// 0.4.21 — inset 的采样锁存（三个量：本次会话已采纳值 / 上一拍原始采样 /
-/// 连续同值计数）。只在 `AevonKbIntersection` 里读写；键盘收起时整体归零。
-/// 0.4.22 把采纳方向改成「上行立即、下行连续两次同值」，见那里 0.4.22 那一段。
-static CGFloat AevonKbAdopted = 0.0;
-static CGFloat AevonKbPrevMeas = 0.0;
-static int AevonKbMeasCount = 0;
-
 static CGFloat AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, BOOL ignore) {
     CGFloat orig = 0.0;
     if (AevonKbOrigIntersection != NULL) {
@@ -703,64 +703,46 @@ static CGFloat AevonKbIntersection(id self, SEL _cmd, id scene, BOOL *isLocal, B
     CGFloat answer = (orig * screenHeight / keyboardHeight) * (CGFloat)AevonKbHeightFraction
                    + keyboardHeight - screenHeight;
 
-    // 0.4.17 — 量出来的占高优先，公式只在量不到时兜底。
+    // 0.4.23 — **删掉 0.4.17 加的「量出来的占高优先」，回到母版公式一个出口。**
+    //
+    // 0.4.17 加那一层，是为了修「kbH=717 的世界」。那时 display 被我改成卡片尺寸，
+    // `keyboardHeight` 与 `screenHeight` 双双是 717 ⇒ 母版公式退化成恒等、`orig`
+    // 被原样透传成 316，比真实 386 少 70 ⇒ 键盘盖住输入框。旧世界里除了测量没有别的路。
+    //
+    // 0.4.21 把 display 还给系统之后，**那个前提不存在了**：`keyboardHeight` 回到
+    // 物理 932，母版公式重新开始工作 —— `(316 × 717 ÷ 932) + 932 − 717 = 458`，
+    // 而 458 > 431（真实占高）。母版公式的哲学本来就是「宁可留白，不盖内容」，
+    // 富余的 27 pt 正好覆盖候选条后到时把键盘顶高的那一段。
+    //
+    // 反过来，0.4.17 那一层在现在**是有害的**：它量的是「此刻」的键盘，而键盘升起
+    // 和候选条到达是两个时刻。第一次量到 386（无候选条），App 就按 386 排完版；
+    // 等候选条把键盘顶到 431，App 不再重排 ⇒ 输入框被盖 45 pt。307 现场：
+    //
+    //   inter … formula=458 meas=386 -> 386   ← 第一次，报了无候选条的值
+    //   inter … formula=458 meas=431 -> 431   ← 候选条到了，App 已经不看了
+    //
+    // `formula` 从头到尾是 458 没变过，它只看 `orig`（键区高），一次到位；
+    // 候选条怎么变都落在那 27 pt 余量里，根本不需要 App 重排。
+    //
+    // 所以整层删掉。它属于「为旧地基打的补丁」，旧地基 0.4.21 已经拆了。
+    //
+    // ⛔ 教训：**换了地基，要回头审所有「为旧地基打的补丁」。** 0.4.21 拆地基时
+    // 我只删了自己记得的那几条补偿，0.4.17 这条留在原地，又烧了一版才看出来。
+    CGFloat chosen = answer;
+    // 只读取证：量出来的真实占高仍然打日志，方便对照公式的余量够不够。
+    // **它不参与决策** —— 这一版起 inset 只有一个来源。
     CGFloat hostY = 0.0;
     CGFloat hostH = 0.0;
     CGFloat measured = AevonKbMeasuredCoverage(keyboardWindow, screenHeight, &hostY, &hostH);
-    // 遮挡不可能超过屏幕本身：某次量歪（host 取到外层容器、或量在窗口换 frame 的那一拍）
-    // 也不会把 App 的内容顶出屏幕。
     if (measured > screenHeight) measured = screenHeight;
-    // 0.4.22 — 采样锁存的**方向**反了，这一版改过来。
-    //
-    // 0.4.21 写的规则是「首样采纳，之后连续两次同值才更新」，实际效果是让第一帧
-    // 拥有否决权。306 的序列正好踩在它的反面：
-    //
-    //   app: kb: inter … meas=386 adopt=386 host=546,386   ← 首样，键盘升起动画中途
-    //   app: kb: inter … meas=431 adopt=386 host=501,431   ← 真值到了，被锁存否决
-    //   app: kb: tree  UIInputSetHostView f=0,501,430x431  ← 视图树印证真值 431
-    //
-    // 键盘升起是**单调向上**的（386 → 431），所以「第一次采样」永远是最小的那个。
-    // 让首样一锤定音 = 永远锁死在动画第一帧，比真值少 45 pt ⇒ 输入框被盖住。
-    //
-    // 正确的不对称（这也是物理上的不对称）：
-    //   · 量到的**比已采纳的大** ⇒ 遮挡正在变大，必须立即采纳；慢一拍就是被盖住。
-    //   · 量到的**比已采纳的小** ⇒ 连续两次同值才采纳。高度变小通常是键盘换形态
-    //     （候选条收起 431 → 359），单帧变小多半是收起动画的路过值，等一拍再认。
-    // 上限由 `screenHeight` 夹住，某次量歪也不会把内容顶出屏幕。
-    if (measured < 8.0) {
-        // 键盘不在：整条会话作废，下一次重新学。
-        AevonKbAdopted = 0.0;
-        AevonKbPrevMeas = 0.0;
-        AevonKbMeasCount = 0;
-    } else {
-        if (AevonKbAdopted < 8.0 || measured > AevonKbAdopted + 0.5) {
-            // 首样，或遮挡变大 ⇒ 立即采纳。
-            AevonKbAdopted = measured;
-            AevonKbMeasCount = 1;
-        } else if (fabs(measured - AevonKbPrevMeas) < 0.5) {
-            // 与上一拍同值 ⇒ 计数；连续两次同值才承认「真的变小了」。
-            AevonKbMeasCount += 1;
-            if (AevonKbMeasCount >= 2) AevonKbAdopted = measured;
-        } else {
-            // 换了个值，计数重来。
-            AevonKbMeasCount = 1;
-        }
-        AevonKbPrevMeas = measured;
-    }
-    CGFloat chosen = answer;
-    const char *source = "formula";
-    if (AevonKbAdopted > 8.0 && fabs(AevonKbAdopted - answer) > 2.0) {
-        chosen = AevonKbAdopted;
-        source = "meas";
-    }
 
     if (AevonKbInterNotes < 10) {
         AevonKbInterNotes += 1;
         char line[288];
         snprintf(line, sizeof(line),
-                 "app: kb: inter orig=%.0f screen=%.0f kb=%.0f hf=%.2f formula=%.0f meas=%.0f adopt=%.0f host=%.0f,%.0f src=%s -> %.0f\n",
+                 "app: kb: inter orig=%.0f screen=%.0f kb=%.0f hf=%.2f formula=%.0f meas=%.0f host=%.0f,%.0f -> %.0f\n",
                  orig, screenHeight, keyboardHeight, AevonKbHeightFraction,
-                 answer, measured, AevonKbAdopted, hostY, hostH, source, chosen);
+                 answer, measured, hostY, hostH, chosen);
         AevonKbLog(line);
     }
     return chosen;
