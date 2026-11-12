@@ -983,7 +983,10 @@ static void AevonKbProbeChannels(const char *tag) {
         UIView *host = AevonKbFindHostView(kbWin, 4);
         if (host != nil) {
             inKb = [host convertRect:[host bounds] toView:kbWin];
-            inWin = [host convertRect:[host bounds] toWindow:appWin];
+            // ⛔ `convertRect:toWindow:` 是 `UIWindow` 的方法，`UIView` 没有这个选择子
+            // （CI 第一次就是被 `-Werror` 挡在这行）。转进主窗用 `toView:`，语义一样：
+            // 目标视图的 bounds 坐标系就是它的窗口坐标系（bounds.origin 恒 0,0）。
+            inWin = [host convertRect:[host bounds] toView:appWin];
         }
     }
     CGRect kbf = kbWin != nil ? [kbWin frame] : CGRectZero;
