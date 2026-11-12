@@ -4049,10 +4049,23 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             if let sc = window.windowScene {
                 door = Int(AevonPushSceneFrame(sc))
             }
-            // 0.2.43 — 场景原点一变，系统那一次「把承载视图 frame 重设成 scene
-            // frame」就会把画面推走 215 pt（见 `reapplySoon`）。连对四次，别等
-            // 守卫循环那一拍。
-            self.reapplySoon("kb-up")
+            // 0.4.5 — **对账阶梯搬到 `grow` 里面去排。**
+            //
+            // 0.2.43 起这里是「先排四拍、再动卡片」，可四拍里的前两拍（0.03 / 0.07 s）
+            // 落在 `landSceneFrame` + `afterSceneAck` 还没回来的那段时间里 —— 那时
+            // `card.bounds` 还是**上一档**的尺寸（停靠小窗 352×587），
+            // `reapplyPlacement` 于是按小卡算出 0.819 的内容缩放，把一个
+            // 430×717 的卡**切成 82% 的内容**：
+            //
+            //   13:19:26 win: placement put back 0.819 was=1.000 dC=39,280 org=215 (kb-up)
+            //
+            // `dC=(39,280)` 就是这个现场的铁证：39 = (430−352)/2、280 = 573.5−293.5，
+            // 两个数都只在「卡还是 352×587、内容已经按 430×717 摆好」时才成立。
+            // 内容被缩到 82% 之后就留下一圈空白（浅色主题下就是用户看到的那条白）。
+            //
+            // 现在四拍从 `grow` 里排：那一刻 `card.frame` 已经是目标值（model 值
+            // 赋值即生效），四拍读到的尺寸与内容的目标一致，写不写、写多少都算得对。
+            // 收起那一侧（`kb-down`）本来就在缩卡之前排，不受影响。
             // 0.1.80 — **撤掉 0.1.78 的「等两拍再动卡片」。**
             //
             // 0.1.78 看到 `fill on … push=0` 紧跟一条 `frame drift now=@0
@@ -4102,6 +4115,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                     // 未必被覆盖到。落地后再对一次是零成本的：值一样就直接返回。
                     _ = self.reapplyPlacement("kb-up done")
                 })
+                // 0.4.5 — 四拍对账从这里开始排（理由见 `setKeyboardFill` 里
+                // 「对账阶梯搬到 grow 里面」那一段）：这一刻 `card.frame` 已是目标值，
+                // `reapplyPlacement` 才不会拿停靠小窗的尺寸去算缩放。
+                self.reapplySoon("kb-up")
+                // 0.4.5 — 一次键盘会话记一行完整几何链。白屏/悬空这类报障要么是
+                // 「内容没铺满卡」（看 scale 与 cover），要么是「卡与场景错开」
+                // （看 card 与 scene 两个矩形），这一行把两者同时钉死，不再靠截图反推。
+                self.noteKeyboardGeometry("kb-up")
                 Log.write("win: keyboard native on card=" + self.size(card.frame.size)
                           + " at " + String(format: "%.0f,%.0f", card.frame.minX, card.frame.minY)
                           + " scene=" + String(format: "%.0f", self.canvasOriginY)
@@ -4335,6 +4356,29 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     ///
     /// 所以修法不是再猜一个比例，而是让这两个量每次被抹掉之后自己回来。只碰我们
     /// 自己的承载视图，不碰 App 的窗口，也不碰系统的任何测量。
+    /// 0.4.5 — 一次键盘会话记一行几何链，只读，不改任何几何。
+    ///
+    /// 「底部白屏」和「输入框被盖」这两种报障，在日志上都只剩三种可能：
+    ///   ① 内容没铺满卡片（`scale` < 1 或 `bars=1`）——  空白就是卡片底板；
+    ///   ② 卡片与场景错开（`card` 与 `org=` 对不上）；
+    ///   ③ 卡片与场景都对，问题在 App 自己（那就得看 App 侧的 `kb: geom`）。
+    /// 一行把①②同时钉死，省掉再靠截图反推一轮。
+    private func noteKeyboardGeometry(_ why: String) {
+        guard let card = card, let content = content else { return }
+        let scale = content.transform.a
+        let shown = CGSize(width: visible.width * scale, height: visible.height * scale)
+        var bars = 0
+        if shown.width < card.bounds.width - 0.5
+            || shown.height < card.bounds.height - 0.5 { bars = 1 }
+        Log.write(String(format:
+            "win: kb geom card=%.0fx%.0f@%.0f,%.0f content=%.0fx%.0f@%.0f,%.0f scale=%.3f org=%.0f h=%.0f bars=%d (%@)",
+            card.frame.size.width, card.frame.size.height,
+            card.frame.minX, card.frame.minY,
+            content.frame.size.width, content.frame.size.height,
+            content.frame.minX, content.frame.minY,
+            scale, canvasOriginY, canvasHeight, bars, why))
+    }
+
     @discardableResult
     func reapplyPlacement(_ why: String) -> Bool {
         guard let card = card, let content = content, visible.height > 16 else { return false }

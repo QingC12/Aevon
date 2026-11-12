@@ -5210,7 +5210,56 @@ static void AevonKbUnfitWindow(void) {
 /// 一次采样：发布顶边 + 稳定时收窗口。三次采样共用，见 `AevonKbEvaluate`。
 static CGFloat AevonKbTopPrev = 0.0;
 
+/// 0.4.5 — **App 的窗口在屏幕上到底摆在哪。** 一次键盘会话最多四条。
+///
+/// 0.4.4 及以前，「底部白屏 + 输入框位置不对」只能靠截图反推，因为我们从来没有
+/// 一行日志同时给出下面这几个量。它们之间的差值直接指向答案：
+///
+///   `win`         App 自己的窗口（它排版用的画布）
+///   `screenWin`   **同一个窗口在屏幕坐标里占哪一块** —— 这一行是新的。
+///                 它等于 `scene` 说明场景原点真的搬到了 215；等于 `0,0` 说明
+///                 承载视图还停在顶上（那 App 的内容就整体高 215，卡片底部空着）
+///   `scene`       宿主登记的场景矩形（`AevonSceneFrameSet` 写的那个）
+///   `screen`      物理屏（本机 430×932，App 永远这么认为）
+///   `kbTop`       我们量到的键盘顶边；`-1` 表示这一拍没量到
+static volatile int AevonKbGeomNotes = 0;
+
+static void AevonKbGeomNote(void) {
+    if (AevonKbGeomNotes >= 4) return;
+    if (![NSThread isMainThread]) return;
+    UIWindow *win = AevonKbAppWindow();
+    if (win == nil) return;
+    CGRect sceneBox = AevonKbSceneRectOnScreen();
+    CGRect screenWin = CGRectNull;
+    CGFloat solid = -1.0;
+    if (win.windowScene != nil) {
+        screenWin = [win convertRect:win.bounds
+                  toCoordinateSpace:win.windowScene.screen.coordinateSpace];
+        solid = win.windowScene.coordinateSpace.bounds.size.height;
+    }
+    CGSize screen = AevonKbNativeBounds(nil).size;
+    CGFloat kbTop = AevonKbVisualTop();
+    AevonKbGeomNotes += 1;
+    char line[320];
+    snprintf(line, sizeof(line),
+             "kb: geom win=%.0fx%.0f@%.0f,%.0f screenWin=%.0fx%.0f@%.0f,%.0f "
+             "scene=%.0fx%.0f@%.0f,%.0f screen=%.0fx%.0f kbTop=%.0f solid=%.0f\n",
+             win.bounds.size.width, win.bounds.size.height,
+             win.frame.origin.x, win.frame.origin.y,
+             CGRectIsNull(screenWin) ? -1.0 : screenWin.size.width,
+             CGRectIsNull(screenWin) ? -1.0 : screenWin.size.height,
+             CGRectIsNull(screenWin) ? -1.0 : screenWin.origin.x,
+             CGRectIsNull(screenWin) ? -1.0 : screenWin.origin.y,
+             CGRectIsNull(sceneBox) ? -1.0 : sceneBox.size.width,
+             CGRectIsNull(sceneBox) ? -1.0 : sceneBox.size.height,
+             CGRectIsNull(sceneBox) ? -1.0 : sceneBox.origin.x,
+             CGRectIsNull(sceneBox) ? -1.0 : sceneBox.origin.y,
+             screen.width, screen.height, kbTop, solid);
+    AevonKbLog(line);
+}
+
 static void AevonKbSample(void) {
+    AevonKbGeomNote();
     // 0.1.68 — 场景现在摆在屏幕哪一行，写进缓存给交集钩子用（它在别的线程被问）。
     CGRect box = AevonKbSceneRectOnScreen();
     if (!CGRectIsNull(box) && box.origin.y > -1.0 && box.origin.y < 400.0) {
