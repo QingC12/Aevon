@@ -1471,13 +1471,25 @@ enum SceneProbe {
                 let want = host.canvasFrame
                 if want.height > 200 {
                     let got = AevonSceneFrameOf(scene)
-                    let wantOrigin = originParked ? got.origin.y : want.origin.y
+                    // 0.4.4 — **「原点被拒」不再一闩到底。**
+                    //
+                    // 0.1.51 起这里是 `originParked ? got.origin.y : want.origin.y`：
+                    // 连续 8 次推不动原点就当成「这个系统不收原点」，之后整个键盘
+                    // 会话内再也不试。可那 8 次全是「写了没门」的形状（见
+                    // `AevonPushSceneFrameStrict` 上面 Aevon(290) 的现场）——
+                    // 不是系统拒绝，是我们没把门敲开。闩上之后卡片在 215、场景在 0
+                    // 就一直错着，正是用户报的那条横带。
+                    //
+                    // 现在闩只降速不放弃：每 30 拍（约 3 s）再试一次真原点。
+                    let retryOrigin = !originParked || beat % 30 == 0
+                    let wantOrigin = retryOrigin ? want.origin.y : got.origin.y
                     if got.width > 0,
                        abs(got.width - want.width) > 1 || abs(got.height - want.height) > 1
                         || abs(got.origin.y - wantOrigin) > 1 {
                         let door = AevonPushSceneFrame(scene)
                         // 原点要不要判「系统不收」：只看「目标原点非 0，回读还是旧值」。
-                        if abs(want.origin.y) > 1, abs(got.origin.y - want.origin.y) > 1 {
+                        if retryOrigin, abs(want.origin.y) > 1,
+                           abs(got.origin.y - want.origin.y) > 1 {
                             originMisses += 1
                             if originMisses == 8, !originParked {
                                 originParked = true
