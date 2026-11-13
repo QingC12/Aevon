@@ -1009,19 +1009,22 @@ def main():
                   b"win: landscape ask now=%.0fx%.0f want=%.0fx%.0f o=%ld slot=%d n=%d",
                   b"win: landscape exit slot=%d o=%ld b=%s",
                   b"win: orientation -> %ld slot=%d geo=%.0fx%.0f",
-                  b"win: card landscape %d source=%.0fx%.0f card=%.0fx%.0f@%.0f,%.0f door=%d b=%@",
-                  b"win: card landscape entered by app b=",
+                  b"win: card landscape %d canvas=%.0fx%.0f card=%.0fx%.0f@%.0f,%.0f vid=%.0fx%.0f@%.0f,%.0f door=%d b=%@",
+                  b"win: card landscape entered by app vid=%.0fx%.0f@%.0f,%.0f b=%@",
                   b"win: card landscape left by app b=",
                   b"win: card landscape reset to %.0fx%.0f at %.0f,%.0f",
                   # 0.4.66 — **App 自己转、宿主跟随**这条路的三个证词：
-                  #   rot follow N world=WxH    App 报了新世界，卡片跟着变
+                  #   rot follow N world=WxH vid=…   App 报了新世界 + 视频区，卡片跟着变
                   #   landscape ask sent b=     长按把「请转一次」发给 App 了
                   #   landscape undock first    停靠小窗先解除再横（0.4.65 是拒绝）
-                  # 判据：`rot follow 1` 出现、`card landscape 1` 跟着出现 ⇒ 通了；
-                  # 只有 `rot follow` 没有 `card landscape` ⇒ 卡片那侧没接上；
-                  # 一条 `rot follow` 都没有而画面仍是竖的 ⇒ App 侧那条通道没通
-                  # （看 `app: rot ask` / `app: band note` 有没有）。
-                  b"win: rot follow %d world=%.0fx%.0f slot=%d b=%s",
+                  # 0.4.67 — `vid=` 是这一版的关键读数：抖音的全屏不转世界
+                  # （344：`box=430x717` 全程不变），卡片只能靠这块矩形对准画面。
+                  # 判据：`rot follow 1` + `card landscape 1` 齐 ⇒ 通；
+                  # `vid` 全零而 `card landscape` 有 ⇒ 探针没量到，卡片居中裁切；
+                  # 一条 `rot follow` 都没有 ⇒ 查 `app: rot probe` 有没有。
+                  b"win: rot follow %d world=%.0fx%.0f vid=%.0fx%.0f@%.0f,%.0f slot=%d b=%s",
+                  b"win: card landscape aim vid=%.0fx%.0f@%.0f,%.0f b=%@",
+                  b"win: rot pending (no card) slot=%d b=%s",
                   b"win: landscape ask sent b=",
                   b"win: landscape undock first b=",
                   b"win: keyboard fill ignored in landscape b=",
@@ -1588,6 +1591,14 @@ def main():
                       # 连 `rot ask` 都没有 ⇒ 宿主那侧没发（看 `landscape ask sent`）。
                       b"app: rot ask %d mask=%lu",
                       b"app: rot ask failed %s",
+                      # 0.4.67 — 判据从「世界尺寸」换成「屏幕上那一块横版视频」。
+                      #   `app: rot probe on=1 … vid=WxH@x,y why=video`
+                      #        ⇒ 树里量到一块横版视频（抖音点全屏就是这一格）；
+                      #   `why=page`  ⇒ 只认出横屏播放页（`…Landscape…`），量不到
+                      #                  视频区，退化成世界正中一块 16:9；
+                      #   `why=world` ⇒ App 真的转了世界（B 站那条路）；
+                      #   `why=none`  ⇒ 什么都没认出来（这一版最该看的一行）。
+                      b"app: rot probe on=%d world=%.0fx%.0f vid=%.0fx%.0f@%.0f,%.0f why=%s",
                       # ------------------------------------------------------------------
                       # 0.4.7 — 键盘整条换成母版机制（`Sources/App/AevonKeyboardNative.m`）。
                       #

@@ -6638,10 +6638,18 @@ static dispatch_queue_t AevonRotQueueGet(void) {
 static int AevonRotSent = -1;
 static int AevonRotSentW = 0;
 static int AevonRotSentH = 0;
+/// 0.4.67 — 上一次报出去的**视频区**。判重也要带上它：同一个横竖、同一块世界，
+/// 但播放器换了位置（点下一集、切全屏 ↔ 半屏）时，卡片必须重新对准。
+static int AevonRotSentVX = -1;
+static int AevonRotSentVY = -1;
+static int AevonRotSentVW = -1;
+static int AevonRotSentVH = -1;
 /// 宿主最近一次要求（`AevonRotWant`）：「已经发过的那一个值」，防重复请求。
 static int AevonRotWantSeen = -1;
 /// 心跳计数，只用来把偏好域读值降频（读不受 0.1.35 那条纪律管，但也不必每拍一问）。
 static int AevonRotTicks = 0;
+/// 0.4.67 — `app: rot probe` 的行数上限。判据变了要能对账，但不能每拍一行。
+static int AevonRotProbeNotes = 0;
 
 static void AevonRotPostNow(const char *text) {
     @autoreleasepool {
@@ -6652,26 +6660,166 @@ static void AevonRotPostNow(const char *text) {
         if (value == nil) return;
         CFPreferencesSetAppValue(CFSTR("AevonRotState"), (CFStringRef)value, domain);
         CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        // 0.4.67 — **容器文件是这条路的主路**，偏好域只是顺带写的一份。
+        //
+        // 344 证明「App 写自己域、宿主读同名域」在 roothide 下对不上：band 那条
+        // 方向能通，靠的正是宿主另写了一份 `tmp/aevon-band`（见 `AevonScene.m` 的
+        // `AevonBandPublishNow`），而这里的 CFPreferences 一份都没被宿主读到 ——
+        // 整份日志 `win: rot follow` 零行。反过来同理：宿主写进我们域的
+        // `AevonRotWant` 我们也读不到，所以 `app: rot ask` 同样零行。
+        // 现在两个方向都按 band 那一套来：**文件存数据，通知只当铃铛。**
+        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"aevon-rot-state"];
+        [value writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                              CFSTR("com.aevon.rot"), NULL, NULL, true);
     }
 }
 
-/// 报一次「我的世界多大、横的还是竖的」。没变就什么都不做。
+// ===========================================================================
+// 0.4.67 — 判据从「世界尺寸」换成「屏幕上那一块横版视频」。
+// ===========================================================================
+//
+// 344 的读数把 0.4.66 的前提也推翻了。那一版假设「用户点全屏 ⇒ App 自己转
+// ⇒ keyWindow.bounds 变成 717x430」，可那份日志从头到尾 `box=430x717`：
+//
+//   17:42:51  app: page sheet AWELandscapeNavigationController h=430 top=0 box=430
+//   17:42:51  app: page transition h=430 last=932 full=717
+//   17:42:52  app: page on resize late player none
+//
+// 抖音的「全屏」不是旋转世界：它**在竖屏世界里开一个横屏播放页**，视频横排
+// 铺在中间，`keyWindow.bounds` 一个字都不变。于是 `width > height + 40` 这条
+// 判据在这条路上永远为 0 —— 用户看到的就是「视频横了、悬浮窗还是小胖屏」。
+//
+// 现在的判据三选一（前一条成立就停）：
+//   · 世界真的横了（真旋转的 App，B 站这类）—— 与 0.4.66 相同；
+//   · 树里量到一块「横版视频」—— 宽 ≥ 0.70 世界宽、宽 > 高×1.2、面积 ≥ 0.12
+//     世界宽²、类名含 Player/Video 或 layer 是 AVPlayerLayer。三条门槛缺一不可：
+//     344 里 B 站竖版有一个 `BBStoryVideoPrev 144x81@143,454`（宽>高！），
+//     只按形状判会把它当横版，卡片永远切不过去；
+//   · 浮层链上出现类名含 `Landscape` 的控制器（`AWELandscapeNavigationController`
+//     就是这个）—— 这时量不到视频区，退化成「世界正中一块 16:9」。
+//
+// 视频区（在 keyWindow 坐标里）**一路带到宿主**：卡片要的是「一块播放视频的
+// 窗」，不是「把 App 的横屏界面端上来」。有了这块矩形，卡片只平移不缩放，
+// 正好框住画面。
+
+/// 树里找那一块横版视频。找到返回 YES 并写 `out`（keyWindow 坐标）。
+static BOOL AevonRotFindVideo(UIWindow *win, CGRect *out) {
+    if (win == nil || out == NULL) return NO;
+    CGSize world = [win bounds].size;
+    CGFloat minW = world.width * 0.70;
+    CGFloat minArea = world.width * world.width * 0.12;
+    Class avl = NSClassFromString(@"AVPlayerLayer");
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:win];
+    CGFloat bestArea = 0;
+    CGRect best = CGRectNull;
+    NSUInteger walked = 0;
+    while ([stack count] > 0 && walked < 1400) {
+        UIView *node = [stack lastObject];
+        [stack removeLastObject];
+        walked += 1;
+        if ([node isHidden] || [node alpha] < 0.05) continue;
+        NSArray *kids = [node subviews];
+        NSUInteger n = [kids count];
+        for (NSUInteger i = 0; i < n && i < 40; i++) [stack addObject:[kids objectAtIndex:i]];
+        CGRect b = [node bounds];
+        if (b.size.width < minW || b.size.height < 40.0) continue;
+        if (b.size.width <= b.size.height * 1.2) continue;
+        BOOL named = NO;
+        const char *cn = class_getName([node class]);
+        if (cn != NULL && (strstr(cn, "Player") != NULL || strstr(cn, "Video") != NULL)) {
+            named = YES;
+        }
+        if (!named && avl != Nil && [[node layer] isKindOfClass:avl]) named = YES;
+        if (!named) continue;
+        CGRect r = [node convertRect:b toView:win];
+        CGFloat area = r.size.width * r.size.height;
+        if (area < minArea) continue;
+        if (area > bestArea) { bestArea = area; best = r; }
+    }
+    if (CGRectIsNull(best)) return NO;
+    *out = best;
+    return YES;
+}
+
+/// 浮层链上找横屏播放页。找到返回 YES 并写 `cls`（调用方不用释放）。
+static BOOL AevonRotFindLandscape(UIWindow *win, NSString **cls) {
+    if (win == nil) return NO;
+    UIViewController *top = [win rootViewController];
+    int hops = 0;
+    while (top != nil && hops < 8) {
+        NSString *name = NSStringFromClass([top class]);
+        if ([name rangeOfString:@"Landscape"].location != NSNotFound) {
+            if (cls != NULL) *cls = name;
+            return YES;
+        }
+        top = [top presentedViewController];
+        hops += 1;
+    }
+    return NO;
+}
+
+/// 一次判定。`why` 只用于日志（`world` / `video` / `page` / `none`）。
+static BOOL AevonRotProbe(CGRect *video, char *why, size_t wyn) {
+    if (why != NULL && wyn > 0) snprintf(why, wyn, "none");
+    UIWindow *win = AevonKeyWindow();
+    if (win == nil) {
+        if (why != NULL && wyn > 0) snprintf(why, wyn, "nowin");
+        return NO;
+    }
+    CGSize world = [win bounds].size;
+    if (video != NULL) *video = CGRectNull;
+    if (world.width > world.height + 40.0) {
+        if (why != NULL && wyn > 0) snprintf(why, wyn, "world");
+        return YES;
+    }
+    CGRect vr = CGRectNull;
+    if (AevonRotFindVideo(win, &vr)) {
+        if (video != NULL) *video = vr;
+        if (why != NULL && wyn > 0) snprintf(why, wyn, "video");
+        return YES;
+    }
+    if (AevonRotFindLandscape(win, NULL)) {
+        CGFloat h = (world.width * 9.0 / 16.0);
+        if (video != NULL) {
+            *video = CGRectMake(0, (world.height - h) * 0.5, world.width, h);
+        }
+        if (why != NULL && wyn > 0) snprintf(why, wyn, "page");
+        return YES;
+    }
+    return NO;
+}
+
+/// 报一次「我横不横、世界多大、横的那块视频在哪」。没变就什么都不做。
 ///
-/// 值写成 `"1 717 430"`：第一个数是横竖（宿主拿它做唯一判据），后两个只是日志
-/// 里的证词 —— 宿主那张卡片按自己的画布换宽高就能得到同一个结果，不靠这两个数
-/// 去算几何。少一个「两边对同一件事各记一份」的机会。
-static void AevonRotPublish(BOOL on, CGSize world) {
+/// 值写成 `"1 430 717 0 237 430 242"`：横竖、世界宽高、视频区 x/y/w/h。
+/// 后五个只是给宿主算「窗口对准哪里」用的 —— 卡片尺寸仍由宿主自己的画布算，
+/// 不靠这里的数（两边各记一份尺寸是 0.2.39 那一类事故的形状）。
+static void AevonRotPublish(BOOL on, CGSize world, CGRect video) {
     int w = (int)(world.width + 0.5);
     int h = (int)(world.height + 0.5);
+    int vx = 0, vy = 0, vw = 0, vh = 0;
+    if (!CGRectIsNull(video) && video.size.width > 8.0 && video.size.height > 8.0) {
+        vx = (int)(video.origin.x + 0.5);
+        vy = (int)(video.origin.y + 0.5);
+        vw = (int)(video.size.width + 0.5);
+        vh = (int)(video.size.height + 0.5);
+    }
     int flag = on ? 1 : 0;
-    if (AevonRotSent == flag && AevonRotSentW == w && AevonRotSentH == h) return;
+    if (AevonRotSent == flag && AevonRotSentW == w && AevonRotSentH == h
+        && AevonRotSentVX == vx && AevonRotSentVY == vy
+        && AevonRotSentVW == vw && AevonRotSentVH == vh) {
+        return;
+    }
     AevonRotSent = flag;
     AevonRotSentW = w;
     AevonRotSentH = h;
+    AevonRotSentVX = vx;
+    AevonRotSentVY = vy;
+    AevonRotSentVW = vw;
+    AevonRotSentVH = vh;
     char text[64];
-    snprintf(text, sizeof(text), "%d %d %d", flag, w, h);
+    snprintf(text, sizeof(text), "%d %d %d %d %d %d %d", flag, w, h, vx, vy, vw, vh);
     char *copy = strdup(text);
     if (copy == NULL) return;
     dispatch_async(AevonRotQueueGet(), ^{
@@ -6778,14 +6926,28 @@ static void AevonRotAsk(BOOL on) {
 
 /// 读一次宿主要求（`AevonRotWant`）。值和上一次一样就什么都不做。
 static void AevonRotApplyWant(void) {
-    CFStringRef domain = AevonRotDomain();
-    if (domain == NULL) return;
-    CFStringRef value = CFPreferencesCopyAppValue(CFSTR("AevonRotWant"), domain);
-    if (value == NULL) return;
     char text[32] = {0};
-    Boolean ok = CFStringGetCString(value, text, sizeof(text) - 1, kCFStringEncodingUTF8);
-    CFRelease(value);
-    if (!ok || text[0] == '\0') return;
+    Boolean ok = NO;
+    CFStringRef domain = AevonRotDomain();
+    if (domain != NULL) {
+        CFStringRef value = CFPreferencesCopyAppValue(CFSTR("AevonRotWant"), domain);
+        if (value != NULL) {
+            ok = CFStringGetCString(value, text, sizeof(text) - 1, kCFStringEncodingUTF8);
+            CFRelease(value);
+        }
+    }
+    if (!ok || text[0] == '\0') {
+        // 0.4.67 — 与 `AevonRotPostNow` 对称的那一半：宿主也写一份容器文件
+        // （`tmp/aevon-rot`）。344 里 `app: rot ask` 零行，就是缺了这一半 ——
+        // 宿主写进我们偏好域的 `AevonRotWant` 在本进程读不到。
+        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"aevon-rot"];
+        NSString *body = [NSString stringWithContentsOfFile:path
+                                                   encoding:NSUTF8StringEncoding
+                                                      error:NULL];
+        if (body.length == 0) return;
+        snprintf(text, sizeof(text), "%s", [body UTF8String]);
+    }
+    if (text[0] == '\0') return;
     int want = (text[0] == '1') ? 1 : 0;
     if (want == AevonRotWantSeen) return;
     AevonRotWantSeen = want;
@@ -6807,8 +6969,11 @@ static void AevonRotApplyWant(void) {
 static void AevonRotForceNow(void) {
     CGSize world = AevonRotWorld();
     if (world.width <= 16 || world.height <= 16) return;
+    CGRect video = CGRectNull;
+    char why[12] = {0};
+    BOOL on = AevonRotProbe(&video, why, sizeof(why));
     AevonRotSent = -1;
-    AevonRotPublish(world.width > world.height + 40, world);
+    AevonRotPublish(on, world, video);
 }
 
 static void AevonRotForce(void) {
@@ -6837,9 +7002,42 @@ static void AevonRotTick(void) {
     busy = 1;
     CGSize world = AevonRotWorld();
     if (world.width > 16 && world.height > 16) {
-        // 40 pt 的余量：分屏 / 键盘 / 浮层都可能让「宽高很接近」，只认真的横。
-        BOOL on = world.width > world.height + 40;
-        AevonRotPublish(on, world);
+        BOOL on = NO;
+        CGRect video = CGRectNull;
+        // 只在被卡片托着的时候走视图树：这一条心跳挂在**所有**被注入的 App 上，
+        // 微信、QQ 这些没开卡的进程每 0.3 s 走一遍树是白花（树还都不小）。
+        // 用户点全屏必然发生在卡片里，托管状态是充分条件。
+        if (AevonBandHostedNow() != 0) {
+            @autoreleasepool {
+                char why[12] = {0};
+                on = AevonRotProbe(&video, why, sizeof(why));
+                // 只看变化：稳态下一行都不写（0.15 s 一条 `page state` 那种日志
+                // 已经让 344 有 900 行了，这条通道不能再刷）。
+                static int lastOn = -1;
+                static CGRect lastVid = {{0, 0}, {0, 0}};
+                if (on != lastOn || !CGSizeEqualToSize(video.size, lastVid.size)
+                    || fabs(video.origin.y - lastVid.origin.y) > 2.0
+                    || fabs(video.origin.x - lastVid.origin.x) > 2.0) {
+                    lastOn = on ? 1 : 0;
+                    lastVid = CGRectIsNull(video) ? CGRectMake(0, 0, 0, 0) : video;
+                    if (AevonRotProbeNotes < 12) {
+                        AevonRotProbeNotes += 1;
+                        char line[160];
+                        snprintf(line, sizeof(line),
+                                 "app: rot probe on=%d world=%.0fx%.0f vid=%.0fx%.0f@%.0f,%.0f why=%s\n",
+                                 on ? 1 : 0, world.width, world.height,
+                                 video.size.width, video.size.height,
+                                 video.origin.x, video.origin.y,
+                                 why[0] != 0 ? why : "-");
+                        AevonAppLogWrite(line);
+                    }
+                }
+            }
+        } else {
+            // 40 pt 的余量：分屏 / 键盘 / 浮层都可能让「宽高很接近」，只认真的横。
+            on = world.width > world.height + 40;
+        }
+        AevonRotPublish(on, world, video);
     }
     AevonRotTicks += 1;
     if (AevonRotTicks % 10 == 1) AevonRotApplyWant();

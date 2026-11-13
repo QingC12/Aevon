@@ -52,7 +52,9 @@ extern int AevonCardYieldForFullscreen(const char *bundle);
 //
 // 与上面那条让路同一个形状（C 侧发现事实、Swift 侧执行），区别是它**不拆卡**：
 // 卡片只是换一个方向继续演同一个 scene。返回 1 = 真转了，0 = 没有这张卡。
-extern int AevonCardLandscapeEnter(const char *bundle);
+/// 0.4.67 — 后四个数 = App 报上来的「横版视频区」（App 世界坐标，全零 = 没量到）。
+extern int AevonCardLandscapeEnter(const char *bundle,
+                                   double vx, double vy, double vw, double vh);
 /// 0.4.65 — App 退出横屏（或用户从全屏缩回卡片）。返回 1 = 真切回竖版。
 extern int AevonCardLandscapeExit(const char *bundle);
 
@@ -904,9 +906,20 @@ static CFAbsoluteTime AevonLandscapeExitAt[AEVON_ARMED_MAX];
 /// `frame drift now=430x717`，哔哩哔哩全程 `box=430x717`），只有 App 自己调的
 /// `requestGeometryUpdateWithPreferences:` 才真的把世界转过去。所以方向这件事
 /// 我们不再「写」，只「读」—— 读的是 App 自己报的那一份。
+/// 0.4.67 — `AevonRotPoll` 要读 App 容器里的文件，而它的定义在 3600 行之后。
+static NSString *AevonAppContainer(NSString *bundleID);
+
 static int AevonRotState[AEVON_ARMED_MAX];
+/// 0.4.67 — `win: rot pending` 的行数上限（卡片还没建好时的重试证词）。
+static int AevonRotPendingNotes = 0;
 static double AevonRotWorldW[AEVON_ARMED_MAX];
 static double AevonRotWorldH[AEVON_ARMED_MAX];
+/// 0.4.67 — App 报上来的「横版视频区」（keyWindow 坐标）。卡片拿它对准画面：
+/// 只平移、不缩放。全零 = 没量到（退化成世界正中一块 16:9）。
+static double AevonRotVidX[AEVON_ARMED_MAX];
+static double AevonRotVidY[AEVON_ARMED_MAX];
+static double AevonRotVidW[AEVON_ARMED_MAX];
+static double AevonRotVidH[AEVON_ARMED_MAX];
 /// 0.3.61 — 冷分享静默期里，这一槽被系统的整屏 frame 顶到了几次。
 ///
 /// Aevon(286) 的 5/7 次失败全是同一件事：卡已经出帧，`land: url fire` 之后
@@ -1140,6 +1153,7 @@ int AevonSeenCountOf(void) { return AevonSeenCount; }
 /// 0.4.66 — 横屏通道的两条前置声明。定义在这个文件后半段（`AevonRotNote`
 /// 旁边），而 `AevonHookArm` 在前半段 —— C 里只能先声明后使用。
 static void AevonRotInstallObserver(void);
+static void AevonRotSweep(void);
 static dispatch_queue_t AevonBandQueueGet(void);
 
 /// 追加一个名字。已经在表里的不重复登记（同一个 App 被再选一次会走到这里）。
@@ -1159,8 +1173,16 @@ void AevonHookArm(NSString *bundle) {
         AevonRotState[i] = -1;
         AevonRotWorldW[i] = 0;
         AevonRotWorldH[i] = 0;
+        AevonRotVidX[i] = 0;
+        AevonRotVidY[i] = 0;
+        AevonRotVidW[i] = 0;
+        AevonRotVidH[i] = 0;
         // 通道只在真正有卡的时候才需要听。
         AevonRotInstallObserver();
+        // 0.4.67 — 登记完立刻回读一次：App 的心跳从构造起就在跑，它**早就**
+        // 把当前横竖写进容器文件了，而那一刻我们还没 observer，通知全丢了。
+        // 只靠「等下一通通知」会让第一张卡永远停在「没有读数」。
+        AevonRotSweep();
         __sync_fetch_and_add(&AevonArmedCount, 1);
         return;
     }
@@ -1199,6 +1221,10 @@ void AevonHookDisarm(NSString *bundle) {
         AevonRotState[i] = -1;
         AevonRotWorldW[i] = 0;
         AevonRotWorldH[i] = 0;
+        AevonRotVidX[i] = 0;
+        AevonRotVidY[i] = 0;
+        AevonRotVidW[i] = 0;
+        AevonRotVidH[i] = 0;
         if (AevonArmedCount > 0) __sync_fetch_and_sub(&AevonArmedCount, 1);
     }
 }
@@ -1813,9 +1839,12 @@ static void AevonLandscapeAsk(int slot, CGSize now, CGSize target, NSInteger ori
                   (long)orient, slot, AevonLandscapeCount[slot]] UTF8String]);
     char *name = strdup(AevonArmed[slot]);
     if (name == NULL) return;
+    // 0.4.67 — 这条路（`AevonWriteFrame` 里认出「App 要横」）没有视频区读数：
+    // 它发生在 settings 被写的那一拍，探针还没报上来。全零交给 `setLandscape`，
+    // 退化成世界正中一块 16:9；下一拍 `AevonRotSweep` 拿到 vid 会再对准一次。
     dispatch_async(dispatch_get_main_queue(), ^{
         if (name[0] == '\0') { free(name); return; }
-        AevonCardLandscapeEnter(name);
+        AevonCardLandscapeEnter(name, 0, 0, 0, 0);
         free(name);
     });
 }
@@ -1866,23 +1895,50 @@ static void AevonLandscapeExit(int slot, NSInteger orient) {
 // 几何，就是 0.4.65 那种「看着转了、其实没转」的样子 —— 卡片横了、画面还是竖的。
 
 /// 读一次 App 自己报的世界。返回 1 横 / 0 竖 / -1 没有读数（不猜）。
-int AevonRotPoll(const char *bundle, double *w, double *h) {
+///
+/// 0.4.67 — 一行多了五个数：世界宽高 + 视频区 x/y/w/h。读的顺序也换了：
+/// **先读容器文件，再读偏好域**。344 证明 App 写自己域、宿主读同名域在
+/// roothide 下对不上（整份日志 `win: rot follow` 零行），而 band 那条方向能通
+/// 全靠宿主另写了一份文件 —— 这里照同一套。
+int AevonRotPoll(const char *bundle, double *w, double *h,
+                 double *vx, double *vy, double *vw, double *vh) {
     if (bundle == NULL || bundle[0] == '\0') return -1;
     NSString *bid = [NSString stringWithUTF8String:bundle];
     if (bid.length == 0) return -1;
+    char text[96] = {0};
+    Boolean ok = NO;
     CFStringRef value = CFPreferencesCopyAppValue(CFSTR("AevonRotState"),
                                                   (CFStringRef)bid);
-    if (value == NULL) return -1;
-    char text[64] = {0};
-    Boolean ok = CFStringGetCString(value, text, sizeof(text) - 1, kCFStringEncodingUTF8);
-    CFRelease(value);
-    if (!ok) return -1;
+    if (value != NULL) {
+        ok = CFStringGetCString(value, text, sizeof(text) - 1, kCFStringEncodingUTF8);
+        CFRelease(value);
+    }
+    if (!ok || text[0] == '\0') {
+        NSString *dir = AevonAppContainer(bid);
+        if (dir == nil) return -1;
+        NSString *path = [dir stringByAppendingPathComponent:@"tmp/aevon-rot-state"];
+        NSString *body = [NSString stringWithContentsOfFile:path
+                                                   encoding:NSUTF8StringEncoding
+                                                      error:NULL];
+        if (body.length == 0) return -1;
+        snprintf(text, sizeof(text), "%s", [body UTF8String]);
+    }
     int on = 0;
     double ww = 0;
     double hh = 0;
-    if (sscanf(text, "%d %lf %lf", &on, &ww, &hh) < 1) return -1;
+    double xx = 0;
+    double yy = 0;
+    double vwv = 0;
+    double vhv = 0;
+    int got = sscanf(text, "%d %lf %lf %lf %lf %lf %lf",
+                     &on, &ww, &hh, &xx, &yy, &vwv, &vhv);
+    if (got < 1) return -1;
     if (w != NULL) *w = ww;
     if (h != NULL) *h = hh;
+    if (vx != NULL) *vx = (got >= 4) ? xx : 0;
+    if (vy != NULL) *vy = (got >= 5) ? yy : 0;
+    if (vw != NULL) *vw = (got >= 6) ? vwv : 0;
+    if (vh != NULL) *vh = (got >= 7) ? vhv : 0;
     return on == 1 ? 1 : 0;
 }
 
@@ -1904,6 +1960,16 @@ void AevonRotAsk(const char *bundle, int on) {
             CFStringRef text = flag ? CFSTR("1") : CFSTR("0");
             CFPreferencesSetAppValue(CFSTR("AevonRotWant"), text, domain);
             CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+            // 0.4.67 — App 那一侧读不到我们写进它偏好域的值（344：`app: rot ask`
+            // 零行），所以照 band 那一套再写一份容器文件。文件才是主路。
+            NSString *dir = AevonAppContainer(identifier);
+            if (dir != nil) {
+                NSString *path = [dir stringByAppendingPathComponent:@"tmp/aevon-rot"];
+                [(__bridge NSString *)text writeToFile:path
+                                            atomically:YES
+                                              encoding:NSUTF8StringEncoding
+                                                 error:NULL];
+            }
             NSString *name = [NSString stringWithFormat:@"com.aevon.band.%@", identifier];
             CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                                  (CFStringRef)name, NULL, NULL, true);
@@ -1920,13 +1986,30 @@ static void AevonRotApplySeen(void) {
         char *name = strdup(AevonArmed[i]);
         if (name == NULL) continue;
         AevonLogRaw([[NSString stringWithFormat:
-                      @"win: rot follow %d world=%.0fx%.0f slot=%d b=%s",
-                      on, AevonRotWorldW[i], AevonRotWorldH[i], i,
+                      @"win: rot follow %d world=%.0fx%.0f vid=%.0fx%.0f@%.0f,%.0f slot=%d b=%s",
+                      on, AevonRotWorldW[i], AevonRotWorldH[i],
+                      AevonRotVidW[i], AevonRotVidH[i],
+                      AevonRotVidX[i], AevonRotVidY[i], i,
                       AevonArmed[i]] UTF8String]);
+        int applied = 1;
         if (on == 1) {
-            AevonCardLandscapeEnter(name);
+            applied = AevonCardLandscapeEnter(name, AevonRotVidX[i], AevonRotVidY[i],
+                                              AevonRotVidW[i], AevonRotVidH[i]);
         } else {
             AevonCardLandscapeExit(name);
+        }
+        if (on == 1 && applied == 0) {
+            // 0.4.67 — 卡片还没建好（开卡那一拍 `FloatHost.host` 找不到它）。
+            // 状态退回「没有读数」，等下一个通知（开卡时那通 band 会让 App 重报）
+            // 再问一次。⛔ 不这么做，这一次的 `on` 就被消费掉了：卡片建好以后
+            // 读数没变、通知不再来，那条视频永远等不到 16:9。
+            AevonRotState[i] = -1;
+            if (AevonRotPendingNotes < 8) {
+                AevonRotPendingNotes += 1;
+                AevonLogRaw([[NSString stringWithFormat:
+                              @"win: rot pending (no card) slot=%d b=%s",
+                              i, AevonArmed[i]] UTF8String]);
+            }
         }
         free(name);
     }
@@ -1941,12 +2024,28 @@ static void AevonRotSweep(void) {
                 if (AevonArmed[i][0] == '\0') continue;
                 double w = 0;
                 double h = 0;
-                int on = AevonRotPoll(AevonArmed[i], &w, &h);
+                double vx = 0;
+                double vy = 0;
+                double vw = 0;
+                double vh = 0;
+                int on = AevonRotPoll(AevonArmed[i], &w, &h, &vx, &vy, &vw, &vh);
                 if (on < 0) continue;
-                if (AevonRotState[i] == on) continue;
+                // 0.4.67 — 判重要带上视频区：同一个「横」，播放器换了位置（切下一集、
+                // 全屏 ↔ 半屏来回）时卡片必须重新对准，否则窗口框住的还是上一块。
+                if (AevonRotState[i] == on
+                    && fabs(AevonRotVidX[i] - vx) < 2.0
+                    && fabs(AevonRotVidY[i] - vy) < 2.0
+                    && fabs(AevonRotVidW[i] - vw) < 2.0
+                    && fabs(AevonRotVidH[i] - vh) < 2.0) {
+                    continue;
+                }
                 AevonRotState[i] = on;
                 AevonRotWorldW[i] = w;
                 AevonRotWorldH[i] = h;
+                AevonRotVidX[i] = vx;
+                AevonRotVidY[i] = vy;
+                AevonRotVidW[i] = vw;
+                AevonRotVidH[i] = vh;
                 changed = 1;
             }
             if (!changed) return;

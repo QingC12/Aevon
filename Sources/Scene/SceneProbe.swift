@@ -2158,20 +2158,29 @@ private func clearFrameTarget(_ closingBundle: String) {
 /// 0.4.65 — App 自己请求横屏了（见 `AevonScene.m` 的 `AevonLandscapeAsk`）。
 ///
 /// 只做一件事：把承载它的那张卡从竖版切到 16:9 视频窗。返回 1 = 真切了，
-/// 0 = 没有这张卡（或者它正在停靠，切不了）。
+/// 0 = 没有这张卡。
 ///
-/// ⛔ 不在这里改 scene：`setLandscape` 自己会登记画布、推帧、写方向。两处各写
-/// 一份几何，结果一定是「卡片横了、App 还是竖的」。
+/// 0.4.67 — 多带一块「视频区」（App 世界的坐标，见 `AevonRotFindVideo`）。
+/// 卡片拿它对准画面；全零 = 没量到，退化成世界正中。
+///
+/// ⛔ 不在这里改 scene：`setLandscape` 自己会算卡片几何。两处各写一份，
+/// 结果一定是「卡片横了、App 还是竖的」。
 @_cdecl("AevonCardLandscapeEnter")
-public func AevonCardLandscapeEnter(_ bundle: UnsafePointer<CChar>?) -> Int32 {
+public func AevonCardLandscapeEnter(_ bundle: UnsafePointer<CChar>?,
+                                    _ vx: Double, _ vy: Double,
+                                    _ vw: Double, _ vh: Double) -> Int32 {
     guard let bundle = bundle else { return 0 }
     let identifier = String(cString: bundle)
     guard identifier.count > 2 else { return 0 }
     guard Thread.isMainThread else { return 0 }
     guard let host = FloatHost.host(of: identifier) else { return 0 }
-    guard !host.isLandscapeCard else { return 0 }
-    host.setLandscape(true)
-    Log.write("win: card landscape entered by app b=" + identifier)
+    // 0.4.67 — 不再「已经是横的就早退」：同一集里播放器换了位置也要重新对准，
+    // 判重交给 `setLandscape`（尺寸与视频区都没变才早退）。
+    let video = (vw > 8 && vh > 8)
+        ? CGRect(x: vx, y: vy, width: vw, height: vh) : CGRect.null
+    host.setLandscape(true, video: video)
+    Log.write(String(format: "win: card landscape entered by app vid=%.0fx%.0f@%.0f,%.0f b=%@",
+                     vw, vh, vx, vy, identifier))
     return 1
 }
 
