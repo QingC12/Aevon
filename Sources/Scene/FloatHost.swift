@@ -1062,46 +1062,50 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return CGSize(width: w.rounded(), height: h.rounded())
     }
 
-    /// 0.4.65 — 横版画布的高宽比：16:9（用户定档「原生视频播放比例」）。
+    /// 0.4.68 — 横版卡片的宽高比：**2.16**（用户定档，TrollOpen 实测同值）。
     ///
-    /// ⛔ 横版**不是**把 `fatAspect` 取倒数。手机竖着的时候，卡片宽度上限还是
-    /// 430 pt（屏幕宽），所以横版能给出的画面最高就是 430 × 242 —— 一个 16:9 的
-    /// 视频窗。母版用的是「整屏等比缩入」，她有一块真横屏画布的余量；我们的 scene
-    /// 被改成了卡片大小，画布多高卡片就得多高，5:3 的横版（717×430）比屏幕还宽，
-    /// 放不下，所以那个形状在这里不可能成立。
-    static let videoAspect: CGFloat = 9.0 / 16.0
+    /// 这个数的来源是「整屏转置后缩到满宽」：屏 430x932 转 90° 是 932x430，
+    /// 缩到卡片宽 430 ⇒ 高 430 × 430/932 = 198.4，比例 932/430 = 2.167。
+    /// TrollOpen 录屏实测 443x205 = 2.161，同一件事。
+    ///
+    /// ⛔ 不是 16:9。0.4.65~0.4.67 写死 `9/16`（卡片 430x242），比母版高 18%，
+    /// 而母版那块卡片装的是**整个横屏界面**，多出来的 43 pt 全是把内容切掉的。
+    static let landscapeAspect: CGFloat = 2.16
 
-    /// 横版画布：长边沿用竖版画布的高（430 宽 × 5/3 ⇒ 717），短边按 16:9。
-    ///
-    /// 为什么长边不是 932：画布是「App 以为的屏幕」，它得和卡片同形。932×524
-    /// 缩进 430 宽的卡片是 0.46 倍，控件会掉一半；717×403 是 0.60 倍，与竖版的
-    /// 0.80 同一量级 —— 切过去字号不会突然变小，切回来也不会。
-    static func videoRender(from portrait: CGSize) -> CGSize {
-        let w = Swift.max(320, portrait.height.rounded())
-        return CGSize(width: w, height: (w * videoAspect).rounded())
+    /// 横版卡片的落点尺寸：满屏宽、按 2.16 定高。
+    static func landscapeCard(in bounds: CGRect) -> CGSize {
+        let w = bounds.width
+        return CGSize(width: w, height: (w / landscapeAspect).rounded())
     }
 
-    // MARK: - 0.4.65 横屏（16:9 视频窗）
+    // MARK: - 0.4.68 横屏（整屏转置 · 2.16 视频窗）
 
-    /// 这张卡现在是横的还是竖的。
+    /// 这张卡现在是横的还是竖的。独立开关，不从 `natural` 推。
     ///
-    /// 0.4.67 — **不再由 `natural` 的宽高比推**。0.4.65/0.4.66 那两版是「横屏 =
-    /// 画布换宽高」，前提是 App 真的把世界转过去了；344 证明抖音不转（全屏播放页
-    /// 在竖屏世界里开），于是画布恒为 430x717，这条派生量永远读不到「横」。
-    /// 现在它是一个独立的开关，画布不动、只换卡片形状（`setLandscape`）。
+    /// 0.4.67 判它「不再由画布宽高比推」，理由是 344 里抖音不转世界。345 推翻
+    /// 了那个前提：抖音点全屏**确实**转（`world=717x430`），只是它的那一拍被
+    /// 误判挡住没执行。现在 `landscapeOn` 仍然独立存着（画布在切换同拍才转，
+    /// 派生量会在中间态读错），但**画布必须跟着转** —— 见 `setLandscape`。
     private var landscape: Bool { landscapeOn }
     private var landscapeOn = false
-    /// App 报上来的「横版视频区」（App 世界坐标）。`.null` = 没量到。
+    /// App 报上来的「视频区」（App 世界坐标）。`.null` = 没量到。
     ///
-    /// 卡片只靠它**平移**内容，不缩放：世界是 430x717、卡片是 430x242，宽一样，
-    /// 缩放恒等于 1。把它居中裁切，框住的正好是那一条视频。
+    /// 0.4.68 — **只当证词，不再参与几何**。0.4.67 拿它做「把视频区搬到卡片中心」
+    /// 的平移，等于用一块内容的位置去决定窗口的形状；它在竖屏时命中的是信息流里
+    /// 的横版元素（345：`vid=430x200` 的 y 从 649 滚到 -282），卡片跟着抖。
+    /// 横屏时整屏等比缩入，视频自己就在中间，不需要谁来搬。
     private var landscapeVideo: CGRect = .null
 
     /// 切横屏前那张卡的几何。`nil` = 现在不在横屏。
-    ///
-    /// 只记 frame、不记画布 —— 画布按 `window.bounds` 重算得出（`fatRender`），
-    /// 存第二份就是「同一个尺寸两个来源」，0.2.39 已经为这个形状付过一次账。
     private var portraitFrame: CGRect?
+
+    /// 切横屏前那块画布（= 竖版 scene 尺寸，430x717）。
+    ///
+    /// 0.4.68 新增：横屏要把 `natural` **转置**成 717x430，退出时必须能原样转回。
+    /// ⛔ 不能按 `fatRender(window.bounds)` 重算 —— 那条路的前提是「画布只由屏幕
+    /// 宽高决定」，而横屏期间 `window.bounds` 没变、`natural` 却变了，重算会把
+    /// 横版画布当成竖版画布再转置一次（430x717 → 717x430 → 又转成 430x717）。
+    private var portraitNatural: CGSize?
 
     /// 0.4.65 — 长按左下侧（`bottomLeftSide`）= 横竖切换。
     ///
@@ -1134,80 +1138,83 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
-    /// 横竖切换的唯一落点。
+    /// 横竖切换的唯一落点 —— 0.4.68 重写。
     ///
-    /// 0.4.67 — 与 0.4.66 的根本区别：**画布一个字节都不动**，只换卡片形状。
+    /// ## 一句话
+    /// 横屏 = **画布转置 + 卡片按 2.16 开一个窗**，位置不动。
     ///
-    /// 344 的读数：抖音点全屏之后 `box=430x717` 从头到尾没变，它是**在竖屏世界
-    /// 里开横屏播放页**（`page sheet AWELandscapeNavigationController h=430`）。
-    /// 0.4.66 的写法是「把画布当成 717x430 再缩进卡片」——画布根本没换，那一缩
-    /// 就是把 430x717 的内容按 717 的宽度去装，画面被压扁、错位。
+    /// ## 为什么画布必须转
+    /// 0.4.67 的写法是「画布一字节不动、只把卡片做成 430x242、内容只平移」。
+    /// 345 的读数把这个做法判死了：`card landscape 1 canvas=430x717 card=430x242`。
+    /// 画布没换，App 就**一直在竖屏世界里排版**（信息流、底部 tab、右侧图标列全按
+    /// 717 高排），卡片只框住其中 242 高的一条 —— 用户看到的是「竖屏信息流被裁掉
+    /// 上下」。
     ///
-    /// 现在的做法只有两件事：
-    ///   1. 卡片换成「屏宽 × 16:9」的窗，**中心不动**（用户明示：位置不需要改变，
-    ///      只改宽高）；
-    ///   2. 内容**只平移不缩放**，把 App 报来的视频区对准卡片中心（`followContent`）。
-    /// 世界是 430x717、卡片是 430x242，宽一样 ⇒ 缩放恒为 1，切出来就是一条
-    /// 正好装着视频的窗，和母版那张 16:9 卡一个形状。
+    /// 真正点全屏那一次（18:04:41）App 已经把世界转过去了：`world=717x430`、
+    /// `box=717x430`、`AWELandscapeMediumVideoPlaye` 出现。它给了我们一个横版
+    /// 世界，我们却还在用竖版画布去接。**画布是「App 以为的屏幕」，App 转了，
+    /// 画布就得跟着转。** 这就是「屏幕转置」在本工程里的全部含义。
     ///
-    /// ⛔ 横屏不推 scene frame：scene 还是 430x717，推 430x242 等于让 App 按
-    /// 242 高重排一版（视频页会退回半屏）；推 717x430 会被系统拒（宽超屏）。
+    /// ## 尺寸
+    /// 卡片 = 屏宽 430 × 430/2.16 = 430x199（`landscapeAspect`）。整个世界
+    /// 717x430 按「装得下」缩进去（`followContent`）⇒ 0.4628 倍、332x199，
+    /// 左右各 49 pt 黑底。视频 16:9 在横屏界面里是 764x430（铺满高），缩完
+    /// 352x199 —— 完整、不裁、不歪。和 TrollOpen 录屏那块 443x205 同一个形状。
+    ///
+    /// ## 为什么现在敢推 scene frame
+    /// 0.4.67 的注释写着「⛔ 横屏不推 scene frame」，理由是 0.4.65 推 717x430
+    /// 之后读到 `frame drift now=430x717`。那次 drift 不是系统拒绝，是**我们
+    /// 自己的守护循环把它写回去的**：`AevonSceneFrameSet` 的目标表里一直是
+    /// 430x717（因为 `natural` 没变），intercept 每一拍都把 drift 纠回旧值。
+    /// 这一版 `natural` 和推给系统的 frame 是同一个数，守护循环纠的就是它自己。
     func setLandscape(_ on: Bool, video: CGRect = .null) {
         guard let card = card, let window = window else { return }
-        // 已经在横屏：只可能是在「对准另一块视频」（切下一集、全屏 ↔ 半屏）。
+        // 已经在横屏：只更新证词。世界在横屏中再变（切下一集）不重摆 ——
+        // 那需要重新读 scene 尺寸，而 `AevonRotPoll` 只在 on 值翻转时才叫我们。
         if on && landscapeOn {
-            let same: Bool
-            if video.isNull || landscapeVideo.isNull {
-                same = video.isNull && landscapeVideo.isNull
-            } else {
-                same = abs(video.minX - landscapeVideo.minX) < 2
-                    && abs(video.minY - landscapeVideo.minY) < 2
-                    && abs(video.width - landscapeVideo.width) < 2
-                    && abs(video.height - landscapeVideo.height) < 2
-            }
-            guard !same else { return }
             landscapeVideo = video
-            followContent()
             Log.write(String(format: "win: card landscape aim vid=%.0fx%.0f@%.0f,%.0f b=%@",
                              video.width, video.height, video.minX, video.minY, bundle))
             return
         }
         guard on != landscapeOn else { return }
         if docked {
-            // 停靠小窗只有 30 % 屏高，横过来连一行字都放不下。0.4.65 这里是
-            // 「拒绝切换」—— 那时切换由我们发起，拒绝就等于什么都没发生。
-            // 0.4.66 不行了：这一拍是**App 已经转过去了**，卡片留在竖屏只会得到
-            // 「横的画面塞在竖框里」。所以先解除停靠，再照常切。
+            // 停靠小窗只有 30 % 屏高，横过来连一行字都放不下。这一拍是
+            // **App 已经转过去了**，卡片留在竖屏只会得到「横的画面塞在竖框里」，
+            // 所以先解除停靠，再照常切。
             Log.write("win: landscape undock first b=" + bundle)
             performUndock()
         }
         if kbFilled {
-            // 横屏态不参与键盘让位（视频播放不弹输入框）；带着一块让过位的几何
-            // 过去，切回来时会按 `kbSavedFrame` 把横屏卡塞进竖屏的尺寸。
+            // 横屏态不参与键盘让位（视频播放不弹输入框）。
             performKeyboardUnfill()
         }
         let bounds = window.bounds
         // 0. 先把场上那条可能还留着的变换摘掉，再记「切之前长什么样」。
         // `card.frame` 是 `bounds`/`center`/`transform` 算出来的派生量，带着一条
-        // 非单位阵去读，记下来的就是一个被缩过的数 —— 切回来时尺寸不对，而且
-        // 每次都差得不一样（0.1.28 的「吸附翻转」是同一个形状）。
+        // 非单位阵去读，记下来的就是一个被缩过的数（0.1.28 的「吸附翻转」）。
         liveFrame = nil
         card.transform = .identity
         glow?.transform = .identity
 
-        // 1. 卡片几何。横版满屏宽、**固定 16:9**，中心沿用切之前那一点。
+        // 1. 几何。横版：画布转置 + 卡片 2.16、中心不动（用户：位置不改，只改宽高）。
         var frame: CGRect
         if on {
             portraitFrame = card.frame
+            portraitNatural = natural
             landscapeVideo = video
-            let w = bounds.width
-            let h = (w * FloatHost.videoAspect).rounded()
+            let size = FloatHost.landscapeCard(in: bounds)
             let c = card.center
-            frame = CGRect(x: (c.x - w * 0.5).rounded(),
-                           y: (c.y - h * 0.5).rounded(),
-                           width: w, height: h)
+            frame = CGRect(x: (c.x - size.width * 0.5).rounded(),
+                           y: (c.y - size.height * 0.5).rounded(),
+                           width: size.width, height: size.height)
+            // 转置：430x717 → 717x430。与 App 自己的 `world` 一致。
+            if natural.width > 16 && natural.height > 16 {
+                natural = CGSize(width: natural.height, height: natural.width)
+            }
         } else if let back = portraitFrame {
             frame = back
+            if let pn = portraitNatural { natural = pn }
         } else {
             frame = plan(in: bounds, source: natural).frame
         }
@@ -1215,15 +1222,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         if !on {
             landscapeVideo = .null
             portraitFrame = nil
-            // 竖版才把画布推回去：横屏从没改过它，切回来时推一次让守护循环
-            // 把可能漂掉的 frame 纠回来。
-            AevonSceneFrameSet(bundle, 0, 0, Double(natural.width), Double(natural.height))
+            portraitNatural = nil
         }
+        // 2. 登记画布（两个方向都登记）。横屏登记的是转置后的那一个 —— 守护循环
+        //    此后纠的就是 717x430，不会把 App 按回竖屏。
+        AevonSceneFrameSet(bundle, 0, 0, Double(natural.width), Double(natural.height))
 
-        // 2. 同一拍：落卡片。
+        // 3. 同一拍：推场景 + 落卡片。
         settleEnter()
         var door: Int = 0
-        if !on, let sc = window.windowScene {
+        if let sc = window.windowScene {
             door = Int(AevonPushSceneFrameStrict(sc))
         }
         card.bounds = CGRect(origin: .zero, size: frame.size)
@@ -2685,18 +2693,22 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let dy = total.y - panStep.y
         panStep = total
         if zone.isCorner, let start = resizeStart {
-            // 0.4.65 — 横屏缩放：**宽度驱动、锁 16:9**。
+            // 0.4.68 — 横屏缩放：**宽度驱动、锁 2.16**。
             //
             // 竖屏那一套是高度驱动，因为竖卡的形状由高度系数决定；横卡的形状
             // 由屏幕宽决定（满宽 430 是上限），所以主变量换成宽度。两个界都来自
             // 屏幕：小到 180（再小就只剩一行字），大到满宽（左右两条边已经撤了，
             // 不需要再给环留 `margin`）。
+            //
+            // ⛔ 高度不是从 `natural` 的宽高比推。横屏画布是 717x430（1.667），
+            // 按它推会把卡片拉成 1.667，与 `setLandscape` 的 2.16 打架 —— 一次
+            // 是从角上拖，一次是从开卡，两条路给出两种形状。
             if landscape {
                 let minW: CGFloat = 180
                 let maxW = window.bounds.width
                 let grown = total.x * (resizeFromLeft ? -1 : 1)
                 let w = Swift.min(maxW, Swift.max(minW, start.width + grown))
-                let h = (w * (natural.height / natural.width)).rounded()
+                let h = (w / FloatHost.landscapeAspect).rounded()
                 let frame: CGRect
                 if resizeFromLeft {
                     frame = CGRect(x: start.maxX - w, y: start.minY,
@@ -3992,23 +4004,24 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 否则缩小一次之后顶部那一条又会滑回卡片里。
     private func followContent(updateCorner: Bool = true) {
         guard let card = card, let content = content, visible.height > 16 else { return }
-        // 0.4.67 — 横屏**不缩放，只平移**。
+        // 0.4.68 — 横屏是**整块转置画布「装得下」卡片**，不是裁，也不是只平移。
         //
-        // 0.4.66 用的是 `fillScale`（max）：那时认为 App 的世界是 717x430、卡片
-        // 430x242，取大的那一边能少留黑边。344 证明世界根本没换（恒为 430x717），
-        // 于是 `fillScale(430x717 → 430x242)` = max(1.0, 0.337) = 1.0 —— 缩放实际
-        // 是 1，被切开的是内容，卡片框住的是世界的**顶部** 242 pt，视频如果不在
-        // 那儿就是一片黑。现在把 App 报来的视频区搬到卡片中心，缩放仍是 1。
+        // 0.4.67 这里写的是 `scale = 1` + 「把 App 报来的视频区搬到卡片中心」。
+        // 那条路的全部前提（画布不动、世界还是 430x717、卡片 430x242 宽一样）
+        // 在 345 里逐条被证伪：画布没换 App 就没重排，视频区那条 y 在信息流里
+        // 从 649 滚到 -282，卡片跟着一路抖。
+        //
+        // 现在画布已经转成 717x430（`setLandscape`），卡片是 430x199，两边形状
+        // 本来就不同 —— 用 `fitScale` 取小的那一边，整块横屏界面完整落在卡里：
+        // 0.4628 倍、332x199，左右各 49 pt 黑底。视频 16:9 在这个世界里是铺满高
+        // 的 764x430，缩完 352x199，一像素不裁。`shift` 恒为零：居中就是终点，
+        // 拿内容去决定窗口位置是上一版抖动的原因。
         let scale: CGFloat = landscape
-            ? 1.0
+            ? FloatHost.fitScale(for: natural, in: card.bounds.size)
             : FloatHost.fitScale(for: visible, in: card.bounds.size)
         let want = CGRect(origin: .zero, size: natural)
-        var shift = CGPoint.zero
-        if landscape, !landscapeVideo.isNull, natural.width > 16, natural.height > 16 {
-            shift = CGPoint(x: landscapeVideo.midX - natural.width * 0.5,
-                            y: landscapeVideo.midY - natural.height * 0.5)
-        }
-        // 顶栏裁切只属于竖版：横屏那块矩形已经带着真实位置，再补一次就是双重偏移。
+        let shift = CGPoint.zero
+        // 顶栏裁切只属于竖版：横版画布没有顶栏那一条。
         let crop = landscape ? CGFloat(0) : (cropTop + kbTopCrop)
         if let canvas = canvasView {
             // 0.4.50 — 承载面在画布里的位置**恒定**：铺满、单位阵。系统重设它时
@@ -4670,12 +4683,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 留边会变成一条系统底色，而不是留边该有的黑。
     private func applyBars() {
         guard let card = card else { return }
-        // 0.4.67 — 与 `followContent` 同一个口径：横屏 scale 恒为 1（只平移），
-        // 两处用不同的比例算「有没有黑边」，结果就是一张铺满画面的卡被人为刷黑。
-        let scale: CGFloat = landscape
-            ? 1.0
-            : FloatHost.fitScale(for: visible, in: card.bounds.size)
-        let shown = CGSize(width: visible.width * scale, height: visible.height * scale)
+        // 0.4.68 — 与 `followContent` 用**同一个源和同一个比例**：横屏的源是转置
+        // 画布 `natural`（717x430），不是竖版 `visible`。两处取不同的源，算出来的
+        // 「有没有黑边」就不是同一件事，结果是铺满画面的卡被人为刷黑（0.4.67）。
+        let source = landscape ? natural : visible
+        let scale: CGFloat = FloatHost.fitScale(for: source, in: card.bounds.size)
+        let shown = CGSize(width: source.width * scale, height: source.height * scale)
         let bars = shown.width < card.bounds.width - 0.5 || shown.height < card.bounds.height - 0.5
         let wanted: UIColor = bars ? .black : .systemBackground
         if let backing = backing {
@@ -4861,11 +4874,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 记忆里算出第三种可能。所以这一支不经过 `plan`、也不写 `CardLayout`：
         // 那张表存的是竖版的「多大、贴哪边」，横屏写进去就是污染。
         if landscape {
-            let w = bounds.width
-            // 0.4.67 — 与 `setLandscape` 同一个算法：16:9 锁死，中心沿用切横
+            // 0.4.68 — 与 `setLandscape` 同一个算法：2.16 锁死，中心沿用切横
             // 之前那一点（`portraitFrame` 记着它）。⛔ 不是「屏幕正中」：用户
             // 明示横屏只改宽高、位置不动。
-            let h = (w * FloatHost.videoAspect).rounded()
+            let h = FloatHost.landscapeCard(in: bounds).height
+            let w = bounds.width
             let c = CGPoint(x: portraitFrame?.midX ?? bounds.midX,
                             y: portraitFrame?.midY ?? bounds.midY)
             let frame = CGRect(x: (c.x - w * 0.5).rounded(),

@@ -6742,52 +6742,53 @@ static BOOL AevonRotFindVideo(UIWindow *win, CGRect *out) {
     return YES;
 }
 
-/// 浮层链上找横屏播放页。找到返回 YES 并写 `cls`（调用方不用释放）。
-static BOOL AevonRotFindLandscape(UIWindow *win, NSString **cls) {
-    if (win == nil) return NO;
-    UIViewController *top = [win rootViewController];
-    int hops = 0;
-    while (top != nil && hops < 8) {
-        NSString *name = NSStringFromClass([top class]);
-        if ([name rangeOfString:@"Landscape"].location != NSNotFound) {
-            if (cls != NULL) *cls = name;
-            return YES;
-        }
-        top = [top presentedViewController];
-        hops += 1;
-    }
-    return NO;
-}
+// 0.4.68 — `AevonRotFindLandscape` 已删。
+//
+// 它找的是「presented 链里类名带 Landscape 的控制器」，即 344 那条
+// `page sheet AWELandscapeNavigationController`。但 345 显示**它和方向无关**：
+// 抖音在竖屏世界里照样有这个控制器（点全屏前就摸得到），而真正转置的那一拍
+// `world` 从 430x717 变成 717x430，本来就是可读的。留一条会误判、又不提供新
+// 信息的判据，只会在下一次「错的离谱」里继续当主犯。
 
-/// 一次判定。`why` 只用于日志（`world` / `video` / `page` / `none`）。
+/// 一次判定。`why` 只用于日志（`world` / `none`）。
+/// 只回答一件事：**App 自己把世界转过去了没有。**
+///
+/// 0.4.68 — 判据收回到「世界转置」这一条，`video` / `page` 两条全删。
+///
+/// 345 是这两条判据的死刑判决书：抖音竖屏信息流里有一个 `430x200` 的横版元素
+/// （16:9 视频卡、直播推荐位一类），`AevonRotFindVideo` 的形状门槛
+/// （宽 ≥ 0.70 世界宽、宽 > 高×1.2、面积达标）它一条不落地全过 —— 于是**开卡
+/// 第一秒**卡片就被切成 430x242，而画布还是 430x717（`card landscape 1
+/// canvas=430x717 card=430x242`），用户看到的是竖屏信息流被裁成中间一条横条。
+/// 那一秒之后到 18:04:41 之间，同一块 `vid=430x200` 的 y 从 649 滚到 -282，
+/// 每一拍都触发一次「重对准」—— 卡片跟着信息流滚动一路抖。
+///
+/// 真正该看的那一拍反而被吞了：18:04:41 抖音点全屏，`world=717x430`（真转置，
+/// 它自己开了 `AWELandscapeNavigationController`、`box=717x430`），但我们因为
+/// 卡片**早就是** landscape，`AevonCardLandscapeEnter` 的 `guard !isLandscapeCard`
+/// 把这一拍挡在门外，只留下 `aim` 没有 `card landscape 1`。
+///
+/// 结论：**形状证明不了旋转。** 世界宽高比是唯一不会被竖屏内容骗到的量 ——
+/// 一个 430x717 的世界里出现一块 430x200 的黑矩形，那是内容，不是方向。
+/// `video` 仍然照旧量出来、照旧上报，但它只用来在日志里指出「视频在哪」，
+/// 不参与判定。判定只剩一行：`world.width > world.height + 40`。
 static BOOL AevonRotProbe(CGRect *video, char *why, size_t wyn) {
     if (why != NULL && wyn > 0) snprintf(why, wyn, "none");
+    if (video != NULL) *video = CGRectNull;
     UIWindow *win = AevonKeyWindow();
     if (win == nil) {
         if (why != NULL && wyn > 0) snprintf(why, wyn, "nowin");
         return NO;
     }
     CGSize world = [win bounds].size;
-    if (video != NULL) *video = CGRectNull;
-    if (world.width > world.height + 40.0) {
-        if (why != NULL && wyn > 0) snprintf(why, wyn, "world");
-        return YES;
+    // 40 pt 的余量：分屏、键盘、浮层都可能让「宽高很接近」，只认真的横。
+    if (world.width <= world.height + 40.0) return NO;
+    if (video != NULL) {
+        CGRect vr = CGRectNull;
+        if (AevonRotFindVideo(win, &vr)) *video = vr;
     }
-    CGRect vr = CGRectNull;
-    if (AevonRotFindVideo(win, &vr)) {
-        if (video != NULL) *video = vr;
-        if (why != NULL && wyn > 0) snprintf(why, wyn, "video");
-        return YES;
-    }
-    if (AevonRotFindLandscape(win, NULL)) {
-        CGFloat h = (world.width * 9.0 / 16.0);
-        if (video != NULL) {
-            *video = CGRectMake(0, (world.height - h) * 0.5, world.width, h);
-        }
-        if (why != NULL && wyn > 0) snprintf(why, wyn, "page");
-        return YES;
-    }
-    return NO;
+    if (why != NULL && wyn > 0) snprintf(why, wyn, "world");
+    return YES;
 }
 
 /// 报一次「我横不横、世界多大、横的那块视频在哪」。没变就什么都不做。

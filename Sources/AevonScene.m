@@ -914,8 +914,19 @@ static int AevonRotState[AEVON_ARMED_MAX];
 static int AevonRotPendingNotes = 0;
 static double AevonRotWorldW[AEVON_ARMED_MAX];
 static double AevonRotWorldH[AEVON_ARMED_MAX];
-/// 0.4.67 — App 报上来的「横版视频区」（keyWindow 坐标）。卡片拿它对准画面：
-/// 只平移、不缩放。全零 = 没量到（退化成世界正中一块 16:9）。
+/// 0.4.68 — **退出要两拍确认**。
+///
+/// 横屏期间宿主会把 scene frame 推成转置后的 717x430。如果哪一拍 App 读回来
+/// 是 430x717（它正在重排、或者某个中间态），我们立刻退出横屏 ⇒ 推回 430x717
+/// ⇒ App 又读成 717x430 ⇒ 再进横屏。这条环每一转都是一次卡片形状跳变，用户
+/// 看到的是「横竖来回来去闪」。时间戳记「第一次读到 0 的时刻」，隔半秒再确认
+/// 一次仍然为 0 才真的退 —— 台面下的重排不会撑过半秒。
+static double AevonRotExitAt[AEVON_ARMED_MAX];
+/// 0.4.67 — App 报上来的「视频区」（keyWindow 坐标）。
+///
+/// 0.4.68 — **只当证词**：0.4.67 拿它做「把视频区搬到卡片中心」的平移，于是
+/// 它在竖屏信息流里每滚一次就触发一次重对准（345：`vid=430x200` 的 y 从 649
+/// 滚到 -282），卡片跟着抖。现在横屏是整屏等比缩入，视频自己就在中间。
 static double AevonRotVidX[AEVON_ARMED_MAX];
 static double AevonRotVidY[AEVON_ARMED_MAX];
 static double AevonRotVidW[AEVON_ARMED_MAX];
@@ -1171,6 +1182,7 @@ void AevonHookArm(NSString *bundle) {
         AevonArmedAt[i] = CFAbsoluteTimeGetCurrent();
         // 0.4.66 — 新卡从「没有读数」开始：上一张卡是横的，不代表这一张也是。
         AevonRotState[i] = -1;
+        AevonRotExitAt[i] = 0;
         AevonRotWorldW[i] = 0;
         AevonRotWorldH[i] = 0;
         AevonRotVidX[i] = 0;
@@ -1202,6 +1214,7 @@ void AevonHookDisarm(NSString *bundle) {
             AevonLandscapeExitAt[i] = 0;
             // 0.4.66 — App 报的横竖也跟着作废：下一张卡从「没有读数」开始。
             AevonRotState[i] = -1;
+            AevonRotExitAt[i] = 0;
             AevonRotWorldW[i] = 0;
             AevonRotWorldH[i] = 0;
             }
@@ -1219,6 +1232,7 @@ void AevonHookDisarm(NSString *bundle) {
         AevonLandscapeCount[i] = 0;
         AevonLandscapeExitAt[i] = 0;
         AevonRotState[i] = -1;
+        AevonRotExitAt[i] = 0;
         AevonRotWorldW[i] = 0;
         AevonRotWorldH[i] = 0;
         AevonRotVidX[i] = 0;
@@ -2030,14 +2044,37 @@ static void AevonRotSweep(void) {
                 double vh = 0;
                 int on = AevonRotPoll(AevonArmed[i], &w, &h, &vx, &vy, &vw, &vh);
                 if (on < 0) continue;
-                // 0.4.67 — 判重要带上视频区：同一个「横」，播放器换了位置（切下一集、
-                // 全屏 ↔ 半屏来回）时卡片必须重新对准，否则窗口框住的还是上一块。
-                if (AevonRotState[i] == on
-                    && fabs(AevonRotVidX[i] - vx) < 2.0
-                    && fabs(AevonRotVidY[i] - vy) < 2.0
-                    && fabs(AevonRotVidW[i] - vw) < 2.0
-                    && fabs(AevonRotVidH[i] - vh) < 2.0) {
+                // 0.4.68 — 判重**只看方向**，不看视频区。
+                //
+                // 0.4.67 把 vid 的四个数也放进判重条件里，于是竖屏信息流每滚一下
+                // （345：`vid=430x200` 的 y 从 649 → 434 → 320 → -282）就判「变了」，
+                // 每变一次就重摆一次卡片 —— 用户看到的是一条会跟着信息流抖的横条。
+                // 视频区只是证词，方向才是那件真的事。
+                if (AevonRotState[i] == on) {
+                    AevonRotWorldW[i] = w;
+                    AevonRotWorldH[i] = h;
+                    AevonRotVidX[i] = vx;
+                    AevonRotVidY[i] = vy;
+                    AevonRotVidW[i] = vw;
+                    AevonRotVidH[i] = vh;
+                    AevonRotExitAt[i] = 0;
                     continue;
+                }
+                // 退出（1 → 0）要两拍：见 `AevonRotExitAt` 上那段。
+                if (on == 0 && AevonRotState[i] == 1) {
+                    double now = CFAbsoluteTimeGetCurrent();
+                    if (AevonRotExitAt[i] == 0) {
+                        AevonRotExitAt[i] = now;
+                        // 半秒后再量一次；`AevonRotSweep` 本身是幂等的。
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                     (int64_t)(0.55 * NSEC_PER_SEC)),
+                                       AevonBandQueueGet(), ^{
+                            AevonRotSweep();
+                        });
+                        continue;
+                    }
+                    if (now - AevonRotExitAt[i] < 0.45) continue;
+                    AevonRotExitAt[i] = 0;
                 }
                 AevonRotState[i] = on;
                 AevonRotWorldW[i] = w;
