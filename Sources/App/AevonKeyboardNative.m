@@ -1054,9 +1054,30 @@ static CGRect AevonKbSceneBounds(UIWindowScene *scene) {
     }
     if (box.size.height < 1.0) return space;
     if (space.size.height < 1.0) return box;
-    // ⛔ 只有「宿主说这个 App 被托着」时才允许取小。没被托管的进程必须与系统
-    // 逐字节一致 —— 这条闸让「换了个入口」不至于变成「换了一套行为」。
-    if (AevonBandHostedNow() && box.size.height - space.size.height > 40.0) {
+    // ⛔ 0.4.54 起这条**不再问 band**。
+    //
+    // 0.4.52 的写法是 `AevonBandHostedNow() && 差 > 40`。337 证明那个闸就是
+    // 「打开抖音 2~3 s 才排对」与「视频断层」共同的根：
+    //
+    //   13:58:06  win: scene frame push door=0 wrote=3     ← scene 已经是 717
+    //   13:58:06  app: page transition h=717 last=932 full=932
+    //                                                     ↑ App 问「屏幕多高」，
+    //                                                       我们答的还是 932
+    //   app: page inside settle box=717 c0=932 … vid=DDanmakuPlayerView:430x849
+    //                                                     ↑ 于是 cell 按 932、
+    //                                                       视频按 932−83=849，
+    //                                                       窗口只有 717
+    //
+    // 顺序是固定的：宿主的 scene settings 先到，band 那条 Darwin 通知后到。
+    // 中间那几百毫秒里 `AevonBandHostedNow()` 还是 0 ⇒ 上面两条闸一起把
+    // `-bounds` 按在 932 上 —— 而 App 的**第一版版式**恰好就建在这一段里。
+    // 更糟的是它收不到 `viewWillTransitionToSize:`（窗口没变，变的是我们答的
+    // 数字），所以只能在某次自发排版时才发现，那就是那 2~3 s。
+    //
+    // 判据换成纯几何：**承载面比真屏小 40 pt 以上，就答承载面**。不依赖任何
+    // 通知、不看开关；没被托管的进程两者相等 ⇒ 走下面原样返回。215 是卡片与
+    // 真屏的差，不是噪声。
+    if (box.size.height - space.size.height > 40.0) {
         // 原点仍用私有方法那一份：UIKit 读 `UIScreen.bounds` 时基本不看 origin，
         // 而它原来给的 (0,0) 已经在 215 那套换算里被验过很多轮，不动。
         return CGRectMake(box.origin.x, box.origin.y, space.size.width, space.size.height);
@@ -1104,13 +1125,24 @@ static CGRect AevonKbBounds(id self, SEL _cmd) {
         if (AevonKbOrigBounds != NULL) return AevonKbOrigBounds(self, _cmd);
         return CGRectZero;
     }
-    if (AevonKbTakeOver && AevonKbHookUIScreen) {
+    // 0.4.54 — 闸从 `TakeOver && HookUIScreen` 收到只剩 `TakeOver`（用户开关）。
+    //
+    // `HookUIScreen` 的事实源是 band（`!AevonBandHostedNow()`），而 band 比
+    // scene settings 晚到几百毫秒。337 的 `page transition … full=932` 就是
+    // 「window 已经 717、`-bounds` 还在答 932」的那一拍 —— App 据此把 cell 排成
+    // 932、把视频排成 849。现在改成**按几何判断**：承载面比真屏小 40 pt 以上
+    // 就答承载面，否则原样返回。全屏进程两者相等，行为与系统逐字节一致。
+    if (AevonKbTakeOver) {
         if (AevonKbAppScene == nil) {
             AevonKbAppScene = AevonKbMainScene();
         }
         if (AevonKbAppScene != nil) {
             CGRect box = AevonKbSceneBounds(AevonKbAppScene);
-            if (!CGRectIsEmpty(box)) {
+            CGRect real = CGRectZero;
+            if (AevonKbOrigBounds != NULL) real = AevonKbOrigBounds(self, _cmd);
+            BOOL shrunk = (real.size.height > 200.0
+                           && real.size.height - box.size.height > 40.0);
+            if (!CGRectIsEmpty(box) && (shrunk || AevonKbHookUIScreen)) {
                 // 0.4.15 — 系统原值只打一次：它回答「我们到底改掉了什么」。
                 // `-bounds` 是计算属性，`AevonKbOrigBounds` 就是系统原实现，只读。
                 // 与下面那行并排看：`sys` 的 origin 若也是 (0,0)，说明 215 这个偏移
@@ -1134,10 +1166,10 @@ static CGRect AevonKbBounds(id self, SEL _cmd) {
                     AevonKbBoundsNotes += 1;
                     char line[224];
                     snprintf(line, sizeof(line),
-                             "app: kb: bounds -> %.0fx%.0f@%.0f,%.0f (hosted=%d)\n",
+                             "app: kb: bounds -> %.0fx%.0f@%.0f,%.0f (hosted=%d shrunk=%d)\n",
                              box.size.width, box.size.height,
                              box.origin.x, box.origin.y,
-                             1 - (int)AevonKbIsFrontMost());
+                             1 - (int)AevonKbIsFrontMost(), (int)shrunk);
                     AevonKbLog(line);
                 }
                 return box;
@@ -1205,7 +1237,7 @@ static CGRect AevonKbNativeBoundsGet(id self, SEL _cmd) {
     if (AevonKbOrigNativeBounds == NULL) return CGRectZero;
     CGRect real = AevonKbOrigNativeBounds(self, _cmd);
     if (AevonKbWinReal > 0) return real;        // 建窗那一拍：读真值
-    if (!AevonKbNativeFixOn || !AevonKbTakeOver || !AevonKbHookUIScreen) return real;
+    if (!AevonKbNativeFixOn || !AevonKbTakeOver) return real;
     if (AevonKbAppScene == nil) {
         AevonKbAppScene = AevonKbMainScene();
     }
@@ -1214,6 +1246,10 @@ static CGRect AevonKbNativeBoundsGet(id self, SEL _cmd) {
     if (CGRectIsEmpty(box)) return real;
     CGFloat ns = ((CGFloat (*)(id, SEL))objc_msgSend)(self, @selector(nativeScale));
     if (ns <= 0.0) return real;
+    // 0.4.54 — 与 `-bounds` 同一把尺子：**承载面真的比物理屏小 40 pt 以上**才换算。
+    // `-bounds` 已经不再等 band，这一条若还等，同一个 App 会在同一拍里同时拿到
+    // 「逻辑屏 717 / 物理屏 932」，那正是 321 判死过的那种不自洽。
+    if (!AevonKbHookUIScreen && real.size.height / ns - box.size.height <= 40.0) return real;
     // 计数的是「被读了几次」。322 里若威锋修好，`nbr` 会是几千；若仍 215 而
     // `nbr=0`，说明那 574 来自窗口表里的 `UITextEffectsWindow`，不是这里 ——
     // 两条路都能被这一列判死，不用再猜。
@@ -4682,6 +4718,7 @@ static void AevonKbEarlyNote(void *context) {
     NSUInteger scenes = 0;
     int active = -1;
     int key = 0;
+    UIWindowScene *first = nil;
     UIApplication *app = [UIApplication sharedApplication];
     if (app != nil) {
         // `connectedScenes` 是 `NSSet<UIScene *> *`（不是数组）。
@@ -4689,18 +4726,25 @@ static void AevonKbEarlyNote(void *context) {
         scenes = [all count];
         for (id one in all) {
             if (![one isKindOfClass:[UIWindowScene class]]) continue;
+            if (first == nil) first = (UIWindowScene *)one;
             if (active < 0) active = (int)[(UIWindowScene *)one activationState];
             for (UIWindow *w in [(UIWindowScene *)one windows]) {
                 if ([w isKeyWindow]) { key = 1; break; }
             }
         }
     }
-    char line[224];
+    // 0.4.54 — `scene=` 就是这一刻承载面答的数：`bounds` 与它不一致、而它比 `sys`
+    // 小 40 pt 以上，说明 App 的第一版版式本该按它排。`hook`/`take` 是那两条闸的
+    // 当下值 —— 0.4.54 之后它们不再参与决定，留着是为了和旧日志对照。
+    CGRect space = first != nil ? AevonKbSceneBounds(first) : CGRectZero;
+    char line[288];
     snprintf(line, sizeof(line),
-             "app: kb: first early=%d bounds=%.0fx%.0f@%.0f,%.0f sys=%.0fx%.0f scenes=%lu active=%d key=%d band=%d\n",
+             "app: kb: first early=%d bounds=%.0fx%.0f@%.0f,%.0f sys=%.0fx%.0f scene=%.0fx%.0f scenes=%lu active=%d key=%d band=%d hook=%d take=%d\n",
              (int)AevonKbEarlyDone,
              got.size.width, got.size.height, got.origin.x, got.origin.y,
              sys.size.width, sys.size.height,
-             (unsigned long)scenes, active, key, AevonBandHostedNow());
+             space.size.width, space.size.height,
+             (unsigned long)scenes, active, key, AevonBandHostedNow(),
+             (int)AevonKbHookUIScreen, (int)AevonKbTakeOver);
     AevonKbLog(line);
 }

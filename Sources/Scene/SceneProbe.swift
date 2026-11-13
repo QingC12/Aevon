@@ -1042,7 +1042,8 @@ enum SceneProbe {
                                               scene)
             Log.write("win: scene frame restored door=" + String(restoreDoor)
                       + " wrote=" + String(AevonFrameWriteCount()))
-            restoreScreenBack(closingBundle: closingBundle, scene: scene)
+            restoreScreenBack(closingBundle: closingBundle, scene: scene,
+                              restoredDoor: restoreDoor)
             _ = AevonCallVoid(presenter, "deactivate")
             _ = AevonCallVoid(presenter, "invalidate")
             // 0.0.68 — 顺序回到「先拆 presenter，再摘卡片」。0.0.67 把它提到
@@ -2077,7 +2078,31 @@ enum SceneProbe {
 /// `!cardUp`，多窗之后「有卡」不等于「这个 App 又被打开了」，关掉主窗而留着一个
 /// 停靠小窗时那条整屏恢复会被无谓地跳过；真正要防的「0.3 s 内重开同一个 App」
 /// 必须按名字判，不能按数量判。
-private func restoreScreenBack(closingBundle: String, scene: NSObject?) {
+private func restoreScreenBack(closingBundle: String, scene: NSObject?,
+                               restoredDoor: Int = -1) {
+    // 0.4.54 — 交还已经**穿过 scene 桥**（`restoredDoor == 3`）而且回读就是整屏：
+    // 三拍补写一次都不发。
+    //
+    // 337 每一次关卡都是这个形状：
+    //   `screen back … door=3 frame=430x717@0 want=430x932`   ← 真的写了
+    //   `scene frame restored door=3 wrote=2`                ← 桥也过了
+    //   `screen back … door=3 frame=430x932@0 want=430x932`  ← 已经是整屏了
+    //   `frame restore again door=3 step=1 / step=2 / step=3` ← 却又强制提交三次
+    // `AevonScreenBack` 是「不吃节流、不判重、不吃登记表」的强制提交：对同一个
+    // 值再敲三次门，App 就要再收三次 settings、再排三次版 —— 而用户看到的
+    // 「从悬浮窗切回全屏时视频断层」正落在这一段里。0.4.4 那条阶梯是为
+    // 「写了没门」（door=0）准备的，桥已经过了就没有它的用武之地。
+    // 保留：`door` 不是 3、或回读不是整屏 —— 阶梯原样跑。
+    if restoredDoor == 3, let scene = scene {
+        let got = AevonSceneFrameOf(scene)
+        let full = UIScreen.main.bounds.size
+        if full.height > 200.0,
+           got.height >= full.height - 1.0, got.width >= full.width - 1.0 {
+            Log.write("win: frame restore settled door=3 (ladder skipped)")
+            clearFrameTarget(closingBundle)
+            return
+        }
+    }
     let ladders: [Double] = [0.15, 0.45, 0.90]
     for (index, delay) in ladders.enumerated() {
         let step = index + 1

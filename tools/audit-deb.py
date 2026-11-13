@@ -1383,9 +1383,15 @@ def main():
                       b"layout audit n=%d scroll cls=%.28s box=%.0fx%.0f span=%.0f off=%.0f paging=%d",
                       b"layout audit n=%d scroll none walk=%lu",
                       b"layout audit n=%d tall cls=%.28s b=%.0fx%.0f over=%.0f",
-                      # 唯一会动手的一句：`over > 60` 时对那一层 `setNeedsLayout`。
-                      # ⛔ 不是 `layoutIfNeeded`（0.0.65/0.0.67 两次「应用打不开、
-                      # 桌面黑屏」正是「替别人的窗口补一次布局」）。每会话最多三条。
+                      # 0.4.54 — 卡片里播放器那一层多高。336 的
+                      # `inside settle box=717 c0=932 vid=DDanmakuPlayerView:430x849`
+                      # 说明视频是按 932 排的（849 = 932 − 83 标签栏）而视口只有
+                      # 717 ⇒ 用户报的「视频断层」就是这一刀。修好之后应当 634。
+                      b"layout audit n=%d vid=%.24s %.0fx%.0f cell=%.0fx%.0f",
+                      # 唯一会动手的一句：视口比窗高 60 pt 时对**视口自己**
+                      # `setNeedsLayout`。⛔ 不是 `layoutIfNeeded`（0.0.65/0.0.67
+                      # 两次「应用打不开、桌面黑屏」正是「替别人的窗口补一次布局」）；
+                      # 0.4.54 起也不再戳 cell 内层（它管不了自己的 frame）。
                       b"layout nudge cls=%.28s over=%.0f win=%.0f n=%d",
                       b"app: boot pid=%d",
                       # 0.1.8 — App 侧闸门的证词（Aevon(95) 第 1 条）。停靠状态下
@@ -1490,7 +1496,7 @@ def main():
                       b"app: kb: native on installed=%d mask=0x%x bundle=%s",
                       # 钩子 4 —— `UIScreen.bounds` 换成了承载面尺寸。整套机制的核心
                       # 证词：没有它，App 仍然认为屏是 932，键盘就还会悬在 215 之上。
-                      b"app: kb: bounds -> %.0fx%.0f@%.0f,%.0f (hosted=%d)",
+                      b"app: kb: bounds -> %.0fx%.0f@%.0f,%.0f (hosted=%d shrunk=%d)",
                       # 0.4.15 — `-bounds` 的系统原值（钩子关着那个数），配额 1。
                       # 与上一行并排看才知道「我们到底改掉了什么」：若 sys 的 origin
                       # 也是 (0,0)，那 215 这个偏移从头到尾不在 `UIScreen` 上，
@@ -1507,7 +1513,11 @@ def main():
                       #   `early=1 bounds=430x717` ⇒ 赶上，不该再有 932 那一版；
                       #   `early=1 bounds=430x932 scenes=0` ⇒ 装了但那一刻连 scene 都
                       #   还没有，得换更早的入口（下一步按这条读数决定，不猜）。
-                      b"app: kb: first early=%d bounds=%.0fx%.0f@%.0f,%.0f sys=%.0fx%.0f scenes=%lu active=%d key=%d band=%d",
+                      #
+                      # 0.4.54 — 加 `scene=` 与 `hook=`/`take=`。`bounds` 与 `scene`
+                      # 不一致、而 `scene` 比 `sys` 小 215，就是「App 第一眼本该按
+                      # 承载面排」；`hook=0` 则是那两条旧闸（band 晚到）在拦。
+                      b"app: kb: first early=%d bounds=%.0fx%.0f@%.0f,%.0f sys=%.0fx%.0f scene=%.0fx%.0f scenes=%lu active=%d key=%d band=%d hook=%d take=%d",
                       # 钩子 1 —— 交集高度换算。**0.4.23 起只有一个出口：母版公式。**
                       # 0.4.17 加的「量出来的占高优先」和 0.4.21/22 的采样锁存已整层
                       # 删除：那两层都是为「display 被改成卡片尺寸」的旧世界打的补丁，
@@ -2406,6 +2416,12 @@ def main():
                   b"win: card already default %.0fx%.0f target %.0fx%.0f at %.0f,%.0f",
                   b"win: canvas re-asserted ",
                   b"win: frame restore again door=",
+                  # 0.4.54 — 交还已经穿过 scene 桥（door=3）且回读就是整屏时，
+                  # 0.15/0.45/0.90 s 那三拍**一次都不发**。337 每次关卡都是
+                  # `frame=430x932 want=430x932` 却又强制提交三次 —— 同一个值再敲
+                  # 三次门，App 就要再收三次 settings、再排三次版，而用户报的
+                  # 「切回全屏时视频断层」正落在这一段里。
+                  b"win: frame restore settled door=",
                   # 0.0.70 — 沙盒 App 的读数取回。这三条是「量尺终于能到手」的证据：
                   # 桥接退到自己的 tmp（`aevon-app.log`），宿主开卡/关卡时取回并
                   # 以 `applog[<bundle>]: ` 前缀并进主日志，首帧之后还会补一次真实

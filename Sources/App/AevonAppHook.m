@@ -4219,7 +4219,7 @@ static int AevonAliveLines = 0;
 //
 // 四拍 × 3 行（`win` / `scroll` / 可能的 `tall`）≈ 12~16 行，加上 nudge 也还在
 // 20 行以内 —— 一份 941 行的日志不会因为这几行变难读。
-#define AEVON_AUDIT_LINES 20
+#define AEVON_AUDIT_LINES 26
 #define AEVON_AUDIT_PASSES 4
 /// 四拍的时刻（相对首拍）。第一项必须是 0：它同时用来记 `AevonAuditAt`。
 static const double AevonAuditGap[AEVON_AUDIT_PASSES] = {0.0, 0.30, 0.80, 1.50};
@@ -4334,25 +4334,47 @@ static void AevonHostedAudit(void) {
                  [tall bounds].size.width, [tall bounds].size.height, tallOver);
         AevonPageWrite(line);
         used += 1;
-        // 0.4.52 — 只有「它真的出现在窗口里」才置脏。
-        //
-        // 335 里 QQ 那两条 `nudge cls=DrawerTransitionView b=430x932 over=215` 是
-        // 误伤：那一层是全屏抽屉的隐藏副本，本来就 932 高、不在屏上，置脏只是让
-        // QQ 白排一次（它的界面没有任何变化）。判据换成「转换进窗口坐标之后，
-        // 真的与窗口相交且露出 60 pt 以上」—— 抖音若真把 932 的版式塞进 717 的
-        // 窗，它一定满足这一条；隐藏抽屉一定不满足。
-        BOOL onScreen = NO;
-        if ([tall window] != nil && ![tall isHidden] && [tall alpha] > 0.01) {
-            CGRect inWin = [tall convertRect:[tall bounds] toView:win];
-            CGRect hit = CGRectIntersection(inWin, [win bounds]);
-            onScreen = !CGRectIsNull(hit) && hit.size.height > 60.0;
+    }
+    // 0.4.54 — 播放器那一层：卡片里它到底多高。
+    //
+    // 这是「视频断层」唯一的直接读数。336 的 `inside settle box=717 c0=932
+    // vid=DDanmakuPlayerView:0,0,430x849` 已经给出过一次答案：**cell 932、
+    // 视频 849（= 932 − 83 的标签栏）**，而窗口只有 717 ⇒ 视频比视口高
+    // 132 pt，画面被裁、切回全屏时再被拉回去 —— 用户看到的就是那一刀。
+    // 849 只可能来自「屏幕高 932」，不可能来自「窗口 717」，所以这一行同时
+    // 是 0.4.54 那条几何判据的验收：修好之后这里应当是 **430x634**。
+    if (pager != nil && AevonAuditPass <= 2) {
+        UIView *page = nil;
+        for (UIView *kid in [pager subviews]) {
+            if ([kid frame].size.height > [pager bounds].size.height * 0.5) { page = kid; break; }
         }
-        if (onScreen && AevonAuditNudges < 3) {
+        if (page != nil) {
+            CGRect vid = CGRectZero;
+            NSString *name = AevonFindPlayer(page, &vid);
+            snprintf(line, sizeof(line), "layout audit n=%d vid=%.24s %.0fx%.0f cell=%.0fx%.0f",
+                     AevonAuditPass, name != nil ? [name UTF8String] : "none",
+                     vid.size.width, vid.size.height,
+                     [page bounds].size.width, [page bounds].size.height);
+            AevonPageWrite(line);
+            used += 1;
+        }
+    }
+    // 0.4.54 — 置脏只对**视口自己**，不再对着 `tall` 乱戳。
+    //
+    // 0.4.52 那一版是按 `tall`（最高的那一层）戳的，判据是「转进窗口坐标后
+    // 真在屏上」。337 里三次戳的全是 `UITableViewCellContentView b=430x932`：
+    // 它是 cell 的内层，**管不了自己的 frame**（cell 多高由表格决定），戳它
+    // 只会让 App 白排一次；而那一拍正好可能在放视频 —— 本版要收的就是这一类
+    // 无谓的重排。真正能自己决定尺寸的是滚动视口：它比窗高 60 pt 才说明
+    // 「视口没跟上」，那才值得戳一次。
+    if (pager != nil && AevonAuditNudges < 3) {
+        CGFloat over = [pager bounds].size.height - winH;
+        if (over > 60.0 && [pager window] != nil && ![pager isHidden] && [pager alpha] > 0.01) {
             AevonAuditNudges += 1;
-            [tall setNeedsLayout];
+            [pager setNeedsLayout];
             snprintf(line, sizeof(line),
                      "layout nudge cls=%.28s over=%.0f win=%.0f n=%d",
-                     AevonAuditCls(tall), tallOver, winH, AevonAuditNudges);
+                     AevonAuditCls(pager), over, winH, AevonAuditNudges);
             AevonPageWrite(line);
             used += 1;
         }
@@ -5602,8 +5624,23 @@ int AevonBandHostedNow(void) {
 /// 的 `AevonKbRefreshShell`）。漏一个写入点，`UIScreen.bounds` 就晚一拍才换回
 /// 真屏尺寸 —— 那一拍正好落在键盘动画的第一帧上，看起来就是「白条晚一步消失」。
 static void AevonBandSetOn(int on) {
+    int was = AevonBandOn;
     AevonBandOn = on ? 1 : 0;
     AevonKbRefreshShell();
+    // 0.4.54 — 冷启动那一段以前**一行读数都没有**。
+    //
+    // `page transition` 只在窗口真的换尺寸时才触发，而冷启动时窗口从头到尾没变
+    // （变的是我们答的数字），于是 `AevonEverHosted` 永远不置位 ⇒ 审计四拍、
+    // `page state`、`page inside` 全部静默。337 的第一次开卡就是这个形状：
+    // 整段 App 日志只有 15 行 boot/kb，一个 page 字都没有 —— 用户说的「冷启动
+    // 2~3 s 才排对」在日志里等于不存在。
+    // 现在「宿主说这个 App 被托着」这一刻就是那四拍的起点（0 / 0.30 / 0.80 /
+    // 1.50 s），正好盖住那 2~3 s。
+    if (on && !was) {
+        AevonEverHosted = 1;
+        AevonAuditPass = 0;
+        AevonPagerWatchArm();
+    }
 }
 static BOOL AevonBandWatching = NO;
 static int AevonBandNotes = 0;
