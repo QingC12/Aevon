@@ -1599,6 +1599,10 @@ def main():
                       #   `why=world` ⇒ App 真的转了世界（B 站那条路）；
                       #   `why=none`  ⇒ 什么都没认出来（这一版最该看的一行）。
                       b"app: rot probe on=%d world=%.0fx%.0f vid=%.0fx%.0f@%.0f,%.0f why=%s",
+                      # 0.4.69 — 世界方向翻转之后的两拍补重排。判据：
+                      #   `app: rot refit n= world=WxH r=1` ⇒ 旧方向 cell 被请出去了；
+                      #   `r=0` ⇒ 死亡闸/门槛/触摸把它拦了（看 remeasure skip）。
+                      b"app: rot refit n=%d world=%dx%d r=%d",
                       # ------------------------------------------------------------------
                       # 0.4.7 — 键盘整条换成母版机制（`Sources/App/AevonKeyboardNative.m`）。
                       #

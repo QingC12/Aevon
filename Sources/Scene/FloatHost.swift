@@ -4011,13 +4011,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 在 345 里逐条被证伪：画布没换 App 就没重排，视频区那条 y 在信息流里
         // 从 649 滚到 -282，卡片跟着一路抖。
         //
-        // 现在画布已经转成 717x430（`setLandscape`），卡片是 430x199，两边形状
-        // 本来就不同 —— 用 `fitScale` 取小的那一边，整块横屏界面完整落在卡里：
-        // 0.4628 倍、332x199，左右各 49 pt 黑底。视频 16:9 在这个世界里是铺满高
-        // 的 764x430，缩完 352x199，一像素不裁。`shift` 恒为零：居中就是终点，
-        // 拿内容去决定窗口位置是上一版抖动的原因。
+        // 现在画布已经转成 717x430（`setLandscape`），卡片是 430x199。
+        //
+        // 0.4.69 — 横屏改**铺满**（`fillScale` 取大的那一边）。
+        //
+        // 346 的用户反馈：「视频内容很小，并没有铺满横屏悬浮窗，显示不全」。
+        // 0.4.68 的 `fitScale` = 0.4628，整个世界缩成 332x199、两侧各 49 pt 黑底
+        // —— 「装得下」在横屏这里含义反了：竖版装不下会露内容，横版装得下反而
+        // 把画面缩小。铺满之后 0.5997 倍、内容 430x258，上下各溢出 29.5 pt 由
+        // `clipsToBounds` 裁掉 —— 溢出的是横屏播放器上下本来就黑的那两条，不是
+        // 视频本体（16:9 的视频画在这块世界里占 717x403，缩完 430x242，被裁掉的
+        // 是它上下各 ~21 pt）。这是 2.16 比例的必然代价：世界 1.667，卡 2.16，
+        // 两个比例不同则必有一边留空或一边裁切，用户拍板要铺满。
+        // `shift` 恒为零：居中就是终点，拿内容去决定窗口位置是上一版抖动的原因。
         let scale: CGFloat = landscape
-            ? FloatHost.fitScale(for: natural, in: card.bounds.size)
+            ? FloatHost.fillScale(for: natural, in: card.bounds.size)
             : FloatHost.fitScale(for: visible, in: card.bounds.size)
         let want = CGRect(origin: .zero, size: natural)
         let shift = CGPoint.zero
@@ -4683,11 +4691,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 留边会变成一条系统底色，而不是留边该有的黑。
     private func applyBars() {
         guard let card = card else { return }
-        // 0.4.68 — 与 `followContent` 用**同一个源和同一个比例**：横屏的源是转置
-        // 画布 `natural`（717x430），不是竖版 `visible`。两处取不同的源，算出来的
-        // 「有没有黑边」就不是同一件事，结果是铺满画面的卡被人为刷黑（0.4.67）。
+        // 0.4.69 — 与 `followContent` 同一个源、同一个取法（横屏 fill / 竖屏 fit）。
+        // 0.4.68 这里还在用 fitScale：铺满之后 `shown >= card`，`bars` 恒为 false，
+        // 底色回到 systemBackground —— 上下被裁掉的那两条本来就是黑的，不需要
+        // 我们再垫一层。
+        let scale: CGFloat = landscape
+            ? FloatHost.fillScale(for: natural, in: card.bounds.size)
+            : FloatHost.fitScale(for: visible, in: card.bounds.size)
         let source = landscape ? natural : visible
-        let scale: CGFloat = FloatHost.fitScale(for: source, in: card.bounds.size)
         let shown = CGSize(width: source.width * scale, height: source.height * scale)
         let bars = shown.width < card.bounds.width - 0.5 || shown.height < card.bounds.height - 0.5
         let wanted: UIColor = bars ? .black : .systemBackground

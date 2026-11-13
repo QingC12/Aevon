@@ -6796,6 +6796,36 @@ static BOOL AevonRotProbe(CGRect *video, char *why, size_t wyn) {
 /// 值写成 `"1 430 717 0 237 430 242"`：横竖、世界宽高、视频区 x/y/w/h。
 /// 后五个只是给宿主算「窗口对准哪里」用的 —— 卡片尺寸仍由宿主自己的画布算，
 /// 不靠这里的数（两边各记一份尺寸是 0.2.39 那一类事故的形状）。
+/// 0.4.69 — 世界方向翻转之后，App 的 UIKit 要花 2~3 s 才把翻页器排进新方向
+/// （346：19:12:22 世界回 `430x717`，`box=717` 到 19:12:25 才跟上，列表里混着
+/// `717x430` 的旧横版 cell）。`AevonLayoutSettle` 那条路被 `AevonPageRideRetired`
+/// 退休了，`AevonRemeasurePending` 置了也会被它清零 —— 所以这里直接排两拍
+/// `AevonTableRemeasure`（0.9 s / 2.2 s，等系统先把 scene 重排完），它自带
+/// 250 ms 死亡闸与行数门槛，安全。
+static void AevonRotRefitSchedule(int w, int h) {
+    static int runs = 0;
+    if (runs >= 12) return;              // 全进程上限 ≈ 6 次翻转，之后靠系统自己排
+    runs += 1;
+    int n = runs;
+    for (int k = 0; k < 2; k++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)((k == 0 ? 0.9 : 2.2) * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            UIScrollView *pager = AevonPagerGet();
+            if (pager == nil || [pager window] == nil) return;
+            if (![pager isKindOfClass:[UITableView class]]) return;
+            if ([pager isTracking] || [pager isDragging] || [pager isDecelerating]) return;
+            BOOL did = AevonTableRemeasure((UITableView *)pager);
+            if (n <= 12) {
+                char line[128];
+                snprintf(line, sizeof(line), "app: rot refit n=%d world=%dx%d r=%d",
+                         n, w, h, did ? 1 : 0);
+                AevonPageWrite(line);
+            }
+        });
+    }
+}
+
 static void AevonRotPublish(BOOL on, CGSize world, CGRect video) {
     int w = (int)(world.width + 0.5);
     int h = (int)(world.height + 0.5);
@@ -6807,6 +6837,7 @@ static void AevonRotPublish(BOOL on, CGSize world, CGRect video) {
         vh = (int)(video.size.height + 0.5);
     }
     int flag = on ? 1 : 0;
+    int prevFlag = AevonRotSent;         // 赋值前读：翻转检测要用它
     if (AevonRotSent == flag && AevonRotSentW == w && AevonRotSentH == h
         && AevonRotSentVX == vx && AevonRotSentVY == vy
         && AevonRotSentVW == vw && AevonRotSentVH == vh) {
@@ -6819,6 +6850,11 @@ static void AevonRotPublish(BOOL on, CGSize world, CGRect video) {
     AevonRotSentVY = vy;
     AevonRotSentVW = vw;
     AevonRotSentVH = vh;
+    // 方向真的翻了一面（`-1` 是开卡握手不算）：排两拍重排，把旧方向的 cell
+    // 请出去。346 里退出全屏后用户看到的「没恢复小胖屏」就是这几秒混装。
+    if (prevFlag != flag && prevFlag >= 0) {
+        AevonRotRefitSchedule(w, h);
+    }
     char text[64];
     snprintf(text, sizeof(text), "%d %d %d %d %d %d %d", flag, w, h, vx, vy, vw, vh);
     char *copy = strdup(text);
