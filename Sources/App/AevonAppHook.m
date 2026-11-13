@@ -99,6 +99,12 @@ extern void AevonKbEarlyInstall(void);
 extern void AevonKbRefreshShell(void);
 extern void AevonKbEnsureInstalled(void);
 
+/// 0.4.52 — 「宿主此刻说这个 App 被托着」的唯一取数口（定义在本文件偏后，
+/// `AevonBandSetOn` 旁边）。0.4.51 的排版对账曾用 `AevonEverHosted` 代替它，
+/// 而那一位置位要靠一次 24 pt 的高度跳变 —— 这一版要拍的恰好是「跳变之前」，
+/// 所以必须提前拿到这份声明。
+int AevonBandHostedNow(void);
+
 static CFStringRef const AevonDomain = CFSTR("com.aevon");
 static CFStringRef const AevonKey = CFSTR("!ring.appHook");
 
