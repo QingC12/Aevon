@@ -6646,6 +6646,18 @@ static int AevonRotSentVW = -1;
 static int AevonRotSentVH = -1;
 /// 宿主最近一次要求（`AevonRotWant`）：「已经发过的那一个值」，防重复请求。
 static int AevonRotWantSeen = -1;
+/// 0.4.70 — 「世界横着、内容已翻回竖排」的锁存。
+///
+/// 世界被宿主钉住之后（hosted 横屏把 scene frame 推成 717x430，守护循环盯死了
+/// 这个值），`world.width > world.height + 40` 在抖音自己退全屏的那一拍**一个字
+/// 都不会变** —— 347 里 App 19:36:11 就把信息流翻回了竖排
+/// （`page pager keep box=430 span=430x12189`），卡片却在 430x199 上一直挂到
+/// 19:36:28 用户手动上滑关卡，17 秒。退全屏只能从内容看出：翻页器
+/// （AWEFeedTableView）从横排 717x430 翻回竖排 430 宽。连两拍才落锁（0.6 s）：
+/// 进全屏那一拍横版页从第一拍就是横排（347：19:35:50 `page=717 box=717`），
+/// 不会误伤入场。
+static int AevonRotFeedExit = 0;
+static int AevonRotFeedStreak = 0;
 /// 心跳计数，只用来把偏好域读值降频（读不受 0.1.35 那条纪律管，但也不必每拍一问）。
 static int AevonRotTicks = 0;
 /// 0.4.67 — `app: rot probe` 的行数上限。判据变了要能对账，但不能每拍一行。
@@ -6789,6 +6801,22 @@ static BOOL AevonRotProbe(CGRect *video, char *why, size_t wyn) {
     }
     if (why != NULL && wyn > 0) snprintf(why, wyn, "world");
     return YES;
+}
+
+/// 0.4.70 — 世界横着的时候，翻页器是不是已经翻回竖排。
+///
+/// 抖音退全屏不转世界：它把横版播放页拆掉、信息流按 430 宽重排（347：
+/// 19:36:11 `page state after change box=430x430 span=430x12189`，而窗口还是
+/// 717x430）。翻页器宽 < 世界宽 − 40 就是这个状态。找不到翻页器返回 NO ——
+/// 退化成旧行为（用户手动关卡），绝不拿「量不到」当「已退出」。
+static BOOL AevonRotFeedPortrait(UIWindow *win) {
+    UIScrollView *pager = AevonPagerGet();
+    if (pager == nil || [pager window] == nil) return NO;
+    if (win != nil && [pager window] != win) return NO;
+    CGFloat pw = [pager bounds].size.width;
+    CGFloat ww = [win bounds].size.width;
+    if (pw < 16.0 || ww < 16.0) return NO;
+    return pw < ww - 40.0;
 }
 
 /// 报一次「我横不横、世界多大、横的那块视频在哪」。没变就什么都不做。
@@ -6991,6 +7019,31 @@ static void AevonRotApplyWant(void) {
     // 已经在这个状态上就不再发：`requestGeometryUpdate` 每发一次都要走一趟系统
     // 协商，重复发等于让窗口闪一下。
     if (AevonRotSent == want) return;
+    // 0.4.70 — 再要转横先把上一轮的退出锁存清掉，否则「长按切竖再切横」的第二
+    // 次请求会被锁存吞成又一次退出。
+    if (want == 1) {
+        AevonRotFeedExit = 0;
+        AevonRotFeedStreak = 0;
+    }
+    // 0.4.70 — 宿主要求回竖、而世界还钉在横屏：App 的 `requestGeometryUpdate`
+    // 会被宿主的守护循环写回（347：`frame drift now=430x717 want=717x430
+    // door=3 wrote=2`），问了也白问。直接报「全屏已退」—— 宿主收到 0 会把
+    // scene frame、画布、卡片一起收回去，与「抖音自己退全屏」同一条路。
+    if (want == 0) {
+        if (![NSThread isMainThread]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AevonRotApplyWant();
+            });
+            return;
+        }
+        CGSize w2 = AevonRotWorld();
+        if (w2.width > w2.height + 40.0) {
+            AevonRotFeedExit = 1;
+            AevonRotFeedStreak = 2;
+            AevonRotPublish(NO, w2, CGRectNull);
+            return;
+        }
+    }
     AevonRotAsk(want == 1);
 }
 
@@ -7048,6 +7101,33 @@ static void AevonRotTick(void) {
             @autoreleasepool {
                 char why[12] = {0};
                 on = AevonRotProbe(&video, why, sizeof(why));
+                // 0.4.70 — 世界横着、翻页器已翻回竖排：App 自己退了全屏，而世界
+                // 被宿主钉住，探针永远看不到。连两拍落锁；锁到世界真回竖（探针
+                // 返回 NO）才清，中途翻页器横竖来回不翻锁 —— 否则宿主收世界的
+                // 那 1 s 里锁被清掉，flag 又弹回 1，卡片横竖来回打摆。
+                if (!on) {
+                    AevonRotFeedExit = 0;
+                    AevonRotFeedStreak = 0;
+                } else if (AevonRotFeedPortrait(AevonKeyWindow())) {
+                    AevonRotFeedStreak += 1;
+                    if (AevonRotFeedStreak >= 2 && AevonRotFeedExit == 0) {
+                        AevonRotFeedExit = 1;
+                        UIScrollView *pg = AevonPagerGet();
+                        CGRect pb = pg != nil ? [pg bounds] : CGRectZero;
+                        char fl[128];
+                        snprintf(fl, sizeof(fl),
+                                 "app: rot feed exit world=%.0fx%.0f pager=%.0fx%.0f\n",
+                                 world.width, world.height,
+                                 pb.size.width, pb.size.height);
+                        AevonAppLogWrite(fl);
+                    }
+                } else {
+                    AevonRotFeedStreak = 0;
+                }
+                if (AevonRotFeedExit) {
+                    on = NO;
+                    snprintf(why, sizeof(why), "feed");
+                }
                 // 只看变化：稳态下一行都不写（0.15 s 一条 `page state` 那种日志
                 // 已经让 344 有 900 行了，这条通道不能再刷）。
                 static int lastOn = -1;

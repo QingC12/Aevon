@@ -1603,6 +1603,14 @@ def main():
                       #   `app: rot refit n= world=WxH r=1` ⇒ 旧方向 cell 被请出去了；
                       #   `r=0` ⇒ 死亡闸/门槛/触摸把它拦了（看 remeasure skip）。
                       b"app: rot refit n=%d world=%dx%d r=%d",
+                      # 0.4.70 — 「世界横着、翻页器已翻回竖排」的退出信号。
+                      # 宿主把 scene frame 钉在 717x430 之后，世界探针永远答横，
+                      # 抖音自己退全屏只能从翻页器宽度看出（717 → 430）。判据：
+                      # `app: rot feed exit world=717x430 pager=430x…` ⇒ 退出被
+                      # 认出来了，宿主接下来应收到 flag 0 并把画布、卡片、scene
+                      # frame 一起收回去；没有这一行而卡片横着不退 ⇒ 翻页器没
+                      # 认出来（看 `page pager keep`）。
+                      b"app: rot feed exit world=%.0fx%.0f pager=%.0fx%.0f",
                       # ------------------------------------------------------------------
                       # 0.4.7 — 键盘整条换成母版机制（`Sources/App/AevonKeyboardNative.m`）。
                       #

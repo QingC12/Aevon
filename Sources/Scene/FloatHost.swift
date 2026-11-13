@@ -2491,10 +2491,18 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let size = card.bounds.size
         if point.y > size.height {
             let side = cellSide
+            // 0.4.70 — 底部两侧格从一格加宽到一格半（55 → 82）。
+            //
+            // 347 里两次长按切横都落在卡内坐标 123 / 135（旧门槛 110 只差
+            // 13~25 pt），全部被记成 bottom-middle、开的是关闭闸，「底左内
+            // 横屏待落」整份日志一次都没触发过。82 之后 430 宽的横卡侧格吃掉
+            // 中段 156 pt、352 宽的小胖屏底中还剩 78 pt —— 上滑关闭那一格仍然
+            // 够用（它本来就是按速度判的 flick，不是按格子宽度）。
+            let sideCell = side * 3 / 2
             if point.x < side { return .bottomLeft }
-            if point.x < side * 2 { return .bottomLeftSide }
+            if point.x < side + sideCell { return .bottomLeftSide }
             if point.x > size.width - side { return .bottomRight }
-            if point.x > size.width - side * 2 { return .bottomRightSide }
+            if point.x > size.width - side - sideCell { return .bottomRightSide }
             return .bottomMiddle
         }
         if point.y < 0 { return .top }
@@ -4815,9 +4823,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     @discardableResult
     func reapplyPlacement(_ why: String) -> Bool {
         guard let card = card, let content = content, visible.height > 16 else { return false }
-        let scale = FloatHost.fitScale(for: visible, in: card.bounds.size)
+        // 0.4.70 — 与 `followContent` / `applyBars` 同一个源：横屏 fill、竖屏 fit。
+        //
+        // 347 的「视频内容小、左右大块黑边」就是这里漏改的：0.4.69 只把
+        // `followContent` 换成了 fillScale，这条 200 ms 心跳还按 fitScale 对账，
+        // 于是每一拍都把 0.600（430/717，铺满）判成「被别人抹了」写回
+        // 0.278（199/717，装得下）—— 日志原话 `placement put back 0.278
+        // was=0.600 (beat)`，三次。铺满只在 `followContent` 里活不过 200 ms。
+        let scale: CGFloat = landscape
+            ? FloatHost.fillScale(for: natural, in: card.bounds.size)
+            : FloatHost.fitScale(for: visible, in: card.bounds.size)
+        // 顶栏裁切只属于竖版（同 `followContent`）：横版画布没有顶栏那一条。
+        let placementCrop = landscape ? CGFloat(0) : (cropTop + kbTopCrop)
         let center = CGPoint(x: card.bounds.midX,
-                             y: card.bounds.midY - (cropTop + kbTopCrop) * scale / 2)
+                             y: card.bounds.midY - placementCrop * scale / 2)
         // 0.4.50 — 判的是 `canvas`（缩放在它身上）。`content` 只保一件事：
         // 留在画布里、铺满 —— 系统把它挪出父视图是这里唯一需要处理的意外。
         let subject = canvasView ?? content
