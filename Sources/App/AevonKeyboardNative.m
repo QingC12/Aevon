@@ -4684,7 +4684,8 @@ static void AevonKbEarlyNote(void *context) {
     int key = 0;
     UIApplication *app = [UIApplication sharedApplication];
     if (app != nil) {
-        NSArray *all = [app connectedScenes];
+        // `connectedScenes` 是 `NSSet<UIScene *> *`（不是数组）。
+        NSSet *all = [app connectedScenes];
         scenes = [all count];
         for (id one in all) {
             if (![one isKindOfClass:[UIWindowScene class]]) continue;
