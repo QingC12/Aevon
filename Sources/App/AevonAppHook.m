@@ -2528,11 +2528,37 @@ static NSInteger AevonAlignPager(const char *reason) {
     return 1;
 }
 
+/// 「差一点」的候选只在最后一次 acquire 里报三行 —— 它就是 340 那 6 秒的答案。
+static int AevonPagerMissNotes = 0;
+
 /// 找出「整屏一页」的翻页器并记住它。只在还没认出来的时候跑（一次遍历，
 /// 上限 4000 个视图）——认出来之后所有后续判断都只读一个属性。
+///
+/// 0.4.60 — **准入判据必须吃得下「混装几何」**，这是 340 断层唯一的根。
+///
+///   14:58:01 page transition h=717 last=932 full=717      ← 卡片已经 717
+///   14:58:01 page layout audit n=1 scroll cls=AWEFeedTableView box=430x717 span=9966 off=5736 cell=932
+///   14:58:01~06  page state after change pager none       ← 整整 6 秒只有这一句
+///   14:58:07 page pager keep box=717 span=430x15774 … pages=22   ← 抖音自己换回 717 才认出来
+///
+/// 那 6 秒里 `cell fit` **一行读数都没有**：它挂在 `AevonPagerGet()` 之后，而
+/// 翻页器是 nil。为什么 nil —— `span=9966`、`box=717` ⇒ `pages=round(13.90)=14`、
+/// `slack=9966−14×717=−72`，差 72 pt 落不进下面那条 24 pt 的整数倍判据；抖音
+/// 这张表本来就不是分页的（`paging=0`），于是两道门都关着，`AevonPagerAcquire`
+/// 每 0.6 s 试一次、连试 8 次全拒。
+///
+/// 而 9966 恰恰就是「一半行还是 932 的旧高、一半已经是 717」这种混装表的尺寸：
+/// 用 932 算它也不是整数倍（`9966/932=10.69`），用 717 算也不是。**「一页多高」
+/// 在混装里没有唯一答案，拿它当准入门槛等于在最该修的那一刻把唯一的通道关掉。**
+/// 所以准入改成「余量不超过半页」：视口仍然必须占满整窗（`|box−H| ≤ 40`）、
+/// 内容仍然必须长过 1.6 屏、页数仍然 ≥ 2，只是不再要求它整除。
 static BOOL AevonPagerAcquire(void) {
     UIApplication *application = [UIApplication sharedApplication];
     if (application == nil) return NO;
+    CGFloat missBox = 0.0;
+    CGFloat missSpan = 0.0;
+    CGFloat missSlack = 0.0;
+    double missPages = 0.0;
     for (UIScene *one in [application connectedScenes]) {
         if (![one isKindOfClass:[UIWindowScene class]]) continue;
         for (UIWindow *win in [(UIWindowScene *)one windows]) {
@@ -2553,10 +2579,18 @@ static BOOL AevonPagerAcquire(void) {
                     // 那一个；40 pt 只放行「同一块屏」，放不进别的列表。
                     if (fabs(box.height - H) <= 40.0 && span.height >= box.height * 1.6) {
                         CGFloat pages = round(span.height / box.height);
+                        CGFloat slack = span.height - pages * box.height;
                         // 整数倍那条从 8 pt 放宽到 24 pt，理由同上：中间态。
-                        BOOL exact = (pages >= 2.0
-                                      && fabs(span.height - pages * box.height) <= 24.0);
-                        if (exact || [view isPagingEnabled]) {
+                        BOOL exact = (pages >= 2.0 && fabs(slack) <= 24.0);
+                        // 0.4.60 — 混装：见函数头。只放行**表格/集合视图**
+                        // （混装页高只可能出现在「一格就是一页」的那两种视图上），
+                        // 且余量不足半页 —— 差得比半页还多说明是 `round` 取错了
+                        // 方向，那是别的东西，不是混装。
+                        BOOL tabular = ([view isKindOfClass:[UITableView class]]
+                                        || [view isKindOfClass:[UICollectionView class]]);
+                        BOOL ragged = (tabular && pages >= 2.0
+                                       && fabs(slack) <= box.height * 0.5);
+                        if (exact || ragged || [view isPagingEnabled]) {
                             AevonPagerKeep(view);
                             AevonLastPageHeight = AevonPageHeightOf(view, box.height);
                             char body[400];
@@ -2568,14 +2602,24 @@ static BOOL AevonPagerAcquire(void) {
                             snprintf(body, sizeof(body),
                                      "pager keep box=%.0f span=%.0fx%.0f "
                                      "cell=%.0f,%.0f,%.0fx%.0f off=%.0f "
-                                     "inset=%.0f paging=%d pages=%.0f",
+                                     "inset=%.0f paging=%d pages=%.0f "
+                                     "slack=%.0f ragged=%d",
                                      box.height, span.width, span.height,
                                      cell.origin.x, cell.origin.y,
                                      cell.size.width, cell.size.height,
                                      [view contentOffset].y, [view contentInset].top,
-                                     [view isPagingEnabled] ? 1 : 0, pages);
+                                     [view isPagingEnabled] ? 1 : 0, pages,
+                                     slack, (exact || [view isPagingEnabled]) ? 0 : 1);
                             AevonPageWrite(body);
                             return YES;
+                        }
+                        // 视口对上了、只是页数不整：这是唯一值得记下来的拒绝，
+                        // 记第一个就够（后面往往是它的子视图）。
+                        if (missBox == 0.0) {
+                            missBox = box.height;
+                            missSpan = span.height;
+                            missSlack = slack;
+                            missPages = pages;
                         }
                     }
                 }
@@ -2583,6 +2627,14 @@ static BOOL AevonPagerAcquire(void) {
                 if (kids.count > 0) [todo addObjectsFromArray:kids];
             }
         }
+    }
+    if (missBox > 0.0 && AevonPagerMissNotes < 3) {
+        AevonPagerMissNotes += 1;
+        char miss[200];
+        snprintf(miss, sizeof(miss),
+                 "pager miss box=%.0f span=%.0f pages=%.0f slack=%.0f",
+                 missBox, missSpan, missPages, missSlack);
+        AevonPageWrite(miss);
     }
     return NO;
 }
@@ -4811,6 +4863,11 @@ static void AevonPagerWatchTick(void *context) {
             AevonCellFitAt = 0.0;
             AevonCellCvFixes = 0;
             AevonCellCvAt = 0.0;
+            // 0.4.60 — 新卡第一拍就去认翻页器。340 的 14:58:01 那张卡是从
+            // 「别的 App 全屏」切回来的，`AevonAcquireTries` 带着上一张卡的
+            // 计数，要等好几拍才轮到下一次真正的遍历。
+            AevonAcquireTries = 0;
+            AevonPagerMissNotes = 0;
         }
         // 0.0.84 — 横版画面贴顶：每 0.6 s 看一眼「那块矩形在不在容器正中」。
         // 0.4.51 — 退休了（`AevonVideoCenterRetired`）。调用保留一行是为了留个
@@ -4908,12 +4965,21 @@ static void AevonPagerWatchTick(void *context) {
 
     UIScrollView *view = AevonPagerGet();
     if (view == nil) {
-        // 翻页器是 App 自己造的，开卡后 1 s 才出现。每 4 拍找一次，最多 40 次
-        // （6 s）—— 再往后要么是还不该有，要么是这一版认不出来，继续找只是
-        // 每 0.6 s 白遍历一遍视图树。
-        if (AevonAcquireTries < 40) {
+        // 翻页器是 App 自己造的，开卡后 1 s 才出现。头 40 次每 4 拍（0.6 s）找
+        // 一次；之后降到每 40 拍（6 s）一次，一直到这张卡关闭为止。
+        //
+        // 0.4.60 — 原来这里是「最多 40 次就永久闭嘴」。340 把这个上限的代价量
+        // 出来了：14:58:01 那张卡整整 6 s 只打 `pager none`，而**认不出翻页器
+        // 就等于 `cell fit` 不存在** —— 唯一能修断层的那条通道，正好在断层全程
+        // 是关着的。降频而不是停摆：一张开着一分钟没人动的卡，用户一滑回来它
+        // 还认得出来。4000 拍 × 0.15 s = 10 分钟，与一张卡的上限同寿。
+        if (AevonAcquireTries < 4000) {
             AevonAcquireTries += 1;
-            if ((AevonAcquireTries & 3) == 1) AevonPagerAcquire();
+            if (AevonAcquireTries <= 40) {
+                if ((AevonAcquireTries & 3) == 1) AevonPagerAcquire();
+            } else if ((AevonAcquireTries % 40) == 0) {
+                AevonPagerAcquire();
+            }
         }
         return;
     }
