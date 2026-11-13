@@ -1340,6 +1340,27 @@ def main():
                       # `video band` 只记前两次写入，之后对打多少次都是静默的；
                       # 这一行让「一直在和它对着干」第一次有读数。
                       b"video bounce n=%d",
+                      # 0.4.51 — 视频居中**退休**。它不是「改坏了」，是从来没跑过：
+                      # 334 里 `app: page … pager none` 11 条、`app: video` 0 条 ——
+                      # `AevonPagerAcquire` 的「一页 = 一窗」门槛（|box−H| ≤ 40）
+                      # 把抖音（一页 932、窗口 717）挡在第一步。撤掉它等于撤掉
+                      # 全工程唯一会在别人 `layoutSubviews` 里改几何的入口。
+                      # 判据：日志里出现 `video retired off=1`（只报一次），
+                      # 而不是「没有 video band」—— 后者也可能只是没遇到能居中的画面。
+                      b"video retired off=1",
+                      # 0.4.51 — 卡片里的排版对账（`AevonHostedAudit`）。三个症状
+                      # 「内容显示不全 / 点赞栏一半 / 底部标题条不见」是同一个形状：
+                      # 版式比窗口高。这两行把「谁还停在 932」写成数：
+                      # `win` 与 `scene` 不一致 ⇒ App 自己按旧尺寸排了版；
+                      # `scroll box` 比 `win` 高 ⇒ 视口没跟着窗口变，`tall` 指名道姓。
+                      b"layout audit n=%d win=%.0fx%.0f scene=%.0fx%.0f root=%.0fx%.0f",
+                      b"layout audit n=%d scroll cls=%.28s box=%.0fx%.0f span=%.0f off=%.0f paging=%d",
+                      b"layout audit n=%d scroll none walk=%lu",
+                      b"layout audit n=%d tall cls=%.28s b=%.0fx%.0f over=%.0f",
+                      # 唯一会动手的一句：`over > 60` 时对那一层 `setNeedsLayout`。
+                      # ⛔ 不是 `layoutIfNeeded`（0.0.65/0.0.67 两次「应用打不开、
+                      # 桌面黑屏」正是「替别人的窗口补一次布局」）。每会话最多三条。
+                      b"layout nudge cls=%.28s over=%.0f win=%.0f n=%d",
                       b"app: boot pid=%d",
                       # 0.1.8 — App 侧闸门的证词（Aevon(95) 第 1 条）。停靠状态下
                       # App 自己的 `sendEvent:` 吞掉整条事件表：`down` = 吞掉的按下

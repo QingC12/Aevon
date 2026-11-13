@@ -3668,13 +3668,36 @@ static void AevonHookPageClasses(UIScrollView *view, CGFloat box, CGFloat y) {
     }
 }
 
-/// 心跳那一份：当前页 + 视口上下各一页。
+/// 0.4.51 — **本职退休**（用户 334 明令：它没改善「视频在卡片里偏上」，可以撤）。
 ///
-/// 心跳 ≈ 0.57 s 一拍（1/7 s × 4）。只处理当前页时，凡是「画面区自己不排版」或
-/// 「画面层晚建」的页，就只能等这一拍 —— 用户看到的是从顶部跳到中间。
-/// **A 路（0.0.96）** 把相邻页也处理：下一页在还停在视口外时就已摆正，滑出来
-/// 第一帧就是居中的，补正过程没有机会被看见。
+/// 说清楚它为什么从来没帮上忙，而不是「效果不好」：
+///
+///   · 它整条链的入口是 `AevonPagerGet()`。那个函数给抖音返回过 `nil` —— 334 里
+///     `app: page … pager none` 从开卡到关卡一共 11 条，`app: video` **0 条**。
+///   · 原因在 `AevonPagerAcquire` 的门槛：「一页 = 一窗」（`|box − H| ≤ 40`）。抖音
+///     的 feed 一页按 932 排、窗口 717，第一步就被挡在外面，后面所有动作
+///     （扫画面、写 transform、装 `layoutSubviews` 钩子）一次都没执行过。
+///   · 也就是说它不是这次「内容显示不全」的原因 —— 一个从没跑过的函数改不了任何
+///     人的排版。它唯一的实际影响是：**它是全工程唯一会在别人 `layoutSubviews`
+///     里改几何的入口**（`AevonHookLayout` 只从这里装），而那条路在 0.0.85 制造过
+///     33,468 次排版/秒的看门狗强杀。
+///
+/// 撤法是「关入口」而不是删函数体：下面所有 `video …` 读数串仍留在二进制里
+/// （审计按串数验收），但一次都不会被执行。用 `volatile const` 而不是 `#if 0`，
+/// 编译器不能把它折成常量、也就不会把整段判成死代码。
+static volatile const int AevonVideoCenterRetired = 1;
+/// 退休这件事只报一次：判据是日志里出现 `video retired off=1`，而不是「没有
+/// `video band`」—— 后者也可能是「这一版没遇到能居中的画面」，两种结论差很远。
+static int AevonVideoRetireNotes = 0;
+
 static void AevonVideoCenter(void) {
+    if (AevonVideoCenterRetired) {
+        if (AevonVideoRetireNotes == 0) {
+            AevonVideoRetireNotes = 1;
+            AevonPageWrite("video retired off=1");
+        }
+        return;
+    }
     AevonStep = AEVON_STEP_TICK;
     // 0.0.95 — 熔断的兜底解除：`dispatch_after` 那条路要等主线程空下来才会跑，
     // 而「空下来」正是我们要判的事。心跳只要还能跑，就按时间把它放掉，
@@ -3912,6 +3935,155 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
 /// 0.0.91 — `app: alive` 已经写了几行（上限 600 ≈ 10 分钟）。
 static int AevonAliveLines = 0;
 
+// ---------------------------------------------------------------------------
+// 0.4.51 — 卡片里的排版对账（只读 + 一次温和置脏）
+// ---------------------------------------------------------------------------
+// 334 之后唯一还说不清的事：卡片里打开抖音，内容有时「显示不全」—— 右侧点赞栏
+// 只剩一半、视频底部的标题条整条不见。这两个症状是**同一个形状**：整块排版比窗口
+// 高。932 的版式放进 717 的窗，底部 215 被裁掉，而点赞栏与标题条恰好都挂在画布
+// 底部，于是「一列剩一半、一条全没」。
+//
+// 我们手上已经能证明的：宿主侧几何全对（`scene=430x717`、`content=430x717@0,0`、
+// `scale` 一致），`app: video` 一条都没有（居中那条路从没跑过，见
+// `AevonVideoCenterRetired`）⇒ 不是我们挪过谁。剩下的可能只有两种：
+//
+//   ① App 自己按 932 排了版（窗口/根视图还停在 932）；
+//   ② 某一层没跟着窗口变（视口 717，里面的翻页器还是 932）。
+//
+// 这条探针就是这两句话的判据，两拍（首拍 + 约 2 s）各一遍，**只读**：
+//
+//   layout audit n=1 win=430x717 scene=430x717 root=430x717
+//   layout audit n=1 scroll cls=AWEFeedTableView box=430x932 span=430x10252 off=932
+//   layout audit n=1 tall cls=AWEFeedContainerView b=430x932 over=215
+//
+// `win` 与 `scene` 不一致 ⇒ ①；`scroll box` 比 `win` 高 ⇒ ②，而且 `tall` 指名道姓
+// 说出是哪一层。唯一动一下手的地方在最后：`over` 超过 60 pt 时对那一层发一次
+// `setNeedsLayout`（**只置脏，绝不 `layoutIfNeeded`** —— 0.0.65/0.0.67 那两次
+// 「应用打不开、桌面黑屏」正是「替别人的窗口补一次布局」）。每层一次、每会话最多
+// 三条，日志总量 14 行封顶。
+#define AEVON_AUDIT_LINES 14
+static int AevonAuditPass = 0;
+static CFTimeInterval AevonAuditAt = 0.0;
+static int AevonAuditLines = 0;
+static int AevonAuditNudges = 0;
+
+static const char *AevonAuditCls(UIView *view) {
+    if (view == nil) return "none";
+    const char *name = class_getName([view class]);
+    return name != NULL ? name : "?";
+}
+
+static void AevonHostedAudit(void) {
+    if (!AevonEverHosted) return;
+    if (AevonAuditPass >= 2) return;
+    if (AevonAuditLines >= AEVON_AUDIT_LINES) return;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (AevonAuditPass == 0) {
+        AevonAuditAt = now;
+    } else if (now - AevonAuditAt < 1.8) {
+        return;      // 第一拍之后隔两秒再看一次：App 的重排不是原子的
+    }
+
+    UIApplication *application = [UIApplication sharedApplication];
+    if (application == nil) return;
+    // 主窗优先：`keyWindow` 对「正在显示什么」最有发言权；没有 key（刚从后台
+    // 回来那一拍）就退到第一个有尺寸的窗口。两种都要，缺一种就会在中间态
+    // 里读到空值、然后一整个会话都没有读数。
+    UIWindow *win = nil;
+    for (UIScene *one in [application connectedScenes]) {
+        if (![one isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *candidate in [(UIWindowScene *)one windows]) {
+            if ([candidate isKeyWindow]) { win = candidate; break; }
+            if (win == nil && [candidate bounds].size.height > 200.0) win = candidate;
+        }
+        if (win != nil && [win isKeyWindow]) break;
+    }
+    if (win == nil) return;
+
+    AevonAuditPass += 1;
+    CGFloat winH = [win bounds].size.height;
+    CGRect card = [[win windowScene] coordinateSpace].bounds;
+    UIViewController *rvc = [win rootViewController];
+    UIView *root = nil;
+    if (rvc != nil) root = [rvc view];
+    if (root == nil && [win.subviews count] > 0) root = [win.subviews objectAtIndex:0];
+    if (root == nil) root = win;
+    CGRect rb = [root bounds];
+
+    char line[224];
+    int used = 0;
+    snprintf(line, sizeof(line),
+             "layout audit n=%d win=%.0fx%.0f scene=%.0fx%.0f root=%.0fx%.0f",
+             AevonAuditPass, [win bounds].size.width, winH,
+             card.size.width, card.size.height, rb.size.width, rb.size.height);
+    AevonPageWrite(line);
+    used += 1;
+
+    // 一遍广度优先走完窗口：顺带把「比窗口高出来的那一层」与「最像翻页器的
+    // 滚动视图」挑出来。2500 个视图约 0.3 ms，两拍一共两次，可以忽略。
+    NSMutableArray *todo = [NSMutableArray arrayWithObject:root];
+    NSUInteger walked = 0;
+    UIView *tall = nil;
+    CGFloat tallOver = 0.0;
+    UIScrollView *pager = nil;
+    CGFloat pagerGap = 0.0;
+    while (walked < todo.count && walked < 2500) {
+        UIView *node = [todo objectAtIndex:walked];
+        walked += 1;
+        CGRect b = [node bounds];
+        CGFloat over = b.size.height - winH;
+        if (over > 60.0 && over > tallOver) { tallOver = over; tall = node; }
+        if ([node isKindOfClass:[UIScrollView class]]) {
+            UIScrollView *sv = (UIScrollView *)node;
+            CGFloat boxH = [sv bounds].size.height;
+            CGFloat gap = fabs(boxH - winH);
+            // 只认「本来应该是整屏视口」的那一个：差得越小越像。
+            if (boxH > 200.0 && gap < 320.0 && [sv contentSize].height > boxH * 1.6
+                && (pager == nil || gap < pagerGap)) {
+                pager = sv;
+                pagerGap = gap;
+            }
+        }
+        NSArray *kids = [node subviews];
+        if (kids.count > 0) [todo addObjectsFromArray:kids];
+    }
+
+    if (pager != nil) {
+        snprintf(line, sizeof(line),
+                 "layout audit n=%d scroll cls=%.28s box=%.0fx%.0f span=%.0f off=%.0f paging=%d",
+                 AevonAuditPass, AevonAuditCls(pager),
+                 [pager bounds].size.width, [pager bounds].size.height,
+                 [pager contentSize].height, [pager contentOffset].y,
+                 [pager isPagingEnabled] ? 1 : 0);
+        AevonPageWrite(line);
+        used += 1;
+    } else {
+        snprintf(line, sizeof(line), "layout audit n=%d scroll none walk=%lu",
+                 AevonAuditPass, (unsigned long)walked);
+        AevonPageWrite(line);
+        used += 1;
+    }
+
+    if (tall != nil) {
+        snprintf(line, sizeof(line),
+                 "layout audit n=%d tall cls=%.28s b=%.0fx%.0f over=%.0f",
+                 AevonAuditPass, AevonAuditCls(tall),
+                 [tall bounds].size.width, [tall bounds].size.height, tallOver);
+        AevonPageWrite(line);
+        used += 1;
+        if (AevonAuditNudges < 3 && [tall window] != nil) {
+            AevonAuditNudges += 1;
+            [tall setNeedsLayout];
+            snprintf(line, sizeof(line),
+                     "layout nudge cls=%.28s over=%.0f win=%.0f n=%d",
+                     AevonAuditCls(tall), tallOver, winH, AevonAuditNudges);
+            AevonPageWrite(line);
+            used += 1;
+        }
+    }
+    AevonAuditLines += used;
+}
+
 static void AevonPagerWatchTick(void *context) {
     (void)context;
     AevonWatchTicks += 1;
@@ -3960,7 +4132,17 @@ static void AevonPagerWatchTick(void *context) {
         AevonSheetLift();
         // 0.0.84 — 横版画面贴顶：每 0.6 s 看一眼「那块矩形在不在容器正中」。
         // 它只在卡片里、只在「高度明显小于容器」时动手，铺满的竖版视频一律不碰。
+        //
+        // 0.4.51 — 退休了（`AevonVideoCenterRetired`）。调用保留一行是为了留个
+        // 明确的落点：以后要重开，把那个常量改成 0 就够，不必再把整条链接回来。
         if ((AevonWatchTicks % 4) == 0) AevonVideoCenter();
+        // 0.4.51 — 卡片里的排版对账。它接管了这一拍里真正有用的那件事：
+        // 把「谁还停在 932」写成读数，而不是替 App 去摆画面。
+        AevonHostedAudit();
+    } else {
+        // 出了卡：下一张卡是新一轮，对账从第一拍重新开始（`AevonAuditLines`
+        // 是全进程的总闸，防的是日志被反复开卡冲掉）。
+        AevonAuditPass = 0;
     }
 
     // 窗口高度变了（过渡钩子没响的那一类 App、或者系统自己去改的）：上一拍的
