@@ -1585,6 +1585,10 @@ def main():
                       # `safe inset bottom=316` → `bar=490..535`（上移 223）。
                       # 复量闭环：写「被盖多少 + 8」→ 0.8 s 后量 `bar` 底边 →
                       # 不到位就乘 2、乘 3 再来 → 三次不到 `safe dead` 并还原。
+                      # ⛔ 0.4.47 已把 ×2/×3 换成「上一档 + 还差多少 + 12」（330 实测
+                      # Safari 底部安全区有 ≈137 死区，×3 会把地址栏顶到屏幕中间），
+                      # 并把读数改成「第一响应者与候选取大者」（`UnifiedField` 不含
+                      # `TextField` 字样，旧写法量到的是框里的 `UITextFieldLabel`）。
                       b"app: kb: safe try why=%s cover=%.0f was=%.0f now=%.0f bar=%.0f kbtop=%.0f tries=%d vc=%.26s",
                       b"app: kb: safe hit bot=%.0f kbtop=%.0f gap=%.0f fit=%d tries=%d",
                       b"app: kb: safe hold bot=none tries=%d",

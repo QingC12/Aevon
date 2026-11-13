@@ -9,6 +9,41 @@
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
 //
 // ---------------------------------------------------------------------------
+// 0.4.47 — 330：安全区**通了**（地址栏抬上来了），差最后 4 pt
+// ---------------------------------------------------------------------------
+// 330 是这条通道第一次真机生效：
+//   `mode height cov=2 … rep=574` → `verdict t4.6/t0.7 h=noop moved=-0`
+//   → `mode height off reason=noop`
+//   → `safe try why=rect cover=137 bar=487 kbtop=358 vc=BrowserRootViewController`
+//   → `safe hit bot=486 gap=-128 fit=0` → `safe try why=step cover=274`
+//   → `safe hit bot=349 gap=9 fit=1` → 保位到收起，`safe back bottom=0`
+// 用户看到的正是 `cover=274` 那一档：**输入框出现了，但显示不全**。
+//
+// 差在哪儿，日志把两件事同时摊开了：
+//   `fr t2.9 view=UnifiedField 342x45@28,317 bot=362`   ← 真正的框，压在键顶 358 下面 4 pt
+//   `bar t2.9 txt=UITextFieldLabel 334x19@30,330 bot=349` ← 框里那行文字，在键顶上面 9 pt
+// `safe hit` 判的是后者，`fit=1` 就收工了 —— 文字没被盖、框被盖。
+// 根因是 `AevonKbCollectTextInput` **按类名收录**（含 `TextField`/`TextView`）：
+// Safari 的输入框叫 `UnifiedField`，收不到；收到的是它里面的 `UITextFieldLabel`。
+// 所以 0.4.47 三处收紧，全部围绕「量到的到底是哪个框」：
+//   ① `AevonKbSafeFocusBottom` —— 第一响应者单独量，不受类名限制，与候选取大者；
+//   ② `fit` 判据 `bot ≤ kbtop + 8` → `+ 1`（旧容差正好把差 4 pt 判成 fit）；
+//   ③ 加码从 `need × (tries+1)` 改成「上一档 + 还差多少 + 12」——
+//      330 两档证明 Safari 底部安全区有一段 ≈137 的死区（`cover=137` 位移 0、
+//      `cover=274` 位移 138，位移 ≈ cover − 137），×3 = 411 会多让 130 多，
+//      把地址栏顶到屏幕中间；按差值两档落在 `gap≈12`。
+// 同时把高度口径（0.4.45）**默认停用**（`AEVON_KB_HEIGHT_AUTOSTART 0`）：
+// 329/330 两版都 `h=noop`，留着它只会每次弹键盘先白报五秒假矩形再判两次 noop，
+// 「矩形四通道对这一族无效」改由 `AevonKbRectGivenUp` 用 `d`/`cov` 直接判。
+//
+// 判据（331）：
+//   · Safari 第一次弹键盘就该 `safe try why=rect cover≈150` →
+//     （最多三档）`safe hit … fit=1`，且 `fr` 的 `bot ≤ 358`。
+//   · 其余七家仍然**一条 `safe` 行都不该有**，`note fix` 与 0.4.46 完全一致。
+//   · 开关：`com.aevon.kbSafeInsetOff = true`。
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // 0.4.46 — 329：用户说「之前版本修复过」—— 查到了，是 0.4.x 弄丢的第四条通道
 // ---------------------------------------------------------------------------
 // 329 的结论只有一句：**矩形这条路对 Safari 走完了**。
@@ -32,16 +67,18 @@
 // 所以本版把 `AevonKbSafeApply` / `AevonKbSafeRestore` 那一族按**新架构**重写回来：
 // `rootViewController.additionalSafeAreaInsets.bottom`，写 `bottom = 原值 + cover`，
 // 收起还原；cover 不猜倍率（旧版 316 换来 223，比值 0.71 不是 1:1），改成
-// **按读数阶梯加码**：写「被盖多少 + 8」→ 0.8 s 复量 → 没到位就 ×2、×3 → 三次
+// **按读数阶梯加码**：写「被盖多少 + 8」→ 0.8 s 复量 → 没到位就 ×2、×3
+// （⛔ 0.4.47 已把 ×2/×3 换成按差值加码，见上面 0.4.47 那段）→ 三次
 // 不到就认输、还原、本进程不再试。`why=rect` 只对 `HeightDead` 那一族生效
-// （所以 Safari 第一次弹键盘仍走矩形四通道，**第二次起**才让位）。
+// （所以 Safari 第一次弹键盘仍走矩形四通道，**第二次起**才让位；
+//  ⛔ 0.4.47 起改由 `AevonKbRectGivenUp` 判，第一次弹键盘就生效）。
 //
 // Filza（`why=kbwin`）也走这条：它投不出票（`bar txt=none`、`field n=0`、假焦点
 // 在键盘窗），唯一能做的是整块让位；量不到编辑区 ⇒ `safe hold bot=none`，保留
 // 到收起。`atree` 这一版对 `RenameView` 强制展开（`f=1`）—— 329 里它 n=1 却
 // 一行子视图都没打出来，被三条剪枝全挡了，那正是要找的地方。
 //
-// 判据（330）：
+// 判据（当时给 330 的，已被上面 0.4.47 那段取代，留作对照）：
 //   · Safari 第二次起应出现 `safe try why=rect cover=… → safe hit … fit=1`，
 //     之后 `bar` 底边 ≤ 358；三次不到会打 `safe dead` 并自动还原（不会更差）。
 //   · Filza 应出现 `safe try why=kbwin` + `safe hold bot=none`，再看 `atree … f=1`
@@ -660,7 +697,23 @@ static volatile int AevonKbSafeDead = 0;          ///< 试满仍不动 ⇒ 本�
 static volatile int AevonKbSafeKept = 0;          ///< 复量确认动了 / 量不到 ⇒ 保留到收起
 static volatile int AevonKbSafeNotes = 0;         ///< 日志配额（每进程 12 行）
 static volatile CGFloat AevonKbSafeNeed = 0;      ///< 本会话第一次算出的「该让多少」
+/// 0.4.47 — 上一次真正写进去的 `cover`。阶梯改成「按复量差值加码」之后，
+/// 每一档都要落在上一档之上，所以必须记住它（`×2 / ×3` 那套会过头，见下）。
+static volatile CGFloat AevonKbSafeCover = 0;
 static volatile int AevonKbSafeVerifyGen = 0;     ///< 复量代际：连写两次时作废旧的那条
+
+/// 0.4.47 — 高度口径（0.4.45）**默认不再自动启动**。
+///
+/// 329 与 330 两版真机各判了一次 `verdict … h=noop moved=-0`：把矩形改成
+/// `430x574@0,143` 之后 Safari 的 `barBot` 一动不动（翻前翻后都是 500）。
+/// 矩形这条路（原点 0.4.39 / 引擎 padding 0.4.41 / 判据 B 0.4.43 / 高度 0.4.45）
+/// 四条全部自证无效，留着它只会让每次弹键盘先白报五秒假矩形、再判两次 noop
+/// 才轮到安全区 —— 用户看到的就是「先跳一下才好」。
+///
+/// 代码与开关都保留（改成 1 即恢复自动启动，`verdict/mode height off` 那套自证还在），
+/// 代价是「矩形四通道无效」这个结论不再靠它现场推，而由 `AevonKbRectGivenUp`
+/// 用两条已有读数（`cov` 与 `d`）直接判 —— 只有 Safari 那一族能同时满足。
+#define AEVON_KB_HEIGHT_AUTOSTART 0
 
 // ===========================================================================
 // 跨文件事实：本 App 现在是不是被卡片托着
@@ -2067,6 +2120,12 @@ static void AevonKbScreenVote(CGFloat d, int barDepth) {
 ///   酷安 `d=44`、minis `d=223`、Turrit `d=227`、贴吧 `d=202` 全在几百量级 ✗。
 /// 两拍才翻、单向、进程内粘住；`verdict` 判出「一点没动」就退回并封死（`AevonKbHeightDead`）。
 static void AevonKbHeightVote(CGFloat cov, CGFloat barBot) {
+#if !AEVON_KB_HEIGHT_AUTOSTART
+    // 0.4.47 — 已判死，不再现场翻（开关见 `AEVON_KB_HEIGHT_AUTOSTART`）。
+    (void)cov;
+    (void)barBot;
+    return;
+#endif
     if (AevonKbHeightMode || AevonKbHeightDead) return;
     if (AevonKbScreenMode) return;                      // 两条口径互斥
     if (!AevonKbTakeOver || !AevonKbShown) return;
@@ -2178,6 +2237,7 @@ static void AevonKbSafeRestore(void) {
     id rvc = AevonKbSafeRootVC();
     CGFloat back = (AevonKbSafeSaved >= 0.0) ? AevonKbSafeSaved : 0.0;
     AevonKbSafeNeed = 0.0;
+    AevonKbSafeCover = 0.0;
     AevonKbSafeTries = 0;
     if (rvc == nil) return;
     AevonKbSafeBottomWrite(rvc, back);
@@ -2190,6 +2250,45 @@ static void AevonKbSafeRestore(void) {
 }
 
 static void AevonKbSafeVerify(void);
+
+/// 0.4.47 — 「矩形四通道对这一族无效」的现场判据（不再靠高度口径现场翻来自证）。
+///
+/// 两条读数都是现成的，而且只有 Safari 那一族同时满足：
+///   · `d = kbtop − barBot < −40` —— 真的压在键盘底下（QQ 正常时 d=0；
+///     威锋 215、minis 223、Turrit 227、贴吧 202、酷安 44 全是正数）
+///   · `|cov| ≤ 12` —— 它把「键盘的屏幕顶边」当成世界顶边（Safari 是 2）
+/// 其余 App 一条都过不去 ⇒ 仍然一条 `safe` 行都不会出现。
+static BOOL AevonKbRectGivenUp(CGFloat d) {
+    if (AevonKbHeightDead != 0) return YES;
+#if AEVON_KB_HEIGHT_AUTOSTART
+    return NO;          // 老路：等高度口径自己判出 noop（`AevonKbHeightDead`）
+#else
+    return (d < -40.0 && fabs(AevonKbCoverDelta(d)) <= 12.0);
+#endif
+}
+
+/// 0.4.47 — 主窗里第一响应者的底边（窗口坐标）。
+///
+/// 330 的 Safari 暴露了这个洞：判据一直用 `AevonKbCollectTextInput` 的候选，
+/// 而它靠**类名含 `TextField`/`TextView`** 收录 —— Safari 的输入框叫
+/// `UnifiedField`（不含 `TextField`），真正被收进来的是它里面的
+/// `UITextFieldLabel`（19 高的文字标签）。于是 `safe hit bot=349 fit=1` 判过了，
+/// 而用户看到的 `UnifiedField 342x45@28,317 bot=362` 还压在键盘底下 4 pt：
+/// 文字没被盖、框被盖 —— 就是「输入框显示不全」。
+///
+/// 第一响应者不受类名影响，所以这里单独量一次，和候选取**较大**的那个。
+/// `why=kbwin` 那种焦点落在键盘窗的（Filza）扫不到 ⇒ 返回 −1，照旧按整块让位。
+static CGFloat AevonKbSafeFocusBottom(UIWindow *win) {
+    if (win == nil) return -1.0;
+    UIView *fr = AevonKbFindFirstResponder(win, 20);
+    if (fr == nil || fr == (UIView *)win) return -1.0;
+    if (![fr isDescendantOfView:win]) return -1.0;
+    if ([fr isHidden] || [fr alpha] < 0.3) return -1.0;
+    CGRect r = [fr convertRect:[fr bounds] toView:win];
+    if (!isfinite(r.origin.y)) return -1.0;
+    if (r.size.width * r.size.height <= 1.0) return -1.0;
+    return r.origin.y + r.size.height;
+}
 
 /// 写一次安全区。`barBot` < 1 表示「量不到编辑区」（Filza 那种自绘情形），
 /// 这时按「键盘占满世界下部」直接让 `worldH − kbtop`。
@@ -2211,14 +2310,32 @@ static void AevonKbSafeTry(CGFloat barBot, CGFloat kbTop, const char *why) {
     if (rvc == nil) return;
     CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
     if (worldH < 200.0) return;
+    // 0.4.47 — 用「真正那个框」的底边，不用文字标签的（见 `AevonKbSafeFocusBottom`）。
+    CGFloat bot = barBot;
+    CGFloat fb = AevonKbSafeFocusBottom(AevonKbAppMainWindow());
+    if (fb > bot) bot = fb;
     if (AevonKbSafeNeed <= 0.0) {
-        CGFloat need = (barBot > 1.0) ? (barBot - kbTop + 8.0) : (worldH - kbTop);
+        CGFloat need = (bot > 1.0) ? (bot - kbTop + 8.0) : (worldH - kbTop);
         if (need < 60.0) need = 60.0;
         if (need > worldH - 140.0) need = worldH - 140.0;
         AevonKbSafeNeed = need;
     }
-    CGFloat cover = AevonKbSafeNeed * (CGFloat)(AevonKbSafeTries + 1);
+    // 0.4.47 — 加码改成「上一档 + 这次还差多少」，不再 ×2 / ×3。
+    //
+    // 330 的两档读数是：`cover=137 → barBot 487→486`（几乎没动）、
+    // `cover=274 → barBot 487→349`（位移 138）⇒ Safari 底部安全区里有一段
+    // ≈137 的死区，位移 ≈ cover − 137。所以 ×3 = 411 会多让 130 多，
+    // 把地址栏顶到屏幕中间；而「按差值 + 12」两到三档就能收在 `gap≈12`。
+    CGFloat cover;
+    if (AevonKbSafeTries == 0) {
+        cover = AevonKbSafeNeed;
+    } else {
+        CGFloat step = (bot > 1.0) ? (bot - kbTop + 12.0) : (AevonKbSafeNeed * 0.5);
+        if (step < 8.0) step = 8.0;
+        cover = AevonKbSafeCover + step;
+    }
     if (cover > worldH - 140.0) cover = worldH - 140.0;
+    AevonKbSafeCover = cover;
     UIEdgeInsets now = AevonKbSafeInsetsRead(rvc);
     if (AevonKbSafeSaved < 0.0) AevonKbSafeSaved = now.bottom;
     CGFloat want = AevonKbSafeSaved + cover;
@@ -2230,7 +2347,7 @@ static void AevonKbSafeTry(CGFloat barBot, CGFloat kbTop, const char *why) {
         char line[260];
         snprintf(line, sizeof(line),
                  "app: kb: safe try why=%s cover=%.0f was=%.0f now=%.0f bar=%.0f kbtop=%.0f tries=%d vc=%.26s\n",
-                 why, cover, AevonKbSafeSaved, want, barBot, kbTop,
+                 why, cover, AevonKbSafeSaved, want, bot, kbTop,
                  (int)AevonKbSafeTries, class_getName([rvc class]));
         AevonKbLog(line);
     }
@@ -2274,6 +2391,9 @@ static void AevonKbSafeVerify(void) {
             CGFloat b = r.origin.y + r.size.height;
             if (b > best) best = b;
         }
+        // 0.4.47 — 第一响应者不受类名限制，一并纳入（Safari 的 `UnifiedField`）。
+        CGFloat fb = AevonKbSafeFocusBottom(win);
+        if (fb > best) best = fb;
         if (best > 0.0) bot = best;
     }
     char line[220];
@@ -2288,7 +2408,9 @@ static void AevonKbSafeVerify(void) {
         }
         return;
     }
-    BOOL fit = (bot <= kbTop + 8.0);
+    // 0.4.47 — 判据从「不盖住文字」（+8 容差）收紧成「不盖住框」（+1）。
+    // 330 的 `UnifiedField bot=362 / kbtop=358` 正好卡在旧容差里被判成 fit。
+    BOOL fit = (bot <= kbTop + 1.0);
     if (AevonKbSafeNotes < 12) {
         AevonKbSafeNotes += 1;
         snprintf(line, sizeof(line),
@@ -3153,9 +3275,10 @@ static void AevonKbProbeBarText(const char *tag) {
              (int)[field isHidden], (double)[field alpha]);
     AevonKbLog(line);
     // 0.4.46 — 矩形四通道都自证无效的那一族（Safari 是唯一一个）：改走安全区让位。
-    // `AevonKbHeightDead` 只在「高度口径翻了、复量没动」之后才为真，所以这条不会
-    // 抢在矩形前面动；第一次弹键盘仍然先把矩形四通道走完，第二次起才让位。
-    if (AevonKbHeightDead != 0 && bottom > kbTop + 20.0) {
+    // 0.4.47 — 入口判据从「等高度口径现场判出 noop」换成 `AevonKbRectGivenUp`：
+    // 高度口径两版都是 `h=noop`、已默认不启动，再靠它自证只会让每次弹键盘先白报
+    // 五秒假矩形。现在直接用 `d` 与 `cov` 两条现成读数判这一族，第一次弹键盘就让位。
+    if (bottom > kbTop + 20.0 && AevonKbRectGivenUp(kbTop - bottom)) {
         AevonKbSafeTry(bottom, kbTop, "rect");
     }
     AevonKbProbeFocusAndScene(tag, appWin, rootView, kbTop);
