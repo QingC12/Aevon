@@ -1332,6 +1332,23 @@ static BOOL AevonKbGuideFixEnabled(void) {
     return on;
 }
 
+/// 0.4.41 — guide **引擎**那条线的开关（缺省开）。写 `com.aevon.kbGuidePadOff = true`
+/// 即只读不写：`graw` 照打，但一次 `keyboardDismissPadding` 都不设。
+static volatile int AevonKbGuidePadOn = 0;
+
+static BOOL AevonKbGuidePadEnabled(void) {
+    BOOL on = YES;
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("kbGuidePadOff"),
+                                                        AevonKbDomain);
+    if (value != NULL) {
+        if (CFGetTypeID(value) == CFBooleanGetTypeID()) {
+            on = CFBooleanGetValue((CFBooleanRef)value) ? NO : YES;
+        }
+        CFRelease(value);
+    }
+    return on;
+}
+
 /// 0.4.39 — 自动换口径的开关。缺省开；写 `true` 即回到「一律窗口坐标」。
 static BOOL AevonKbScreenModeEnabled(void) {
     BOOL on = YES;
@@ -1811,6 +1828,125 @@ static void AevonKbScreenVote(CGFloat d, int barDepth) {
     AevonKbLog(line);
 }
 
+/// 0.4.41 — Safari 的底部地址栏：**它根本没读我们报的那个矩形**。
+///
+/// 324 的 Safari 每一拍都是同一组数，四个通道全对、症状却还在：
+/// ```
+///   note fix end=430x489@0,443 -> 430x359@0,358      （报出去的，窗口坐标）
+///   chan t0  guide=430x359@0,358                     （我们的钩子）
+///   tree     host=0,513,430x359 ph=60                （键盘树、可见顶 573..932）
+///   fr t0.7  view=UnifiedField 342x45@28,455 bot=500 gap=-142   ← 地址栏压在键盘底下
+/// ```
+/// 而它自己的两处避让都停在 144 上下：`WKScrollView ai=134`、那个 932 高的
+/// `UICollectionView 574−440=134`；`144 = 717 − 573`，573 正是键盘**在本进程里**
+/// 的可见顶边（宿主 513 + 占位 60）。⇒ 这个 App 把「键盘窗的屏幕坐标」当成世界坐标
+/// 用了：与威锋**相反方向**、同一个 215。它不会因为通知里改成 358 就好。
+///
+/// 这一版只做两件可验证的事，都不动键盘窗、不动 App 的视图：
+///
+///   · `graw`（只读）—— 布局引擎里那份 guide 矩形：直接调**被我们替换掉的原件**，
+///     绕过钩子。"engine" 与 "layoutFrame" 的区别就是 0.4.37 那条已知缺口
+///     （走 topAnchor 的 App 用引擎值）。`d = 引擎顶 − kbtop` 分三族：
+///     `≈ +shift` ⇒ 引擎也是屏幕口径（**唯一有解的一族**）；
+///     `≈ 0`     ⇒ 引擎是对的，地址栏另有来源，别乱动；
+///     其它（+44/+60）⇒ 第三族，原样保留。
+///
+///   · 抬引擎（可回退）—— 只在第一族动手：`keyboardDismissPadding = shift`。
+///     这是 UIKit 自己的「键盘上方留白」量，作用是把 guide 的顶边整体上抬，
+///     不改键盘窗、不改任何业务视图；写错也只是布局偏高，删开关即回原样。
+///     同一行把写入后的引擎矩形再读一次 ⇒ 日志自己回答「抬没抬动」，不靠猜。
+///
+/// ⛔ 别用「按包名特判 Safari」这条路：判据必须是量出来的 `d`，否则下一个同病
+/// 的 App 还要再写一次特判。`kbGuidePadOff = true` 可整条关掉。
+static void AevonKbGuideEngineNudge(const char *tag, UIWindow *appWin, CGFloat kbTop) {
+    if (!AevonKbGuidePadOn || AevonKbShown == 0 || appWin == nil) return;
+    if (AevonKbOrigGuideFrame == NULL) return;
+    if (kbTop <= 0.0) return;
+    SEL ksel = NSSelectorFromString(@"keyboardLayoutGuide");
+    if (![appWin respondsToSelector:ksel]) return;
+    id guide = ((id (*)(id, SEL))objc_msgSend)(appWin, ksel);
+    if (guide == nil) return;
+    SEL fsel = NSSelectorFromString(@"layoutFrame");
+    if (![guide respondsToSelector:fsel]) return;
+    // 引擎原值：直接调原件，绕过 0.4.37 的钩子。
+    CGRect e0 = AevonKbOrigGuideFrame(guide, fsel);
+    // `layoutFrame` 的坐标系是 `owningView`，判据要的是窗口坐标。
+    UIView *owner = nil;
+    SEL osel = NSSelectorFromString(@"owningView");
+    if ([guide respondsToSelector:osel]) {
+        owner = ((id (*)(id, SEL))objc_msgSend)(guide, osel);
+    }
+    CGRect e0w = (owner != nil) ? [owner convertRect:e0 toView:appWin] : e0;
+    CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
+    CGFloat shift = AevonKbPhysicalHeight() - worldH;
+    if (shift < 40.0 || shift > 400.0) return;
+    if (kbTop >= worldH - 8.0) return;
+    CGFloat d = e0w.origin.y - kbTop;
+    CGFloat want = -1.0;
+    if (fabs(d - shift) <= 12.0) want = shift;        // 屏幕口径 ⇒ 整条上抬 shift
+    else if (fabs(d) <= 12.0) want = 0.0;             // 已经对 ⇒ 确保不残留
+    CGFloat applied = -1.0;                           // -1 = 这一拍没写（第三族/读不到）
+    if (want >= 0.0) {
+        SEL pset = NSSelectorFromString(@"setKeyboardDismissPadding:");
+        SEL pget = NSSelectorFromString(@"keyboardDismissPadding");
+        if ([guide respondsToSelector:pset] && [guide respondsToSelector:pget]) {
+            CGFloat cur = ((CGFloat (*)(id, SEL))objc_msgSend)(guide, pget);
+            if (fabs(cur - want) > 0.5) {
+                ((void (*)(id, SEL, CGFloat))objc_msgSend)(guide, pset, want);
+            }
+            applied = want;
+        } else {
+            applied = -2.0;                           // 系统没有这个属性（iOS 15 以前）
+        }
+    }
+    CGRect e1 = AevonKbOrigGuideFrame(guide, fsel);
+    CGRect e1w = (owner != nil) ? [owner convertRect:e1 toView:appWin] : e1;
+    char line[320];
+    snprintf(line, sizeof(line),
+             "app: kb: graw %s eng0=%.0fx%.0f@%.0f,%.0f eng1=%.0fx%.0f@%.0f,%.0f d=%.0f kbtop=%.0f pad=%.0f shift=%.0f\n",
+             tag, e0w.size.width, e0w.size.height, e0w.origin.x, e0w.origin.y,
+             e1w.size.width, e1w.size.height, e1w.origin.x, e1w.origin.y,
+             d, kbTop, applied, shift);
+    AevonKbLog(line);
+}
+
+/// 0.4.41 — 焦点**被盖住**时把整条祖先链并排打出来（只读）。
+///
+/// 触发条件刻意写成「焦点底边比键盘顶低 40 pt 以上」：那已经不是抖动，是真被盖。
+/// 324 里只有 Safari 命中（地址栏 `bot=500` vs `kbtop=358`，差 142）；
+/// 贴吧 `-33`、酷安/QQ 都是正的 ⇒ 不会被这条刷屏。
+/// 每层打 `ci`（adjustedContentInset.bottom）/`off`/`sb`（safeAreaInsets.bottom），
+/// 目的是看那个 136（= 144 − 8）究竟挂在哪一层 —— 是 Safari 自己设的 inset，
+/// 还是某一层的安全区被算成了「键盘高」。
+static volatile int AevonKbCoveredProbes = 0;
+
+static void AevonKbProbeCoveredChain(const char *tag, UIView *focus, UIWindow *win, CGFloat kbTop) {
+    if (focus == nil || win == nil) return;
+    if (AevonKbCoveredProbes >= 4) return;
+    AevonKbCoveredProbes += 1;
+    CGRect uin = [[UIScreen mainScreen] bounds];
+    char line[300];
+    snprintf(line, sizeof(line), "app: kb: sfx %s kbtop=%.0f uin=%.0fx%.0f\n",
+             tag, kbTop, uin.size.width, uin.size.height);
+    AevonKbLog(line);
+    UIView *node = focus;
+    for (int i = 0; i < 6 && node != nil; i++) {
+        CGRect r = [node convertRect:[node bounds] toView:win];
+        CGFloat ai = 0.0;
+        CGFloat off = 0.0;
+        if ([node isKindOfClass:[UIScrollView class]]) {
+            ai = [(UIScrollView *)node adjustedContentInset].bottom;
+            off = [(UIScrollView *)node contentOffset].y;
+        }
+        snprintf(line, sizeof(line),
+                 "app: kb: sfx   %d %.24s %.0fx%.0f@%.0f,%.0f ai=%.0f off=%.0f sb=%.0f\n",
+                 i, class_getName([node class]), r.size.width, r.size.height,
+                 r.origin.x, r.origin.y, ai, off, [node safeAreaInsets].bottom);
+        AevonKbLog(line);
+        node = [node superview];
+    }
+}
+
 /// 0.4.35 — 两行只读取证：焦点视图（含父链）与 App 主窗 scene 的落点。
 /// 0.4.36 — 焦点改成扫**全部窗口**，并多打一行「输入条容器」的底边。
 ///
@@ -1848,6 +1984,8 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
                  fr.size.width, fr.size.height, fr.origin.x, fr.origin.y,
                  bot, kbTop - bot, kbTop, class_getName([focusWin class]));
         AevonKbLog(line);
+        // 0.4.41 — 焦点整块压在键盘底下（不是抖动）⇒ 把祖先链的 inset 摊开看。
+        if (bot > kbTop + 40.0) AevonKbProbeCoveredChain(tag, focus, focusWin, kbTop);
 
         // 父链五层 + 「输入条容器」。SwiftUI 的类名很长，每段截 28 字符，
         // 够认出「是不是整套被移动的容器」。
@@ -2065,6 +2203,19 @@ static void AevonKbScheduleBarProbes(void) {
                    dispatch_get_main_queue(), ^{ AevonKbProbeBarText("t1.7"); });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.90 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ AevonKbProbeBarText("t2.9"); });
+    // 0.4.41 — guide **引擎**那一拍：0.40 s 时动画已收尾、布局引擎有值；1.30 s 再补
+    // 一次，抓「App 在动画后又自己排了一遍」的情形。两拍都只对「引擎顶比真顶低
+    // 正好一个 shift」那一族动手（见 `AevonKbGuideEngineNudge`）。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.40 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UIWindow *w = AevonKbAppMainWindow();
+        if (w != nil) AevonKbGuideEngineNudge("g0.4", w, (CGFloat)AevonKbLastTop);
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.30 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UIWindow *w = AevonKbAppMainWindow();
+        if (w != nil) AevonKbGuideEngineNudge("g1.3", w, (CGFloat)AevonKbLastTop);
+    });
 }
 
 // 0.4.27 — 通知里那个 frame，**y 用什么、高用什么**。
@@ -2991,6 +3142,9 @@ static void AevonKbNativeInstall(void) {
     AevonKbGuideFixOn = (AevonKbInjectApp && AevonKbGuideFixEnabled()) ? 1 : 0;
     // 0.4.38 — `nativeBounds` 那条线也单独一个开关（`kbNativeOff`）。
     AevonKbNativeFixOn = (AevonKbInjectApp && AevonKbNativeFixEnabled()) ? 1 : 0;
+    // 0.4.41 — guide **引擎**抬升（`kbGuidePadOff`）。与 0.4.37 的 guide 读取钩子
+    // 是两件事：那条改「读出来的矩形」，这条改「引擎排出来的矩形」。
+    AevonKbGuidePadOn = (AevonKbInjectApp && AevonKbGuidePadEnabled()) ? 1 : 0;
     if (!AevonKbInjectApp) {
         AevonKbLog("app: kb: native off, inject=0\n");
         return;
