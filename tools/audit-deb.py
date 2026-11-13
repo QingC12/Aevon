@@ -1550,7 +1550,7 @@ def main():
                       # `cov = d + meas − shift ∈ ±12`（Safari 是 2，其余七家在几十到几百），
                       # 两拍才翻、单向；`verdict h=noop` 两次 ⇒ 自动退回并封死本进程重试。
                       b"app: kb: mode hvote cov=%.0f bar=%.0f shift=%.0f votes=%d",
-                      b"app: kb: mode height cov=%.0f bar=%.0f shift=%.0f meas=%.0f next=%.0f votes=%d sess=%d",
+                      b"app: kb: mode height cov=%.0f bar=%.0f shift=%.0f meas=%.0f rep=%.0f votes=%d sess=%d",
                       b"app: kb: mode height off reason=noop moved=%.0f",
                       # 0.4.43 — 判据 B（「被盖」族）**0.4.44 起只读**。
                       # 327 证明它既治不了 Safari（翻前翻后 `barBot` 恒 500），又会骗翻

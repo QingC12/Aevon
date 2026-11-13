@@ -2032,7 +2032,7 @@ static void AevonKbHeightVote(CGFloat cov, CGFloat barBot) {
         AevonKbHeightBase = (int)barBot;
         AevonKbHeightFlipSession = AevonKbSessionId;
         snprintf(line, sizeof(line),
-                 "app: kb: mode height cov=%.0f bar=%.0f shift=%.0f meas=%.0f next=%.0f votes=%d sess=%d\n",
+                 "app: kb: mode height cov=%.0f bar=%.0f shift=%.0f meas=%.0f rep=%.0f votes=%d sess=%d\n",
                  cov, barBot, shift, meas, meas + shift,
                  (int)AevonKbHeightVotes, (int)AevonKbSessionId);
     } else {
