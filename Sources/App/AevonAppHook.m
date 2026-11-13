@@ -6382,6 +6382,8 @@ static void AevonBandDropAllHighlights(void) {
 /// 「转横 / 转竖」写在同一份偏好域里、用同一通 Darwin 通知叫醒我们，所以这里
 /// 只提前声明一下，回调里照着叫一声。
 static void AevonRotApplyWant(void);
+/// 0.4.66 — 同一通 band 里还要答一次「我现在是横的还是竖的」（见 `AevonRotForce`）。
+static void AevonRotForce(void);
 
 static void AevonBandNote(CFNotificationCenterRef __unused center,
                           void *__unused observer,
@@ -6398,6 +6400,9 @@ static void AevonBandNote(CFNotificationCenterRef __unused center,
     // 0.4.66 — 同一通通知里宿主可能还夹了一个「转横 / 转竖」（`AevonRotWant`）。
     // 读数与判重都在 `AevonRotApplyWant` 里，这里只负责「来了一通就问一次」。
     AevonRotApplyWant();
+    // 0.4.66 — 开卡那一拍宿主会发一次 band：顺手把当前横竖答回去（暖启动的 App
+    // 不会再报「变化」，见 `AevonRotForce`）。
+    AevonRotForce();
     // 0.4.7 — 这里原本补一拍 `AevonKbLiftApply`（把键盘窗按场景底平移）。
     // 键盘不再由我们摆位：母版让 App 认为屏就是承载面那么高，键盘窗的几何由
     // UIKit 在建窗那一拍自己摆（`AevonKeyboardNative.m` 的 `remoteKeyboardWindowForScreen:`）。
@@ -6779,6 +6784,26 @@ static void AevonRotApplyWant(void) {
     // 协商，重复发等于让窗口闪一下。
     if (AevonRotSent == want) return;
     AevonRotAsk(want == 1);
+}
+
+/// 0.4.66 — 宿主刚给这张卡发过 band：**把当前横竖重报一次**，判重放行。
+///
+/// 为什么需要这一下：`AevonRotPublish` 只报「变化」。一个**暖启动**的 App
+/// （进程还活着、已经报过一次竖版）在新卡片打开时不会再报，宿主那侧刚把
+/// 「没有读数」写进槽里，就永远等不到 —— 卡片会以竖版画布承载一个横版世界。
+/// 所以开卡那一拍由宿主发 band 叫醒我们，我们答一次当前值，握手成立。
+///
+/// 限流 0.8 s：band 在拖动过程中会被反复发布，每来一通就写一次偏好域 + 刷盘
+/// 是不必要的；而「开卡」这件事本身不会 0.8 s 内来两次。
+static void AevonRotForce(void) {
+    static CFAbsoluteTime last = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (last > 0 && now - last < 0.8) return;
+    CGSize world = AevonRotWorld();
+    if (world.width <= 16 || world.height <= 16) return;
+    last = now;
+    AevonRotSent = -1;
+    AevonRotPublish(world.width > world.height + 40, world);
 }
 
 /// 0.3 s 一拍：**读数 + 上报**，顺带每 10 拍看一次宿主要求（≈3 s）。
