@@ -1541,6 +1541,17 @@ def main():
                       # `next=screen` 之后，下一次弹键盘就按屏幕坐标报。
                       b"app: kb: mode vote d=%.0f shift=%.0f votes=%d src=%s",
                       b"app: kb: mode screen shift=%.0f d=%.0f votes=%d src=%s next=screen",
+                      # 0.4.43 — 判据 B（「被盖」票，`src=cover`）。Safari 的地址栏不是被抬高
+                      # 215，而是被压到 `世界底 − shift`（`barBot=500`，差 2）。判据写成
+                      # `|d + meas − shift| ≤ 12` 且 `d < −40`。三个票源：`bar` / `focus` / `pane`。
+                      # ⚠ 翻过去是带自证的实验：威锋是「减」，Safari 若是「加」就会翻反 ⇒
+                      # 由下面那行 `verdict` 自己回答 `fit` / `overshoot` / `mid`。
+                      b"app: kb: verdict %s bar=%.0f kbtop=%.0f world=%.0f %s",
+                      # 0.4.43 — Filza 的「假焦点」：第一响应者是个 `bounds` 0x0 的隐藏
+                      # `UITextField`（`RenameView` 只用来拉键盘），以它为基准的 `fr/gap/d`
+                      # 全部作废。这时摊开父视图的子视图清单，顺便用「横满、高 20..半屏、
+                      # 底边落在 `世界底 − shift`」的候选投判据 B 的票。配额 6。
+                      b"app: kb: pane %s host=%.20s n=%d %s",
                       # 0.4.42 — 焦点票（`src=focus`）。容器票会被「底板」骗掉：
                       # Turrit 的可见输入条底 135、玻璃底板底 199，容器票差 56 投不出，
                       # 焦点票 227 只差 12。闸门见 `AevonKbProbeFocusAndScene`。
