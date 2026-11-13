@@ -9,7 +9,39 @@
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
 //
 // ---------------------------------------------------------------------------
-// 0.4.47 — 330：安全区**通了**（地址栏抬上来了），差最后 4 pt
+// 0.4.48 — 331：安全区通道**静默失效**，根因是入口量错了框（差 13 pt）
+// ---------------------------------------------------------------------------
+// 331 的 Safari 跟 329 一模一样：`bar bot=487`、`fr bot=500`、`scn safe=59/34`
+// （底部安全区还是 iOS 原值 34），而且**一条 `safe` 行都没有** —— 通道根本没进。
+// Filza 那两条 `why=kbwin` 照旧，说明开关和主流程都在，只有 `why=rect` 挂了。
+//
+// 把两条读数并排就看见了（同一个 `barBot`，一个是文字、一个是框）：
+//   `bar t0.7 txt=UITextFieldLabel 334x19@30,468 bot=487`   ← 框里那行文字
+//   `fr  t0.7 view=UnifiedField 342x45@28,455 bot=500`      ← 真正的框
+// 0.4.47 把入口挂在 `AevonKbProbeBarText` 的 `bottom`（文字，487）上：
+//   d = 358−487 = −129 → cov = −129+359−215 = **15** → |15| > 12 → 判假
+// 而真框那条：
+//   d = 358−500 = −142 → cov = **2** → 判真
+// 330 之所以能进，是因为当时 `AevonKbHeightDead` 已经置位、判据第一行直接短路 YES；
+// 0.4.47 停掉高度口径 ⇒ `HeightDead` 永不置位 ⇒ 第一次真走 `cov` ⇒ 就差 3 pt 卡死。
+//
+// 0.4.48 四处（都是「把通道接回去」，不是新机制）：
+//   ① 入口挪到 `AevonKbProbeFocusAndScene` 里 `fr … bar=` 之后，用**真框**底边算
+//      `d`/`cov`；`fr` 行尾加 `give=0|1`，判据结果以后每次都能看见，不再静默。
+//   ② `AevonKbSafeRestore` 的状态清理（`Need/Cover/Tries`、作废待复量）提到
+//      `Wrote` 那道闸之前 —— 旧写法在 verify 把 `Wrote` 置 0 之后整个空转，
+//      `Tries` 留在 1~3 不带回，下一次弹键盘从高台阶起跳、撞满 3 次就永久封死。
+//   ③ 新会话（`Shown` 0→1）清 `AevonKbSafeKept` —— 切 App / 掉收起通知那种路径上
+//      它会一直挂着，把下一次弹键盘第一行就挡死。
+//   ④ `safe` 日志配额 12 → 24（330 里 Filza 两组就吃掉 5 条）。
+//
+// 判据（332）：
+//   · Safari 第一次弹键盘就 `fr … bar=SFCapsuleURLField 500 d=-142 … give=1`
+//     → `safe try why=rect cover≈150` → 最多三档 `safe hit … fit=1`，
+//     且收工时 `fr` 的 `bot ≤ 359`。
+//   · 其余七家仍**一条 `safe` 行都不该有**，`fr … give=` 恒 0（它们 `d` 全是正数）。
+//   · 万一三档不到：`safe dead gap=…` + `safe back bottom=…` 自动还原。
+//   · 开关：`com.aevon.kbSafeInsetOff = true`。
 // ---------------------------------------------------------------------------
 // 330 是这条通道第一次真机生效：
 //   `mode height cov=2 … rep=574` → `verdict t4.6/t0.7 h=noop moved=-0`
@@ -695,7 +727,7 @@ static volatile CGFloat AevonKbSafeSaved = -1.0;  ///< 写之前的 `bottom`（�
 static volatile int AevonKbSafeTries = 0;         ///< 本会话试了几次（阶梯加码）
 static volatile int AevonKbSafeDead = 0;          ///< 试满仍不动 ⇒ 本进程不再试
 static volatile int AevonKbSafeKept = 0;          ///< 复量确认动了 / 量不到 ⇒ 保留到收起
-static volatile int AevonKbSafeNotes = 0;         ///< 日志配额（每进程 12 行）
+static volatile int AevonKbSafeNotes = 0;         ///< 日志配额（每进程 24 行）
 static volatile CGFloat AevonKbSafeNeed = 0;      ///< 本会话第一次算出的「该让多少」
 /// 0.4.47 — 上一次真正写进去的 `cover`。阶梯改成「按复量差值加码」之后，
 /// 每一档都要落在上一档之上，所以必须记住它（`×2 / ×3` 那套会过头，见下）。
@@ -2228,6 +2260,18 @@ static void AevonKbSafeBottomWrite(id rvc, CGFloat bottom) {
 
 /// 把 `bottom` 还回写之前的值。键盘收起、判负、开关关掉都走这里。
 static void AevonKbSafeRestore(void) {
+    // 0.4.48 — 状态清理必须在 `Wrote` 那道闸**之前**。
+    //
+    // 旧写法 `if (Wrote == 0) return;` 把 `Tries/Need/Cover` 一起跳过了：
+    // `AevonKbSafeVerify` 在「再来一档」的分支里会先把 `Wrote` 置 0 再调
+    // `AevonKbSafeTry`（见 2439 那条），只要这中间键盘收起，Restore 就整个
+    // 空转 —— `Tries` 留在 1~3 不带回，下一次弹键盘直接从高台阶起跳，
+    // 严重时直接撞上 `Tries >= 3` 永久不再让位。331 的 Safari 一条 safe 行
+    // 都没有，这是嫌疑之一（另一条就是上面那个文字标签的判据）。
+    AevonKbSafeNeed = 0.0;
+    AevonKbSafeCover = 0.0;
+    AevonKbSafeTries = 0;
+    AevonKbSafeVerifyGen += 1;      // 作废还没到点的那次复量
     if (AevonKbSafeWrote == 0) return;
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{ AevonKbSafeRestore(); });
@@ -2236,12 +2280,9 @@ static void AevonKbSafeRestore(void) {
     AevonKbSafeWrote = 0;
     id rvc = AevonKbSafeRootVC();
     CGFloat back = (AevonKbSafeSaved >= 0.0) ? AevonKbSafeSaved : 0.0;
-    AevonKbSafeNeed = 0.0;
-    AevonKbSafeCover = 0.0;
-    AevonKbSafeTries = 0;
     if (rvc == nil) return;
     AevonKbSafeBottomWrite(rvc, back);
-    if (AevonKbSafeNotes < 12) {
+    if (AevonKbSafeNotes < 24) {
         AevonKbSafeNotes += 1;
         char line[160];
         snprintf(line, sizeof(line), "app: kb: safe back bottom=%.0f\n", back);
@@ -2344,7 +2385,7 @@ static void AevonKbSafeTry(CGFloat barBot, CGFloat kbTop, const char *why) {
     AevonKbSafeTries += 1;
     AevonKbSafeWrote = 1;
     AevonKbSafeBottomWrite(rvc, want);
-    if (AevonKbSafeNotes < 12) {
+    if (AevonKbSafeNotes < 24) {
         AevonKbSafeNotes += 1;
         char line[260];
         snprintf(line, sizeof(line),
@@ -2402,7 +2443,7 @@ static void AevonKbSafeVerify(void) {
     if (bot < 0.0 || kbTop < 40.0) {
         // 量不到（自绘编辑区）⇒ 无法闭环，保留到键盘收起：写一次无害，错了也是还原。
         AevonKbSafeKept = 1;
-        if (AevonKbSafeNotes < 12) {
+        if (AevonKbSafeNotes < 24) {
             AevonKbSafeNotes += 1;
             snprintf(line, sizeof(line), "app: kb: safe hold bot=none tries=%d\n",
                      (int)AevonKbSafeTries);
@@ -2413,7 +2454,7 @@ static void AevonKbSafeVerify(void) {
     // 0.4.47 — 判据从「不盖住文字」（+8 容差）收紧成「不盖住框」（+1）。
     // 330 的 `UnifiedField bot=362 / kbtop=358` 正好卡在旧容差里被判成 fit。
     BOOL fit = (bot <= kbTop + 1.0);
-    if (AevonKbSafeNotes < 12) {
+    if (AevonKbSafeNotes < 24) {
         AevonKbSafeNotes += 1;
         snprintf(line, sizeof(line),
                  "app: kb: safe hit bot=%.0f kbtop=%.0f gap=%.0f fit=%d tries=%d\n",
@@ -2426,7 +2467,7 @@ static void AevonKbSafeVerify(void) {
     }
     if (AevonKbSafeTries >= 3) {
         AevonKbSafeDead = 1;
-        if (AevonKbSafeNotes < 12) {
+        if (AevonKbSafeNotes < 24) {
             AevonKbSafeNotes += 1;
             snprintf(line, sizeof(line), "app: kb: safe dead gap=%.0f tries=%d\n",
                      kbTop - bot, (int)AevonKbSafeTries);
@@ -3010,10 +3051,25 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
             // `d = kbtop − barBot`，与 `gap` 同向：正 = 抬高、负 = 被盖。
             // 这条取代 `gap` 当判据 —— QQ 正常时 barBot 恒 = 358 = kbtop ⇒ d=0。
             CGFloat d = kbTop - barBot;
+            BOOL givenUp = AevonKbRectGivenUp(d);
             snprintf(line, sizeof(line),
-                     "app: kb: fr %s bar=%.28s %.0f d=%.0f depth=%d cov=%.0f\n",
-                     tag, barCls, barBot, d, barDepth, AevonKbCoverDelta(d));
+                     "app: kb: fr %s bar=%.28s %.0f d=%.0f depth=%d cov=%.0f give=%d\n",
+                     tag, barCls, barBot, d, barDepth, AevonKbCoverDelta(d),
+                     (int)givenUp);
             AevonKbLog(line);
+            // 0.4.48 — 安全区让位的入口**必须用这一行的 `barBot`**（真框的底边）。
+            //
+            // 331 就是栽在这儿：0.4.47 把入口挂在 `AevonKbProbeBarText` 那个
+            // `bottom` 上，而那是框里的**文字标签**（`UITextFieldLabel`，19 高），
+            // 比真框（`SFCapsuleURLField` 45 高）底边高 13 pt：
+            //   bar 入口  d = 358−487 = −129 → cov = −129+359−215 = **15** > 12 ⇒ 判假
+            //   这里      d = 358−500 = −142 → cov = **2**            ⇒ 判真
+            // 330 之所以进了，是因为当时 `HeightDead` 已置位、判据直接短路 YES；
+            // 0.4.47 停掉高度口径后第一次真走 `cov`，就差这 3 pt，整条通道静默失效。
+            // ⛔ 以后这条判据只认「真框」，别再挂回文字标签那条读数上。
+            if (givenUp) {
+                AevonKbSafeTry(barBot, kbTop, "rect");
+            }
             // 0.4.39 — 顺手记一票「这个 App 是不是在按屏幕坐标换算」（见 `AevonKbScreenVote`）。
             AevonKbScreenVote(d, barDepth);
             // 0.4.45 — 同一个 `cov` 再试一次「高度口径」（Safari 走这条：`cov=2`）。
@@ -3276,13 +3332,10 @@ static void AevonKbProbeBarText(const char *tag) {
              (int)offScreen, candCount,
              (int)[field isHidden], (double)[field alpha]);
     AevonKbLog(line);
-    // 0.4.46 — 矩形四通道都自证无效的那一族（Safari 是唯一一个）：改走安全区让位。
-    // 0.4.47 — 入口判据从「等高度口径现场判出 noop」换成 `AevonKbRectGivenUp`：
-    // 高度口径两版都是 `h=noop`、已默认不启动，再靠它自证只会让每次弹键盘先白报
-    // 五秒假矩形。现在直接用 `d` 与 `cov` 两条现成读数判这一族，第一次弹键盘就让位。
-    if (bottom > kbTop + 20.0 && AevonKbRectGivenUp(kbTop - bottom)) {
-        AevonKbSafeTry(bottom, kbTop, "rect");
-    }
+    // 0.4.48 — ⛔ 这里**不再**是安全区让位的入口。这一行的 `bottom` 量的是
+    // `AevonKbCollectTextInput` 收上来的候选，Safari 收到的是框里的
+    // `UITextFieldLabel`（比真框高 13 pt），拿它算 `cov` 会得 15、超出 ±12 的容差。
+    // 入口已挪到 `AevonKbProbeFocusAndScene` 里那条 `fr … bar=` 之后（真框底边）。
     AevonKbProbeFocusAndScene(tag, appWin, rootView, kbTop);
 }
 
@@ -3610,6 +3663,12 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
         // 0.4.45 — 新的一次「弹键盘」：会话号加一。高度口径的 `noop` 判定
         // 必须等到下一个会话（同一会话里没有新通知，`barBot` 不可能动）。
         AevonKbSessionId += 1;
+        // 0.4.48 — 新的一次「弹键盘」重新给一次让位机会。
+        // `Kept` 本意是「这一轮已经到位、保位到收起」，但切 App / 断点续传那种
+        // 收不到 `UIKeyboardWillHide` 的路径上它会一直挂着，于是下一次弹键盘
+        // 第一行 `if (Dead || Kept) return;` 就把整条通道挡死（331 的嫌疑之一）。
+        // 会话级状态跟着会话走：这里清，收起时也会清（见 `AevonKbSafeRestore` 旁边）。
+        AevonKbSafeKept = 0;
         AevonKbScheduleBarProbes();
     }
     AevonKbShown = 1;

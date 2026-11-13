@@ -1661,7 +1661,11 @@ def main():
                       b"app: kb: fr %s view=%.28s %.0fx%.0f@%.0f,%.0f bot=%.0f gap=%.0f kbtop=%.0f win=%.22s",
                       b"app: kb: fr %s view=none kbtop=%.0f",
                       b"app: kb: fr %s anc=%s",
-                      b"app: kb: fr %s bar=%.28s %.0f d=%.0f depth=%d cov=%.0f",
+                      b"app: kb: fr %s bar=%.28s %.0f d=%.0f depth=%d cov=%.0f give=%d",
+                      # 0.4.48 — 判据结果 `give=0|1` 挂在 `fr` 行尾。331 的教训：
+                      # 0.4.47 的入口判据在 `bar` 那条（文字标签，比真框高 13 pt），
+                      # `cov` 算成 15、超出 ±12 ⇒ 判假 ⇒ 整条安全区通道**一行日志都没有**，
+                      # 从外部完全看不出它被谁挡了。以后这一列每次都得在。
                       b"app: kb: fr %s bar=none d=999",
                       # 0.4.35 — App 主窗 scene 的落点 + 坐标空间 + 指南（同一拍）。
                       # 318 里六个 App 的 `guide` 全是 `430x34@0,683`（窗口底减安全区
