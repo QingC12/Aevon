@@ -1060,6 +1060,104 @@ static void AevonKbScanScrollViews(UIView *root, int depth,
     }
 }
 
+// ===========================================================================
+// 0.4.40 — 全树滚动视图读数（补 `ins` 打不到的那一档）
+// ===========================================================================
+//
+// `ins` 只从**焦点视图**往上 8 层找滚动视图。这对 QQ / 威锋 / 酷安够用，对
+// Safari 一条都打不出来：网页输入框的焦点在 WebContent 进程，主进程这边
+// `AevonKbFindFirstResponderAnyWindow` 摸到的是底部地址栏（`UnifiedField`），
+// 父链是 `SFCapsuleURLField > SFCapsuleView > SFCapsuleCollectionView`，
+// 全程没有 UIScrollView ⇒ 323 里 Safari 一个 `ins` 都没有。
+//
+// 而 Safari 恰恰是「输入框在页面底部时看不见」的那一家 —— 它到底给页面留了
+// 多少，只能从 `WKScrollView` 自己的 inset 上看。323 唯一的线索是
+// `probe inset=297`，但那一行只取「全树 `contentInset.bottom` 最大值」、
+// 不带类名，无法判断 297 是 WebKit 的让位量，还是底部胶囊栏自己的内边距。
+//
+// 所以这里把 `adjustedContentInset.bottom` 最大的三个连类名、连尺寸打出来：
+//   · `ai ≈ 359`（世界高 − kbtop） ⇒ App 的认知是对的，问题在它之后的一步；
+//   · `ai ≈ 297`（= 359 − 60）    ⇒ 它把 Safari 那 60 的顶部占位又扣了一遍；
+//   · `ai ≈ 574`（= 359 + 215）   ⇒ 它按 932 在算，跟威锋同一个病，可投票。
+// 只读，不改任何几何。
+#define AEVON_KB_SV_SCAN 24
+#define AEVON_KB_SV_SHOW 3
+typedef struct {
+    UIScrollView *sv;
+    CGRect frame;
+    CGFloat ci;
+    CGFloat ai;
+    CGFloat off;
+} AevonKbSvHit;
+
+static void AevonKbCollectScrollViews(UIView *root, int depth,
+                                      AevonKbSvHit *hits, int *count) {
+    if (root == nil || depth < 0 || hits == NULL || count == NULL) return;
+    if (*count >= AEVON_KB_SV_SCAN) return;
+    if ([root isKindOfClass:[UIScrollView class]]) {
+        UIScrollView *sv = (UIScrollView *)root;
+        AevonKbSvHit *hit = &hits[*count];
+        hit->sv = sv;
+        hit->frame = [sv frame];
+        hit->ci = [sv contentInset].bottom;
+        hit->ai = [sv adjustedContentInset].bottom;
+        hit->off = [sv contentOffset].y;
+        *count += 1;
+    }
+    NSArray *subs = [root subviews];
+    NSUInteger n = [subs count];
+    for (NSUInteger i = 0; i < n && i < 32; i++) {
+        AevonKbCollectScrollViews([subs objectAtIndex:i], depth - 1, hits, count);
+        if (*count >= AEVON_KB_SV_SCAN) return;
+    }
+}
+
+/// 配额 6 —— 与 `ins` 同拍（1.7 s / 2.9 s 各一次），一次弹键盘最多三屏。
+static volatile int AevonKbSvProbes = 0;
+
+static void AevonKbProbeScrollViews(const char *tag, UIWindow *appWin) {
+    if (appWin == nil || tag == NULL) return;
+    if (AevonKbSvProbes >= 6) return;
+    if (![NSThread isMainThread]) return;
+    AevonKbSvProbes += 1;
+
+    AevonKbSvHit hits[AEVON_KB_SV_SCAN];
+    int count = 0;
+    char line[420];
+    AevonKbCollectScrollViews(appWin, 12, hits, &count);
+    if (count <= 0) {
+        snprintf(line, sizeof(line), "app: kb: svs %s n=0\n", tag);
+        AevonKbLog(line);
+        return;
+    }
+    // `ai` 降序取前三个；取过的格子置 −1 当「已用」标记（`ai` 本身不会为负）。
+    char list[380] = "";
+    int shown = 0;
+    int k;
+    for (k = 0; k < AEVON_KB_SV_SHOW; k++) {
+        int best = -1;
+        int i;
+        for (i = 0; i < count; i++) {
+            if (hits[i].ai < 0.0) continue;
+            if (best < 0 || hits[i].ai > hits[best].ai) best = i;
+        }
+        if (best < 0) break;
+        char bit[132];
+        snprintf(bit, sizeof(bit), "%s%.22s %.0fx%.0f@%.0f,%.0f ci=%.0f ai=%.0f off=%.0f",
+                 (shown == 0) ? "" : " | ",
+                 class_getName([hits[best].sv class]),
+                 hits[best].frame.size.width, hits[best].frame.size.height,
+                 hits[best].frame.origin.x, hits[best].frame.origin.y,
+                 hits[best].ci, hits[best].ai, hits[best].off);
+        size_t room = sizeof(list) - strlen(list) - 1;
+        if (room > 1) strncat(list, bit, room);
+        hits[best].ai = -1.0;
+        shown += 1;
+    }
+    snprintf(line, sizeof(line), "app: kb: svs %s n=%d %s\n", tag, count, list);
+    AevonKbLog(line);
+}
+
 static UIWindow *AevonKbAppMainWindow(void) {
     Class appCls = objc_getClass("UIApplication");
     if (appCls == Nil) return nil;
@@ -1769,8 +1867,16 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
             if (room > 1) strncat(chain, bit, room);
             // 第一个「横向占满、且有高度」的祖先就是输入条/工具栏本体。
             // 排除那些整屏容器：世界高 717 的祖先不是输入条，是页面。
+            //
+            // 0.4.40 — 宽度门槛从 `worldW − 8` 放宽到 `worldW × 0.88`。
+            // 旧门槛只认「几乎满宽」的，而 SwiftUI 自绘的输入条容器两侧各留 12：
+            // 323 里 minis 的 `_UIInheritedView 406x142@12,-7`（406 / 430 = 0.944）
+            // 就卡在 422 的门外，一路 `bar=none` ⇒ `AevonKbScreenVote` 拿不到 `d`，
+            // 它那一份「按 932 换算」的 215 pt 永远投不出票。
+            // ⛔ 放宽宽度只是让容器能被量到，判据仍是 `|d − shift| ≤ 12`：
+            // 贴吧的 202（差 13）、酷安的 44（差 171）、Safari 的 −142 都不会翻。
             if (barDepth < 0
-                && pr.size.width >= worldW - 8.0
+                && pr.size.width >= worldW * 0.88
                 && pr.size.height >= 20.0
                 && pr.size.height <= [UIScreen mainScreen].bounds.size.height * 0.5) {
                 barBot = pr.origin.y + pr.size.height;
@@ -1826,6 +1932,9 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
             AevonKbLog(line);
         }
     }
+
+    // 0.4.40 — `ins` 打不到的那一档（Safari 的网页输入框）走全树扫描。
+    AevonKbProbeScrollViews(tag, appWin);
 
     UIWindowScene *scene = [appWin windowScene];
     CGRect sf = CGRectZero;
