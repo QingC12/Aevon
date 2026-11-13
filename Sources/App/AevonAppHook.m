@@ -1652,6 +1652,13 @@ static void AevonCellFitTick(UIScrollView *view) {
     if (![view isKindOfClass:[UITableView class]]) return;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (AevonCellFitAt > 0.0 && now - AevonCellFitAt < 0.8) return;
+    // 0.4.58 — 与 `settle` 共用节流。
+    //
+    // 换屏后的四拍（0.30 / 0.85 / 1.40 / 3.00 s）与这条 0.15 s 心跳会撞在同一拍上：
+    // 一边刚发完 `beginUpdates/endUpdates`，另一边 100 ms 后再发一次 —— 两次重排
+    // 背靠背，用户看到的是同一块版面被摆两遍。这一拍不发，等下一拍再看读数：
+    // 如果真没修好，0.8 s 后照发不误。
+    if (AevonSettleAt > 0.0 && now - AevonSettleAt < 0.8) return;
     if (AevonCellFixes >= 6) return;
     if (fabs(cellH - AevonCellFitSeen) < 1.0) AevonCellFitSame += 1;
     else AevonCellFitSame = 0;
