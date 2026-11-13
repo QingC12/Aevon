@@ -59,6 +59,9 @@ extern int AevonCardLandscapeEnter(const char *bundle,
 extern int AevonCardLandscapeExit(const char *bundle);
 /// 0.4.71 — 退出第一拍：只解钉 scene frame，卡片保持横屏。返回 1 = 解钉了。
 extern int AevonCardLandscapeExitPhase1(const char *bundle);
+/// 0.4.71 — 退出分流口（定义在横屏段）：世界还横 ⇒ phase1 + 挂起；已竖 ⇒ 全量退出。
+/// `AevonLandscapeExit`（本文件前部）也要走它，这里先给原型。
+static void AevonRotExitDispatch(int slot);
 
 /// The scene manager is a singleton with no public door, and its spelling has
 /// changed across releases. Resolving it here keeps the class-method dispatch
