@@ -1280,7 +1280,8 @@ static void AevonPagerStats(UIScrollView *view, CGFloat box,
 /// 「这一行多高」，**不重建单元格、不动数据源**（所以正在播的那一帧不会重来）。
 /// 这两句包在 `performWithoutAnimation:` 里，改高度不带动画；外面套 `@try` ——
 /// 万一 App 正好在自己的更新里，抛异常的是我们，不该是它。
-/// 0.1.38 — 一次只准花 30 ms，超了就永久闭嘴。
+/// 0.1.38 — 一次只准花 30 ms，超了就永久闭嘴。0.4.61 改成 250 ms + 本张卡（理由在
+/// 下面那段「0.4.61」里，341 的 `remeasure slow 55ms … gone for this boot` 是物证）。
 ///
 /// 抖音那次不是崩溃，是看门狗强杀：`0x8BADF00D scene-update watchdog …
 /// exhausted real time allowance of 10.00 seconds`。`beginUpdates/endUpdates`
@@ -1292,8 +1293,10 @@ static void AevonPagerStats(UIScrollView *view, CGFloat box,
 ///   ① **事前**：手势/惯性/编辑中不发（那时布局本来就在跑，插一脚只是把同一次
 ///      布局拉长一倍）；表格不在窗口上不发；表长超过 12 屏不发 —— 一页高度需
 ///      要校正的场合都是短表，而长表正是最贵的那一类。
-///   ② **事中**：记一次耗时。小表第一次跑一两毫秒，照旧用；一旦在**任何**一张
-///      表上超过 30 ms，这张牌打掉，本次启动内不再赌第二次（`…Dead`）。
+///   ② **事中**：记一次耗时。小表第一次跑两三毫秒，照旧用；一旦在**任何**一张
+///      表上超过 250 ms，这张牌打掉，**本张卡**内不再赌第二次（`…Dead`，band 上升沿
+///      归零）。0.4.61 之前这里是 30 ms + 「本次启动永久」，341 证明那个组合会把
+///      「浮窗修好了、全屏没得修」直接做出来。
 ///   ③ **事后**：异常一律吞掉，绝不把异常带回 App 的布局链。
 static int AevonTableRemeasureDead = 0;
 static int AevonTableRemeasureNotes = 0;
@@ -1356,10 +1359,29 @@ static BOOL AevonTableRemeasure(UITableView *table) {
         finished = NO;
     }
     double cost = (CFAbsoluteTimeGetCurrent() - started) * 1000.0;
-    if (cost > 30.0) {
+    // 0.4.61 — 30 ms → 250 ms，且寿命从「本次启动」缩到「本张卡」。
+    //
+    // 341 把这条闸的代价量出来了，而且是它自己造成的：
+    //
+    //   15:11:26 page remeasure 3.2ms cls=AWEFeedTableView rows=8
+    //   15:11:37 page remeasure 2.3ms cls=AWEFeedTableView rows=8
+    //   15:11:39 page remeasure 2.4ms cls=AWEFeedTableView rows=8
+    //   15:11:55 page remeasure 3.4ms cls=AWEFeedTableView rows=8
+    //   15:12:23 page remeasure slow 55ms cls=AWEFeedTableView gone for this boot   ← 第 5 次
+    //
+    // 前四次都是 rows=8、两三毫秒；第五次表已经长到 23 屏（`span=21868`），代价
+    // 55 ms。**代价随表长走，而 30 ms 是个固定值** —— 表一长必然撞死。撞死之后
+    // `AevonTableRemeasure` 直接 `return NO`，而那一刻正是用户要「关掉浮窗、全屏
+    // 打开」的时候：浮窗里那次咬牙修好了（55 ms 换来两行变 717），工具却被打坏了，
+    // 接下来全屏要修时一次机会都没有。用户看到的就是「浮窗正常、全屏断层」。
+    //
+    // 55 ms 与那条 10 秒看门狗差 180 倍，它不是风险源；真正要防的是「一次跑十秒」。
+    // 250 ms 是 1/40，仍是安全余量，而它够得着「一两屏的长表」这一整类。
+    // Dead 也不再是「本次启动永久」——一次撞上贵表就废掉整次启动，代价远大于收益。
+    if (cost > 250.0) {
         AevonTableRemeasureDead = 1;
         char slow[176];
-        snprintf(slow, sizeof(slow), "remeasure slow %.0fms cls=%s gone for this boot",
+        snprintf(slow, sizeof(slow), "remeasure slow %.0fms cls=%s gone for this card",
                  cost, class_getName([table class]));
         AevonPageWrite(slow);
     } else if (AevonTableRemeasureNotes < 6) {
@@ -1434,9 +1456,21 @@ typedef struct {
     int n;          // 落在视口里的「一页大小」的格子数（不管高度对不对）
     int bad;        // 其中高度≠视口高的（差 > 40 pt）
     int blind;      // 有格子、但没有一格盖住视口中心 ⇒ 落点落在了所有行之外
+    int cvBad;      // 0.4.61 — frame 对了、它自己的 contentView 还按旧高度排的格子数
     CGFloat worst;  // 最离谱那一格的高度（给日志用）
-    CGFloat cv;     // 正中那一格的 contentView 高度（内层有没有跟着走）
+    CGFloat cv;     // contentView 高度：`cvBad>0` 时是最差那一格的，否则是正中那一格的
+    UIView *__unsafe_unretained cvCell; // `cvBad>0` 时指向最差的那一格（只读，不持有）
 } AevonSpanned;
+
+// 0.4.61 — `cv` 原来只量「盖住视口中心的那一格」，341 证明这留了一个洞：
+//
+//   15:12:14 page state after change box=430x932 off=0,7423 cell=0,7815,430x932
+//            k0=…:7815,932 k1=…:6883,932 k2=…:5951,932
+//   15:12:27 page cell fit ok n=2 bad=0 cell=932 worst=0 box=932 cv=932 vid=430x849
+//
+// 读数全对，用户看到断层。因为 `cv=932` 只是正中那一格的；旁边那一格的
+// contentView 可能还停在 717，没有任何一个数会说出来 —— 而「格子对了、里面的
+// 内容没跟」正是断层的观感。所以逐格比一次，把最差的那一格连指针一起带出去。
 
 static void AevonSpanMeasure(UIScrollView *view, CGFloat box, AevonSpanned *out,
                              UIView **midOut);
@@ -1674,6 +1708,9 @@ static void AevonSpanMeasure(UIScrollView *view, CGFloat box, AevonSpanned *out,
     NSUInteger limit = cells.count < 24 ? cells.count : 24;
     int sawMid = 0;
     CGFloat worstGap = 0.0;
+    CGFloat midCv = 0.0;
+    CGFloat worstCv = 0.0;
+    CGFloat worstCvGap = 0.0;
     for (NSUInteger i = 0; i < limit; i++) {
         UIView *cell = [cells objectAtIndex:i];
         if (![cell isKindOfClass:[UIView class]]) continue;
@@ -1686,7 +1723,7 @@ static void AevonSpanMeasure(UIScrollView *view, CGFloat box, AevonSpanned *out,
             sawMid = 1;
             if (midOut != NULL) *midOut = cell;
             if ([cell isKindOfClass:[UITableViewCell class]]) {
-                out->cv = [[(UITableViewCell *)cell contentView] bounds].size.height;
+                midCv = [[(UITableViewCell *)cell contentView] bounds].size.height;
             }
         }
         if (!page) continue;
@@ -1701,7 +1738,25 @@ static void AevonSpanMeasure(UIScrollView *view, CGFloat box, AevonSpanned *out,
                 out->worst = h;
             }
         }
+        // 0.4.61 — 逐格比一次「格子 vs 它自己的 contentView」。只看「与视口相交」
+        // 的那几格：视口外的行不影响用户看到的东西，追它没有意义。
+        if (covers && [cell isKindOfClass:[UITableViewCell class]]) {
+            CGFloat inner = [[(UITableViewCell *)cell contentView] bounds].size.height;
+            CGFloat d = fabs(inner - h);
+            if (d > 40.0) {
+                out->cvBad += 1;
+                if (d > worstCvGap) {
+                    worstCvGap = d;
+                    worstCv = inner;
+                    out->cvCell = cell;
+                }
+            }
+        }
     }
+    // `cv` 的口径：有错配就报最差那一格（配 `cvCell`），否则报正中那一格 —— 后者
+    // 是 0.4.59 起的旧口径，保留它，日志里同一个字段才可比。
+    if (out->cvBad > 0) out->cv = worstCv;
+    else if (midCv > 0.0) out->cv = midCv;
     // 有格子、却没有一格盖住视口中心 ⇒ 落点落在了所有行之外。这是「空屏」而不是
     // 「页高不对」，两种都要修，但日志里必须能分开。
     //
@@ -1750,9 +1805,9 @@ static void AevonCellFitTick(UIScrollView *view) {
             }
         }
         snprintf(line, sizeof(line),
-                 "cell fit %s n=%d bad=%d cell=%.0f worst=%.0f box=%.0f cv=%.0f%s%s%s",
+                 "cell fit %s n=%d bad=%d cell=%.0f worst=%.0f box=%.0f cv=%.0f cvbad=%d%s%s%s",
                  stale ? "stale" : "ok", span.n, span.bad, cellH, span.worst,
-                 box.size.height, span.cv,
+                 box.size.height, span.cv, span.cvBad,
                  span.blind ? " blind=1" : "",
                  moving ? " moving=1" : "",
                  vidText);
@@ -1767,19 +1822,24 @@ static void AevonCellFitTick(UIScrollView *view) {
         // 于是底部 215 pt 连同标题条一起被裁掉。格子 frame 是对的，唯一的受害者
         // 是内层。这种情况不重排行高（那会白摆一遍版面），只请**这一格**重新
         // 排自己 —— `setNeedsLayout` 不写任何几何，contentView 的 frame 归 cell 管。
-        if (cell != nil && !moving && span.cv > 200.0
-            && fabs(span.cv - [cell frame].size.height) > 40.0
-            && [cell window] != nil && ![cell isHidden]) {
+        // 0.4.61 — 从「只量正中那一格」扩到「可见格里最差的那一格」。341 的全屏
+        // 读数全是 `bad=0 cell=932 cv=932`，而用户看到断层 —— 因为 `cv` 只量了
+        // 正中那一格，旁边那一格的 contentView 停在 717 没人看。`cvCell` 就是那一格。
+        UIView *cvCell = (span.cvBad > 0 && span.cvCell != nil) ? span.cvCell : cell;
+        CGFloat cvFrame = (cvCell != nil) ? [cvCell frame].size.height : 0.0;
+        if (cvCell != nil && !moving && span.cv > 200.0
+            && fabs(span.cv - cvFrame) > 40.0
+            && [cvCell window] != nil && ![cvCell isHidden]) {
             CFAbsoluteTime nowCv = CFAbsoluteTimeGetCurrent();
             if (AevonCellCvAt == 0.0 || nowCv - AevonCellCvAt > 0.8) {
                 if (AevonCellCvFixes < 4) {
                     AevonCellCvAt = nowCv;
                     AevonCellCvFixes += 1;
-                    [cell setNeedsLayout];
+                    [cvCell setNeedsLayout];
                     char cv[200];
-                    snprintf(cv, sizeof(cv), "cell cv fix n=%d cv=%.0f cell=%.0f box=%.0f",
-                             AevonCellCvFixes, span.cv, [cell frame].size.height,
-                             box.size.height);
+                    snprintf(cv, sizeof(cv), "cell cv fix n=%d cv=%.0f cell=%.0f box=%.0f cvbad=%d",
+                             AevonCellCvFixes, span.cv, cvFrame,
+                             box.size.height, span.cvBad);
                     AevonPageWrite(cv);
                 }
             }
@@ -1800,21 +1860,30 @@ static void AevonCellFitTick(UIScrollView *view) {
     if (AevonSettleAt > 0.0 && now - AevonSettleAt < 0.8) return;
     if (AevonCellFixes >= 6) return;
     // 「改不动」的判据也要跟着换：`blind` 时 `cellH` 是 0，拿它比永远「没变」。
-    CGFloat witness = span.blind ? -1.0 : (span.worst > 200.0 ? span.worst : cellH);
-    if (fabs(witness - AevonCellFitSeen) < 1.0) AevonCellFitSame += 1;
-    else AevonCellFitSame = 0;
-    AevonCellFitSeen = witness;
-    if (AevonCellFitSame >= 2) {
-        AevonCellFitDead = 1;
-        char stop[200];
-        snprintf(stop, sizeof(stop), "cell fit give up cell=%.0f box=%.0f n=%d blind=%d",
-                 cellH, box.size.height, AevonCellFixes, span.blind);
-        AevonPageWrite(stop);
-        return;
-    }
     AevonCellFitAt = now;
     AevonCellFixes += 1;
     BOOL did = AevonTableRemeasure((UITableView *)view);
+    // 0.4.61 — 「动作没执行」不等于「改了也没用」。
+    //
+    // 341 的 15:12:23 之后 `AevonTableRemeasure` 被 30 ms 闸永久关掉，此后每一拍
+    // 都只会 `r=0`。若那一拍拍样计进「同一高度」，两拍就 `cell fit give up` ——
+    // 通道跟着工具一起死，而用户看到的正是「浮窗正常、全屏断层」。所以只有真的
+    // 发出过 `beginUpdates/endUpdates`（`did`）才判「改不动」。
+    if (did) {
+        // 「改不动」的判据也要跟着换：`blind` 时 `cellH` 是 0，拿它比永远「没变」。
+        CGFloat witness = span.blind ? -1.0 : (span.worst > 200.0 ? span.worst : cellH);
+        if (fabs(witness - AevonCellFitSeen) < 1.0) AevonCellFitSame += 1;
+        else AevonCellFitSame = 0;
+        AevonCellFitSeen = witness;
+        if (AevonCellFitSame >= 2) {
+            AevonCellFitDead = 1;
+            char stop[200];
+            snprintf(stop, sizeof(stop), "cell fit give up cell=%.0f box=%.0f n=%d blind=%d",
+                     cellH, box.size.height, AevonCellFixes, span.blind);
+            AevonPageWrite(stop);
+            return;
+        }
+    }
     char line[220];
     snprintf(line, sizeof(line), "cell fit fix n=%d bad=%d blind=%d cell=%.0f box=%.0f r=%d",
              AevonCellFixes, span.bad, span.blind, cellH, box.size.height, did ? 1 : 0);
@@ -2724,6 +2793,17 @@ static int AevonInsideLines = 0;
 static CFAbsoluteTime AevonInsideAt = 0.0;
 
 static NSString *AevonFindPlayer(UIView *root, CGRect *out) {
+    if (root == nil) return nil;
+    // 0.4.61 — 名字里带 Player 的不一定是画面。
+    //
+    // 341 的 15:11:26 那一拍挑中的是 `AWEDPlayerProgre 430x200@0,649`（进度条视图），
+    // 于是同一份日志里一边写着「播放器只有 200 高」、另一边是
+    // `DDanmakuPlayerView 430x849` —— 读数自相矛盾，而真正要看的画面是后者。
+    // 一段竖屏画面至少占格子的一半，所以挑第一个「够大」的；都不够大才退回第一个
+    // 命中的（保持旧行为，免得在别的 App 上一条都读不出来）。
+    CGFloat need = [root bounds].size.height * 0.4;
+    NSString *fallback = nil;
+    CGRect fallbackRect = CGRectZero;
     NSMutableArray *todo = [NSMutableArray arrayWithObject:root];
     NSUInteger walked = 0;
     while (todo.count > 0 && walked < 400) {
@@ -2732,13 +2812,21 @@ static NSString *AevonFindPlayer(UIView *root, CGRect *out) {
         walked += 1;
         const char *name = class_getName([node class]);
         if (name != NULL && (strstr(name, "Player") != NULL || strstr(name, "Video") != NULL)) {
-            *out = [node convertRect:[node bounds] toView:root];
-            return [NSString stringWithUTF8String:name];
+            CGRect rect = [node convertRect:[node bounds] toView:root];
+            if (rect.size.height >= need) {
+                if (out != NULL) *out = rect;
+                return [NSString stringWithUTF8String:name];
+            }
+            if (fallback == nil) {
+                fallback = [NSString stringWithUTF8String:name];
+                fallbackRect = rect;
+            }
         }
         NSArray *kids = [node subviews];
         if (kids.count > 0) [todo addObjectsFromArray:kids];
     }
-    return nil;
+    if (fallback != nil && out != NULL) *out = fallbackRect;
+    return fallback;
 }
 
 /// 0.4.59 — **画面那一层**多大。
@@ -4868,6 +4956,12 @@ static void AevonPagerWatchTick(void *context) {
             // 计数，要等好几拍才轮到下一次真正的遍历。
             AevonAcquireTries = 0;
             AevonPagerMissNotes = 0;
+            // 0.4.61 — 「这张表太贵」这个结论不能带到下一张卡。341 里 15:12:23
+            // 那一次 55 ms 把工具永久打掉，紧接着的全屏就一次机会都没有了 ——
+            // 用户看到的是「浮窗正常、全屏断层」。现在它是「本张卡」而不是
+            // 「本次启动」，每次进卡都重新给一次机会。
+            AevonTableRemeasureDead = 0;
+            AevonTableRemeasureNotes = 0;
         }
         // 0.0.84 — 横版画面贴顶：每 0.6 s 看一眼「那块矩形在不在容器正中」。
         // 0.4.51 — 退休了（`AevonVideoCenterRetired`）。调用保留一行是为了留个
@@ -4965,21 +5059,17 @@ static void AevonPagerWatchTick(void *context) {
 
     UIScrollView *view = AevonPagerGet();
     if (view == nil) {
-        // 翻页器是 App 自己造的，开卡后 1 s 才出现。头 40 次每 4 拍（0.6 s）找
-        // 一次；之后降到每 40 拍（6 s）一次，一直到这张卡关闭为止。
+        // 翻页器是 App 自己造的，开卡后 1 s 才出现。每 4 拍（0.6 s）找一次，
+        // 一直找到 4000 拍（10 分钟，与一张卡的上限同寿）。
         //
-        // 0.4.60 — 原来这里是「最多 40 次就永久闭嘴」。340 把这个上限的代价量
-        // 出来了：14:58:01 那张卡整整 6 s 只打 `pager none`，而**认不出翻页器
-        // 就等于 `cell fit` 不存在** —— 唯一能修断层的那条通道，正好在断层全程
-        // 是关着的。降频而不是停摆：一张开着一分钟没人动的卡，用户一滑回来它
-        // 还认得出来。4000 拍 × 0.15 s = 10 分钟，与一张卡的上限同寿。
+        // 0.4.61 — **不降频**。0.4.60 把 40 次之后降到每 40 拍（6 s）一次，341 立刻
+        // 报了账：15:12:11 关卡回全屏，`pager keep box=932 …` 直到 **15:12:16**
+        // 才出现 —— 中间那五秒 `view == nil`，`cell fit` 一行读数都没有，而用户看到
+        // 的断层正是这五秒。一次遍历上限 4000 个视图、实测 0.3 ms，0.6 s 一次是
+        // 0.05% 的 CPU，省它没有意义；而「认不出翻页器 = 通道不存在」是致命的。
         if (AevonAcquireTries < 4000) {
             AevonAcquireTries += 1;
-            if (AevonAcquireTries <= 40) {
-                if ((AevonAcquireTries & 3) == 1) AevonPagerAcquire();
-            } else if ((AevonAcquireTries % 40) == 0) {
-                AevonPagerAcquire();
-            }
+            if ((AevonAcquireTries & 3) == 1) AevonPagerAcquire();
         }
         return;
     }

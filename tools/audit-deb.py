@@ -1397,13 +1397,18 @@ def main():
                       # 2.5 秒不记账也不动作，而屏幕上是空的。现在：
                       #   `n=` 视口里有几页；`bad=` 其中高度不对的；
                       #   `blind=1` 有格子但没有一格盖住视口中心（落点飞了）；
-                      #   `cv=` 正中那一格的 contentView 高度（内层跟没跟）。
-                      b"cell fit %s n=%d bad=%d cell=%.0f worst=%.0f box=%.0f cv=%.0f%s%s%s",
+                      #   `cv=` contentView 高度（内层跟没跟）。
+                      # 0.4.61 — 加了 `cvbad=`：341 的全屏读数全是
+                      # `bad=0 cell=932 cv=932` 而用户看到断层，因为 `cv` 只量了
+                      # 「盖住视口中心的那一格」。现在逐格比一遍，报出「frame 对、
+                      # 它自己的 contentView 还按旧高度排」的格子数（0 才是真齐）。
+                      b"cell fit %s n=%d bad=%d cell=%.0f worst=%.0f box=%.0f cv=%.0f cvbad=%d%s%s%s",
                       b"cell fit fix n=%d bad=%d blind=%d cell=%.0f box=%.0f r=%d",
                       b"cell fit give up cell=%.0f box=%.0f n=%d blind=%d",
                       # 0.4.59 — 格子 frame 对了、contentView 还按旧高度排：只请
                       # **这一格**重新排自己（`setNeedsLayout`，不写任何几何）。
-                      b"cell cv fix n=%d cv=%.0f cell=%.0f box=%.0f",
+                      # 0.4.61 起「这一格」= 可见格里最差的那一格，不再只是正中那一格。
+                      b"cell cv fix n=%d cv=%.0f cell=%.0f box=%.0f cvbad=%d",
                       # 0.4.51 — 卡片里的排版对账（`AevonHostedAudit`）。三个症状
                       # 「内容显示不全 / 点赞栏一半 / 底部标题条不见」是同一个形状：
                       # 版式比窗口高。这两行把「谁还停在 932」写成数：
