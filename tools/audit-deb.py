@@ -1549,8 +1549,12 @@ def main():
                       # 0.4.45 — 高度口径（`kbHeightFixOff` 可关）。门槛与判据 B 同一把尺子
                       # `cov = d + meas − shift ∈ ±12`（Safari 是 2，其余七家在几十到几百），
                       # 两拍才翻、单向；`verdict h=noop` 两次 ⇒ 自动退回并封死本进程重试。
-                      b"app: kb: mode hvote cov=%.0f bar=%.0f shift=%.0f votes=%d",
-                      b"app: kb: mode height cov=%.0f bar=%.0f shift=%.0f meas=%.0f rep=%.0f votes=%d sess=%d",
+                      # ⛔ 0.4.47：`mode hvote` 与 `mode height` 两行**默认不再编译**
+                      # （`AEVON_KB_HEIGHT_AUTOSTART 0`，函数体第一句就 return，
+                      #  -O2 把后面的 snprintf 常量整段删了）。高度口径已判死，
+                      #  断言随之撤掉；把常量改回 1 时这两条要一起恢复。
+                      # b"app: kb: mode hvote cov=%.0f bar=%.0f shift=%.0f votes=%d",
+                      # b"app: kb: mode height cov=%.0f bar=%.0f shift=%.0f meas=%.0f rep=%.0f votes=%d sess=%d",
                       b"app: kb: mode height off reason=noop moved=%.0f",
                       # 0.4.43 — 判据 B（「被盖」族）**0.4.44 起只读**。
                       # 327 证明它既治不了 Safari（翻前翻后 `barBot` 恒 500），又会骗翻

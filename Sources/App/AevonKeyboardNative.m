@@ -2280,9 +2280,11 @@ static BOOL AevonKbRectGivenUp(CGFloat d) {
 /// `why=kbwin` 那种焦点落在键盘窗的（Filza）扫不到 ⇒ 返回 −1，照旧按整块让位。
 static CGFloat AevonKbSafeFocusBottom(UIWindow *win) {
     if (win == nil) return -1.0;
+    // `AevonKbFindFirstResponder` 从 `win` 往下扫，找到的一定在它的子树里；
+    // ⛔ 不写 `isDescendantOfView:`（审计禁这条：那个选择子跟「替别人的窗口
+    // 强制重排」是同一批调用，0.4.x 之前各毁过一个版本）。
     UIView *fr = AevonKbFindFirstResponder(win, 20);
     if (fr == nil || fr == (UIView *)win) return -1.0;
-    if (![fr isDescendantOfView:win]) return -1.0;
     if ([fr isHidden] || [fr alpha] < 0.3) return -1.0;
     CGRect r = [fr convertRect:[fr bounds] toView:win];
     if (!isfinite(r.origin.y)) return -1.0;
