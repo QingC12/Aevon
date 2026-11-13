@@ -1077,7 +1077,15 @@ static CGRect AevonKbSceneBounds(UIWindowScene *scene) {
     // 判据换成纯几何：**承载面比真屏小 40 pt 以上，就答承载面**。不依赖任何
     // 通知、不看开关；没被托管的进程两者相等 ⇒ 走下面原样返回。215 是卡片与
     // 真屏的差，不是噪声。
-    if (box.size.height - space.size.height > 40.0) {
+    // ⛔ 只认「宽度一样、高度变矮」这一种。
+    //
+    // `[UIScreen bounds]` 从 iOS 8 起**不跟旋转**（恒竖版 430x932），而
+    // `coordinateSpace.bounds` 跟。不设这条闸的话，一个全屏 App 横过来时
+    // 两个读数会变成 430x932 与 932x430 —— 高度差 502，一眼就「该取小」，
+    // 于是我们会在横屏那一刻告诉它「你的屏是 932x430」。承载面永远是
+    // 「同宽、更矮」，多一条宽度闸把整类误判挡在外面。
+    if (box.size.height - space.size.height > 40.0
+        && fabs(box.size.width - space.size.width) <= 40.0) {
         // 原点仍用私有方法那一份：UIKit 读 `UIScreen.bounds` 时基本不看 origin，
         // 而它原来给的 (0,0) 已经在 215 那套换算里被验过很多轮，不动。
         return CGRectMake(box.origin.x, box.origin.y, space.size.width, space.size.height);
@@ -1141,6 +1149,7 @@ static CGRect AevonKbBounds(id self, SEL _cmd) {
             CGRect real = CGRectZero;
             if (AevonKbOrigBounds != NULL) real = AevonKbOrigBounds(self, _cmd);
             BOOL shrunk = (real.size.height > 200.0
+                           && fabs(real.size.width - box.size.width) <= 40.0
                            && real.size.height - box.size.height > 40.0);
             if (!CGRectIsEmpty(box) && (shrunk || AevonKbHookUIScreen)) {
                 // 0.4.15 — 系统原值只打一次：它回答「我们到底改掉了什么」。
@@ -1246,10 +1255,15 @@ static CGRect AevonKbNativeBoundsGet(id self, SEL _cmd) {
     if (CGRectIsEmpty(box)) return real;
     CGFloat ns = ((CGFloat (*)(id, SEL))objc_msgSend)(self, @selector(nativeScale));
     if (ns <= 0.0) return real;
-    // 0.4.54 — 与 `-bounds` 同一把尺子：**承载面真的比物理屏小 40 pt 以上**才换算。
-    // `-bounds` 已经不再等 band，这一条若还等，同一个 App 会在同一拍里同时拿到
-    // 「逻辑屏 717 / 物理屏 932」，那正是 321 判死过的那种不自洽。
-    if (!AevonKbHookUIScreen && real.size.height / ns - box.size.height <= 40.0) return real;
+    // 0.4.54 — 与 `-bounds` 同一把尺子：**宽度与物理屏一致、高度比它矮 40 pt 以上**
+    // 才是承载面。`-bounds` 已经不再等 band，这一条若还等，同一个 App 会在同一拍里
+    // 同时拿到「逻辑屏 717 / 物理屏 932」，那正是 321 判死过的那种不自洽。
+    // 宽度闸挡的是横屏：那一刻 `coordinateSpace` 是 932x430，乘上 scale 与
+    // `nativeBounds` 的宽度对不上，必须原样返回系统值。
+    CGFloat px = box.size.width * ns;
+    CGFloat py = box.size.height * ns;
+    if (fabs(px - real.size.width) > 40.0) return real;
+    if (!AevonKbHookUIScreen && real.size.height - py <= 40.0) return real;
     // 计数的是「被读了几次」。322 里若威锋修好，`nbr` 会是几千；若仍 215 而
     // `nbr=0`，说明那 574 来自窗口表里的 `UITextEffectsWindow`，不是这里 ——
     // 两条路都能被这一列判死，不用再猜。
