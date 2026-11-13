@@ -1541,17 +1541,25 @@ def main():
                       # `next=screen` 之后，下一次弹键盘就按屏幕坐标报。
                       b"app: kb: mode vote d=%.0f shift=%.0f votes=%d src=%s",
                       b"app: kb: mode screen shift=%.0f d=%.0f votes=%d src=%s next=screen",
-                      # 0.4.43 — 判据 B（「被盖」票，`src=cover`）。Safari 的地址栏不是被抬高
-                      # 215，而是被压到 `世界底 − shift`（`barBot=500`，差 2）。判据写成
-                      # `|d + meas − shift| ≤ 12` 且 `d < −40`。三个票源：`bar` / `focus` / `pane`。
-                      # ⚠ 翻过去是带自证的实验：威锋是「减」，Safari 若是「加」就会翻反 ⇒
-                      # 由下面那行 `verdict` 自己回答 `fit` / `overshoot` / `mid`。
+                      # 0.4.43 — 判据 B（「被盖」族）**0.4.44 起只读**。
+                      # 327 证明它既治不了 Safari（翻前翻后 `barBot` 恒 500），又会骗翻
+                      # Filza（第一响应者在键盘窗里，`bot=503` 是键盘窗坐标 = 世界 288）。
+                      # ⇒ 不再投票，只在 `bar` 行挂 `cov = d + meas − shift`：`≈0` 就是这一族。
+                      # `verdict` 保留：只有判据 A 翻过去之后才会打，用来判方向。
                       b"app: kb: verdict %s bar=%.0f kbtop=%.0f world=%.0f %s",
                       # 0.4.43 — Filza 的「假焦点」：第一响应者是个 `bounds` 0x0 的隐藏
                       # `UITextField`（`RenameView` 只用来拉键盘），以它为基准的 `fr/gap/d`
-                      # 全部作废。这时摊开父视图的子视图清单，顺便用「横满、高 20..半屏、
-                      # 底边落在 `世界底 − shift`」的候选投判据 B 的票。配额 6。
+                      # 全部作废。这时摊开父视图的子视图清单。0.4.44 起不再投票。配额 6。
                       b"app: kb: pane %s host=%.20s n=%d %s",
+                      # 0.4.44 — 焦点落在**键盘窗**里（`skip=kbwin(高度)`）：它给的是键盘窗
+                      # 坐标，不能拿来算 `d`。改去主窗找真编辑区：`pres` 是「被呈现控制器」
+                      # 链尾的视图 + 一层子视图，`field` 是主窗里底边最大的三个输入框。
+                      b"app: kb: fr %s view=%.28s %.0fx%.0f@%.0f,%.0f bot=%.0f skip=kbwin(%.0f) win=%.22s",
+                      b"app: kb: pres %s root=%.24s depth=%d top=%.24s view=%.24s %.0fx%.0f@%.0f,%.0f n=%d %s",
+                      b"app: kb: pres %s root=%.24s depth=%d top=%.24s view=none kbtop=%.0f",
+                      b"app: kb: pres %s root=none kbtop=%.0f",
+                      b"app: kb: field %s n=%d kbtop=%.0f %s",
+                      b"app: kb: field %s n=0 kbtop=%.0f",
                       # 0.4.42 — 焦点票（`src=focus`）。容器票会被「底板」骗掉：
                       # Turrit 的可见输入条底 135、玻璃底板底 199，容器票差 56 投不出，
                       # 焦点票 227 只差 12。闸门见 `AevonKbProbeFocusAndScene`。
@@ -1601,13 +1609,16 @@ def main():
                       #          323 的样本：威锋 143→d=215 / QQ 358→d=0 /
                       #          酷安 314→d=44（自带 44 表头，不作判据）/
                       #          贴吧 202（差 13，刚好落在 215 的容差外）。
-                      #   depth= 那个容器在父链第几层
+                      #   depth= 那个容器在父链第几层（0 = 焦点自己就是「容器」⇒ 0.4.44
+                      #          起 `depth=0` 不再投票：它量到的就是焦点本身，不是输入条）
+                      #   cov=   0.4.44 判据 B 的读数（`d + meas − shift`）：`≈0` = 「它以为
+                      #          自己脚下是 502」那一族。只读，不再翻口径。
                       # 319 的教训：`gap` 在备忘录（整屏文档视图）与 minis（顶部搜索框）
                       # 上天然离谱，只能看 `bar` 的 `d`。
                       b"app: kb: fr %s view=%.28s %.0fx%.0f@%.0f,%.0f bot=%.0f gap=%.0f kbtop=%.0f win=%.22s",
                       b"app: kb: fr %s view=none kbtop=%.0f",
                       b"app: kb: fr %s anc=%s",
-                      b"app: kb: fr %s bar=%.28s %.0f d=%.0f depth=%d",
+                      b"app: kb: fr %s bar=%.28s %.0f d=%.0f depth=%d cov=%.0f",
                       b"app: kb: fr %s bar=none d=999",
                       # 0.4.35 — App 主窗 scene 的落点 + 坐标空间 + 指南（同一拍）。
                       # 318 里六个 App 的 `guide` 全是 `430x34@0,683`（窗口底减安全区

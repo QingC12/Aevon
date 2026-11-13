@@ -9,6 +9,37 @@
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
 //
 // ---------------------------------------------------------------------------
+// 0.4.44 — 327：判据 B 判死（翻了个寂寞，还骗翻一家）；Filza 的焦点在键盘窗里
+// ---------------------------------------------------------------------------
+// 327 只有两家在场（Safari + QQ 对照），读数把两件事钉死了：
+//
+//   ① Safari **翻前翻后 `barBot` 恒 500**：
+//        t0.7 `m=0`（报 `430x359@0,358`）→ 455..500
+//        t1.7 起 `mode screen … src=focus`（报 `@0,573`，`note fix … m=1`）→ 仍然 500
+//      四个通道依旧全对（`note fix`/`guide`/`tree host`/`scn co`），症状一动没动
+//      ⇒ 我们报的矩形对它**零影响**，0.4.39 的换口径和 0.4.43 的被盖票都治不了它。
+//      它那两个症状（地址栏压在 500、网页输入框只让 134）都等于同一个数：
+//        `144 = 717 − 573`（573 = 键盘在**屏幕坐标**里的可见顶边）
+//        Safari 拿 144 当「键盘压住了多少」，再各减自己的留白：胶囊 144−8=136、WebKit 144−10=134。
+//      要让它算出 359，只能让「键盘的屏幕坐标」与「它的世界」对上号 —— 那是承载层的
+//      坐标关系（0.4.12 / 0.4.20 两次改键盘窗就翻在这上面）⇒ **本版不碰**，先止损。
+//   ② Filza 的第一响应者是**键盘窗里**的 `UITextField 270x49@80,454`
+//      （`win=UITextEffectsWindow`）：`bot=503` 是键盘窗坐标，换算到世界只有 288，
+//      离 kbtop(358) 还有 70 的空隙 —— 根本没被盖。可 `d=-145` 正好落进判据 B 的 ±12
+//      ⇒ 被骗着翻了一次。**这是坐标空间用错，不是 App 摆错。**
+//
+// 所以本版三件（都不动键盘窗、不动落点、不动 scene）：
+//   1. 判据 B **只读**：删掉 `src=cover` 的三个投票点（`bar` / `focus` / `pane`），
+//      只在 `bar` 行挂 `cov = d + meas − shift`。`≈0` 就是那一族，其余 App 是几百上千。
+//   2. 焦点落在键盘窗（`focusWin != appWin` 且窗高 > 世界高 + 20）⇒ 打
+//      `skip=kbwin(高度)` 后**一条判据都不跑**；改去主窗找真编辑区：
+//        `pres`  被呈现控制器链尾的视图 + 一层子视图（对话框都挂这儿）
+//        `field` 主窗里底边最大的三个 `UITextField`/`UITextView`
+//   3. `src=bar` 仍然要求 `depth ≥ 1`：`depth=0` 量到的是焦点自己，不是输入条。
+//
+// 判据（328）：Filza 重命名时看 `pres` / `field` 两行里谁是真的、`bot` 比 `kbtop` 低多少；
+// QQ 应维持 `bar=AIOBaseBarView 358 d=0 cov=-9999`，且**永不**出现 `mode` 行。
+// ---------------------------------------------------------------------------
 // 0.4.38 — 321：guide 修好了，932 只剩一个公开入口
 // ---------------------------------------------------------------------------
 // 321 先确认 0.4.37 那一条真的生效了（这次不是推的，是读数）：
@@ -513,6 +544,9 @@ static volatile int AevonKbVoteTick = 0;
 static volatile int AevonKbVoteLastTick = -1;
 /// 0.4.43 — 「假焦点」时摊开父视图子视图的配额（一次输入会话最多 6 条）。
 static volatile int AevonKbPaneProbes = 0;
+/// 0.4.44 — 「被呈现控制器链」与「主窗输入框清单」的配额（各 4 条）。
+static volatile int AevonKbPresProbes = 0;
+static volatile int AevonKbFieldProbes = 0;
 /// 0.4.43 — 翻到屏幕口径之后的「自证方向」行配额。
 static volatile int AevonKbVerdicts = 0;
 
@@ -1856,45 +1890,24 @@ static void AevonKbScreenVoteCore(CGFloat d, const char *src) {
     AevonKbScreenVoteTake(d, src);
 }
 
-/// 0.4.43 — 判据 B（「被盖」票）：App 把内容底对齐到了 `世界底 − shift`。
+/// 0.4.44 — 判据 B 降级成**只读读数**，不再投票、不再翻口径。
 ///
-/// 325/326 的 Safari 把判据 A 彻底绕开了：它的地址栏不是被「抬高 215」，
-/// 而是被「压到 502」——`barBot = 500`，两个数只差 2。
-///
-/// 这一族怎么来的：它把 `430x359@0,358` 当成**屏幕坐标**（358..717），
-/// 于是算出的键盘顶 = `717 − 215 = 502`，地址栏底就落到 500。
-/// 屏幕口径的 App 我们改通知里的 y 就能治（`AevonKbReportRect` 加 shift），
-/// 但它摆错之后 `d = 358 − 500 = −142`，永远落不进判据 A 的 ±12。
-///
-/// 换一条只跟「它摆到哪」有关的判据：
-///   `d + meas − shift ≈ 0`   ⇔   `kbtop + meas − shift ≈ barBot`
-/// 左边 `kbtop + meas` 就是**我们报出去的矩形底边**（正常恒等于世界底 717），
-/// 减 shift 得到 502 —— 它把内容底对齐到那儿，就是在说「我以为键盘底在世界 502」。
-///
-/// 用 326 七家实测核对过，只有 Safari 命中：
-///   Safari 500 ⇒ |−142+359−215| = 2 ✓
-///   QQ 358 ⇒ 144 ✗   威锋 143 ⇒ 359 ✗   酷安 314 ⇒ 188 ✗
-///   Turrit 131 ⇒ 371 ✗   minis 135 ⇒ 367 ✗   贴吧 202 ⇒ 300 ✗
-/// 两道硬闸：**必须真的被盖住**（`d < −40`，排除「本来就摆得高」的 App）+
-/// 量到的键盘高必须合理（`meas ≥ 40`，否则是收键盘那一拍）。
-/// ⛔ 判据能成立的前提是 `kbtop + meas` 确实贴世界底；键盘浮起 / 外接键盘时它会不贴，
-/// 那时 `meas` 与 `kbtop` 一起偏，这条票自然会投不出来 —— 这是想要的保守。
-///
-/// ⚠ **翻过去是一次带自证的实验，不是已验证的修法。**
-/// 「被盖」只说明它把矩形摆错了 215，**没说该加还是该减**：
-/// 威锋是「减」（`358 → 143`），Safari 若按 `WKScrollView` 那条线读是「加」（`358 → 573`），
-/// 两者在 `barBot` 上都只留下一个数，分不出来。所以 `AevonKbReportRect` 照旧按
-/// `+= shift` 翻，翻完由 `verdict` 那行自己判：`fit` 收工、`overshoot` 说明该改 `-=`。
-static void AevonKbScreenVoteCover(CGFloat d, const char *src) {
-    if (!AevonKbShown) return;
+/// 0.4.43 让 `d + meas − shift ≈ 0` 那一族（Safari `barBot=500`）也去翻，
+/// 327 的结果是**翻了等于没翻**，还顺带骗翻了一家：
+///   · Safari：翻前翻后 `barBot` 恒 500（`note fix` 从 `@358 m=0` 变成 `@573 m=1`，
+///     它照旧不动）⇒ 我们报的矩形对它**零影响**，这条票治不了它。
+///   · Filza：`fr` 那次的第一响应者是**键盘窗里**的 `UITextField 270x49@80,454`
+///     （`win=UITextEffectsWindow`），`bot=503` 是**键盘窗坐标**，换算到世界只有 288 ——
+///     根本没被盖，可 `d=-145` 正好落进 ±12 ⇒ 被骗着翻了一次。
+/// 所以这一族从此只留一个数：`cov = d + meas − shift`。
+///   `cov ≈ 0` 就是「它以为自己脚下是 502」的那一族；其余 App 都是几百上千，一眼能分。
+static CGFloat AevonKbCoverDelta(CGFloat d) {
     CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
     CGFloat shift = AevonKbPhysicalHeight() - worldH;
-    if (shift < 20.0 || shift > 400.0) return;
     CGFloat meas = (CGFloat)AevonKbLastHeight;
-    if (meas < 40.0) return;                            // 收键盘那一拍 / 量不到
-    if (d > -40.0) return;                              // 没被盖，不是这一族
-    if (fabs(d + meas - shift) > 12.0) return;
-    AevonKbScreenVoteTake(d, src);
+    if (meas < 40.0) return -9999.0;                    // 收键盘那一拍 / 量不到
+    if (d > -40.0) return -9999.0;                       // 没被盖，不是这一族
+    return d + meas - shift;
 }
 
 static void AevonKbScreenVote(CGFloat d, int barDepth) {
@@ -2042,9 +2055,8 @@ static void AevonKbProbeSiblingPanes(const char *tag, UIView *host, UIWindow *wi
     if (host == nil || win == nil) return;
     if (AevonKbPaneProbes >= 6) return;
     if (![NSThread isMainThread]) return;
+    (void)kbTop;                                        // 0.4.44 — 判据 B 只读，这里不再投票
     AevonKbPaneProbes += 1;
-    CGFloat worldW = [UIScreen mainScreen].bounds.size.width;
-    CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
     NSArray *subs = [host subviews];
     NSUInteger total = [subs count];
     char list[900] = "";
@@ -2061,19 +2073,164 @@ static void AevonKbProbeSiblingPanes(const char *tag, UIView *host, UIWindow *wi
                  r.origin.y + r.size.height, [sv isHidden] ? " hid" : "");
         size_t room = sizeof(list) - strlen(list) - 1;
         if (room > 1) strncat(list, bit, room);
-        // 只有「像输入条」的候选才投票：横满、高 20..半屏。整屏遮罩/背景出局。
-        if (![sv isHidden]
-            && r.size.width >= worldW * 0.88
-            && r.size.height >= 20.0
-            && r.size.height <= worldH * 0.5) {
-            AevonKbScreenVoteCover(kbTop - (r.origin.y + r.size.height), "pane");
-        }
         shown += 1;
     }
     char line[1000];
     snprintf(line, sizeof(line), "app: kb: pane %s host=%.20s n=%d %s\n",
              tag, class_getName([host class]), (int)total,
              (list[0] != '\0') ? list : "none");
+    AevonKbLog(line);
+}
+
+// ---------------------------------------------------------------------------
+// 0.4.44 — 假焦点落在键盘窗里时，去主窗找「真正那块编辑区」
+// ---------------------------------------------------------------------------
+//
+// 326/327 的 Filza 两次给出两个不同的第一响应者（一次 `0x0` 的隐藏 `UITextField`、
+// 一次键盘窗里那个 `270x49`），都不是真正那块编辑区 —— 它是「假焦点拉键盘 + 自绘
+// 输入框」。`pane` 只能摊假焦点的父视图，焦点一跑到键盘窗里就摊不到了。
+// 两条独立的只读取证互补：
+//   `pres`  被呈现控制器链的**链尾**（模态/对话框都挂这儿）；
+//   `field` 主窗里所有可见 `UITextField`/`UITextView`，按底边从大到小列前三个。
+// 两条都带 `bot=`，和 `kbtop=` 一比就知道到底谁被盖、被盖多少。
+
+/// 0.4.44 — 主窗「被呈现控制器」链尾的视图 + 它的一层子视图。只读，配额 4。
+static void AevonKbProbePresentedChain(const char *tag, UIWindow *appWin, CGFloat kbTop) {
+    if (appWin == nil) return;
+    if (AevonKbPresProbes >= 4) return;
+    if (![NSThread isMainThread]) return;
+    // 键盘没起来（kbtop 贴着世界底）就不打：那时没有「谁被盖」这回事，白占配额。
+    if (kbTop >= [UIScreen mainScreen].bounds.size.height - 40.0) return;
+    AevonKbPresProbes += 1;
+    UIViewController *root = [appWin rootViewController];
+    char line[1000];
+    if (root == nil) {
+        snprintf(line, sizeof(line), "app: kb: pres %s root=none kbtop=%.0f\n", tag, kbTop);
+        AevonKbLog(line);
+        return;
+    }
+    UIViewController *last = root;
+    UIViewController *cur = root;
+    int depth = 0;
+    while (cur != nil && depth < 8) {
+        last = cur;
+        cur = [cur presentedViewController];
+        depth += 1;
+    }
+    UIView *host = [last view];
+    if (host == nil) {
+        snprintf(line, sizeof(line),
+                 "app: kb: pres %s root=%.24s depth=%d top=%.24s view=none kbtop=%.0f\n",
+                 tag, class_getName([root class]), depth, class_getName([last class]), kbTop);
+        AevonKbLog(line);
+        return;
+    }
+    CGRect hr = [host convertRect:[host bounds] toView:appWin];
+    char list[600] = "";
+    NSArray *subs = [host subviews];
+    NSUInteger total = [subs count];
+    NSUInteger shown = 0;
+    for (NSUInteger i = 0; i < total && shown < 8; i++) {
+        UIView *sv = [subs objectAtIndex:i];
+        if (sv == nil) continue;
+        CGRect r = [sv convertRect:[sv bounds] toView:appWin];
+        char bit[130];
+        snprintf(bit, sizeof(bit), "%s%.22s %.0fx%.0f@%.0f,%.0f bot=%.0f%s",
+                 (shown == 0) ? "" : " | ", class_getName([sv class]),
+                 r.size.width, r.size.height, r.origin.x, r.origin.y,
+                 r.origin.y + r.size.height, [sv isHidden] ? " hid" : "");
+        size_t room = sizeof(list) - strlen(list) - 1;
+        if (room > 1) strncat(list, bit, room);
+        shown += 1;
+    }
+    snprintf(line, sizeof(line),
+             "app: kb: pres %s root=%.24s depth=%d top=%.24s view=%.24s %.0fx%.0f@%.0f,%.0f n=%d %s\n",
+             tag, class_getName([root class]), depth, class_getName([last class]),
+             class_getName([host class]), hr.size.width, hr.size.height,
+             hr.origin.x, hr.origin.y, (int)total,
+             (list[0] != '\0') ? list : "none");
+    AevonKbLog(line);
+}
+
+/// 0.4.44 — 主窗里的输入框清单（底边最大的三个）。只读，配额 4。
+#define AEVON_KB_FIELD_MAX 32
+
+typedef struct {
+    CGFloat bot;
+    CGFloat w;
+    CGFloat h;
+    CGFloat x;
+    CGFloat y;
+    const char *cls;
+    int first;
+} AevonKbFieldHit;
+
+static void AevonKbCollectFields(UIView *node, UIWindow *win, int depth, int *budget,
+                                 AevonKbFieldHit *hits, int *count) {
+    if (node == nil || depth < 0 || *budget <= 0) return;
+    *budget -= 1;
+    if ([node isKindOfClass:[UITextField class]] || [node isKindOfClass:[UITextView class]]) {
+        CGRect r = [node convertRect:[node bounds] toView:win];
+        if (r.size.width >= 30.0 && r.size.height >= 14.0
+            && ![node isHidden] && [node alpha] > 0.05
+            && *count < AEVON_KB_FIELD_MAX) {
+            hits[*count].bot = r.origin.y + r.size.height;
+            hits[*count].w = r.size.width;
+            hits[*count].h = r.size.height;
+            hits[*count].x = r.origin.x;
+            hits[*count].y = r.origin.y;
+            hits[*count].cls = class_getName([node class]);
+            hits[*count].first = [node isFirstResponder] ? 1 : 0;
+            *count += 1;
+        }
+    }
+    NSArray *subs = [node subviews];
+    NSUInteger total = [subs count];
+    for (NSUInteger i = 0; i < total && *budget > 0; i++) {
+        AevonKbCollectFields([subs objectAtIndex:i], win, depth - 1, budget, hits, count);
+    }
+}
+
+static void AevonKbProbeTextInputs(const char *tag, UIWindow *appWin, CGFloat kbTop) {
+    if (appWin == nil) return;
+    if (AevonKbFieldProbes >= 4) return;
+    if (![NSThread isMainThread]) return;
+    if (kbTop >= [UIScreen mainScreen].bounds.size.height - 40.0) return;
+    AevonKbFieldProbes += 1;
+    AevonKbFieldHit hits[AEVON_KB_FIELD_MAX];
+    memset(hits, 0, sizeof(hits));
+    int count = 0;
+    int budget = 600;
+    AevonKbCollectFields(appWin, appWin, 14, &budget, hits, &count);
+    char line[1000];
+    if (count <= 0) {
+        snprintf(line, sizeof(line), "app: kb: field %s n=0 kbtop=%.0f\n", tag, kbTop);
+        AevonKbLog(line);
+        return;
+    }
+    // 底边大的靠前（插入排序，最多 32 个）
+    for (int i = 1; i < count; i++) {
+        AevonKbFieldHit t = hits[i];
+        int k = i - 1;
+        while (k >= 0 && hits[k].bot < t.bot) {
+            hits[k + 1] = hits[k];
+            k -= 1;
+        }
+        hits[k + 1] = t;
+    }
+    char list[720] = "";
+    int shown = (count < 3) ? count : 3;
+    for (int i = 0; i < shown; i++) {
+        char bit[220];
+        snprintf(bit, sizeof(bit), "%s%.22s %.0fx%.0f@%.0f,%.0f bot=%.0f gap=%.0f%s",
+                 (i == 0) ? "" : " | ", hits[i].cls,
+                 hits[i].w, hits[i].h, hits[i].x, hits[i].y,
+                 hits[i].bot, kbTop - hits[i].bot, hits[i].first ? " FR" : "");
+        size_t room = sizeof(list) - strlen(list) - 1;
+        if (room > 1) strncat(list, bit, room);
+    }
+    snprintf(line, sizeof(line), "app: kb: field %s n=%d kbtop=%.0f %s\n",
+             tag, count, kbTop, list);
     AevonKbLog(line);
 }
 
@@ -2102,10 +2259,33 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
     CGFloat worldW = [UIScreen mainScreen].bounds.size.width;
     CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
     char line[400];
+    // 0.4.44 — 焦点落在**键盘自己的窗口**里 ⇒ 它给的坐标是键盘窗坐标（932 那一套），
+    // 不是世界坐标。拿它算 `d` / 投票全是错的：327 的 Filza 就是这样被投了一票 ——
+    // `fr view=UITextField 270x49@80,454 win=UITextEffectsWindow` ⇒ `bot=503`，
+    // 而 503 在键盘窗坐标里等于世界的 288，离 kbtop(358) 还有 70 的空隙，根本没被盖。
+    // 这类焦点只留一行证词，后面所有判据一条都不跑，改去主窗找「真正那块编辑区」。
+    CGFloat focusWinH = (focusWin != nil) ? focusWin.bounds.size.height : worldH;
+    BOOL focusOutside = (focusWin != nil && focusWin != appWin
+                         && focusWinH > worldH + 20.0);
     if (focus == nil) {
         snprintf(line, sizeof(line),
                  "app: kb: fr %s view=none kbtop=%.0f\n", tag, kbTop);
         AevonKbLog(line);
+        AevonKbProbePresentedChain(tag, appWin, kbTop);
+        AevonKbProbeTextInputs(tag, appWin, kbTop);
+    } else if (focusOutside) {
+        CGRect fo = [focus convertRect:[focus bounds] toView:focusWin];
+        snprintf(line, sizeof(line),
+                 "app: kb: fr %s view=%.28s %.0fx%.0f@%.0f,%.0f bot=%.0f skip=kbwin(%.0f) win=%.22s\n",
+                 tag, class_getName([focus class]),
+                 fo.size.width, fo.size.height, fo.origin.x, fo.origin.y,
+                 fo.origin.y + fo.size.height, focusWinH,
+                 class_getName([focusWin class]));
+        AevonKbLog(line);
+        // 假焦点在键盘窗里 ⇒ 真编辑区一定在主窗：先摊「被呈现控制器」链尾（对话框），
+        // 再按底边从大到小列主窗里的输入框。
+        AevonKbProbePresentedChain(tag, appWin, kbTop);
+        AevonKbProbeTextInputs(tag, appWin, kbTop);
     } else {
         CGRect fr = [focus convertRect:[focus bounds] toView:focusWin];
         CGFloat bot = fr.origin.y + fr.size.height;
@@ -2142,11 +2322,9 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
         if (focusWin == appWin && bot < worldH / 3.0) {
             AevonKbScreenVoteCore(kbTop - bot, "focus");
         }
-        // 0.4.43 — 判据 B（被盖那一族，Safari）：焦点底边落在世界下半部、
-        // 且比 kbtop 低出「键盘高 − shift」时，是它把矩形当屏幕坐标用了。
-        if (focusWin == appWin) {
-            AevonKbScreenVoteCover(kbTop - bot, "focus");
-        }
+        // 0.4.43 — 判据 B（被盖那一族）**不再投票**：327 证明它翻了个寂寞（Safari 翻前翻后
+        // 恒 500），还骗翻了 Filza。这一族现在只在 `bar` 行挂一个 `cov=` 读数（见
+        // `AevonKbCoverDelta`）。
 
         // 父链五层 + 「输入条容器」。SwiftUI 的类名很长，每段截 28 字符，
         // 够认出「是不是整套被移动的容器」。
@@ -2192,13 +2370,11 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
             // 这条取代 `gap` 当判据 —— QQ 正常时 barBot 恒 = 358 = kbtop ⇒ d=0。
             CGFloat d = kbTop - barBot;
             snprintf(line, sizeof(line),
-                     "app: kb: fr %s bar=%.28s %.0f d=%.0f depth=%d\n",
-                     tag, barCls, barBot, d, barDepth);
+                     "app: kb: fr %s bar=%.28s %.0f d=%.0f depth=%d cov=%.0f\n",
+                     tag, barCls, barBot, d, barDepth, AevonKbCoverDelta(d));
             AevonKbLog(line);
             // 0.4.39 — 顺手记一票「这个 App 是不是在按屏幕坐标换算」（见 `AevonKbScreenVote`）。
             AevonKbScreenVote(d, barDepth);
-            // 0.4.43 — 同一个 `d` 再按判据 B 试一票（Safari 走这条：`d=-142`）。
-            AevonKbScreenVoteCover(d, "bar");
             // 0.4.43 — 翻过去之后自己证明方向对不对（⚠ 这一步只读，不改任何几何）：
             //   `fit`        输入条底边回到 kbtop 附近 ⇒ 屏幕口径是对的，收工；
             //   `overshoot`  冲到世界底部 ⇒ 这个 App 是「加 shift」型，翻反了，
