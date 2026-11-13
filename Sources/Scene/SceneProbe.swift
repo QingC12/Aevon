@@ -2184,6 +2184,26 @@ public func AevonCardLandscapeEnter(_ bundle: UnsafePointer<CChar>?,
     return 1
 }
 
+/// 0.4.71 — 退出横屏的第一拍：只解钉 scene frame，卡片保持横屏。
+///
+/// 348 的时间线：卡片 20:48:35 就换回竖版画布，App 世界 20:48:37 才转回竖
+/// （`transition full=717`），中间 2 秒竖画布接横世界 = 大面积黑屏。根因是
+/// frame 还钉在 717x430。第一拍把 frame 目标写回竖版并推给系统，世界立刻
+/// 开始转回；世界真回竖（宿主 `AevonRotSweep` 读到）才走 `AevonCardLandscapeExit`
+/// 收卡。返回 1 = 解钉了；0 = 没有这张卡 / 不在横屏。
+@_cdecl("AevonCardLandscapeExitPhase1")
+public func AevonCardLandscapeExitPhase1(_ bundle: UnsafePointer<CChar>?) -> Int32 {
+    guard let bundle = bundle else { return 0 }
+    let identifier = String(cString: bundle)
+    guard identifier.count > 2 else { return 0 }
+    guard Thread.isMainThread else { return 0 }
+    guard let host = FloatHost.host(of: identifier) else { return 0 }
+    guard host.isLandscapeCard else { return 0 }
+    host.landscapeExitUnpin()
+    Log.write("win: card landscape exit phase1 b=" + identifier)
+    return 1
+}
+
 /// 0.4.65 — App 退出横屏（见 `AevonScene.m` 的 `AevonLandscapeExit`）。
 ///
 /// 与进入对称：只切卡片，几何由 `setLandscape(false)` 一处算。

@@ -1027,6 +1027,11 @@ def main():
                   b"win: rot pending (no card) slot=%d b=%s",
                   b"win: landscape ask sent b=",
                   b"win: landscape undock first b=",
+                  # 0.4.71 — 退出两拍的三条证词：解钉动作（unpin，带推给系统的
+                  # frame 与 door）、phase1 入口、phase2 收卡（世界回竖那一拍）。
+                  b"win: landscape unpin frame=%.0fx%.0f door=%d b=%@",
+                  b"win: card landscape exit phase1 b=",
+                  b"win: card landscape exit phase2 world=%.0fx%.0f tries=%d b=%s",
                   b"win: keyboard fill ignored in landscape b=",
                   # 0.4.0 — `com.ss.iphone.ugc.Aweme`（抖音在「出生整屏」名单里）原本
                   # 断言在这里，但它四个出现点全在 `Sources/App/AevonAppHook.m`；
@@ -1611,6 +1616,14 @@ def main():
                       # frame 一起收回去；没有这一行而卡片横着不退 ⇒ 翻页器没
                       # 认出来（看 `page pager keep`）。
                       b"app: rot feed exit world=%.0fx%.0f pager=%.0fx%.0f",
+                      # 0.4.71 — 退出两拍：先解钉、后收卡。判据：
+                      #   `app: rot exit ask n=1 world=717x430` ⇒ 世界还横时补发的
+                      #        「请回竖」几何请求发出去了（宿主解钉之后才落得了地）；
+                      #   `win: card landscape exit phase1` / `landscape unpin` 在宿主
+                      #        dylib 里 ⇒ frame 解钉通路编进去了；
+                      #   `win: card landscape exit phase2 world=430x717` ⇒ 世界真回
+                      #        竖才收卡，黑屏窗口被关上。
+                      b"app: rot exit ask n=%d world=%.0fx%.0f",
                       # ------------------------------------------------------------------
                       # 0.4.7 — 键盘整条换成母版机制（`Sources/App/AevonKeyboardNative.m`）。
                       #

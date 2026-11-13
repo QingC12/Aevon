@@ -57,6 +57,8 @@ extern int AevonCardLandscapeEnter(const char *bundle,
                                    double vx, double vy, double vw, double vh);
 /// 0.4.65 — App 退出横屏（或用户从全屏缩回卡片）。返回 1 = 真切回竖版。
 extern int AevonCardLandscapeExit(const char *bundle);
+/// 0.4.71 — 退出第一拍：只解钉 scene frame，卡片保持横屏。返回 1 = 解钉了。
+extern int AevonCardLandscapeExitPhase1(const char *bundle);
 
 /// The scene manager is a singleton with no public door, and its spelling has
 /// changed across releases. Resolving it here keeps the class-method dispatch
@@ -922,6 +924,17 @@ static double AevonRotWorldH[AEVON_ARMED_MAX];
 /// 看到的是「横竖来回来去闪」。时间戳记「第一次读到 0 的时刻」，隔半秒再确认
 /// 一次仍然为 0 才真的退 —— 台面下的重排不会撑过半秒。
 static double AevonRotExitAt[AEVON_ARMED_MAX];
+/// 0.4.71 — **退出分两拍：先解钉、后收卡**。
+///
+/// 348 的黑屏：`AevonRotApplySeen` 收到 0 那一拍就把画布/卡片/scene frame 一起
+/// 收回，但世界还钉在 717x430、要 1~2 s 才转回竖（20:48:35 收卡 → 20:48:37
+/// `transition full=717`），期间竖版画布接横版世界 = 大面积黑屏。现在收到 0
+/// 且世界还横时，第一拍只调 `AevonCardLandscapeExitPhase1` 把 frame 写回竖版
+/// 推给系统（世界立刻开始转），卡片保持横屏；`AevonRotSweep` 每拍读世界，
+/// 真回竖（或重试满 8 拍 3.2 s 兕底）才走全量退出。挂起期间 App 重报 1
+/// （用户又进全屏）则取消挂起，走正常的进横屏。
+static int AevonRotRestorePending[AEVON_ARMED_MAX];
+static int AevonRotRestoreTries[AEVON_ARMED_MAX];
 /// 0.4.67 — App 报上来的「视频区」（keyWindow 坐标）。
 ///
 /// 0.4.68 — **只当证词**：0.4.67 拿它做「把视频区搬到卡片中心」的平移，于是
@@ -1882,7 +1895,8 @@ static void AevonLandscapeExit(int slot, NSInteger orient) {
     if (name == NULL) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         if (name[0] == '\0') { free(name); return; }
-        AevonCardLandscapeExit(name);
+        // 0.4.71 — 同样走分流：系统写整屏竖版时世界也可能还没转完。
+        AevonRotExitDispatch(slot);
         free(name);
     });
 }
@@ -1991,6 +2005,40 @@ void AevonRotAsk(const char *bundle, int on) {
     });
 }
 
+/// 0.4.71 — 退出横屏的分流口。世界还横 ⇒ 先只解钉（phase1）+ 挂起，等世界
+/// 回竖再收卡（sweep 的 phase2）；世界已竖或没有读数 ⇒ 照旧全量退出。
+///
+/// 348 的黑屏：收卡那一拍世界还是 717x430，竖版画布接横版世界黑 2 秒。
+/// phase1 把 frame 目标写回竖版并推给系统，世界立刻开始转；卡片保持横屏
+/// 直到世界真回竖 —— 期间横屏内容一直是对的，没有黑帧。
+static void AevonRotSweep(void);
+static void AevonRotExitDispatch(int slot) {
+    if (slot < 0 || slot >= AEVON_ARMED_MAX) return;
+    if (AevonArmed[slot][0] == '\0') return;
+    BOOL landscape = (AevonRotWorldW[slot] > AevonRotWorldH[slot] + 40.0);
+    char *name = strdup(AevonArmed[slot]);
+    if (name == NULL) return;
+    if (landscape && AevonRotRestorePending[slot] == 0) {
+        AevonRotRestorePending[slot] = 1;
+        AevonRotRestoreTries[slot] = 0;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (name[0] != '\0') AevonCardLandscapeExitPhase1(name);
+            free(name);
+        });
+        // 挂起期间主动轮询：0.4 s 一拍，最多 8 拍（3.2 s）后兜底强收。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(0.4 * NSEC_PER_SEC)),
+                       AevonBandQueueGet(), ^{
+            AevonRotSweep();
+        });
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (name[0] != '\0') AevonCardLandscapeExit(name);
+            free(name);
+        });
+    }
+}
+
 /// 把「App 说我横了」落到卡片上。主线程。
 static void AevonRotApplySeen(void) {
     for (int i = 0; i < AEVON_ARMED_MAX; i++) {
@@ -2007,10 +2055,13 @@ static void AevonRotApplySeen(void) {
                       AevonArmed[i]] UTF8String]);
         int applied = 1;
         if (on == 1) {
+            // 0.4.71 — 重进横屏：取消上一轮未完成的退出挂起。
+            AevonRotRestorePending[i] = 0;
             applied = AevonCardLandscapeEnter(name, AevonRotVidX[i], AevonRotVidY[i],
                                               AevonRotVidW[i], AevonRotVidH[i]);
         } else {
-            AevonCardLandscapeExit(name);
+            // 0.4.71 — 分流：世界还横 ⇒ phase1 只解钉 + 挂起；已竖 ⇒ 全量退出。
+            AevonRotExitDispatch(i);
         }
         if (on == 1 && applied == 0) {
             // 0.4.67 — 卡片还没建好（开卡那一拍 `FloatHost.host` 找不到它）。
@@ -2044,6 +2095,31 @@ static void AevonRotSweep(void) {
                 double vh = 0;
                 int on = AevonRotPoll(AevonArmed[i], &w, &h, &vx, &vy, &vw, &vh);
                 if (on < 0) continue;
+                // 0.4.71 — phase1 挂起：世界回竖（或兕底到点）才收卡。
+                // 在判重之前查：挂起期间 App 持续报 0，不能被判重吞掉。
+                if (AevonRotRestorePending[i] != 0) {
+                    if (w <= h + 40.0 || AevonRotRestoreTries[i] >= 8) {
+                        AevonRotRestorePending[i] = 0;
+                        char *nm = strdup(AevonArmed[i]);
+                        if (nm != NULL) {
+                            AevonLogRaw([[NSString stringWithFormat:
+                                          @"win: card landscape exit phase2 world=%.0fx%.0f tries=%d b=%s",
+                                          w, h, AevonRotRestoreTries[i], nm] UTF8String]);
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                if (nm[0] != '\0') AevonCardLandscapeExit(nm);
+                                free(nm);
+                            });
+                        }
+                    } else {
+                        AevonRotRestoreTries[i] += 1;
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                     (int64_t)(0.4 * NSEC_PER_SEC)),
+                                       AevonBandQueueGet(), ^{
+                            AevonRotSweep();
+                        });
+                    }
+                    continue;
+                }
                 // 0.4.68 — 判重**只看方向**，不看视频区。
                 //
                 // 0.4.67 把 vid 的四个数也放进判重条件里，于是竖屏信息流每滚一下

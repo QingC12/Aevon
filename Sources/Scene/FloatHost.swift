@@ -1062,15 +1062,15 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return CGSize(width: w.rounded(), height: h.rounded())
     }
 
-    /// 0.4.68 — 横版卡片的宽高比：**2.16**（用户定档，TrollOpen 实测同值）。
+    /// 0.4.71 — 横版卡片的宽高比：**1.667（= 世界的宽高比）**。
     ///
-    /// 这个数的来源是「整屏转置后缩到满宽」：屏 430x932 转 90° 是 932x430，
-    /// 缩到卡片宽 430 ⇒ 高 430 × 430/932 = 198.4，比例 932/430 = 2.167。
-    /// TrollOpen 录屏实测 443x205 = 2.161，同一件事。
-    ///
-    /// ⛔ 不是 16:9。0.4.65~0.4.67 写死 `9/16`（卡片 430x242），比母版高 18%，
-    /// 而母版那块卡片装的是**整个横屏界面**，多出来的 43 pt 全是把内容切掉的。
-    static let landscapeAspect: CGFloat = 2.16
+    /// 0.4.68 曾按用户要求定 2.16（TrollOpen 录屏实测 443x205）。但 TrollOpen 的
+    /// 世界是**整屏转置 932x430**，卡片比例 = 世界比例 ⇒ 满宽零裁切；我们的世界
+    /// 是**画布转置 717x430**（1.667），卡片硬开 2.16 就必须裁 59 pt（上下各
+    /// 29.5）——348：返回箭头、进度条被裁掉，「页面显示不全」。
+    /// 满宽且完整只有一个解：卡片比例 = 世界比例。世界 717x430 ⇒ 卡 430x258。
+    /// 世界尺寸若变（分屏等），比例失配会回到「装得下」而非裁切，安全。
+    static let landscapeAspect: CGFloat = 1.6674
 
     /// 横版卡片的落点尺寸：满屏宽、按 2.16 定高。
     static func landscapeCard(in bounds: CGRect) -> CGSize {
@@ -1156,10 +1156,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 画布就得跟着转。** 这就是「屏幕转置」在本工程里的全部含义。
     ///
     /// ## 尺寸
-    /// 卡片 = 屏宽 430 × 430/2.16 = 430x199（`landscapeAspect`）。整个世界
-    /// 717x430 按「装得下」缩进去（`followContent`）⇒ 0.4628 倍、332x199，
-    /// 左右各 49 pt 黑底。视频 16:9 在横屏界面里是 764x430（铺满高），缩完
-    /// 352x199 —— 完整、不裁、不歪。和 TrollOpen 录屏那块 443x205 同一个形状。
+    /// 卡片 = 屏宽 430 × 430/1.6674 = 430x258（`landscapeAspect` = 世界比例）。
+    /// 世界 717x430 缩到卡片宽 ⇒ 恰好 258 高，满宽零裁切 —— 返回箭头、进度条
+    /// 全部可见（0.4.70 的 2.16 会裁上下各 29.5 pt，348 判死）。
+    ///
+    /// ## 退出两拍（0.4.71）
+    /// 0.4.70 在收到「全屏已退」那一拍就把画布、卡片、scene frame 一起收回，
+    /// 但 App 世界要 1~2 s 才真的转回竖（348：20:48:35 收卡、20:48:37 才
+    /// `transition full=717`），期间竖版画布接横版世界 = 大面积黑屏。
+    /// 现在 `landscapeExitUnpin()` 只解钉 frame（世界立刻开始转回），卡片保持
+    /// 横屏；世界真回竖（`AevonRotSweep` 读到）才走 `setLandscape(false)`。
     ///
     /// ## 为什么现在敢推 scene frame
     /// 0.4.67 的注释写着「⛔ 横屏不推 scene frame」，理由是 0.4.65 推 717x430
@@ -1245,6 +1251,25 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                          frame.minX, frame.minY,
                          landscapeVideo.width, landscapeVideo.height,
                          landscapeVideo.minX, landscapeVideo.minY, door, bundle))
+    }
+
+    /// 0.4.71 — 退出的第一拍：**只解钉 scene frame，卡片保持横屏**。
+    ///
+    /// 348 的时间线：20:48:35 收卡（画布换回竖版）→ 20:48:37 世界才转回竖，
+    /// 中间 2 秒竖画布接横世界 = 大面积黑屏。根因是 scene frame 还钉在
+    /// 717x430，App 的回竖请求落不了地；把 frame 目标写回竖版并推给系统，
+    /// 世界立刻开始转，这一拍不动画布、不动卡片 —— 用户看到的是横屏内容
+    /// 一直好好待着，转完（`AevonRotSweep` 读到竖世界）才收卡。
+    func landscapeExitUnpin() {
+        guard landscapeOn, let window = window else { return }
+        let pn = portraitNatural ?? CGSize(width: natural.height, height: natural.width)
+        AevonSceneFrameSet(bundle, 0, 0, Double(pn.width), Double(pn.height))
+        var door: Int = 0
+        if let sc = window.windowScene {
+            door = Int(AevonPushSceneFrameStrict(sc))
+        }
+        Log.write(String(format: "win: landscape unpin frame=%.0fx%.0f door=%d b=%@",
+                         pn.width, pn.height, door, bundle))
     }
 
     /// 0.0.81 — 画布装进卡片的那个比例。
@@ -2344,7 +2369,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 又回到「一缩就变形状」。一条比例下主窗缩到底和小窗完全同形，停靠看不出
     /// 接缝。小窗 168 宽落 21.4 —— 比原来的 13 圆，那正是「和视频一致」的代价
     /// 与目的。
-    static let cornerRatio: CGFloat = 0.1273
+    /// 0.4.71 — 12.73 % → **8 %**（用户：「横屏的圆角化太严重，看着别扭，
+    /// 减小圆角化，让他看起来方一点」）。
+    ///
+    /// 348 实测：横屏卡 430 宽落 55 pt 圆角（12.73 %），配 199 高的横条就是
+    /// 「胶囊」观感。降到 8 %：横屏卡 430 → 34、竖版主窗 355 → 28。小窗
+    /// 98 → 8（floor 4 之上），比例制不变 —— 「一缩就变形状」的老病不会回来。
+    /// 母版量法不变（比例换算），只是比例本身按用户定档收窄。
+    static let cornerRatio: CGFloat = 0.08
     static let cornerFloor: CGFloat = 4
 
     /// 唯一一处「卡宽 → 圆角」。`lift` 那条动画和 `applyCorner` 都走这里，
@@ -2701,16 +2733,15 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let dy = total.y - panStep.y
         panStep = total
         if zone.isCorner, let start = resizeStart {
-            // 0.4.68 — 横屏缩放：**宽度驱动、锁 2.16**。
+            // 0.4.71 — 宽度驱动、锁 1.667（= 世界比例，见 `landscapeAspect`）。
             //
             // 竖屏那一套是高度驱动，因为竖卡的形状由高度系数决定；横卡的形状
             // 由屏幕宽决定（满宽 430 是上限），所以主变量换成宽度。两个界都来自
             // 屏幕：小到 180（再小就只剩一行字），大到满宽（左右两条边已经撤了，
             // 不需要再给环留 `margin`）。
             //
-            // ⛔ 高度不是从 `natural` 的宽高比推。横屏画布是 717x430（1.667），
-            // 按它推会把卡片拉成 1.667，与 `setLandscape` 的 2.16 打架 —— 一次
-            // 是从角上拖，一次是从开卡，两条路给出两种形状。
+            // ⛔ 高度不是从 `natural` 的宽高比推之外的第二套数。横屏画布是 717x430
+            // （1.667），卡片锁同一个比例 ⇒ 缩放时内容始终恰好装满，无裁切。
             if landscape {
                 let minW: CGFloat = 180
                 let maxW = window.bounds.width
