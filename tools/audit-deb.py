@@ -1534,19 +1534,32 @@ def main():
                       #      0 = 窗口坐标（默认）、1 = 屏幕坐标（origin.y 已加回 215）。
                       #      322 里威锋的回复条底边 = 我们报的 358 − 215，说明它把矩形
                       #      当屏幕坐标在做 screen→window 换算 ⇒ 只能按屏幕坐标喂它。
-                      b"app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f bgn=%.0fx%.0f@%.0f,%.0f m=%d",
+                      # `h=` 0.4.45 起：高度口径（高度已加 shift，顶边 = world − 高度）。
+                      #      两条互斥：0.4.39 翻 origin 对 Safari 零反应（翻前 @358、
+                      #      翻后 @573，`bot` 恒 500），328 的 `cov=2` + 327 的静止位
+                      #      623 → 升起位 500 说明它算的是 144 = 717 − 573、573 = 932 − 359。
+                      #      给高度 359 + 215 = 574 之后 932 − 574 = 358，两条算式同解。
+                      b"app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f bgn=%.0fx%.0f@%.0f,%.0f m=%d h=%d",
                       # 0.4.39 — 口径自动校准（见 `AevonKbScreenVote`）。
                       # 判据只有一条：`d`（报出去的 kbtop − 输入条底边）正好等于卡片偏移。
                       # 两票才翻，单向、进程内粘住；`kbScreenModeOff` 可关。
                       # `next=screen` 之后，下一次弹键盘就按屏幕坐标报。
                       b"app: kb: mode vote d=%.0f shift=%.0f votes=%d src=%s",
                       b"app: kb: mode screen shift=%.0f d=%.0f votes=%d src=%s next=screen",
+                      # 0.4.45 — 高度口径（`kbHeightFixOff` 可关）。门槛与判据 B 同一把尺子
+                      # `cov = d + meas − shift ∈ ±12`（Safari 是 2，其余七家在几十到几百），
+                      # 两拍才翻、单向；`verdict h=noop` 两次 ⇒ 自动退回并封死本进程重试。
+                      b"app: kb: mode hvote cov=%.0f bar=%.0f shift=%.0f votes=%d",
+                      b"app: kb: mode height cov=%.0f bar=%.0f shift=%.0f meas=%.0f next=%.0f votes=%d sess=%d",
+                      b"app: kb: mode height off reason=noop moved=%.0f",
                       # 0.4.43 — 判据 B（「被盖」族）**0.4.44 起只读**。
                       # 327 证明它既治不了 Safari（翻前翻后 `barBot` 恒 500），又会骗翻
                       # Filza（第一响应者在键盘窗里，`bot=503` 是键盘窗坐标 = 世界 288）。
                       # ⇒ 不再投票，只在 `bar` 行挂 `cov = d + meas − shift`：`≈0` 就是这一族。
-                      # `verdict` 保留：只有判据 A 翻过去之后才会打，用来判方向。
+                      # `verdict` 保留：判据 A 翻过去之后判方向；0.4.45 起高度口径走
+                      # `h=fit|partial|noop|mid` + `moved=`（真的往上走了多少）。
                       b"app: kb: verdict %s bar=%.0f kbtop=%.0f world=%.0f %s",
+                      b"app: kb: verdict %s bar=%.0f kbtop=%.0f world=%.0f h=%s moved=%.0f",
                       # 0.4.43 — Filza 的「假焦点」：第一响应者是个 `bounds` 0x0 的隐藏
                       # `UITextField`（`RenameView` 只用来拉键盘），以它为基准的 `fr/gap/d`
                       # 全部作废。这时摊开父视图的子视图清单。0.4.44 起不再投票。配额 6。
@@ -1555,6 +1568,16 @@ def main():
                       # 坐标，不能拿来算 `d`。改去主窗找真编辑区：`pres` 是「被呈现控制器」
                       # 链尾的视图 + 一层子视图，`field` 是主窗里底边最大的三个输入框。
                       b"app: kb: fr %s view=%.28s %.0fx%.0f@%.0f,%.0f bot=%.0f skip=kbwin(%.0f) win=%.22s",
+                      # 0.4.45 — 这个假焦点挂在谁身上（在它自己的窗口坐标系里），
+                      # 用来区分「键盘自己的隐藏输入框」与「App 把对话框搬进了 932 高的旁窗」。
+                      b"app: kb: fr %s kanc=%s",
+                      # 0.4.45 — 主窗视图树（剪枝后 ≤22 行）。328 里 `field n=0`、
+                      # `pres` 只有根视图、`winl` 主窗 `fr=none` ⇒ Filza 的编辑区是自绘的，
+                      # 只能看树。整块在 `kbtop − 40` 以上、尺寸 < 40×8、类名带
+                      # 列表/单元格/导航条的会被剪掉（保留一行标 `cut`）。
+                      b"app: kb: atree %s begin kbtop=%.0f root=%.24s",
+                      b"app: kb: atree %.*s%.24s %.0fx%.0f@%.0f,%.0f bot=%.0f n=%lu%s",
+                      b"app: kb: atree %s end lines=%d budget=%d",
                       b"app: kb: pres %s root=%.24s depth=%d top=%.24s view=%.24s %.0fx%.0f@%.0f,%.0f n=%d %s",
                       b"app: kb: pres %s root=%.24s depth=%d top=%.24s view=none kbtop=%.0f",
                       b"app: kb: pres %s root=none kbtop=%.0f",

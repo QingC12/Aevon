@@ -9,6 +9,35 @@
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
 //
 // ---------------------------------------------------------------------------
+// 0.4.45 — 328：Safari 的算式闭合（高度口径）；Filza 只能看树
+// ---------------------------------------------------------------------------
+// 328 只有 Safari + 微信（对照组）+ 一整段 Filza。
+//
+//   ① 微信干净：`note fix` 全是 `359@358 m=0`，零 `mode` 行。
+//   ② Safari 仍 `bot=500`、`cov=2`（`431x45@28,455` 三拍不动）。
+//      327 的静止位把最后一块拼上了：
+//        键盘收起 `bar down txt=UITextFieldLabel 334x19@169,604 bot=623`
+//        键盘升起 `fr UnifiedField 342x45@28,455 bot=500`
+//      同一根地址栏只往上走了 136 ≈ **144**，不是 359 ⇒ 它算出的占高就是 144，
+//      而 `144 = 717 − 573`、`573 = 932 − 359`：它拿**键盘在屏幕坐标里的顶边**
+//      当成了世界的顶边。0.4.39 翻的是 `origin.y` —— 它不看原点，所以零反应；
+//      它看的是**高度**（用 932 去减）。于是本版换一条从未试过的通道：
+//      把报出去的高度加上 shift（359 → 574），`932 − 574 = 358` ⇒ 占高 359 ✓
+//      （同一族另一条算式 `高度 − shift = 359` 也同解）。门槛仍是 `cov ∈ ±12`
+//      （七家实测只有 Safari 能过），两拍才翻、单向；`verdict h=noop` 两次
+//      自动退回并封死，避免下一次弹键盘又翻一遍。
+//   ③ Filza 三条通道全堵死：
+//        `winl`  主窗 `fr=none`
+//        `fr`    `view=UITextField 270x49@80,454 … skip=kbwin(932)`
+//        `field` 主窗里可见的 `UITextField`/`UITextView` **一个都没有**（`n=0`）
+//      ⇒ 编辑区是自绘的。本版只加两件取证：`kanc`（那个 932 高旁窗里的父链）
+//      与 `atree`（主窗剪枝视图树）—— 先看清它长什么样，再决定动不动。
+//
+// 判据（329）：Safari 看 `mode hvote cov=2` → `mode height … next=574`，
+// 之后 `note fix … h=1`（报 `430x574@0,143`）；再开键盘时
+// `verdict h=fit|partial|noop moved=`，其中 `moved ≥ 60` 才算这条通道通。
+// Filza 看 `kanc=` 与 `atree` 那二十来行；QQ/微信/威锋/minis/Turrit 应无任何变化。
+// ---------------------------------------------------------------------------
 // 0.4.44 — 327：判据 B 判死（翻了个寂寞，还骗翻一家）；Filza 的焦点在键盘窗里
 // ---------------------------------------------------------------------------
 // 327 只有两家在场（Safari + QQ 对照），读数把两件事钉死了：
@@ -549,6 +578,38 @@ static volatile int AevonKbPresProbes = 0;
 static volatile int AevonKbFieldProbes = 0;
 /// 0.4.43 — 翻到屏幕口径之后的「自证方向」行配额。
 static volatile int AevonKbVerdicts = 0;
+
+/// 0.4.45 — 「高度口径」：只改**高度**，不动原点。
+///
+/// 0.4.39 翻的是 `origin.y += 215`，328 证明 Safari 对此**零反应**
+/// （翻前 `@358`、翻后 `@573`，`barBot` 恒 500）。
+/// 而 327 的 `down` 拍给了另一半答案：
+/// ```
+///   键盘收起  bar down txt=UITextFieldLabel 334x19@169,604 bot=623   （静止位）
+///   键盘升起  fr UnifiedField 342x45@28,455 bot=500                （同一根地址栏）
+/// ```
+/// 它只往上走了 **136 ≈ 144** 的百分之九十几 —— 也就是说它算出的「键盘占多少」
+/// 是 **144**，不是 359。144 = `717 − 573`，573 = `932 − 359` = 键盘在**屏幕坐标**
+/// 里的顶边。它把屏幕顶边当成世界顶边用了。
+///
+/// 两种成因都指向同一个补法：**把报出去的高度加上 shift**（359 + 215 = 574），
+/// 于是 `932 − 574 = 358` = 世界顶边，`717 − 358 = 359` = 正确占高。
+///   · `932 − 高度` 型：932 − 574 = 358 ✓
+///   · `高度 − shift` 型：574 − 215 = 359 ✓
+/// 两条算式同解，所以这不是「挑一个碰运气」，是这一族唯一的公共解。
+/// 门槛与判据 B 同一把尺子：`cov = d + meas − shift` 落在 ±12 内（Safari 是 2），
+/// 两拍才翻、单向、进程内粘住；翻后由 `verdict` 自证，没动就自动退回并不再重试。
+static volatile int AevonKbHeightMode = 0;
+static volatile int AevonKbHeightVotes = 0;
+static volatile int AevonKbHeightDead = 0;       ///< 试过、没动 ⇒ 本进程不再重试
+static volatile int AevonKbHeightBase = -1;      ///< 翻之前那一拍的 `barBot`
+/// 0.4.45 — 「第几次弹键盘」。翻口径发生在探针拍上（键盘已经在屏上了），
+/// 那一拍**不会再发通知**，所以同一个会话里的 `barBot` 必然不动 ——
+/// 拿它当「没生效」会把自己的翻口径当场掐死。判 `h=noop` 必须等到**下一个会话**。
+static volatile int AevonKbSessionId = 0;
+static volatile int AevonKbHeightFlipSession = -1;
+/// 0.4.45 — 主窗视图树取证（Filza 那条）配额：一次输入会话 1 条。
+static volatile int AevonKbTreeProbes = 0;
 
 // ===========================================================================
 // 跨文件事实：本 App 现在是不是被卡片托着
@@ -1404,6 +1465,20 @@ static BOOL AevonKbScreenModeEnabled(void) {
     return on;
 }
 
+/// 0.4.45 — 「高度口径」的开关。缺省开；写 `true` 即回到「高度恒等于量到的占高」。
+static BOOL AevonKbHeightFixEnabled(void) {
+    BOOL on = YES;
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("kbHeightFixOff"),
+                                                        AevonKbDomain);
+    if (value != NULL) {
+        if (CFGetTypeID(value) == CFBooleanGetTypeID()) {
+            on = CFBooleanGetValue((CFBooleanRef)value) ? NO : YES;
+        }
+        CFRelease(value);
+    }
+    return on;
+}
+
 /// 物理屏高。`UIScreen.bounds` 此刻已被我们钩成承载面（717）、`nativeBounds`
 /// 自 0.4.38 起也被钩成承载面，所以这里必须走**系统原值**
 /// （`AevonKbRealNativeBounds`），不能读 `nativeBounds`。
@@ -1835,9 +1910,21 @@ static void AevonKbProbeScreenChannels(const char *tag) {
 ///
 /// 只在 `AevonKbScreenMode` 翻起来之后加回那 215。`AevonKbLastTop` 仍然存窗口坐标
 /// （`guide` 钩子、`begin` 自建、所有探针都按窗口坐标算），否则量测会自己咬到自己。
+///
+/// 0.4.45 — 再加一条**只改高度**的口径（`AevonKbHeightMode`，见它的注释）。
+/// 两条互斥：高度口径只在没翻屏幕口径时才可能被立起来，所以这里先判它。
 static CGRect AevonKbReportRect(CGRect windowRect, CGFloat shift) {
-    if (!AevonKbScreenMode) return windowRect;
     CGRect r = windowRect;
+    if (AevonKbHeightMode) {
+        // 收起帧（高度 < 8）原样留着：那一帧的语义是「键盘在世界底之下」，
+        // 加高度只会让它变成一个不存在的矩形。
+        if (r.size.height >= 8.0) {
+            r.size.height += shift;
+            r.origin.y = [UIScreen mainScreen].bounds.size.height - r.size.height;
+        }
+        return r;
+    }
+    if (!AevonKbScreenMode) return windowRect;
     r.origin.y += shift;
     return r;
 }
@@ -1854,7 +1941,8 @@ static CGRect AevonKbReportRect(CGRect windowRect, CGFloat shift) {
 /// 一直铺到 199 ⇒ 容器票 `d=159`（差 56，投不出），焦点票 `d=227`（差 12，正好）。
 /// 0.4.43 — 计票内核：判据交给调用方，这里只管「两拍才翻、只翻一次」。
 static void AevonKbScreenVoteTake(CGFloat d, const char *src) {
-    if (AevonKbScreenMode || !AevonKbTakeOver) return;
+    if (AevonKbScreenMode || AevonKbHeightMode) return;   // 0.4.45 — 两条口径互斥
+    if (!AevonKbTakeOver) return;
     if (!AevonKbShown) return;
     if (AevonKbScreenVotes >= 2) return;
     // 一拍只记一票：0.4.42 起同一拍里「容器票」与「焦点票」可能同时成立，
@@ -1913,6 +2001,46 @@ static CGFloat AevonKbCoverDelta(CGFloat d) {
 static void AevonKbScreenVote(CGFloat d, int barDepth) {
     if (barDepth < 1) return;
     AevonKbScreenVoteCore(d, "bar");
+}
+
+/// 0.4.45 — 「高度口径」投票：`cov ≈ 0` 那一族（Safari）改报**更高的键盘**。
+///
+/// 为什么不继续翻原点：0.4.39 翻过，328 的 `note fix` 里能一眼看到翻前 `@358`、
+/// 翻后 `@573`，而 `fr` 每一拍都是 `bot=500` —— 原点它压根不看。
+/// 而 327/328 的静止位（`bar down … bot=623`）与升起位（`bot=500`）差 136，
+/// 说明它算的是 144 而不是 359：144 = `717 − 573`、573 = `932 − 359`。
+/// 把**高度**改成 `meas + shift = 574` 之后，`932 − 574 = 358`，两种算法同时归到 359。
+///
+/// 门槛沿用判据 B 的那把尺子，而且只有它一家能过：
+///   Safari `d=-142 cov=2` ✓；QQ `d=0 cov=144` ✗；威锋 `d=215 cov=359` ✗；
+///   酷安 `d=44`、minis `d=223`、Turrit `d=227`、贴吧 `d=202` 全在几百量级 ✗。
+/// 两拍才翻、单向、进程内粘住；`verdict` 判出「一点没动」就退回并封死（`AevonKbHeightDead`）。
+static void AevonKbHeightVote(CGFloat cov, CGFloat barBot) {
+    if (AevonKbHeightMode || AevonKbHeightDead) return;
+    if (AevonKbScreenMode) return;                      // 两条口径互斥
+    if (!AevonKbTakeOver || !AevonKbShown) return;
+    if (!AevonKbHeightFixEnabled()) return;
+    if (cov < -12.0 || cov > 12.0) return;              // 不是「以为脚下是 502」那一族
+    if (AevonKbHeightVotes >= 2) return;
+    AevonKbHeightVotes += 1;
+    char line[220];
+    CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
+    CGFloat shift = AevonKbPhysicalHeight() - worldH;
+    CGFloat meas = (CGFloat)AevonKbLastHeight;
+    if (AevonKbHeightVotes >= 2) {
+        AevonKbHeightMode = 1;
+        AevonKbHeightBase = (int)barBot;
+        AevonKbHeightFlipSession = AevonKbSessionId;
+        snprintf(line, sizeof(line),
+                 "app: kb: mode height cov=%.0f bar=%.0f shift=%.0f meas=%.0f next=%.0f votes=%d sess=%d\n",
+                 cov, barBot, shift, meas, meas + shift,
+                 (int)AevonKbHeightVotes, (int)AevonKbSessionId);
+    } else {
+        snprintf(line, sizeof(line),
+                 "app: kb: mode hvote cov=%.0f bar=%.0f shift=%.0f votes=%d\n",
+                 cov, barBot, shift, (int)AevonKbHeightVotes);
+    }
+    AevonKbLog(line);
 }
 
 /// 0.4.41 — Safari 的底部地址栏：**它根本没读我们报的那个矩形**。
@@ -2234,6 +2362,86 @@ static void AevonKbProbeTextInputs(const char *tag, UIWindow *appWin, CGFloat kb
     AevonKbLog(line);
 }
 
+// ---------------------------------------------------------------------------
+// 0.4.45 — Filza 的「真编辑区」：主窗视图树
+// ---------------------------------------------------------------------------
+//
+// 328 把现有三条通道全堵死了：
+//   `winl`  主窗 `fr=none` —— 第一响应者不在主窗；
+//   `fr`    `view=UITextField 270x49@80,454 … skip=kbwin(932) win=UITextEffectsWindow`
+//           —— 第一响应者在一个 **932 高**的旁窗里，坐标不是世界坐标；
+//   `field` 主窗里**一个可见的 `UITextField`/`UITextView` 都没有**（`n=0`）。
+// ⇒ Filza 的编辑区是自绘的，不是输入框。要量它只能看树。
+//
+// 剪枝三条（只为把日志压到二十来行）：
+//   · 整块落在 `kbtop − 40` 以上 ⇒ 与「被盖」无关；
+//   · 尺寸 < 40×8、隐藏、几乎透明；
+//   · 类名带列表/单元格/导航条/滚动视图 ⇒ 那不是对话框（保留一行并标 `cut`，
+//     这样万一对话框真在滚动视图里，日志会告诉我们「被剪掉了」而不是「没有」）。
+#define AEVON_KB_ATREE_MAX 22
+
+static BOOL AevonKbTreePruneClass(const char *cls) {
+    if (cls == NULL) return NO;
+    static const char *kPrune[] = {
+        "TableView", "CollectionView", "ScrollView", "Cell", "NavigationBar",
+        "TabBar", "Toolbar", "Separator"
+    };
+    for (size_t i = 0; i < sizeof(kPrune) / sizeof(kPrune[0]); i++) {
+        if (strstr(cls, kPrune[i]) != NULL) return YES;
+    }
+    return NO;
+}
+
+static void AevonKbTreeWalk(UIView *node, UIWindow *win, int depth, CGFloat kbTop,
+                            int *budget, int *lines) {
+    if (node == nil || win == nil || depth < 0 || *budget <= 0) return;
+    if (*lines >= AEVON_KB_ATREE_MAX) return;
+    if ([node isHidden] || [node alpha] < 0.05) return;
+    CGRect r = [node convertRect:[node bounds] toView:win];
+    if (r.size.width < 40.0 || r.size.height < 8.0) return;
+    if (r.origin.y + r.size.height < kbTop - 40.0) return;
+    const char *cls = class_getName([node class]);
+    BOOL cut = AevonKbTreePruneClass(cls);
+    *budget -= 1;
+    *lines += 1;
+    char line[240];
+    int indent = 12 - depth;
+    if (indent < 0) indent = 0;
+    if (indent > 12) indent = 12;
+    snprintf(line, sizeof(line),
+             "app: kb: atree %.*s%.24s %.0fx%.0f@%.0f,%.0f bot=%.0f n=%lu%s\n",
+             indent, "............", cls, r.size.width, r.size.height,
+             r.origin.x, r.origin.y, r.origin.y + r.size.height,
+             (unsigned long)[[node subviews] count], cut ? " cut" : "");
+    AevonKbLog(line);
+    if (cut) return;
+    NSArray *subs = [node subviews];
+    NSUInteger total = [subs count];
+    for (NSUInteger i = 0; i < total && i < 6; i++) {
+        if (*lines >= AEVON_KB_ATREE_MAX || *budget <= 0) break;
+        AevonKbTreeWalk([subs objectAtIndex:i], win, depth - 1, kbTop, budget, lines);
+    }
+}
+
+static void AevonKbProbeAppTree(const char *tag, UIWindow *appWin, CGFloat kbTop) {
+    if (appWin == nil) return;
+    if (AevonKbTreeProbes >= 2) return;
+    if (![NSThread isMainThread]) return;
+    if (kbTop >= [UIScreen mainScreen].bounds.size.height - 40.0) return;
+    AevonKbTreeProbes += 1;
+    char head[140];
+    snprintf(head, sizeof(head), "app: kb: atree %s begin kbtop=%.0f root=%.24s\n",
+             tag, kbTop, class_getName([appWin class]));
+    AevonKbLog(head);
+    int budget = 500;
+    int lines = 0;
+    AevonKbTreeWalk(appWin, appWin, 12, kbTop, &budget, &lines);
+    char tail[120];
+    snprintf(tail, sizeof(tail), "app: kb: atree %s end lines=%d budget=%d\n",
+             tag, lines, budget);
+    AevonKbLog(tail);
+}
+
 /// 0.4.35 — 两行只读取证：焦点视图（含父链）与 App 主窗 scene 的落点。
 /// 0.4.36 — 焦点改成扫**全部窗口**，并多打一行「输入条容器」的底边。
 ///
@@ -2282,10 +2490,30 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
                  fo.origin.y + fo.size.height, focusWinH,
                  class_getName([focusWin class]));
         AevonKbLog(line);
+        // 0.4.45 — 这个「假焦点」到底挂在谁身上？328 只知道它在 `UITextEffectsWindow` 里，
+        // 分不清它是**键盘自己的**隐藏输入框（那 Filza 的编辑区就完全在别处），
+        // 还是 Filza 把自己的对话框整块搬进了那个 932 高的窗口。
+        // 两种情形的修法相反，所以把这条链打出来（在它自己的窗口坐标系里）。
+        char kchain[300] = "";
+        UIView *kp = [focus superview];
+        for (int k = 0; k < 6 && kp != nil; k++) {
+            CGRect kr = [kp convertRect:[kp bounds] toView:focusWin];
+            char bit[100];
+            snprintf(bit, sizeof(bit), "%s%.28s %.0fx%.0f@%.0f,%.0f",
+                     (k == 0) ? "" : " > ", class_getName([kp class]),
+                     kr.size.width, kr.size.height, kr.origin.x, kr.origin.y);
+            size_t room = sizeof(kchain) - strlen(kchain) - 1;
+            if (room > 1) strncat(kchain, bit, room);
+            kp = [kp superview];
+        }
+        snprintf(line, sizeof(line), "app: kb: fr %s kanc=%s\n", tag,
+                 (kchain[0] != '\0') ? kchain : "none");
+        AevonKbLog(line);
         // 假焦点在键盘窗里 ⇒ 真编辑区一定在主窗：先摊「被呈现控制器」链尾（对话框），
-        // 再按底边从大到小列主窗里的输入框。
+        // 再按底边从大到小列主窗里的输入框，最后（0.4.45）把主窗的可见树剪一遍。
         AevonKbProbePresentedChain(tag, appWin, kbTop);
         AevonKbProbeTextInputs(tag, appWin, kbTop);
+        AevonKbProbeAppTree(tag, appWin, kbTop);
     } else {
         CGRect fr = [focus convertRect:[focus bounds] toView:focusWin];
         CGFloat bot = fr.origin.y + fr.size.height;
@@ -2375,12 +2603,39 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
             AevonKbLog(line);
             // 0.4.39 — 顺手记一票「这个 App 是不是在按屏幕坐标换算」（见 `AevonKbScreenVote`）。
             AevonKbScreenVote(d, barDepth);
+            // 0.4.45 — 同一个 `cov` 再试一次「高度口径」（Safari 走这条：`cov=2`）。
+            AevonKbHeightVote(AevonKbCoverDelta(d), barBot);
             // 0.4.43 — 翻过去之后自己证明方向对不对（⚠ 这一步只读，不改任何几何）：
             //   `fit`        输入条底边回到 kbtop 附近 ⇒ 屏幕口径是对的，收工；
             //   `overshoot`  冲到世界底部 ⇒ 这个 App 是「加 shift」型，翻反了，
             //                下一版把 `AevonKbReportRect` 改成 `origin.y -= shift`；
             //   `mid`        两个方向都不像 ⇒ 判据 B 是巧合，回退这条票。
-            if (AevonKbScreenMode && AevonKbVerdicts < 12) {
+            //
+            // 0.4.45 — 高度口径单独判：它只要求「真的往上走了」且「不再压在键盘底下」。
+            // 因为这一类（Safari 的悬浮胶囊）本来就和键盘之间有一段自身留白，
+            // 用 `|barBot − kbtop| ≤ 12` 去卡它会把「修好了」误判成 `mid`。
+            if (AevonKbHeightMode && AevonKbVerdicts < 12
+                && AevonKbSessionId > AevonKbHeightFlipSession) {
+                AevonKbVerdicts += 1;
+                const char *v = "mid";
+                CGFloat moved = (CGFloat)AevonKbHeightBase - barBot;   // 正 = 往上走了
+                if (barBot <= kbTop - 4.0) v = "fit";
+                else if (moved >= 60.0) v = "partial";
+                else if (fabs(moved) < 20.0) v = "noop";
+                snprintf(line, sizeof(line),
+                         "app: kb: verdict %s bar=%.0f kbtop=%.0f world=%.0f h=%s moved=%.0f\n",
+                         tag, barBot, kbTop, worldH, v, moved);
+                AevonKbLog(line);
+                // 「一点没动」⇒ 高度这条通道它也不看。退回原点口径（等于本版没做），
+                // 并封死本进程的重试，避免下一次弹键盘又翻一遍。
+                if (strcmp(v, "noop") == 0 && AevonKbVerdicts >= 2) {
+                    AevonKbHeightMode = 0;
+                    AevonKbHeightDead = 1;
+                    snprintf(line, sizeof(line),
+                             "app: kb: mode height off reason=noop moved=%.0f\n", moved);
+                    AevonKbLog(line);
+                }
+            } else if (AevonKbScreenMode && AevonKbVerdicts < 12) {
                 AevonKbVerdicts += 1;
                 const char *v = "mid";
                 if (fabs(barBot - kbTop) <= 12.0) v = "fit";
@@ -2888,7 +3143,10 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     // ⛔ 三条通道必须同值。以后再有 App 位置不对，先数 userInfo 里有几个矩形，不要先调落点。
     NSValue *boundsValue = [info objectForKey:AevonKbBoundsKey];
     if (boundsValue != nil && [boundsValue isKindOfClass:[NSValue class]]) {
-        CGRect kbBounds = CGRectMake(0.0, 0.0, end.size.width, realH);
+        // 0.4.45 — 高度口径下连 bounds 一起抬高（读 bounds 的 App 与读 frame 的 App
+        // 必须看到同一个「键盘有多大」，否则又变成只修一半）。
+        CGFloat boundsH = AevonKbHeightMode ? (realH + shift) : realH;
+        CGRect kbBounds = CGRectMake(0.0, 0.0, end.size.width, boundsH);
         [fixed setObject:[NSValue valueWithCGRect:kbBounds] forKey:AevonKbBoundsKey];
     }
     // 0.4.31 — `begin` 不再用系统那个，用**我们自己上次报出去的矩形**（原因见
@@ -2923,18 +3181,23 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     AevonKbLastTop = end2.origin.y;
     AevonKbLastHeight = end2.size.height;
     // 0.4.31 — 新的一次「弹键盘」：从 0→1 这一拍排三拍输入条读数。
-    if (AevonKbShown == 0) AevonKbScheduleBarProbes();
+    if (AevonKbShown == 0) {
+        // 0.4.45 — 新的一次「弹键盘」：会话号加一。高度口径的 `noop` 判定
+        // 必须等到下一个会话（同一会话里没有新通知，`barBot` 不可能动）。
+        AevonKbSessionId += 1;
+        AevonKbScheduleBarProbes();
+    }
     AevonKbShown = 1;
     if (AevonKbNoteFixes < 96) {
         AevonKbNoteFixes += 1;
         char line[320];
         snprintf(line, sizeof(line),
-                 "app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f bgn=%.0fx%.0f@%.0f,%.0f m=%d\n",
+                 "app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f bgn=%.0fx%.0f@%.0f,%.0f m=%d h=%d\n",
                  end.size.width, end.size.height, end.origin.x, end.origin.y,
                  endRep.size.width, endRep.size.height, endRep.origin.x, endRep.origin.y,
                  src, worldH - end2.origin.y,
                  begin2.size.width, begin2.size.height, begin2.origin.x, begin2.origin.y,
-                 (int)AevonKbScreenMode);
+                 (int)AevonKbScreenMode, (int)AevonKbHeightMode);
         AevonKbLog(line);
     }
     orig(self, _cmd, name, object, fixed);
