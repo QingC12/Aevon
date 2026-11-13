@@ -672,6 +672,16 @@ static id      (*AevonKbOrigRemoteWindow)(id, SEL, UIScreen *, BOOL) = NULL;
 static void    (*AevonKbOrigSceneSettings)(id, SEL, id, id, id, id) = NULL;
 static CGRect  (*AevonKbOrigBounds)(id, SEL) = NULL;
 
+/// 0.4.52 — 两条纯计算钩子已经在构造函数里装过了。
+///
+/// `AevonKbNativeInstall` 必须看这一位：`method_setImplementation` 装第二次会把
+/// 我们自己的 `AevonKbBounds` 存成「原件」，下一次调用就是自己调自己 —— 栈直接
+/// 爆在 `-bounds` 上，那比白屏更难查。
+static volatile int AevonKbEarlyDone = 0;
+/// 0.4.52 — 「进程最早读到的那一版尺寸」只写一行。
+static volatile int AevonKbEarlyNotes = 0;
+static void AevonKbEarlyNote(void *context);
+
 /// 0.4.37 — `UIKeyboardLayoutGuide -layoutFrame` 的原件。
 ///
 /// 这条**不属于母版**（母版四钩子里没有 guide），是 320 实测出来的第六条：
@@ -973,17 +983,32 @@ static void AevonKbUpdateTakeOver(void) {
 //       for (window in [scene windows]) if ([window isKeyWindow]) return scene;
 //   }
 //   return nil;
+
+/// 0.4.52 — `AevonKbMainScene` 的放宽分支要用它做尺寸闸（定义在下面）。
+static CGRect AevonKbSceneBounds(UIWindowScene *scene);
 static UIWindowScene *AevonKbMainScene(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (app == nil) return nil;
+    UIWindowScene *fallback = nil;
     for (id object in [app connectedScenes]) {
         if (![object isKindOfClass:[UIWindowScene class]]) continue;
         UIWindowScene *scene = (UIWindowScene *)object;
-        if ([scene activationState] != UISceneActivationStateForegroundActive) continue;
+        if ([scene activationState] != UISceneActivationStateForegroundActive) {
+            // 0.4.52 — 冷启动头几百毫秒里 scene 还不是 ForegroundActive（宿主刚把
+            // 它摆进卡片、App 还没走到 `didBecomeActive`），但几何已经是承载面。
+            // 母版这一条要求「最前」，是因为它要答「键盘归谁」；`-bounds` 要答的
+            // 只是「这块屏多大」，早一拍拿到比晚一拍重要得多（理由见
+            // `AevonKbSceneBounds` 的 0.4.52 段）。拿到之后仍要过尺寸闸：连
+            // 200 pt 都没有的 scene 说明还没摆好，宁可原样返回。
+            if (fallback == nil) fallback = scene;
+            continue;
+        }
         for (UIWindow *window in [scene windows]) {
             if ([window isKeyWindow]) return scene;
         }
+        if (fallback == nil) fallback = scene;
     }
+    if (fallback != nil && AevonKbSceneBounds(fallback).size.height > 200.0) return fallback;
     return nil;
 }
 
@@ -993,12 +1018,50 @@ typedef CGRect (*AevonKbBoundsForOrientationIMP)(id, SEL, long);
 
 static CGRect AevonKbSceneBounds(UIWindowScene *scene) {
     if (scene == nil) return CGRectZero;
+    CGRect box = CGRectZero;
     SEL sel = NSSelectorFromString(@"_boundsForInterfaceOrientation:");
-    if (sel == NULL || ![scene respondsToSelector:sel]) return CGRectZero;
-    AevonKbBoundsForOrientationIMP fn =
-        (AevonKbBoundsForOrientationIMP)[scene methodForSelector:sel];
-    if (fn == NULL) return CGRectZero;
-    return fn(scene, sel, (long)[scene interfaceOrientation]);
+    if (sel != NULL && [scene respondsToSelector:sel]) {
+        AevonKbBoundsForOrientationIMP fn =
+            (AevonKbBoundsForOrientationIMP)[scene methodForSelector:sel];
+        if (fn != NULL) box = fn(scene, sel, (long)[scene interfaceOrientation]);
+    }
+    // 0.4.52 — 第二读数：`coordinateSpace.bounds`。
+    //
+    // 335 的时间线把「打开抖音要等 2 s 才排对」钉在了一个很窄的窗口上：
+    //
+    //   13:18:07  app: boot pid=76986                 ← 进程起来
+    //   13:18:07  app: kb: install armed (hosted)     ← 只知道「被托着」
+    //   13:18:08  app: kb: native on installed=7      ← 七条钩子这一拍才装好
+    //   13:18:08  page transition h=717 last=932 full=932
+    //   13:18:09  page on resize late player none     ← App 在走「尺寸变了」那条路
+    //   13:18:11  page pager keep box=717 … pages=10  ← 重建十页，2 s 花在这里
+    //
+    // `last=932 full=932` 是 App **在钩子装好之前**读到的真屏。它据此建了第一版
+    // 932 的界面，等我们把 `-bounds` 改成 717 再整块重排 —— 那 2 s 就是这次重排。
+    //
+    // 要把这段时间省掉，钩子必须从进程第一拍就在（见 `AevonKbEarlyInstall`），
+    // 而那时候 `_boundsForInterfaceOrientation:` 经常还没收到宿主的 settings，
+    // 它答的是全屏。`coordinateSpace.bounds` 反过来：它一开始就是承载面的矩形
+    // （宿主先把 scene 摆成 430×717@0,215，再拉起 App）。两个读数谁小听谁的，
+    // 差不到 40 pt 就当一致 —— 承载面与真屏差 215，不是噪声。
+    CGRect space = CGRectZero;
+    SEL csel = NSSelectorFromString(@"coordinateSpace");
+    if (csel != NULL && [scene respondsToSelector:csel]) {
+        id spaceObject = ((id (*)(id, SEL))objc_msgSend)(scene, csel);
+        if (spaceObject != nil) {
+            space = ((CGRect (*)(id, SEL))objc_msgSend)(spaceObject, @selector(bounds));
+        }
+    }
+    if (box.size.height < 1.0) return space;
+    if (space.size.height < 1.0) return box;
+    // ⛔ 只有「宿主说这个 App 被托着」时才允许取小。没被托管的进程必须与系统
+    // 逐字节一致 —— 这条闸让「换了个入口」不至于变成「换了一套行为」。
+    if (AevonBandHostedNow() && box.size.height - space.size.height > 40.0) {
+        // 原点仍用私有方法那一份：UIKit 读 `UIScreen.bounds` 时基本不看 origin，
+        // 而它原来给的 (0,0) 已经在 215 那套换算里被验过很多轮，不动。
+        return CGRectMake(box.origin.x, box.origin.y, space.size.width, space.size.height);
+    }
+    return box;
 }
 
 // ===========================================================================
@@ -1019,6 +1082,16 @@ static CGRect AevonKbSceneBounds(UIWindowScene *scene) {
 // Aevon 照抄三条，一个都不省。另外这个文件只编进 `AevonApp.dylib`（App 进程），
 // 而 `AevonApp.plist` 的 Filter 排除了 SpringBoard —— 桌面进程里根本没有这条代码。
 static CGRect AevonKbBounds(id self, SEL _cmd) {
+    // 0.4.52 — 进程第一拍读到的是哪一版尺寸，只记一次。
+    //
+    // 这一行是「抖音那 2 s」的验收判据：`early` 若是 430x717，说明 App 从第一眼
+    // 就按卡片排版，`page transition … last=932` 那一段根本不该再出现；若还是
+    // 932，说明那一刻连 `connectedScenes` 都是空的，得换个更早的入口（届时再议，
+    // 不拿猜测改进）。
+    if (AevonKbEarlyNotes == 0) {
+        AevonKbEarlyNotes = 1;
+        dispatch_async_f(dispatch_get_main_queue(), NULL, AevonKbEarlyNote);
+    }
     // 0.4.21 — 建键盘窗那一拍 `AevonKbWinReal > 0`：**读真值**。
     //
     // 这一条 0.4.12 曾反着写过（冻结期读承载面），当时的理由是「窗底要落在屏底
@@ -4408,6 +4481,11 @@ static void AevonKbNativeInstall(void) {
     // 是两件事：那条改「读出来的矩形」，这条改「引擎排出来的矩形」。
     AevonKbGuidePadOn = (AevonKbInjectApp && AevonKbGuidePadEnabled()) ? 1 : 0;
     if (!AevonKbInjectApp) {
+        // 0.4.52 — 构造函数里那两条已经装上了（`AevonKbEarlyInstall`），开关关掉时
+        // 必须把闸明确放下：`AevonKbTakeOver` 上面已经写 0，`AevonKbHookUIScreen`
+        // 是构造期置的 1，不落下去就等于「关掉开关仍然改 bounds」。
+        AevonKbHookUIScreen = NO;
+        AevonKbNativeFixOn = 0;
         AevonKbLog("app: kb: native off, inject=0\n");
         return;
     }
@@ -4454,12 +4532,20 @@ static void AevonKbNativeInstall(void) {
         mask |= 1 << 2;
     }
 
-    IMP oldBounds = AevonKbInstallInstance([UIScreen class], @selector(bounds),
-                                           (IMP)AevonKbBounds);
-    if (oldBounds != NULL) {
-        AevonKbOrigBounds = (CGRect (*)(id, SEL))oldBounds;
+    // 0.4.52 — 构造函数里已经装过（`AevonKbEarlyInstall`）。这里只置位，**不能
+    // 重装**：`method_setImplementation` 第二次会把 `AevonKbBounds` 自己存成原件，
+    // 下一次 `-bounds` 就自己调自己。
+    if (AevonKbEarlyDone && AevonKbOrigBounds != NULL) {
         installed += 1;
         mask |= 1 << 3;
+    } else {
+        IMP oldBounds = AevonKbInstallInstance([UIScreen class], @selector(bounds),
+                                               (IMP)AevonKbBounds);
+        if (oldBounds != NULL) {
+            AevonKbOrigBounds = (CGRect (*)(id, SEL))oldBounds;
+            installed += 1;
+            mask |= 1 << 3;
+        }
     }
 
     // 0.4.26 — 第五条：键盘通知的坐标系校正（理由见 `AevonKbPostNote` 那一节）。
@@ -4496,16 +4582,124 @@ static void AevonKbNativeInstall(void) {
     // 同时宣称两块屏。威锋按「屏幕高 − 键盘顶」算键盘高，正好吃这条 932 ⇒ 多抬 215。
     // `UIScreen` 自己就实现了 `nativeBounds`，所以仍走 `AevonKbInstallOwn`
     // （万一某版本它是从父类继承的，也不能在父类上打洞）。
-    IMP oldNative = AevonKbInstallOwn([UIScreen class], @selector(nativeBounds),
-                                      (IMP)AevonKbNativeBoundsGet);
-    if (oldNative != NULL) {
-        AevonKbOrigNativeBounds = (CGRect (*)(id, SEL))oldNative;
+    if (AevonKbEarlyDone && AevonKbOrigNativeBounds != NULL) {
         installed += 1;
         mask |= 1 << 6;
+    } else {
+        IMP oldNative = AevonKbInstallOwn([UIScreen class], @selector(nativeBounds),
+                                          (IMP)AevonKbNativeBoundsGet);
+        if (oldNative != NULL) {
+            AevonKbOrigNativeBounds = (CGRect (*)(id, SEL))oldNative;
+            installed += 1;
+            mask |= 1 << 6;
+        }
     }
 
     char line[192];
     snprintf(line, sizeof(line), "app: kb: native on installed=%d mask=0x%x bundle=%s\n",
              installed, mask, [AevonKbBundleId UTF8String] ?: "?");
+    AevonKbLog(line);
+}
+
+// ===========================================================================
+// 0.4.52 — 构造函数里的那两条（早装一拍，省掉 App 的第一版错排）
+// ===========================================================================
+//
+// 335 的读数（`app: page transition h=717 last=932 full=932`）说清了「打开抖音要
+// 等 2 s 才排对」的来历：App 在**钩子装好之前**读了一次真屏 932，据此建了第一版
+// 界面；等 0.15 s 后七条钩子装上、`-bounds` 改答 717，它再把整块版重排一遍。
+// 那 2 s 就是这次重排（`page on resize late` → 重建十页 feed）。
+//
+// 所以只要「第一眼」就是 717，就没有这版错排可重排。做法是把其中最安全的
+// **两条纯计算钩子**挪进构造函数：
+//
+//   · `-[UIScreen bounds]` / `-[UIScreen nativeBounds]` 只换返回值，
+//     不写任何 ivar、不碰任何 view、不读盘 —— 0.0.65 / 0.0.67 / 0.1.42 三次
+//     「桌面黑屏」没有一次是这两条本身造成的，而是「在没有承载面时也改写」与
+//     「写了存储」。两条闸（`AevonKbTakeOver` + `AevonKbHookUIScreen`）原样留着，
+//     拿不到 scene 仍然原样返回。
+//
+// ⛔ 为什么不是七条全挪：0.4.8 白屏的根因就写在 `AevonAppBoot` 里 —— 另外五条
+// 要 `NSClassFromString` 到 `_UIRemoteKeyboards` / `UIRemoteKeyboardWindow` /
+// `FBSWorkspaceScenesClient` 并触发它们的 `+initialize`，在 `main()` 之前拿
+// runtimeLock 去跑 UIKit，里面只要有一处 `dispatch_sync` 到主队列就是主线程
+// 自己等自己。`UIScreen` 是公开类、此刻早已 realize（同一个构造函数里
+// `[UIApplication class]` / `[UIScene class]` / `[UIViewController class]` 都已
+// 在用），不在那个风险面上。
+//
+// 开关不变：`install` 时 `AevonKbTakeOver` 会按 `!ring.keyboardNative` 重算，
+// 关掉设置里的键盘接管 ⇒ 钩子体一律透传，与「没装」等价。
+void AevonKbEarlyInstall(void) {
+    if (AevonKbEarlyDone) return;
+    // ⛔ 类名走 `objc_getClass`，不走 `[UIScreen class]`：后者会触发 `+initialize`，
+    // 而这一拍在 `main()` 之前 —— 0.4.8 那 90 条 `gap=-1ms` 就是这么来的。
+    // `objc_getClass` 只查已注册的类表，一个消息都不发。UIKit 是 App 的依赖，
+    // dylib 被加载时它早就在表里；真取不到就什么都不装（等价 0.4.51）。
+    Class screenCls = (Class)objc_getClass("UIScreen");
+    if (screenCls == Nil) return;
+    // 取到类之后才落「做过决定」这一位：否则类名万一取不到，`AevonKbNativeInstall`
+    // 会以为已经装过而整段跳过，七条钩子全丢。
+    AevonKbEarlyDone = 1;
+    IMP oldBounds = AevonKbInstallInstance(screenCls, sel_registerName("bounds"),
+                                           (IMP)AevonKbBounds);
+    if (oldBounds != NULL) {
+        AevonKbOrigBounds = (CGRect (*)(id, SEL))oldBounds;
+        // 与 install 那一拍同一表达式；构造函数里 App 一定不是「前台最前」。
+        AevonKbTakeOver = YES;
+        AevonKbHookUIScreen = YES;
+    }
+    IMP oldNative = AevonKbInstallOwn(screenCls, sel_registerName("nativeBounds"),
+                                      (IMP)AevonKbNativeBoundsGet);
+    if (oldNative != NULL) {
+        AevonKbOrigNativeBounds = (CGRect (*)(id, SEL))oldNative;
+        // `kbNativeOff` 此刻不能读（读盘要 pool）；缺省是开，install 那一拍再按
+        // 真实开关纠正 —— 中间这几百毫秒顶多是「提前按卡片答」，不比原来差。
+        AevonKbNativeFixOn = 1;
+    }
+    // ⛔ 这里不写日志：`AevonKbLog` 第一次调用会走 `NSTemporaryDirectory()` 与
+    // `stringByAppendingPathComponent:`，构造函数那一拍没有 autorelease pool。
+    // 装没装成由 `AevonKbEarlyNote` 的 `early=` 字段回答，那一行在主队列上写。
+}
+
+/// 0.4.52 — 进程最早读到的那一版尺寸，一行。
+///
+/// 判据（335 之后唯一还缺的那个读数）：
+///   `app: kb: first early=1 bounds=430x717@0,0 sys=430x932@0,0 scenes=1 active=0 key=0 band=1`
+/// `early` 是「构造函数那两条装上了吗」，`bounds` 是 App 第一眼看到的（应当 717），
+/// `sys` 是真屏、`scenes/active/key` 是当时 scene 的成熟度、`band` 是「宿主说这个
+/// App 被托着」。
+/// 若 `bounds` 仍是 932 而 `scenes=0`，说明那一刻连 scene 都还没有 —— 这一版
+/// 修不到那一拍，下一次换入口（不猜）。
+static void AevonKbEarlyNote(void *context) {
+    (void)context;
+    UIScreen *screen = [UIScreen mainScreen];
+    CGRect got = CGRectZero;
+    CGRect sys = CGRectZero;
+    if (screen != nil) {
+        got = [screen bounds];
+        if (AevonKbOrigBounds != NULL) sys = AevonKbOrigBounds(screen, @selector(bounds));
+    }
+    NSUInteger scenes = 0;
+    int active = -1;
+    int key = 0;
+    UIApplication *app = [UIApplication sharedApplication];
+    if (app != nil) {
+        NSArray *all = [app connectedScenes];
+        scenes = [all count];
+        for (id one in all) {
+            if (![one isKindOfClass:[UIWindowScene class]]) continue;
+            if (active < 0) active = (int)[(UIWindowScene *)one activationState];
+            for (UIWindow *w in [(UIWindowScene *)one windows]) {
+                if ([w isKeyWindow]) { key = 1; break; }
+            }
+        }
+    }
+    char line[224];
+    snprintf(line, sizeof(line),
+             "app: kb: first early=%d bounds=%.0fx%.0f@%.0f,%.0f sys=%.0fx%.0f scenes=%lu active=%d key=%d band=%d\n",
+             (int)AevonKbEarlyDone,
+             got.size.width, got.size.height, got.origin.x, got.origin.y,
+             sys.size.width, sys.size.height,
+             (unsigned long)scenes, active, key, AevonBandHostedNow());
     AevonKbLog(line);
 }

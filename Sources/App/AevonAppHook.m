@@ -91,9 +91,11 @@
 /// 0.4.7 — 跨文件的键盘接口。
 ///
 /// 实现在 `Sources/App/AevonKeyboardNative.m`（1:1 复刻母版 `SthenoKeyboard.dylib`）。
-/// 这里只留两条：
+/// 这里只留三条：
+///   · `AevonKbEarlyInstall` —— 构造函数里只装「两条纯计算钩子」（0.4.52）；
 ///   · `AevonKbRefreshShell` —— band 翻转时通知它重算 `_hookUIScreen`；
-///   · `AevonKbEnsureInstalled` —— band 说「我被托着」时才装钩子（0.4.10）。
+///   · `AevonKbEnsureInstalled` —— band 说「我被托着」时才装其余五条（0.4.10）。
+extern void AevonKbEarlyInstall(void);
 extern void AevonKbRefreshShell(void);
 extern void AevonKbEnsureInstalled(void);
 
@@ -3960,8 +3962,21 @@ static int AevonAliveLines = 0;
 // 说出是哪一层。唯一动一下手的地方在最后：`over` 超过 60 pt 时对那一层发一次
 // `setNeedsLayout`（**只置脏，绝不 `layoutIfNeeded`** —— 0.0.65/0.0.67 那两次
 // 「应用打不开、桌面黑屏」正是「替别人的窗口补一次布局」）。每层一次、每会话最多
-// 三条，日志总量 14 行封顶。
-#define AEVON_AUDIT_LINES 14
+// 三条，日志总量 20 行封顶。
+//
+// 0.4.52 — **采样窗口挪到开卡后的前 1.5 s，四拍。**
+//
+// 335 之后问题换了一个形状：抖音不再是「一直排错」，而是「打开约 2 s 才排对」。
+// 0.4.51 那两拍（首拍 + 1.8 s）落在用户已经在滑的时候（`audit n=1` 出现在
+// 13:18:47，开卡后 40 s），拍到的全是「已经对了」的读数 —— 对判「那 2 s 里发生了
+// 什么」没有用。现在改成 0 / 0.30 / 0.80 / 1.50 s 四拍，正好盖住用户说的那一段。
+//
+// 四拍 × 3 行（`win` / `scroll` / 可能的 `tall`）≈ 12~16 行，加上 nudge 也还在
+// 20 行以内 —— 一份 941 行的日志不会因为这几行变难读。
+#define AEVON_AUDIT_LINES 20
+#define AEVON_AUDIT_PASSES 4
+/// 四拍的时刻（相对首拍）。第一项必须是 0：它同时用来记 `AevonAuditAt`。
+static const double AevonAuditGap[AEVON_AUDIT_PASSES] = {0.0, 0.30, 0.80, 1.50};
 static int AevonAuditPass = 0;
 static CFTimeInterval AevonAuditAt = 0.0;
 static int AevonAuditLines = 0;
@@ -3974,14 +3989,16 @@ static const char *AevonAuditCls(UIView *view) {
 }
 
 static void AevonHostedAudit(void) {
-    if (!AevonEverHosted) return;
-    if (AevonAuditPass >= 2) return;
+    // 0.4.52 — 闸从 `AevonEverHosted` 换成「宿主此刻还说这个 App 被托着」。
+    // 前者要等一次 24 pt 的高度跳变才置位，而这一版正是要拍「跳变之前」那一段。
+    if (!AevonBandHostedNow()) return;
+    if (AevonAuditPass >= AEVON_AUDIT_PASSES) return;
     if (AevonAuditLines >= AEVON_AUDIT_LINES) return;
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (AevonAuditPass == 0) {
         AevonAuditAt = now;
-    } else if (now - AevonAuditAt < 1.8) {
-        return;      // 第一拍之后隔两秒再看一次：App 的重排不是原子的
+    } else if (now - AevonAuditAt < AevonAuditGap[AevonAuditPass]) {
+        return;      // 还没到这一拍的时刻
     }
 
     UIApplication *application = [UIApplication sharedApplication];
@@ -4071,7 +4088,20 @@ static void AevonHostedAudit(void) {
                  [tall bounds].size.width, [tall bounds].size.height, tallOver);
         AevonPageWrite(line);
         used += 1;
-        if (AevonAuditNudges < 3 && [tall window] != nil) {
+        // 0.4.52 — 只有「它真的出现在窗口里」才置脏。
+        //
+        // 335 里 QQ 那两条 `nudge cls=DrawerTransitionView b=430x932 over=215` 是
+        // 误伤：那一层是全屏抽屉的隐藏副本，本来就 932 高、不在屏上，置脏只是让
+        // QQ 白排一次（它的界面没有任何变化）。判据换成「转换进窗口坐标之后，
+        // 真的与窗口相交且露出 60 pt 以上」—— 抖音若真把 932 的版式塞进 717 的
+        // 窗，它一定满足这一条；隐藏抽屉一定不满足。
+        BOOL onScreen = NO;
+        if ([tall window] != nil && ![tall isHidden] && [tall alpha] > 0.01) {
+            CGRect inWin = [tall convertRect:[tall bounds] toView:win];
+            CGRect hit = CGRectIntersection(inWin, [win bounds]);
+            onScreen = !CGRectIsNull(hit) && hit.size.height > 60.0;
+        }
+        if (onScreen && AevonAuditNudges < 3) {
             AevonAuditNudges += 1;
             [tall setNeedsLayout];
             snprintf(line, sizeof(line),
@@ -4130,14 +4160,19 @@ static void AevonPagerWatchTick(void *context) {
         // `sheet` 那两行读数不再靠定期采样，改由「第一次看见这张浮层」触发
         // （见 `AevonSheetLift` 的 fresh 分支）。
         AevonSheetLift();
+    }
+    // 0.4.52 — **下面这两件挪出 `shrunk`。**
+    //
+    // `shrunk` 的算式是 `[UIScreen bounds] < 全屏 − 40`，而 `-bounds` 已经被我们
+    // 改成承载面了 ⇒ 两边都是 717 ⇒ 恒等于假。335 里 `video retired off=1` 一条
+    // 都没有，就是因为它挂在这个永远不进的支里（判据因此失效，不是功能失效）。
+    // 判据换成「宿主此刻说这个 App 被托着」，与 `-bounds` 的口径无关。
+    if (AevonBandHostedNow()) {
         // 0.0.84 — 横版画面贴顶：每 0.6 s 看一眼「那块矩形在不在容器正中」。
-        // 它只在卡片里、只在「高度明显小于容器」时动手，铺满的竖版视频一律不碰。
-        //
         // 0.4.51 — 退休了（`AevonVideoCenterRetired`）。调用保留一行是为了留个
         // 明确的落点：以后要重开，把那个常量改成 0 就够，不必再把整条链接回来。
         if ((AevonWatchTicks % 4) == 0) AevonVideoCenter();
-        // 0.4.51 — 卡片里的排版对账。它接管了这一拍里真正有用的那件事：
-        // 把「谁还停在 932」写成读数，而不是替 App 去摆画面。
+        // 0.4.51 / 0.4.52 — 卡片里的排版对账，开卡前 1.5 s 四拍。
         AevonHostedAudit();
     } else {
         // 出了卡：下一张卡是新一轮，对账从第一拍重新开始（`AevonAuditLines`
@@ -5724,6 +5759,17 @@ static void AevonAppBoot(void) {
     // 也没有任何读数。上面那一组只会在「真的崩了」时落盘，所以再挂一条看门狗：
     // 主线程 2 秒不动就由另一条线程替它说话，写「停在哪一句 + PC + 调用栈」。
     AevonInstallHangWatch();
+    // 0.4.52 — **构造函数里唯一装的两条钩子**（`-UIScreen bounds` / `nativeBounds`）。
+    //
+    // 位置刻意放在这里：`AevonWorthInjecting()` 已经过了（这是名单内 App 的进程），
+    // 崩了/卡了都有上面那两组证词兜底，而 `main()` 还没开始 —— App 读第一眼尺寸
+    // 之前钩子就已经在，它不会再有「先按 932 排一版、再按 717 重排」那一段。
+    // 335 的 `page transition h=717 last=932 full=932` 就是那一段的读数，抖音为它
+    // 付了 2 s（重建十页 feed）。
+    //
+    // 为什么不是七条、为什么这两条安全：见 `AevonKeyboardNative.m` 的
+    // `AevonKbEarlyInstall` 上面那一段（0.4.8 白屏的边界在那里，别越）。
+    AevonKbEarlyInstall();
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 4)),
                      dispatch_get_main_queue(), NULL, AevonMainBeatTick);
     // 0.1.2 — 独立心跳链（1 s）。原先挂在 0.15 s 的翻页器守卫上，那条链 6 分钟后
