@@ -687,6 +687,14 @@ def main():
                   # 正好 15 字节，Swift 把它编成立即数，二进制里没有这个串。
                   b"no scene after 12s and 3 retries",
                   b"win: canvas revived ",
+                  # 0.4.50 — 承载面外面那层画布。缩放在它身上，承载面在它里面恒
+                  # `(0,0,natural)` + 单位阵 —— 也就是系统重设承载面时写的同一组
+                  # 值。这条串在，才说明 `show` 里那层真的建了（`surface wrapped
+                  # in canvas`）；`surface flat, no wrapper` 是退化路径。
+                  # ⛔ 断言用整句长串，不用 ` layer=` / `wrap` 这类短字面量：
+                  # Swift 会把 ≤15 字节的串编成立即数，二进制里 grep 不到。
+                  b" surface wrapped in canvas",
+                  b" surface flat, no wrapper",
                   b"win: revive after unlock tick=",
                   # 0.1.61 — 键盘态的**进与出**都在。0.1.60 只留下了「进」：
                   # 进入分支把 `kbFilled` 置真的那几行被删掉，收起分支第一行

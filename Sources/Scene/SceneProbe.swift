@@ -1771,15 +1771,22 @@ enum SceneProbe {
         // closes it, drags it or resizes it; the teardown that used to be this
         // timer is `closeCard` above, called by the button.
         //
-        // One cap remains. A card that is never closed holds a backgrounded app
-        // in the foreground for as long as it lives: it renders, it plays audio,
-        // it drains the battery, and the only thing on screen that would say so
-        // is the card itself. Ten minutes is long enough to be a window and
-        // short enough that forgetting one costs nothing, and it names itself in
-        // the log so a card that vanished was not a crash.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 600.0) {
-            closeCard("ten minute cap")
-        }
+        // 0.4.50 — **十分钟上限整段删除。**
+        //
+        // 0.0.33 留了 `asyncAfter(600)` + `closeCard("ten minute cap")`，理由是
+        // 「一张忘了关的卡会让 App 一直前台渲染、耗电」。用户 2026-11-13 报的
+        // 第 2 条正是它：「悬浮窗播放抖音时，一段时间后抖音悬浮窗会自动关闭」。
+        // 对播放视频这件事来说 10 分钟不是上限，是**一半**：一个稍长的视频就会
+        // 演到一半被我们拆掉，而且拆得不留痕迹（日志里只有一行 cap）。
+        //
+        // 这张卡的所有权应当只有操作者：关窗按钮、拖出屏幕、放大缩小，以及
+        // `scene dead`（画面真的没了，那时留着只是一块黑）。母版 Stheno 也从不
+        // 按时间拆卡 —— 它整份二进制里没有任何以秒计的收卡计时器。
+        //
+        // 想找回旧行为：把这一段恢复成
+        //   DispatchQueue.main.asyncAfter(deadline: .now() + 600.0) {
+        //       closeCard("ten minute cap")
+        //   }
     }
 
     /// The one witness a kill leaves behind: which call the process was inside.

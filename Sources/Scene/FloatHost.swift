@@ -44,7 +44,8 @@ import UIKit
 /// the way *out* of the mini was a band, not the window it had just become.
 ///
 /// 0.0.54 — 画面里不再有自己的控件。右上角那颗 ✕ 撤了：它压在 App 画面右上角，
-/// 和 App 自己的顶栏挤在一起，既挡内容又不好看；关窗仍有底边上滑与十分钟上限。
+/// 和 App 自己的顶栏挤在一起，既挡内容又不好看；关窗仍有底边上滑
+/// （0.4.50 起「十分钟上限」已删除，见 `SceneProbe` 里那一段）。
 ///
 /// 0.0.60 — 那刀裁切撤了。裁切能去掉顶栏，但切掉的东西不会自己回来：App 仍是
 /// 按整屏排好的，卡片只是它的一截。改比例是另一条路 —— 承载面按小胖屏的尺寸
@@ -56,6 +57,18 @@ import UIKit
 /// 等比缩小。0.0.61 交的是卡片自己的尺寸（345 宽），任何按屏幕宽度布局的层都会
 /// 出界（抖音右侧那一列、视频居中都不对）；等宽之后它们全部落在界内，字号与
 /// 圆角也顺带按同一个 scale 收敛。见 `fatRender`。
+///
+/// 0.4.50 — 承载面外面多了一层 `canvas`（`show` 里建，见属性上那段）。
+///
+/// 起因是 333 的一条读数：`win: placement put back 0.819 was=1.000 dC=39,65
+/// (kb-down)`。39=(430−352)/2、65=358.5−293.5 —— 正是「系统把承载面设成
+/// `frame=(0,0,430,717)` + `transform=单位阵`」与我们想要的那组值的差。每次写
+/// scene settings（开键盘、关键盘、每 2 s 的 drift 对账）都会来一次，那一帧内容
+/// 按 1:1 画进小窗 —— 用户报的「关闭键盘后内容排版放大、一闪而过」就是它。
+///
+/// 系统的写法**恰好是「铺满父视图」**。所以给它一层尺寸恒为 `natural` 的父视图，
+/// 承载面在里面永远是这一组值：系统怎么重设都等于我们要的答案，它从干扰变成了
+/// 同一次赋值。缩放与居中从此只写在 `canvas` 上。
 final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 0.0.98 — 两个槽，轮流当主窗。
     ///
@@ -112,14 +125,25 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 0.1.34 — 重挂承载面。只碰我们自己的视图，不碰 App 的窗口。
     func reviveCanvas() {
         guard let card = card, let content = content else { return }
+        // 0.4.50 — 挂回**画布**（有的话），画布自己挂回卡片 —— 承载面在画布里
+        // 永远是 `(0,0,natural)` + 单位阵，这是系统重设它时写的同一组值。
+        let home: UIView = canvas ?? card
         content.removeFromSuperview()
-        card.insertSubview(content, at: 0)
+        content.transform = .identity
+        content.frame = CGRect(origin: .zero, size: natural)
+        home.insertSubview(content, at: 0)
+        if let canvas = canvas {
+            canvas.removeFromSuperview()
+            card.insertSubview(canvas, at: 0)
+        }
         // 重挂会把系统的 `transform` / `frame` 重置成 scene 自己那一版，所以
         // 摆正必须在之后 —— 与 `reapplyPlacement` 里那段注释同一个原因。
         followContent()
         reapplyPlacement("revive")
         reassertCanvas()
-        Log.write("win: canvas revived " + size(card.bounds.size))
+        Log.write("win: canvas revived " + size(card.bounds.size)
+                  + (canvas == nil ? " surface flat, no wrapper"
+                                   : " surface wrapped in canvas"))
     }
 
     /// 0.1.7 — **「上一个主悬浮窗」的几何**，升窗时唯一的落点来源。
@@ -548,6 +572,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 整块画面不参与命中，触摸只会落到我们这张卡和它上面的 shield 上。升回主窗
         // 时在 `performUndock` 里恢复。
         content?.isUserInteractionEnabled = false
+        // 0.4.50 — 画布在承载面上层，它不禁用就会先接住那一下（命中测试返回
+        // canvas，而不是卡片）。两者同开同关，命中路径才与加画布之前一致。
+        canvas?.isUserInteractionEnabled = false
         Log.write("win: mini touch lock content=0")
         // 0.1.8 — 告诉 App 进程「你被停靠了」（Aevon(95) 第 1 条）。
         //
@@ -791,6 +818,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private var bandInset: CGPoint = .zero
     private var card: UIView?
     private var content: UIView?
+    /// 0.4.50 — 承载面外面的那层「画布」。**缩放与定位只写在它身上。**
+    ///
+    /// 起因（333 的 `win: placement put back 0.819 was=1.000 dC=39,65 (kb-down)`）：
+    /// 直接缩放 `content`（`_UIScenePresentationView`）时，只要 scene 的 settings
+    /// 被写一次，系统就把它重设成 `frame=(0,0,430,717)` + `transform=单位阵` +
+    /// `center=(215,358.5)` —— 与我们想要的值差 `(39,65)`，正是 `dC` 那两个数
+    /// （39=(430−352)/2、65=358.5−293.5）。那一帧内容按 1:1 画进 352 宽的小窗，
+    /// 用户看到的就是「关闭键盘后内容排版放大、一闪而过」。
+    ///
+    /// 系统的那个写法**恰好就是「铺满父视图」**。所以给它一层尺寸恒为
+    /// `natural` 的父视图：`content` 在里面永远是 `(0,0,natural)` + 单位阵，
+    /// 系统怎么重设都等于我们想要的值 —— 它不再是干扰，而是同一次赋值。
+    /// 缩放交给 `canvas`，那上面没有任何系统代码会碰。
+    private var canvas: UIView?
     /// 0.2.42 — 卡片里最下面那层不透明底板（见 `show` 里创建它的那一段）。
     ///
     /// 它只做一件事：App 的画面真的透出来时，露出来的是系统底色，不是桌面。
@@ -1406,9 +1447,25 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.0.60 — `scale` 初始就是 1.000：卡片的尺寸就是承载面的尺寸，一比一。
         // 之后拖大拖小走的是 transform，`bounds` 不再变 —— 一个窗口在手上被拉
         // 扯的时候不该让 App 每一帧都重排一次界面。
-        view.center = CGPoint(x: card.bounds.midX, y: card.bounds.midY)
-        view.transform = CGAffineTransform(scaleX: plan.scale, y: plan.scale)
-        card.addSubview(view)
+        //
+        // 0.4.50 — 中间多一层 `canvas`（见属性上那段）：承载面在它里面固定
+        // `(0,0,natural)` + 单位阵，缩放和居中写在 `canvas` 上。系统的重设从此
+        // 落在「本来就该长这样」的那一组值上，不再制造那一帧 1:1 的放大。
+        let canvas = UIView(frame: CGRect(origin: .zero, size: source))
+        canvas.backgroundColor = .clear
+        // ⛔ 不能关 `isUserInteractionEnabled`：`hitTest` 在不可交互的视图上返回
+        // nil 并**连子树一起跳过**，App 的画面会从此收不到任何触摸。它只是一层
+        // 容器，自己不实现手势，命中测试会照常交给子视图。
+        canvas.isUserInteractionEnabled = true
+        canvas.clipsToBounds = true
+        canvas.isOpaque = false
+        card.addSubview(canvas)
+        host.canvas = canvas
+        view.transform = .identity
+        view.frame = CGRect(origin: .zero, size: source)
+        canvas.addSubview(view)
+        canvas.center = CGPoint(x: card.bounds.midX, y: card.bounds.midY)
+        canvas.transform = CGAffineTransform(scaleX: plan.scale, y: plan.scale)
 
         // 0.0.58 — 冷启动不再盖图标。
         //
@@ -1749,6 +1806,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 视图的引用，下一次 `applyBars` 就会往一个不在屏幕上的对象里填色。
         backing = nil
         content = nil
+        canvas = nil
         visible = .zero
         cropTop = 0
         pan = nil
@@ -3661,6 +3719,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         shield = nil
         // 0.1.7 — 画面重新可操作（小窗那条锁在 `placeDock` 里上）。
         content?.isUserInteractionEnabled = true
+        canvas?.isUserInteractionEnabled = true
         // 0.1.8 — 标记必须在几何恢复之后立刻撤掉：留在里面等于「App 永远收不到触摸」。
         setMiniFlag(false)
         Log.write("win: card undocked " + size(card.bounds.size)
@@ -3684,9 +3743,22 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private func followContent(updateCorner: Bool = true) {
         guard let card = card, let content = content, visible.height > 16 else { return }
         let scale = FloatHost.fitScale(for: visible, in: card.bounds.size)
-        content.center = CGPoint(x: card.bounds.midX,
-                                 y: card.bounds.midY - (cropTop + kbTopCrop) * scale / 2)
-        content.transform = CGAffineTransform(scaleX: scale, y: scale)
+        let want = CGRect(origin: .zero, size: natural)
+        if let canvas = canvas {
+            // 0.4.50 — 承载面在画布里的位置**恒定**：铺满、单位阵。系统重设它时
+            // 写的正是这组值（见属性上那段），所以这里只在真的被改成别的值时
+            // 才落笔 —— 写一次 `frame` 就是一次跨进程合成重排，不能每拍来一发。
+            if content.transform != .identity { content.transform = .identity }
+            if content.frame != want { content.frame = want }
+            if canvas.bounds != want { canvas.bounds = want }
+            canvas.center = CGPoint(x: card.bounds.midX,
+                                    y: card.bounds.midY - (cropTop + kbTopCrop) * scale / 2)
+            canvas.transform = CGAffineTransform(scaleX: scale, y: scale)
+        } else {
+            content.center = CGPoint(x: card.bounds.midX,
+                                     y: card.bounds.midY - (cropTop + kbTopCrop) * scale / 2)
+            content.transform = CGAffineTransform(scaleX: scale, y: scale)
+        }
         // A resized card is the same device at another scale, so the corner is
         // the same screen corner at another scale. Leaving the old radius on a
         // shrunk card reads as a rounded rectangle that has been sanded down.
@@ -4289,7 +4361,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             applyGlow()
         }
         // 0.2.43 — 收起时场景原点是 215→0，同一条「重设 frame」会把承载面往上
-        // 推 215 pt。这一步已经在卡片缩回之前（`unfillSettle` 0.15 s），四次对账
+        // 推 215 pt。这一步已经在卡片缩回之前（`unfillSettle` 0.06 s），四次对账
         // 覆盖到动画收尾，正好把错位压在缩回这一段里。
         reapplySoon("kb-down")
         Log.write("win: keyboard fill off card=" + size(card.frame.size)
@@ -4365,7 +4437,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 一行把①②同时钉死，省掉再靠截图反推一轮。
     private func noteKeyboardGeometry(_ why: String) {
         guard let card = card, let content = content else { return }
-        let scale = content.transform.a
+        // 0.4.50 — 缩放写在 `canvas` 上（没有画布时仍是承载面自己）。
+        let subject = canvas ?? content
+        let scale = subject.transform.a
         let shown = CGSize(width: visible.width * scale, height: visible.height * scale)
         var bars = 0
         if shown.width < card.bounds.width - 0.5
@@ -4374,8 +4448,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             "win: kb geom card=%.0fx%.0f@%.0f,%.0f content=%.0fx%.0f@%.0f,%.0f scale=%.3f org=%.0f h=%.0f bars=%d (%@)",
             card.frame.size.width, card.frame.size.height,
             card.frame.minX, card.frame.minY,
-            content.frame.size.width, content.frame.size.height,
-            content.frame.minX, content.frame.minY,
+            subject.frame.size.width, subject.frame.size.height,
+            subject.frame.minX, subject.frame.minY,
             scale, canvasOriginY, canvasHeight, bars, why))
         noteSurfaceMapping(why)
     }
@@ -4435,17 +4509,26 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let scale = FloatHost.fitScale(for: visible, in: card.bounds.size)
         let center = CGPoint(x: card.bounds.midX,
                              y: card.bounds.midY - (cropTop + kbTopCrop) * scale / 2)
-        let at = content.transform
+        // 0.4.50 — 判的是 `canvas`（缩放在它身上）。`content` 只保一件事：
+        // 留在画布里、铺满 —— 系统把它挪出父视图是这里唯一需要处理的意外。
+        let subject = canvas ?? content
+        if let canvas = canvas, content.superview !== canvas {
+            content.removeFromSuperview()
+            content.transform = .identity
+            content.frame = CGRect(origin: .zero, size: natural)
+            canvas.insertSubview(content, at: 0)
+        }
+        let at = subject.transform
         let off = abs(at.a - scale) > 0.004 || abs(at.d - scale) > 0.004
-            || abs(content.center.x - center.x) > 0.5
-            || abs(content.center.y - center.y) > 0.5
+            || abs(subject.center.x - center.x) > 0.5
+            || abs(subject.center.y - center.y) > 0.5
         guard off else { return false }
         // 0.2.43 — 修之前先把偏差记下来。`dC` 就是「别人把承载面推走多少」：
         // 若它恰好是 (0, +215) 或 (0, −215)（等于 `org=`），那就证实了
         // `reapplySoon` 那段写的机制 —— 系统按 scene 原点重设了承载面 frame。
         // 这个数只在修之前有意义，写完就没了。
-        let dC = CGPoint(x: content.center.x - center.x,
-                         y: content.center.y - center.y)
+        let dC = CGPoint(x: subject.center.x - center.x,
+                         y: subject.center.y - center.y)
         // 0.2.43 — **两个属性分开判、分开写。**
         //
         // 键盘张开那 0.24 s 里，`transform` 正在被弹簧驱动；它的 model 值已经是
@@ -4457,10 +4540,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 动画中属性的硬赋值是「撤掉动画、直接到终点」，于是画面会提前跳到终点
         // 尺寸。修一个字反而闪一下，那不值得。
         if abs(at.a - scale) > 0.004 || abs(at.d - scale) > 0.004 {
-            content.transform = CGAffineTransform(scaleX: scale, y: scale)
+            subject.transform = CGAffineTransform(scaleX: scale, y: scale)
         }
         if abs(dC.x) > 0.5 || abs(dC.y) > 0.5 {
-            content.center = center
+            subject.center = center
         }
         // 前 12 次各写一行：这一条如果真的每拍都要重写，说明还有别的东西在抹它，
         // 日志会直接说出频率；稳定下来之后就不再占版面。

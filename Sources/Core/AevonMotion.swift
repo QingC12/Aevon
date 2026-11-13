@@ -371,7 +371,16 @@ enum AevonMotion {
     /// 落下去之后紧接着缩回的，看起来是一次收；假收起会被紧随其后的 `kb.up`
     /// 在这 0.35 s 里否决掉，一个几何都不写。用 0.35 而不是更长，是因为再长
     /// 用户就会觉得「关了键盘窗口还赖着」（0.1.76 那条教训）。
-    static let unfillHold: TimeInterval = 0.35
+    /// 0.4.50 — **0.35 → 0.30。**
+    ///
+    /// 用户 2026-11-13 第 1 条：「还原时的过渡动画看着很别扭、不流畅」。333 的
+    /// 实测读数是 `win: keyboard fill off … kb-to-card=513ms` —— 键盘收起之后，
+    /// 卡片要撑满屏幕再等半秒才开始缩，那半秒里的画面是「键盘没了、窗口还占满」。
+    ///
+    /// 0.35 这个数的来源是 0.2.59 的抖音假收起：`off` 之后 0.10 s 内可能还有一条
+    /// 在途的 `kb.up`。0.30 仍有 0.05 s 余量，而 0.2.42 起 App 侧已经是三态轮询
+    /// （连续两次 `GONE` 才发 `kb.off`），假收起的概率比当年低一个量级。
+    static let unfillHold: TimeInterval = 0.30
 
     /// 0.2.42 — 收起时「先放场景、再动卡片」之间的那一拍。
     ///
@@ -381,7 +390,16 @@ enum AevonMotion {
     /// 中间那一拍 App 按 215 摆、卡片按 0 装，用户看到的是「关键盘时闪黑一下」。
     /// 它只是从代码里的字面量挪到这里，与 `unfillHold` 放在一起，好让「收起一共
     /// 要多久」只有一处能读。
-    static let unfillSettle: TimeInterval = 0.15
+    ///
+    /// 0.4.50 — **0.15 → 0.06。**
+    ///
+    /// 0.1.67 那 0.15 s 是「重推一次 settings 然后干等」时代的全部保险，因为那时
+    /// 没有任何落地确认。0.4.4 起 `landSceneFrame` 已经在等回执/重试（每 25 ms
+    /// 一拍，最多 8 拍），场景**已经落地**才走到这一段 —— 再等九帧是把同一件事
+    /// 再做一遍。留 0.06 s（约四帧）只给系统的布局提交收尾。
+    ///
+    /// 这一条与 `unfillHold` 一起，把 333 的 `kb-to-card=513ms` 压到约 0.37 s。
+    static let unfillSettle: TimeInterval = 0.06
 
     @discardableResult
     static func lift(_ views: [UIView], from scale: CGFloat, center: CGPoint?,
