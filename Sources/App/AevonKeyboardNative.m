@@ -9,6 +9,47 @@
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
 //
 // ---------------------------------------------------------------------------
+// 0.4.46 — 329：用户说「之前版本修复过」—— 查到了，是 0.4.x 弄丢的第四条通道
+// ---------------------------------------------------------------------------
+// 329 的结论只有一句：**矩形这条路对 Safari 走完了**。
+//   `mode hvote cov=2 votes=1` → `mode height cov=2 … rep=574 votes=2`
+//   → `verdict t0.7/t4.6 bar=500 kbtop=358 h=noop moved=-0`
+//   → `mode height off reason=noop moved=-0`
+// 原点（0.4.39）、引擎 padding（0.4.41）、判据 B（0.4.43/44）、高度（0.4.45）
+// 四条全 noop，`bar` 三拍恒 500 —— 它连一个字节都没看。
+//
+// 用户原话「我记得之前版本制作键盘时修复过这两个问题」。去翻同目录的历史日志，
+// 这个「之前」不是印象，是一条一直在跑、0.4.x 重写原生钩子时被整段删掉的通道：
+//
+//   Aevon(147) 0.1.76  safari  caret cls=UnifiedField bar=713..758     ← 被盖 245
+//   Aevon(150) 0.1.82  safari  kb: safe inset bottom=316 was=0 cover=316
+//                      safari  caret cls=UnifiedField bar=490..535     ← 同会话上移 223
+//   Aevon(152) 0.1.84  safari  safe inset bottom=316 / bar=490..535
+//   Aevon(220) 0.2.87  safari  safe inset bottom=316 / bar=490..535
+//   Aevon(259) 0.3.34  safari  safe inset bottom=316 / bar=490..535
+//   329        0.4.45  safari  bar=500 恒、moved=-0、**一条 safe 行都没有**
+//
+// 所以本版把 `AevonKbSafeApply` / `AevonKbSafeRestore` 那一族按**新架构**重写回来：
+// `rootViewController.additionalSafeAreaInsets.bottom`，写 `bottom = 原值 + cover`，
+// 收起还原；cover 不猜倍率（旧版 316 换来 223，比值 0.71 不是 1:1），改成
+// **按读数阶梯加码**：写「被盖多少 + 8」→ 0.8 s 复量 → 没到位就 ×2、×3 → 三次
+// 不到就认输、还原、本进程不再试。`why=rect` 只对 `HeightDead` 那一族生效
+// （所以 Safari 第一次弹键盘仍走矩形四通道，**第二次起**才让位）。
+//
+// Filza（`why=kbwin`）也走这条：它投不出票（`bar txt=none`、`field n=0`、假焦点
+// 在键盘窗），唯一能做的是整块让位；量不到编辑区 ⇒ `safe hold bot=none`，保留
+// 到收起。`atree` 这一版对 `RenameView` 强制展开（`f=1`）—— 329 里它 n=1 却
+// 一行子视图都没打出来，被三条剪枝全挡了，那正是要找的地方。
+//
+// 判据（330）：
+//   · Safari 第二次起应出现 `safe try why=rect cover=… → safe hit … fit=1`，
+//     之后 `bar` 底边 ≤ 358；三次不到会打 `safe dead` 并自动还原（不会更差）。
+//   · Filza 应出现 `safe try why=kbwin` + `safe hold bot=none`，再看 `atree … f=1`
+//     那几行（RenameView 下面到底是什么）。
+//   · 其余七家**一条 `safe` 行都不该有**。开关：`com.aevon.kbSafeInsetOff = true`。
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // 0.4.45 — 328：Safari 的算式闭合（高度口径）；Filza 只能看树
 // ---------------------------------------------------------------------------
 // 328 只有 Safari + 微信（对照组）+ 一整段 Filza。
@@ -610,6 +651,16 @@ static volatile int AevonKbSessionId = 0;
 static volatile int AevonKbHeightFlipSession = -1;
 /// 0.4.45 — 主窗视图树取证（Filza 那条）配额：一次输入会话 1 条。
 static volatile int AevonKbTreeProbes = 0;
+
+/// 0.4.46 — 安全区让位的状态（通道说明见 `AevonKbSafeTry` 上面那一段长注释）。
+static volatile int AevonKbSafeWrote = 0;         ///< 这一会话写进去了、还没还
+static volatile CGFloat AevonKbSafeSaved = -1.0;  ///< 写之前的 `bottom`（系统 safe area）
+static volatile int AevonKbSafeTries = 0;         ///< 本会话试了几次（阶梯加码）
+static volatile int AevonKbSafeDead = 0;          ///< 试满仍不动 ⇒ 本进程不再试
+static volatile int AevonKbSafeKept = 0;          ///< 复量确认动了 / 量不到 ⇒ 保留到收起
+static volatile int AevonKbSafeNotes = 0;         ///< 日志配额（每进程 12 行）
+static volatile CGFloat AevonKbSafeNeed = 0;      ///< 本会话第一次算出的「该让多少」
+static volatile int AevonKbSafeVerifyGen = 0;     ///< 复量代际：连写两次时作废旧的那条
 
 // ===========================================================================
 // 跨文件事实：本 App 现在是不是被卡片托着
@@ -2043,6 +2094,228 @@ static void AevonKbHeightVote(CGFloat cov, CGFloat barBot) {
     AevonKbLog(line);
 }
 
+// ===========================================================================
+// 0.4.46 — 安全区让位：`rootViewController.additionalSafeAreaInsets.bottom`
+// ===========================================================================
+//
+// 用户 329 的原话是「我记得之前版本制作键盘时修复过这两个问题」。翻历史日志，
+// 这个「之前」可以钉到具体版本上 —— 而且不是修过，是**一直在跑、0.4.x 丢了**：
+//
+//   Aevon(147) 0.1.76  safari  caret cls=UnifiedField bar=713..758     ← 被盖 245
+//   Aevon(150) 0.1.82  safari  kb: safe inset bottom=316 was=0 cover=316
+//                      safari  caret cls=UnifiedField bar=490..535     ← 同会话上移 223
+//   Aevon(152) 0.1.84  safari  safe inset bottom=316 / bar=490..535
+//   Aevon(220) 0.2.87  safari  safe inset bottom=316 / bar=490..535
+//   Aevon(259) 0.3.34  safari  safe inset bottom=316 / bar=490..535
+//   329        0.4.45  safari  bar=500 恒、moved=-0、**一条 safe 行都没有**
+//
+// 0.1.78 引入这条通道时的原话是「Safari 不读两条通道、guide 高度恒 0，只剩安全区」，
+// 0.1.82 的教训是「三份让位叠加会把酷安顶飞」，所以那时就定了规矩：**只留安全区
+// 一条**。0.4.x 重写原生键盘钩子时，把整段 `AevonKbSafeApply` / `AevonKbSafeRestore`
+// 一起删掉了，于是 Safari 退回「矩形改得再对也不看」的状态 —— 327/328/329 三次
+// 判死（原点、引擎 padding、判据 B、高度）都是在证明「矩形这条路对它无效」，
+// 而唯一有效的第四条通道当时已经不在代码里了。
+//
+// 写入语义：`additionalSafeAreaInsets` 是**加在系统 safe area 之上的额外量**，
+// 所以必须记住写之前的 `bottom`，还原时写回去；累加会漂。
+//
+// 阶梯加码：`inset → 布局位移` 不是 1:1（0.1.82 那次 316 换来 223，比值 0.71），
+// 所以不猜倍率，改成**按读数闭环**：第一拍写「被盖多少 + 8」，0.8 s 后复量
+// `bar` 底边 —— 到位（≤ kbtop + 8）就粘住；还被盖就把 cover 乘 2、乘 3 再来。
+// 三次都不到就认输、还原、本进程不再试（`AevonKbSafeDead`）。
+//
+// 谁该走这条：
+//   · `why=rect`  —— `AevonKbHeightDead` 为真（矩形四通道全都自证无效，Safari 是这一类）
+//   · `why=kbwin` —— 第一响应者落在键盘窗里、主窗一个编辑区都量不到（Filza 是这一类）
+// 其余 App（QQ/微信/威锋/minis/Turrit/酷安）**一条都不该出现 safe 行**。
+//
+// ⛔ 开关：`com.aevon.kbSafeInsetOff = true` ⇒ 整条通道只读日志、一个字不写。
+
+/// 通道开关。缺省开；写 `true` 即完全不写安全区。
+static BOOL AevonKbSafeInsetEnabled(void) {
+    BOOL on = YES;
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("kbSafeInsetOff"),
+                                                        AevonKbDomain);
+    if (value != NULL) {
+        if (CFGetTypeID(value) == CFBooleanGetTypeID()) {
+            on = CFBooleanGetValue((CFBooleanRef)value) ? NO : YES;
+        }
+        CFRelease(value);
+    }
+    return on;
+}
+
+/// 主窗的 `rootViewController` —— 安全区写在它身上（写窗口没用）。
+static id AevonKbSafeRootVC(void) {
+    UIWindow *win = AevonKbAppMainWindow();
+    if (win == nil) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(win, @selector(rootViewController));
+}
+
+static UIEdgeInsets AevonKbSafeInsetsRead(id rvc) {
+    return ((UIEdgeInsets (*)(id, SEL))objc_msgSend)(rvc,
+                                                    @selector(additionalSafeAreaInsets));
+}
+
+static void AevonKbSafeBottomWrite(id rvc, CGFloat bottom) {
+    UIEdgeInsets now = AevonKbSafeInsetsRead(rvc);
+    if (fabs(now.bottom - bottom) < 0.5) return;
+    UIEdgeInsets want = now;
+    want.bottom = bottom;
+    ((void (*)(id, SEL, UIEdgeInsets))objc_msgSend)(rvc,
+                                                   @selector(setAdditionalSafeAreaInsets:),
+                                                   want);
+}
+
+/// 把 `bottom` 还回写之前的值。键盘收起、判负、开关关掉都走这里。
+static void AevonKbSafeRestore(void) {
+    if (AevonKbSafeWrote == 0) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ AevonKbSafeRestore(); });
+        return;
+    }
+    AevonKbSafeWrote = 0;
+    id rvc = AevonKbSafeRootVC();
+    CGFloat back = (AevonKbSafeSaved >= 0.0) ? AevonKbSafeSaved : 0.0;
+    AevonKbSafeNeed = 0.0;
+    AevonKbSafeTries = 0;
+    if (rvc == nil) return;
+    AevonKbSafeBottomWrite(rvc, back);
+    if (AevonKbSafeNotes < 12) {
+        AevonKbSafeNotes += 1;
+        char line[160];
+        snprintf(line, sizeof(line), "app: kb: safe back bottom=%.0f\n", back);
+        AevonKbLog(line);
+    }
+}
+
+static void AevonKbSafeVerify(void);
+
+/// 写一次安全区。`barBot` < 1 表示「量不到编辑区」（Filza 那种自绘情形），
+/// 这时按「键盘占满世界下部」直接让 `worldH − kbtop`。
+static void AevonKbSafeTry(CGFloat barBot, CGFloat kbTop, const char *why) {
+    if (AevonKbSafeDead || AevonKbSafeKept) return;
+    if (!AevonKbSafeInsetEnabled()) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonKbSafeTry(barBot, kbTop, why);
+        });
+        return;
+    }
+    if (AevonKbShown == 0 || kbTop < 40.0) return;
+    if (AevonKbScreenMode) return;      // 换口径那一族已经好了，不叠加（0.1.82 酷安教训）
+    if (AevonKbHeightMode) return;      // 高度口径正翻着，让它自己判完
+    if (AevonKbSafeWrote) return;       // 这一轮还没复量，不重复写
+    if (AevonKbSafeTries >= 3) return;
+    id rvc = AevonKbSafeRootVC();
+    if (rvc == nil) return;
+    CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
+    if (worldH < 200.0) return;
+    if (AevonKbSafeNeed <= 0.0) {
+        CGFloat need = (barBot > 1.0) ? (barBot - kbTop + 8.0) : (worldH - kbTop);
+        if (need < 60.0) need = 60.0;
+        if (need > worldH - 140.0) need = worldH - 140.0;
+        AevonKbSafeNeed = need;
+    }
+    CGFloat cover = AevonKbSafeNeed * (CGFloat)(AevonKbSafeTries + 1);
+    if (cover > worldH - 140.0) cover = worldH - 140.0;
+    UIEdgeInsets now = AevonKbSafeInsetsRead(rvc);
+    if (AevonKbSafeSaved < 0.0) AevonKbSafeSaved = now.bottom;
+    CGFloat want = AevonKbSafeSaved + cover;
+    AevonKbSafeTries += 1;
+    AevonKbSafeWrote = 1;
+    AevonKbSafeBottomWrite(rvc, want);
+    if (AevonKbSafeNotes < 12) {
+        AevonKbSafeNotes += 1;
+        char line[260];
+        snprintf(line, sizeof(line),
+                 "app: kb: safe try why=%s cover=%.0f was=%.0f now=%.0f bar=%.0f kbtop=%.0f tries=%d vc=%.26s\n",
+                 why, cover, AevonKbSafeSaved, want, barBot, kbTop,
+                 (int)AevonKbSafeTries, class_getName([rvc class]));
+        AevonKbLog(line);
+    }
+    AevonKbSafeVerifyGen += 1;
+    int gen = AevonKbSafeVerifyGen;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.80 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (gen != AevonKbSafeVerifyGen) return;
+        AevonKbSafeVerify();
+    });
+}
+
+/// 0.8 s 后复量 `bar` 的底边 —— 通道通不通由这一行自己说，不靠猜。
+static void AevonKbSafeVerify(void) {
+    if (AevonKbSafeWrote == 0 || AevonKbSafeKept) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ AevonKbSafeVerify(); });
+        return;
+    }
+    UIWindow *win = AevonKbAppMainWindow();
+    CGFloat kbTop = AevonKbShown ? (CGFloat)AevonKbLastTop : 0.0;
+    CGFloat bot = -1.0;
+    if (win != nil) {
+        UIView *root = nil;
+        id rvc = ((id (*)(id, SEL))objc_msgSend)(win, @selector(rootViewController));
+        if (rvc != nil) {
+            root = (UIView *)((id (*)(id, SEL))objc_msgSend)(rvc, @selector(view));
+        }
+        if (root == nil) root = win;
+        UIView *cands[AEVON_KB_INPUT_MAX];
+        int candCount = 0;
+        AevonKbCollectTextInput(root, 16, cands, &candCount);
+        CGFloat best = 0.0;
+        for (int i = 0; i < candCount; i++) {
+            UIView *v = cands[i];
+            if (v == nil) continue;
+            if ([v isHidden] || [v alpha] < 0.3) continue;
+            CGRect r = [v convertRect:[v bounds] toView:win];
+            if (!isfinite(r.origin.y)) continue;
+            if (r.size.width * r.size.height <= 1.0) continue;
+            CGFloat b = r.origin.y + r.size.height;
+            if (b > best) best = b;
+        }
+        if (best > 0.0) bot = best;
+    }
+    char line[220];
+    if (bot < 0.0 || kbTop < 40.0) {
+        // 量不到（自绘编辑区）⇒ 无法闭环，保留到键盘收起：写一次无害，错了也是还原。
+        AevonKbSafeKept = 1;
+        if (AevonKbSafeNotes < 12) {
+            AevonKbSafeNotes += 1;
+            snprintf(line, sizeof(line), "app: kb: safe hold bot=none tries=%d\n",
+                     (int)AevonKbSafeTries);
+            AevonKbLog(line);
+        }
+        return;
+    }
+    BOOL fit = (bot <= kbTop + 8.0);
+    if (AevonKbSafeNotes < 12) {
+        AevonKbSafeNotes += 1;
+        snprintf(line, sizeof(line),
+                 "app: kb: safe hit bot=%.0f kbtop=%.0f gap=%.0f fit=%d tries=%d\n",
+                 bot, kbTop, kbTop - bot, (int)fit, (int)AevonKbSafeTries);
+        AevonKbLog(line);
+    }
+    if (fit) {
+        AevonKbSafeKept = 1;
+        return;
+    }
+    if (AevonKbSafeTries >= 3) {
+        AevonKbSafeDead = 1;
+        if (AevonKbSafeNotes < 12) {
+            AevonKbSafeNotes += 1;
+            snprintf(line, sizeof(line), "app: kb: safe dead gap=%.0f tries=%d\n",
+                     kbTop - bot, (int)AevonKbSafeTries);
+            AevonKbLog(line);
+        }
+        AevonKbSafeRestore();
+        return;
+    }
+    // 加码再来一次：`AevonKbSafeTry` 的 cover 已经乘上 `tries + 1`。
+    AevonKbSafeWrote = 0;
+    AevonKbSafeTry(bot, kbTop, "step");
+}
+
 /// 0.4.41 — Safari 的底部地址栏：**它根本没读我们报的那个矩形**。
 ///
 /// 324 的 Safari 每一拍都是同一组数，四个通道全对、症状却还在：
@@ -2393,18 +2666,30 @@ static BOOL AevonKbTreePruneClass(const char *cls) {
 }
 
 static void AevonKbTreeWalk(UIView *node, UIWindow *win, int depth, CGFloat kbTop,
-                            int *budget, int *lines) {
+                            int *budget, int *lines, int force) {
     if (node == nil || win == nil || depth < 0 || *budget <= 0) return;
     if (*lines >= AEVON_KB_ATREE_MAX) return;
-    if ([node isHidden] || [node alpha] < 0.05) return;
-    CGRect r = [node convertRect:[node bounds] toView:win];
-    if (r.size.width < 40.0 || r.size.height < 8.0) return;
-    if (r.origin.y + r.size.height < kbTop - 40.0) return;
     const char *cls = class_getName([node class]);
+    // 0.4.46 — `RenameView`：Filza 的重命名弹窗是 window 级浮层（329 的 atree 里
+    // 只有一个点），它下面那一层在 0.4.45 里被「hidden / 尺寸 / 位置」三条剪枝
+    // 一起挡掉了 —— 而它正是要找的那块编辑区。这一族的子树**不过滤**，只受行数
+    // 预算约束；行尾加 `f=1` 自报「这一支是强开的」，不跟普通节点混在一起。
+    BOOL forced = (force != 0) || (strstr(cls, "Rename") != NULL);
+    CGRect r = [node convertRect:[node bounds] toView:win];
+    if (!forced) {
+        if ([node isHidden] || [node alpha] < 0.05) return;
+        if (r.size.width < 40.0 || r.size.height < 8.0) return;
+        if (r.origin.y + r.size.height < kbTop - 40.0) return;
+    }
     BOOL cut = AevonKbTreePruneClass(cls);
     *budget -= 1;
     *lines += 1;
     char line[240];
+    char mark[48] = "";
+    if (cut) strncat(mark, " cut", sizeof(mark) - strlen(mark) - 1);
+    if (forced) strncat(mark, " f=1", sizeof(mark) - strlen(mark) - 1);
+    if ([node isHidden]) strncat(mark, " hid=1", sizeof(mark) - strlen(mark) - 1);
+    if ([node alpha] < 0.05) strncat(mark, " a0=1", sizeof(mark) - strlen(mark) - 1);
     int indent = 12 - depth;
     if (indent < 0) indent = 0;
     if (indent > 12) indent = 12;
@@ -2412,14 +2697,14 @@ static void AevonKbTreeWalk(UIView *node, UIWindow *win, int depth, CGFloat kbTo
              "app: kb: atree %.*s%.24s %.0fx%.0f@%.0f,%.0f bot=%.0f n=%lu%s\n",
              indent, "............", cls, r.size.width, r.size.height,
              r.origin.x, r.origin.y, r.origin.y + r.size.height,
-             (unsigned long)[[node subviews] count], cut ? " cut" : "");
+             (unsigned long)[[node subviews] count], mark);
     AevonKbLog(line);
     if (cut) return;
     NSArray *subs = [node subviews];
     NSUInteger total = [subs count];
-    for (NSUInteger i = 0; i < total && i < 6; i++) {
+    for (NSUInteger i = 0; i < total && i < 8; i++) {
         if (*lines >= AEVON_KB_ATREE_MAX || *budget <= 0) break;
-        AevonKbTreeWalk([subs objectAtIndex:i], win, depth - 1, kbTop, budget, lines);
+        AevonKbTreeWalk([subs objectAtIndex:i], win, depth - 1, kbTop, budget, lines, forced);
     }
 }
 
@@ -2435,7 +2720,7 @@ static void AevonKbProbeAppTree(const char *tag, UIWindow *appWin, CGFloat kbTop
     AevonKbLog(head);
     int budget = 500;
     int lines = 0;
-    AevonKbTreeWalk(appWin, appWin, 12, kbTop, &budget, &lines);
+    AevonKbTreeWalk(appWin, appWin, 12, kbTop, &budget, &lines, 0);
     char tail[120];
     snprintf(tail, sizeof(tail), "app: kb: atree %s end lines=%d budget=%d\n",
              tag, lines, budget);
@@ -2514,6 +2799,10 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
         AevonKbProbePresentedChain(tag, appWin, kbTop);
         AevonKbProbeTextInputs(tag, appWin, kbTop);
         AevonKbProbeAppTree(tag, appWin, kbTop);
+        // 0.4.46 — 主窗里一个编辑区都量不到（329 的 Filza：`bar txt=none`、`field n=0`、
+        // `pres` 只有根视图 + 一个整屏子视图）⇒ 编辑区是自绘的，唯一还能动的是
+        // 「整块让位」。这条不看 `HeightDead`（它压根投不出票），只认「假焦点」这一条证词。
+        AevonKbSafeTry(0.0, kbTop, "kbwin");
     } else {
         CGRect fr = [focus convertRect:[focus bounds] toView:focusWin];
         CGFloat bot = fr.origin.y + fr.size.height;
@@ -2863,6 +3152,12 @@ static void AevonKbProbeBarText(const char *tag) {
              (int)offScreen, candCount,
              (int)[field isHidden], (double)[field alpha]);
     AevonKbLog(line);
+    // 0.4.46 — 矩形四通道都自证无效的那一族（Safari 是唯一一个）：改走安全区让位。
+    // `AevonKbHeightDead` 只在「高度口径翻了、复量没动」之后才为真，所以这条不会
+    // 抢在矩形前面动；第一次弹键盘仍然先把矩形四通道走完，第二次起才让位。
+    if (AevonKbHeightDead != 0 && bottom > kbTop + 20.0) {
+        AevonKbSafeTry(bottom, kbTop, "rect");
+    }
     AevonKbProbeFocusAndScene(tag, appWin, rootView, kbTop);
 }
 
@@ -3093,6 +3388,11 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
         if (!visible && (hideNote || end.size.height < 40.0
                          || end.origin.y >= worldH - 40.0)) {
             AevonKbShown = 0;
+            // 0.4.46 — 键盘收起 ⇒ 安全区立刻还回系统原值（否则 App 下一次布局
+            // 会带着这 359 的空隙，看起来像「底部多了一条白」）。
+            AevonKbSafeRestore();
+            AevonKbSafeKept = 0;
+            AevonKbSafeNeed = 0.0;
             // 0.4.42 — 收起之后补一拍「静止位」：输入条回到哪儿、滚动视图 inset 归零没有。
             // Safari 那条线全靠这一拍分辨两种情形：
             //   · 静止位 = 世界底（638 附近）⇒ 键盘本来能让它动，是键盘给的高度不对；

@@ -1578,6 +1578,18 @@ def main():
                       b"app: kb: atree %s begin kbtop=%.0f root=%.24s",
                       b"app: kb: atree %.*s%.24s %.0fx%.0f@%.0f,%.0f bot=%.0f n=%lu%s",
                       b"app: kb: atree %s end lines=%d budget=%d",
+                      # 0.4.46 — 安全区让位（`rootViewController.additionalSafeAreaInsets.bottom`）。
+                      # 这是 0.1.78 引入、0.3.34 之前一直在跑、0.4.x 重写原生钩子时整段
+                      # 删掉的第四条通道。329 只有 Safari 一个 App 的矩形四通道全 noop
+                      # （`bar=500` 三拍恒定），而 0.1.82 的同一条日志是
+                      # `safe inset bottom=316` → `bar=490..535`（上移 223）。
+                      # 复量闭环：写「被盖多少 + 8」→ 0.8 s 后量 `bar` 底边 →
+                      # 不到位就乘 2、乘 3 再来 → 三次不到 `safe dead` 并还原。
+                      b"app: kb: safe try why=%s cover=%.0f was=%.0f now=%.0f bar=%.0f kbtop=%.0f tries=%d vc=%.26s",
+                      b"app: kb: safe hit bot=%.0f kbtop=%.0f gap=%.0f fit=%d tries=%d",
+                      b"app: kb: safe hold bot=none tries=%d",
+                      b"app: kb: safe dead gap=%.0f tries=%d",
+                      b"app: kb: safe back bottom=%.0f",
                       b"app: kb: pres %s root=%.24s depth=%d top=%.24s view=%.24s %.0fx%.0f@%.0f,%.0f n=%d %s",
                       b"app: kb: pres %s root=%.24s depth=%d top=%.24s view=none kbtop=%.0f",
                       b"app: kb: pres %s root=none kbtop=%.0f",
