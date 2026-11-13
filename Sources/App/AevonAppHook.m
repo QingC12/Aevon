@@ -1307,7 +1307,7 @@ static BOOL AevonTableRemeasure(UITableView *table) {
     if ([table isEditing]) return NO;
     CGRect box = [table bounds];
     CGFloat span = [table contentSize].height;
-    // 0.4.53 — 门槛从 12 屏放到 40 屏。
+    // 0.4.53 把门槛从 12 屏放到 40 屏，0.4.57 再放到 80 屏并补一道「行数」闸。
     //
     // 12 屏是 0.1.38 在「没有任何耗时读数」的情况下拍的保守值。336 第一次把它
     // 量出来：`page remeasure 2.8ms cls=AWEFeedTableView rows=11`（11 屏的表），
@@ -1316,14 +1316,21 @@ static BOOL AevonTableRemeasure(UITableView *table) {
     // 这个保守值正是「开卡之后要等 5~10 s 才排对」的直接原因：卡片是 717，
     // 抖音那张表的内容高 10252 = 14.3 屏 > 12 ⇒ 一次都没敢发，于是顶部那一页
     // 一直停在 932（`inside settle box=717 c0=932 … 430x849`），底部 215 pt 被裁
-    // —— 用户说的「点赞栏只显示一半、标题栏不显示」。40 屏仍然是一道闸（无限
-    // feed 真到几百屏时不碰），只是不再把 11~14 屏这种正常尺寸挡在外面。
-    if (box.size.height > 1.0 && span > box.size.height * 40.0) {
+    // —— 用户说的「点赞栏只显示一半、标题栏不显示」。
+    //
+    // 0.4.57 为什么还要动它：338 里抖音在卡片里已经到
+    // `span=430x27960 box=717` = **39.0 屏**，离 40 只差一步。一旦撞上，0.4.56
+    // 那条「每一次滑动都检测」就会静默失效（`cell fit fix … r=0`）。真正防看门狗
+    // 的是下面那道 30 ms 实测闸，这一条只是「明显不合理的表不碰」—— 而行数比
+    // 内容高更能代表代价：`beginUpdates/endUpdates` 的开销随行数走，而无限 feed
+    // 的内容高可以无限长。
+    NSInteger rows = [table numberOfSections] > 0 ? [table numberOfRowsInSection:0] : 0;
+    if ((box.size.height > 1.0 && span > box.size.height * 80.0) || rows > 400) {
         if (AevonTableRemeasureNotes < 3) {
             AevonTableRemeasureNotes += 1;
-            char skip[160];
-            snprintf(skip, sizeof(skip), "remeasure skip span=%.0f box=%.0f",
-                     span, box.size.height);
+            char skip[176];
+            snprintf(skip, sizeof(skip), "remeasure skip span=%.0f box=%.0f rows=%ld",
+                     span, box.size.height, (long)rows);
             AevonPageWrite(skip);
         }
         return NO;
