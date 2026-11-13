@@ -48,6 +48,7 @@ WIRED = {
     "kb.keep",               # FloatHost.setKeyboardFill：键盘态是否保持浮窗尺寸
     "windowBlacklistText",   # AevonOpenDecide：名单里的 App 走原生
     "!ring.desktop",         # RingHost：桌面是否挂圆盘
+    "SOUND",                 # AevonFloatMotion：圆盘反馈用声音代替震动（0.4.63）
 }
 
 # ---------------------------------------------------------------------------
@@ -77,6 +78,11 @@ PANELS = [
         dict(grp="显示", k="!ring.desktop", cn="在桌面显示", cell="switch", d=True,
              note="开着时，手指贴屏幕右缘、在下部 35% 之内向左划，圆盘从固定点展开。"
                   "关掉只是不显示，不影响浮窗。"),
+        dict(grp="反馈", k="SOUND", cn="声音代替震动", cell="switch", d=False,
+             note="关（默认）时圆盘用震动反馈：手指滑过图标、展开、收起、选中各一记，"
+                  "强度是母版 Stheno 的默认值 0.5。开启后整条路径改播系统提示音 1157，"
+                  "不再震动 —— 母版里声音本来就是「震动关掉时的替代」，不是和震动一起响。"
+                  "改完立刻生效，下一个动作就换；不需要重载桌面。"),
         dict(grp="触摸", k="!ring.appHook", cn="浮窗内容可点击", cell="switch", d=True,
              note="浮窗里的 App 由另一个进程显示，它自己会以为「我在后台」，"
                   "UIKit 于是把转发进来的触摸丢掉 —— 画面在动、声音在放，就是点不动。"

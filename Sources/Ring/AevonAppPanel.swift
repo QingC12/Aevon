@@ -581,7 +581,7 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
     /// 这种顺序就会在一条路上对、另一条路上错。
     private func openApp(_ bundleID: String) {
         guard !dismissing, !bundleID.isEmpty else { return }
-        AevonFloatMotion.haptic(.light)
+        AevonFloatMotion.haptic(.light, source: "panel")
         Log.write("panel: picked app " + bundleID)
         // 先取回调再 dismiss —— dismiss 会把 onPick 置 nil，写在后面就永远拿到 nil。
         let pick = onPick
@@ -602,7 +602,7 @@ final class AevonAppPanel: UIView, UIGestureRecognizerDelegate, UIScrollViewDele
             guard seen == sender.tag else { continue }
             let y = Swift.max(0, row.y - 4)
             scroll.setContentOffset(CGPoint(x: 0, y: y), animated: true)
-            AevonFloatMotion.haptic(.light)
+            AevonFloatMotion.haptic(.light, source: "panel-jump")
             return
         }
     }

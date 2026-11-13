@@ -582,6 +582,10 @@ final class AevonRingMenu: UIView {
         /* V0.3.18（AevonSpringUnifyV318）：阻尼比在展开这一刻读一次，之后整局复用。
          * 滑条改动要下次呼盘才生效 —— 这是刻意的：逐帧读 prefs 是跨进程 IPC。 */
         menu.hoverZ = AevonSpring.userDampingFraction()
+        /* 0.4.63 — `SOUND` 的第二个刷新源：每一次呼盘读一次 ring.plist。
+         * 第一个源是 `RingHost.refresh()`（改设置 → Darwin）。两条都要，
+         * 因为一个粘性全局量必须有人按期把它拉回真实值。 */
+        AevonFloatMotion.refreshSound()
         /* 0.1.19 — 「展开后固定」每局读一次（母版把它做成设置项 `AutoPin`：
          * 自锁::展开后立即固定）。读一次而不是逐帧读：一次呼盘只召唤一次盘，
          * 逐帧读 UserDefaults 是跨进程 IO。 */
@@ -1223,6 +1227,8 @@ final class AevonRingMenu: UIView {
      * 手指停住也会在 0.55s 内自己长完（不会卡在半个盘）。
      */
     private func animateIn() {
+        // 0.4.63 — 母版 `0x1a2c4`（圆盘展开，先震再起动画）。
+        AevonFloatMotion.haptic(.light, source: "unfold")
         // 遮罩单独一条淡入：它和盘面几何无关，跟着 progress 走只会让背景忽明忽暗
         dimView.alpha = 0
         UIView.animate(withDuration: 0.18, animations: { self.dimView.alpha = 1 })
@@ -1322,6 +1328,13 @@ final class AevonRingMenu: UIView {
     private func dismiss(instant: Bool = false) {
         guard AevonRingMenu.current === self, !isDismissing else { return }
         isDismissing = true
+        /* 0.4.63 — 母版 `0x1ba74`（圆盘收起）。
+         *
+         * ⛔ 瞬时档**不震**：那条路只有「选中开窗」走，而 `activate` 已经震过
+         * 一记（母版 `0x1c350` 选中 / `0x2dd8c` 点击）。母版那几个点是「一个动作
+         * 一记」，不是叠加 —— 在这里补一下就会变成连震两下。
+         */
+        if !instant { AevonFloatMotion.haptic(.light, source: "close") }
         // V0.2.66（AevonRingIdleV266）：静默看门狗随圆盘一起停。
         idleWatch?.invalidate()
         idleWatch = nil
@@ -1752,7 +1765,7 @@ final class AevonRingMenu: UIView {
             setHovered(nil)
             return
         }
-        AevonFloatMotion.haptic(.light)
+        AevonFloatMotion.haptic(.light, source: "rotate-off")
         let pulse = CAKeyframeAnimation(keyPath: "transform.scale")
         pulse.values = [1.0, 0.86, 1.0]
         pulse.keyTimes = [0, 0.5, 1]
@@ -1794,7 +1807,7 @@ final class AevonRingMenu: UIView {
 
     /// 进入旋转模式的反馈：一圈涟漪 + 轻度触感 + 圆心轻微放大。
     private func pulseRotationFeedback() {
-        AevonFloatMotion.haptic(.medium)
+        AevonFloatMotion.haptic(.medium, source: "rotate-on")
         guard let radius = ringRadii.first, radius > 0 else { return }
         let ring = CAShapeLayer()
         ring.frame = bounds
@@ -1889,6 +1902,14 @@ final class AevonRingMenu: UIView {
         hoveredBundleID = newID
         hoveredIcon = icon
         if let icon = icon {
+            /* 0.4.63 — 母版 `0x4c334`：**手指滑过图标**一记。
+             *
+             * 那一处的判据是「选中 index 变了就震，`0x3e7 = 999` 是空位哨兵，
+             * 回到空位不震」—— 换成这里的说法就是：`newID` 非空才算一次划过，
+             * 离开所有图标（空 ID）什么都不做。上面那条 `guard` 已经把「同一个
+             * 图标报两次」挡住了，所以手指停在某个图标上不会持续震。
+             */
+            AevonFloatMotion.haptic(.light, source: "hover")
             /* V0.3.19（AevonHoverTrailV319）：只在内存里记一笔，**不写盘**。
              * 逐条「划过 X」日志的成本见 `hoverSwitchCount` 的注释。 */
             hoverSwitchCount += 1
@@ -1997,6 +2018,10 @@ final class AevonRingMenu: UIView {
 
     private func activate(_ icon: AevonRingIcon) {
         if AevonRingMenu.activateHook?(icon) == true { return }
+        // 0.4.63 — 母版 `0x1c350`（选中）/ `0x2dd8c`（点击）：一个动作一记。
+        // 用 medium 而不是 hover 那档 light，是为了让「选中」和「划过」摸得出差别；
+        // 强度仍是全局那一个 0.5（母版只有一个 VibrateIntensity）。
+        AevonFloatMotion.haptic(.medium, source: "pick")
         let bundleID = icon.bundleID
         // V0.2.62（AevonQuickActionV262）：截图 / 录屏不是 App，直接执行动作，不开窗。
         if AevonQuickAction.isAction(bundleID) {

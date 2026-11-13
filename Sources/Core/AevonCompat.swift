@@ -30,6 +30,7 @@
 import UIKit
 import ObjectiveC.runtime
 import ReplayKit
+import AudioToolbox
 
 // MARK: - Log
 
@@ -75,34 +76,77 @@ enum AevonPrefs {
 
 // MARK: - Haptics
 
-/// Only the haptic entry of the old `AevonFloatMotion` is called by the ring
-/// menu (rotation-mode feedback), so only that entry came over. Intensity is
-/// resolved the same way the old file did: the private
-/// `impactOccurredWithIntensity:` when the system has it, the public API when
-/// it does not — never a crash over a vibration.
+/// 圆盘唯一的反馈出口 —— 母版 `sub_4a764` 的移植。
+///
+/// 母版 `disasm-Stheno-s0.txt` 里这一段是全库**唯一**的反馈函数，十个调用点
+/// 都汇到它（`0x4c334` 滑过图标、`0x1a2c4/0x1ba74/0x1c350` 展开/收起/选中、
+/// `0x2dd8c` 点击、`0x6114c` 钉住、`0x60674` 设置开关、另三处动作按钮）。
+/// 它做的是一个二选一，不是两件事：
+///
+///     0x4a7b0  mov  w0, #0xe          ← ToggleMask 第 15 项 `vibrate`
+///     0x4a7cc  tbz  w19,#0, 0x4a84c   ← 关 → 去播系统音
+///     0x4a844  bl   _objc_msgSend     ← impactOccurredWithIntensity:
+///     0x4a84c  mov  w0, #0x485        ← 1157
+///     0x4a850  bl   _AudioServicesPlaySystemSound
+///
+/// 所以 Aevon 也只有一个开关 `SOUND`：关（默认）= 震动，开 = 响一声、不震。
 enum AevonFloatMotion {
 
-    static func hapticIntensity(for style: UIImpactFeedbackGenerator.FeedbackStyle) -> CGFloat {
-        switch style {
-        case .light:  return 0.55
-        case .medium: return 0.85
-        case .heavy:  return 1.00
-        case .soft:   return 0.45
-        case .rigid:  return 0.70
-        @unknown default: return 0.85
-        }
+    /// 0.4.63 — 母版 `VibrateIntensity` 的默认值（`0x6a530 fmov d0,#0.5`）。
+    ///
+    /// 旧版这里按 style 硬编码 0.55 / 0.85 / 1.00 —— 三个数都没有出处，而母版
+    /// 全局只有一个强度值。手感想变就调这一个数，不要再按 style 分档。
+    static let intensity: CGFloat = 0.5
+
+    /// 母版 `mov w0, #0x485` = 1157。全库 `_AudioServicesPlaySystemSound` 只有
+    /// 这一个调用点（`AevonQuickAction` 里那记 1108 是截图快门，不是圆盘反馈）。
+    static let soundID: SystemSoundID = 1157
+
+    /// `SOUND` 的运行期镜像。
+    ///
+    /// 读 `RingConfig` 是一次跨进程 IO（roothide 下 Preferences 每进程重定向，
+    /// 实际走的是 `ring.plist` 快照），而 `setHovered` 在手指划过整排时会连调
+    /// 十几次 —— 一次震动读一次盘是不可接受的。所以只在三处刷新：
+    ///
+    ///   · `RingHost.refresh()` —— 改设置 → Darwin 通知 → 这里；
+    ///   · `AevonRingMenu.present()` —— 每一次呼盘；
+    ///   · 第一次真的要用之前（下面那条懒加载兜底）。
+    ///
+    /// ⚠ 这是个粘性全局量，必须有同寿命的刷新源 —— 0.4.63 的两个源就是上面
+    /// 前两条。少任何一条，改完设置就要重载桌面才生效。
+    private static var soundOn = false
+    private static var soundKnown = false
+
+    static func refreshSound() {
+        soundOn = RingConfig.loadRuntime().sound
+        soundKnown = true
     }
 
-    static func haptic(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
+    private static var soundReplacesHaptic: Bool {
+        if !soundKnown { refreshSound() }
+        return soundOn
+    }
+
+    /// `source` 只进日志：hover / unfold / close / pick / rotate / panel。
+    /// 圆盘上九个反馈点全走这一条出口，靠它区分「这一记是谁要的」。
+    static func haptic(_ style: UIImpactFeedbackGenerator.FeedbackStyle,
+                       source: String = "menu") {
+        if soundReplacesHaptic {
+            AudioServicesPlaySystemSound(soundID)
+            AevonLog.info("[圆盘] 声音 id=1157 src=" + source)
+            return
+        }
         let generator = UIImpactFeedbackGenerator(style: style)
         let selector = NSSelectorFromString("impactOccurredWithIntensity:")
         guard let method = class_getInstanceMethod(UIImpactFeedbackGenerator.self, selector) else {
             generator.impactOccurred()
+            AevonLog.info("[圆盘] 震动 i=0.50 src=" + source)
             return
         }
         typealias IntensityFn = @convention(c) (AnyObject, Selector, CGFloat) -> Void
         let function = unsafeBitCast(method_getImplementation(method), to: IntensityFn.self)
-        function(generator, selector, hapticIntensity(for: style))
+        function(generator, selector, intensity)
+        AevonLog.info("[圆盘] 震动 i=0.50 src=" + source)
     }
 }
 

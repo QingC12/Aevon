@@ -29,9 +29,28 @@ struct RingConfig {
     var damping: CGFloat = 0.82      // 阻尼系数
     var customSpring: Bool = true    // 动画弹性
     var star: Bool = true            // 收藏（0.0.42 起圆盘本体不再提供）
-    var haptic: Bool = true          // 震动
-    var intensity: CGFloat = 0.7     // 强度
     var speed: CGFloat = 1           // 速度
+
+    // 0.4.63 — `haptic` 与 `intensity` 两个字段**删除**。
+    //
+    // 它们读的 `VIBRATE` / `INTENSITY` 从来就没有控件（`gen-settings.py` 的
+    // `WIRED` 里没有这两个键），也就是「一个拧了没反应的开关」的孪生形态：
+    // 一个谁都不知道存在、改了却真的会生效的隐藏字段。现在圆盘的反馈是二选一
+    // （`sound`），强度只有母版那一个 0.5，两个字段都没有第二个读者了。
+
+    /// 0.4.63 — **一个开关，两选一：震动 / 声音。**
+    ///
+    /// 母版 `sub_4a764` 逐行是这么写的（`disasm-Stheno-s0.txt`）：
+    ///
+    ///     0x4a7b0  mov  w0, #0xe          ← 读 ToggleMask 第 15 项 `vibrate`
+    ///     0x4a7cc  tbz  w19,#0, 0x4a84c   ← 关 → 跳去播系统音
+    ///     0x4a844  bl   _objc_msgSend     ← impactOccurredWithIntensity:（默认 0.5）
+    ///     0x4a84c  mov  w0, #0x485        ← 1157
+    ///     0x4a850  bl   _AudioServicesPlaySystemSound
+    ///
+    /// 也就是说声音在母版里**不是**「和震动一起响」，而是「震动关掉时的替代」。
+    /// 所以不做两个开关：`SOUND` 关（默认）= 震动，开 = 播系统音、不震。
+    var sound: Bool = false
 
     /// "Put the grip on the home screen." Not one of the master's 81 keys, so
     /// it is prefixed and kept out of the generated table. Ships on: a shape
@@ -75,8 +94,8 @@ struct RingConfig {
     /// new ring control cannot be added to the UI and forgotten here.
     static let mirroredKeys: Set<String> = [
         "Radius", "IconWidth", "RotationAngle", "Star",
-        "DampingFraction", "CustomSpringAnimation", "VIBRATE", "INTENSITY",
-        "Speed", "!ring.desktop", "!ring.autopin",
+        "DampingFraction", "CustomSpringAnimation",
+        "Speed", "!ring.desktop", "!ring.autopin", "SOUND",
     ]
 
     // MARK: Reading
@@ -108,8 +127,7 @@ struct RingConfig {
         config.damping = clamp(number("DampingFraction", 0.82), 0.10, 1.0)
         config.customSpring = flag("CustomSpringAnimation", true)
         config.star = flag("Star", true)
-        config.haptic = flag("VIBRATE", true)
-        config.intensity = clamp(number("INTENSITY", 0.7), 0.10, 1.0)
+        config.sound = flag("SOUND", false)
         config.speed = clamp(number("Speed", 1), 0.2, 2.0)
         config.desktop = flag("!ring.desktop", true)
         config.autoPin = false   // 0.1.20：跟手已撤，本版一律不固定（见 `autoPin` 字段注释）
@@ -134,8 +152,7 @@ struct RingConfig {
             "DampingFraction": Double(damping),
             "CustomSpringAnimation": customSpring,
             "Star": star,
-            "VIBRATE": haptic,
-            "INTENSITY": Double(intensity),
+            "SOUND": sound,
             "Speed": Double(speed),
             "summary": summary,
             "desktop": desktop,
@@ -170,8 +187,7 @@ struct RingConfig {
         config.damping = clamp(number("DampingFraction", 0.82), 0.10, 1.0)
         config.customSpring = flag("CustomSpringAnimation", true)
         config.star = flag("Star", true)
-        config.haptic = flag("VIBRATE", true)
-        config.intensity = clamp(number("INTENSITY", 0.7), 0.10, 1.0)
+        config.sound = flag("SOUND", false)
         config.speed = clamp(number("Speed", 1), 0.2, 2.0)
         config.desktop = flag("desktop", true)
         config.autoPin = false   // 0.1.20：同 `load()`，忽略存盘值

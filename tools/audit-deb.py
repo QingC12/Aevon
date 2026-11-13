@@ -465,6 +465,13 @@ def main():
             # 的坑原样留给用户。
             bad("ring: !ring.fulledge is back — 0.1.24 froze the band at the bottom "
                 "35 %, the full-edge档 is exactly what caused the plugin clash")
+        elif "SOUND" not in keys:
+            # 0.4.63 — 圆盘反馈只有一条出口（`AevonFloatMotion.haptic`），它按
+            # `SOUND` 二选一：关（默认）震动，开播系统音 1157。面板上没有这个
+            # 开关，用户就没有任何办法把震动换成声音 —— 而 iPhone 的静音拨片
+            # 管不住 `impactOccurredWithIntensity:`，只能切断马达本身。
+            bad("ring: no SOUND switch — the disc would have no way to swap "
+                "haptics for the system sound")
         elif "!ring.appHook" not in keys:
             bad("ring: no !ring.appHook switch — an app-side bridge that cannot be "
                 "turned off is a bridge with no way back")
@@ -492,6 +499,13 @@ def main():
     # in CI while looking fine locally. tools/push-gate.py enforces the length.
     dylib_early = files.get("Library/MobileSubstrate/DynamicLibraries/Aevon.dylib", b"")
     for token in (b"RingHost", b"ring: hosted on desktop", b"LSApplicationWorkspace",
+                  # 0.4.63 — 圆盘反馈的唯一出口（母版 `sub_4a764` 移植）。
+                  # 两条串就是「这一记是震还是响」的全部证词，`src=` 后面跟着
+                  # hover / unfold / close / pick / rotate-on / rotate-off / panel。
+                  # 断言写成「盘」字后面的整段（含中文）：只查 `src=` 会命中
+                  # 一堆别的日志，只查 `震动` 又会被短串优化吞掉。
+                  "[圆盘] 震动 i=0.50 src=".encode("utf-8"),
+                  "[圆盘] 声音 id=1157 src=".encode("utf-8"),
                   # 0.1.24 — `ring: bar position ` 随竖条一起下线。替它的是
                   # `ring: edge claim=`：竖条那行原本自带 `claim=` 段，是「热区在
                   # 哪儿」的唯一读数；竖条没了，这条读数必须自己站出来，否则下一
