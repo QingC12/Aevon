@@ -83,70 +83,158 @@ enum AevonPrefs {
 /// `0x2dd8c` 点击、`0x6114c` 钉住、`0x60674` 设置开关、另三处动作按钮）。
 /// 它做的是一个二选一，不是两件事：
 ///
-///     0x4a7b0  mov  w0, #0xe          ← ToggleMask 第 15 项 `vibrate`
-///     0x4a7cc  tbz  w19,#0, 0x4a84c   ← 关 → 去播系统音
-///     0x4a844  bl   _objc_msgSend     ← impactOccurredWithIntensity:
-///     0x4a84c  mov  w0, #0x485        ← 1157
+///     0x4a7b0  mov  w0, #0xe                 ← ToggleMask 第 15 项 `vibrate`
+///     0x4a7cc  tbz  w19,#0, 0x4a84c          ← 关 → 去播系统音
+///     0x4a820  bl   AppStorage…wrappedValue  ← 强度是变量，不是常量
+///     0x4a844  bl   _objc_msgSend            ← impactOccurredWithIntensity:
+///     0x4a84c  mov  w0, #0x485               ← 1157
 ///     0x4a850  bl   _AudioServicesPlaySystemSound
 ///
-/// 所以 Aevon 也只有一个开关 `SOUND`：关（默认）= 震动，开 = 响一声、不震。
+/// 那一条 `AppStorage…wrappedValue` 是关键：母版的强度读 `VibrateIntensity`，
+/// 默认 0.5（`0x6a530 fmov d0,#0.5`）但**面板里可调**（`VibrateIntensityControlView`）。
+/// 0.4.63 把 0.5 写死，于是「与母版默认相同」却「与母版能调到的不相同」——
+/// 用户 0.4.64 说震感偏小，根在这里。现在强度和音量共用 `RingConfig.feedback`。
 enum AevonFloatMotion {
-
-    /// 0.4.63 — 母版 `VibrateIntensity` 的默认值（`0x6a530 fmov d0,#0.5`）。
-    ///
-    /// 旧版这里按 style 硬编码 0.55 / 0.85 / 1.00 —— 三个数都没有出处，而母版
-    /// 全局只有一个强度值。手感想变就调这一个数，不要再按 style 分档。
-    static let intensity: CGFloat = 0.5
 
     /// 母版 `mov w0, #0x485` = 1157。全库 `_AudioServicesPlaySystemSound` 只有
     /// 这一个调用点（`AevonQuickAction` 里那记 1108 是截图快门，不是圆盘反馈）。
+    ///
+    /// ⛔ 不要换 ID、不要自己合成。用户 0.4.64 明确「按母版中的音效，添加到圆盘
+    /// 旋转里，不需要我们自己寻找新的」。旋转的齿轮感来自**触发间隔**（每转
+    /// 6° 一声，转得快就密），不是换一个更像齿轮的音色。
     static let soundID: SystemSoundID = 1157
 
-    /// `SOUND` 的运行期镜像。
+    /// 旋转时每转多少度一声。
     ///
-    /// 读 `RingConfig` 是一次跨进程 IO（roothide 下 Preferences 每进程重定向，
-    /// 实际走的是 `ring.plist` 快照），而 `setHovered` 在手指划过整排时会连调
-    /// 十几次 —— 一次震动读一次盘是不可接受的。所以只在三处刷新：
-    ///
-    ///   · `RingHost.refresh()` —— 改设置 → Darwin 通知 → 这里；
-    ///   · `AevonRingMenu.present()` —— 每一次呼盘；
-    ///   · 第一次真的要用之前（下面那条懒加载兜底）。
-    ///
-    /// ⚠ 这是个粘性全局量，必须有同寿命的刷新源 —— 0.4.63 的两个源就是上面
-    /// 前两条。少任何一条，改完设置就要重载桌面才生效。
-    private static var soundOn = false
-    private static var soundKnown = false
+    /// 母版没有这个数 —— 母版旋转过程完全没有反馈。6° 是按「一圈 60 声」定的：
+    /// 慢转约每秒两三声，快转自然连成一片。
+    static let gearStep: CGFloat = 6.0
 
-    static func refreshSound() {
-        soundOn = RingConfig.loadRuntime().sound
-        soundKnown = true
+    // MARK: 运行期镜像
+
+    private static var soundOn = false
+    private static var level: CGFloat = 0.7
+    private static var known = false
+
+    /// 两条刷新源都调它：`RingHost.refresh()`（改设置 → Darwin）与
+    /// `AevonRingMenu.present()`（每次呼盘）。⚠ 粘性全局量必须有同寿命的刷新源，
+    /// 少任何一条，「改完设置要重载桌面才生效」就会回来。
+    static func refresh() {
+        let config = RingConfig.loadRuntime()
+        soundOn = config.sound
+        level = config.feedback
+        known = true
     }
 
     private static var soundReplacesHaptic: Bool {
-        if !soundKnown { refreshSound() }
+        if !known { refresh() }
         return soundOn
     }
+
+    private static var strength: CGFloat {
+        if !known { refresh() }
+        return level
+    }
+
+    // MARK: 震动
+
+    /// 母版把 generator 建成**全局单例**（`0x4a8b0` 由 `swift_once` 只跑一次），
+    /// 0.4.63 却是每一记都新建一个。新引擎没有 prepare，第一拍会被系统压轻或
+    /// 延后 —— 这是「震感偏小」的第二个来源，不只是 0.5 那个数。
+    ///
+    /// 保留两档（Light / Medium）而不是母版那一个 Light：`pick`（选中开窗）
+    /// 用 Medium 是 0.4.63 起就有的手感，本版没有理由把它降回去。
+    private static let lightEngine = UIImpactFeedbackGenerator(style: .light)
+    private static let mediumEngine = UIImpactFeedbackGenerator(style: .medium)
+    private static var prepared = false
+
+    private static func prepareEngines() {
+        guard !prepared else { return }
+        prepared = true
+        lightEngine.prepare()
+        mediumEngine.prepare()
+    }
+
+    private static func fireHaptic(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
+        prepareEngines()
+        let engine: UIImpactFeedbackGenerator = (style == .light) ? lightEngine : mediumEngine
+        let selector = NSSelectorFromString("impactOccurredWithIntensity:")
+        if let method = class_getInstanceMethod(UIImpactFeedbackGenerator.self, selector) {
+            typealias IntensityFn = @convention(c) (AnyObject, Selector, CGFloat) -> Void
+            let function = unsafeBitCast(method_getImplementation(method), to: IntensityFn.self)
+            function(engine, selector, strength)
+        } else {
+            engine.impactOccurred(intensity: strength)   // iOS 13+ 公开重载，同参数
+        }
+    }
+
+    // MARK: 声音
+
+    /// `AudioServicesPlaySystemSound` 本身**没有音量参数** —— 母版也只有这一句，
+    /// 所以母版的音量就是系统「铃声与提示音」的音量，谁也调不了。
+    /// 要让滑条管音量，只能用私有的 `AudioServicesPlaySystemSoundWithVolume`；
+    /// 拿不到就原样退回母版那一个调用（音量交回系统）。
+    private typealias VolumeFn = @convention(c) (SystemSoundID, Float) -> Void
+    private static let playWithVolume: VolumeFn? = {
+        // -2 是 RTLD_DEFAULT：在整个已加载镜像里找，不限定某个句柄。
+        guard let handle = UnsafeMutableRawPointer(bitPattern: -2),
+              let symbol = dlsym(handle, "AudioServicesPlaySystemSoundWithVolume") else {
+            return nil
+        }
+        return unsafeBitCast(symbol, to: VolumeFn.self)
+    }()
+
+    private static func fireSound() {
+        let value = Swift.max(0.0, Swift.min(1.0, strength))
+        if let function = playWithVolume {
+            function(soundID, Float(value))
+        } else {
+            AudioServicesPlaySystemSound(soundID)
+        }
+    }
+
+    // MARK: 出口
 
     /// `source` 只进日志：hover / unfold / close / pick / rotate / panel。
     /// 圆盘上九个反馈点全走这一条出口，靠它区分「这一记是谁要的」。
     static func haptic(_ style: UIImpactFeedbackGenerator.FeedbackStyle,
                        source: String = "menu") {
         if soundReplacesHaptic {
-            AudioServicesPlaySystemSound(soundID)
-            AevonLog.info("[圆盘] 声音 id=1157 src=" + source)
+            fireSound()
+            note("声音", source)
             return
         }
-        let generator = UIImpactFeedbackGenerator(style: style)
-        let selector = NSSelectorFromString("impactOccurredWithIntensity:")
-        guard let method = class_getInstanceMethod(UIImpactFeedbackGenerator.self, selector) else {
-            generator.impactOccurred()
-            AevonLog.info("[圆盘] 震动 i=0.50 src=" + source)
-            return
+        fireHaptic(style)
+        note("震动", source)
+    }
+
+    /// 旋转模式的「齿」：按角度步进调用，每 6° 一记。
+    ///
+    /// ⛔ 只在声音模式响。震动模式下旋转**不震** —— 母版的旋转过程本来就没有
+    /// 反馈，每格震一下会变成持续嗡鸣。这也是「声音代替震动」的本来语义。
+    static func gear(source: String = "rotate") {
+        guard soundReplacesHaptic else { return }
+        let now = CACurrentMediaTime()
+        // 转得再快也留 28 ms 间隙：1157 约 30 ms 长，再密就只剩噪音。
+        if now - lastGearAt < 0.028 { return }
+        lastGearAt = now
+        fireSound()
+        note("齿轮", source)
+    }
+
+    private static var lastGearAt: CFAbsoluteTime = 0
+
+    /// 日志带当前值：改过滑条之后第一件事就是确认「新数真的读到了」。
+    /// `vol=1` 表示走的是带音量的私有入口，`vol=0` 表示退回母版原调用。
+    private static func note(_ kind: String, _ source: String) {
+        let value = String(format: "%.2f", Double(strength))
+        if kind == "震动" {
+            AevonLog.info("[圆盘] 震动 i=" + value + " src=" + source)
+        } else {
+            let via = playWithVolume != nil ? "1" : "0"
+            AevonLog.info("[圆盘] " + kind + " id=1157 v=" + value
+                          + " vol=" + via + " src=" + source)
         }
-        typealias IntensityFn = @convention(c) (AnyObject, Selector, CGFloat) -> Void
-        let function = unsafeBitCast(method_getImplementation(method), to: IntensityFn.self)
-        function(generator, selector, intensity)
-        AevonLog.info("[圆盘] 震动 i=0.50 src=" + source)
     }
 }
 

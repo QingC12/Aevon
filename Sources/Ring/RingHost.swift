@@ -367,7 +367,7 @@ final class RingHost: NSObject {
         /* 0.4.63 — `SOUND` 的第一个刷新源。改设置 → Darwin 通知 → 这里，
          * 于是「下一个动作」就按新的那一样走，不用重载桌面。
          * 第二个源在 `AevonRingMenu.present()`（每次呼盘再校一次）。 */
-        AevonFloatMotion.refreshSound()
+        AevonFloatMotion.refresh()
         // The bar's height on the screen is one of those sliders, so every
         // refresh re-lays out. `layout()` is a handful of frame writes; the
         // cheaper alternative is a bar that only moves after a respring.

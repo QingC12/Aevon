@@ -484,6 +484,11 @@ final class AevonRingMenu: UIView {
     private var ringRadii: [CGFloat] = []
 
     private var rotation: CGFloat = 0
+    /// 0.4.64 — 旋转模式里**已经转过多少度还没有出声**。
+    ///
+    /// 齿轮声按「每 6° 一记」触发，这个数就是余量：慢转几帧才攒够一格，
+    /// 快转一帧就过一格 —— 声音的疏密自然跟着角速度走，不需要另算速度。
+    private var gearAccum: CGFloat = 0
     /// 阻尼显示角（V0.0.30 起，V0.0.33 升级为速度弹簧）：图标不直接贴手指角度。
     /// V0.0.33（AevonRingSpringV33）：从「每帧追 32%」的纯指数追赶，换成
     /// **质量-弹簧-阻尼**积分器 —— 带速度项，急停会过冲回摆（Q 弹），
@@ -585,7 +590,7 @@ final class AevonRingMenu: UIView {
         /* 0.4.63 — `SOUND` 的第二个刷新源：每一次呼盘读一次 ring.plist。
          * 第一个源是 `RingHost.refresh()`（改设置 → Darwin）。两条都要，
          * 因为一个粘性全局量必须有人按期把它拉回真实值。 */
-        AevonFloatMotion.refreshSound()
+        AevonFloatMotion.refresh()
         /* 0.1.19 — 「展开后固定」每局读一次（母版把它做成设置项 `AutoPin`：
          * 自锁::展开后立即固定）。读一次而不是逐帧读：一次呼盘只召唤一次盘，
          * 逐帧读 UserDefaults 是跨进程 IO。 */
@@ -1560,6 +1565,22 @@ final class AevonRingMenu: UIView {
             if abs(delta) > 0.01 {
                 rotation += delta
                 startDamping()
+                /* 0.4.64 — 齿轮：每转过 6° 一声（母版那一声 1157）。
+                 *
+                 * 用户要的是「按母版中的音效，加到圆盘旋转里」+「快慢跟随旋转
+                 * 快慢」。后者不需要变调，也不需要循环音频：**触发间隔本身**
+                 * 就是转速 —— 慢转每几帧才够一格，快转一帧过一格。
+                 * `gear` 内部还有 28 ms 限流，快速甩动不会糊成噪音。
+                 *
+                 * 只在声音模式响（`gear` 自己判 SOUND）；震动模式下旋转不震，
+                 * 与母版一致 —— 母版的旋转过程本来就没有反馈。
+                 */
+                gearAccum += abs(delta)
+                if gearAccum >= AevonFloatMotion.gearStep {
+                    gearAccum = gearAccum.truncatingRemainder(
+                        dividingBy: AevonFloatMotion.gearStep)
+                    AevonFloatMotion.gear(source: "rotate")
+                }
             }
             setHovered(nil)
         } else {
@@ -1759,6 +1780,7 @@ final class AevonRingMenu: UIView {
     private func setRotating(_ on: Bool, at point: CGPoint?) {
         guard rotating != on else { return }
         rotating = on
+        gearAccum = 0
         updateCenterAppearance()
         if on {
             pulseRotationFeedback()

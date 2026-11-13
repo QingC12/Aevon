@@ -475,9 +475,19 @@ def main():
         elif "!ring.appHook" not in keys:
             bad("ring: no !ring.appHook switch — an app-side bridge that cannot be "
                 "turned off is a bridge with no way back")
+        elif "FEEDBACK" not in keys:
+            # 0.4.64 — 强度/音量滑条。母版的强度本来就是变量（`@AppStorage
+            # "VibrateIntensity"`），0.4.63 把它写死成 0.5 又没给入口，用户量出来
+            # 就是「震感偏小」。没有这一行，那两个数只能改代码。
+            bad("ring: no FEEDBACK slider — intensity would be frozen in code again")
+        elif next((row for row in ring_items if row.get("key") == "FEEDBACK"),
+                  {}).get("cell") != "PSSliderCell":
+            bad("ring: FEEDBACK is not a PSSliderCell — a key without a control "
+                "is exactly the dead-field shape 0.4.63 deleted")
         else:
             ok("ring: 旧版圆盘, live summary, preview, apps, grip reset, desktop "
-               "switch, app-side bridge switch (bar sliders and !ring.fulledge gone)")
+               "switch, app-side bridge switch, 反馈开关 + 强度滑条 "
+               "(bar sliders and !ring.fulledge gone)")
 
     for token in (b"RingPreviewController", b"openPanel:",
                   b"PanelController", b"previewRing:", b"editApps:",
@@ -504,8 +514,12 @@ def main():
                   # hover / unfold / close / pick / rotate-on / rotate-off / panel。
                   # 断言写成「盘」字后面的整段（含中文）：只查 `src=` 会命中
                   # 一堆别的日志，只查 `震动` 又会被短串优化吞掉。
-                  "[圆盘] 震动 i=0.50 src=".encode("utf-8"),
-                  "[圆盘] 声音 id=1157 src=".encode("utf-8"),
+                  # 0.4.64 — 数值从写死改成拼接（`i=` / `v=` 后面才接数字），
+                  # 所以断言只到等号，不再带 0.50。三条分别对应：震动、声音、
+                  # 旋转的齿轮（同一颗 1157，只是 `src=rotate`）。
+                  "[圆盘] 震动 i=".encode("utf-8"),
+                  "[圆盘] 声音 id=1157 v=".encode("utf-8"),
+                  "[圆盘] 齿轮 id=1157 v=".encode("utf-8"),
                   # 0.1.24 — `ring: bar position ` 随竖条一起下线。替它的是
                   # `ring: edge claim=`：竖条那行原本自带 `claim=` 段，是「热区在
                   # 哪儿」的唯一读数；竖条没了，这条读数必须自己站出来，否则下一

@@ -36,7 +36,7 @@ struct RingConfig {
     // 它们读的 `VIBRATE` / `INTENSITY` 从来就没有控件（`gen-settings.py` 的
     // `WIRED` 里没有这两个键），也就是「一个拧了没反应的开关」的孪生形态：
     // 一个谁都不知道存在、改了却真的会生效的隐藏字段。现在圆盘的反馈是二选一
-    // （`sound`），强度只有母版那一个 0.5，两个字段都没有第二个读者了。
+    // （`sound`），强度/音量只剩下面那一个 `feedback`，两个旧字段都没有第二个读者了。
 
     /// 0.4.63 — **一个开关，两选一：震动 / 声音。**
     ///
@@ -51,6 +51,23 @@ struct RingConfig {
     /// 也就是说声音在母版里**不是**「和震动一起响」，而是「震动关掉时的替代」。
     /// 所以不做两个开关：`SOUND` 关（默认）= 震动，开 = 播系统音、不震。
     var sound: Bool = false
+
+    /// 0.4.64 — **一个滑条，两种含义**：`SOUND` 关时是震动强度，开时是音量。
+    ///
+    /// 母版的强度本来就不是常量：`sub_4a764` 里那一句
+    ///
+    ///     0x4a820  bl  _$s7SwiftUI10AppStorageV12wrappedValuexvg
+    ///     0x4a834  ldr d0, [sp]                       ← 强度是变量，不是立即数
+    ///     0x4a844  bl  _objc_msgSend → impactOccurredWithIntensity:
+    ///
+    /// 读的是 `@AppStorage("VibrateIntensity")`，默认 0.5（`0x6a530 fmov d0,#0.5`），
+    /// 面板里还带一个 `VibrateIntensityControlView` 让人往上拉。Aevon 0.4.63 把
+    /// 它写死成 0.5，于是「和母版默认一样」但「和母版能调到的不一样」——
+    /// 用户 0.4.64 说震感偏小，根就在这里。
+    ///
+    /// 默认取 0.7：比母版默认高一档，又不顶到 1.0。范围 0.1~1.0 与
+    /// `impactOccurredWithIntensity:` 的定义域一致；音量那一路按同一数值走。
+    var feedback: CGFloat = 0.7
 
     /// "Put the grip on the home screen." Not one of the master's 81 keys, so
     /// it is prefixed and kept out of the generated table. Ships on: a shape
@@ -95,7 +112,7 @@ struct RingConfig {
     static let mirroredKeys: Set<String> = [
         "Radius", "IconWidth", "RotationAngle", "Star",
         "DampingFraction", "CustomSpringAnimation",
-        "Speed", "!ring.desktop", "!ring.autopin", "SOUND",
+        "Speed", "!ring.desktop", "!ring.autopin", "SOUND", "FEEDBACK",
     ]
 
     // MARK: Reading
@@ -128,6 +145,7 @@ struct RingConfig {
         config.customSpring = flag("CustomSpringAnimation", true)
         config.star = flag("Star", true)
         config.sound = flag("SOUND", false)
+        config.feedback = clamp(number("FEEDBACK", 0.7), 0.1, 1.0)
         config.speed = clamp(number("Speed", 1), 0.2, 2.0)
         config.desktop = flag("!ring.desktop", true)
         config.autoPin = false   // 0.1.20：跟手已撤，本版一律不固定（见 `autoPin` 字段注释）
@@ -153,6 +171,7 @@ struct RingConfig {
             "CustomSpringAnimation": customSpring,
             "Star": star,
             "SOUND": sound,
+            "FEEDBACK": Double(feedback),
             "Speed": Double(speed),
             "summary": summary,
             "desktop": desktop,
@@ -188,6 +207,7 @@ struct RingConfig {
         config.customSpring = flag("CustomSpringAnimation", true)
         config.star = flag("Star", true)
         config.sound = flag("SOUND", false)
+        config.feedback = clamp(number("FEEDBACK", 0.7), 0.1, 1.0)
         config.speed = clamp(number("Speed", 1), 0.2, 2.0)
         config.desktop = flag("desktop", true)
         config.autoPin = false   // 0.1.20：同 `load()`，忽略存盘值

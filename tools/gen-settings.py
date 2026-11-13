@@ -49,6 +49,7 @@ WIRED = {
     "windowBlacklistText",   # AevonOpenDecide：名单里的 App 走原生
     "!ring.desktop",         # RingHost：桌面是否挂圆盘
     "SOUND",                 # AevonFloatMotion：圆盘反馈用声音代替震动（0.4.63）
+    "FEEDBACK",              # AevonFloatMotion：震动强度 / 音量，一个滑条两用（0.4.64）
 }
 
 # ---------------------------------------------------------------------------
@@ -83,6 +84,13 @@ PANELS = [
                   "强度是母版 Stheno 的默认值 0.5。开启后整条路径改播系统提示音 1157，"
                   "不再震动 —— 母版里声音本来就是「震动关掉时的替代」，不是和震动一起响。"
                   "改完立刻生效，下一个动作就换；不需要重载桌面。"),
+        dict(grp="反馈", k="FEEDBACK", cn="强度 / 音量", cell="slider", d=0.7,
+             rng=(0.10, 1.00),
+             note="一个滑条，两种含义：上面那个开关关着（默认）时它是震动强度，"
+                  "开着时它是音量。默认 0.7。母版 Stheno 的震动强度默认是 0.5，"
+                  "而且面板里本来就能调（VibrateIntensity），0.4.63 照搬 0.5 而没给"
+                  "调节入口，所以震感偏小 —— 这一版把入口补上并把默认抬到 0.7。"
+                  "范围 0.1~1.0，与 impactOccurredWithIntensity: 的定义域一致。"),
         dict(grp="触摸", k="!ring.appHook", cn="浮窗内容可点击", cell="switch", d=True,
              note="浮窗里的 App 由另一个进程显示，它自己会以为「我在后台」，"
                   "UIKit 于是把转发进来的触摸丢掉 —— 画面在动、声音在放，就是点不动。"
@@ -144,11 +152,22 @@ def spec_of(it):
 
 def build_panel(panel_id, title, items):
     specs = []
+    # 0.4.64 — **同一组的连续项共用一个 PSGroupCell**。
+    #
+    # 旧版是无条件每项插一个 group 头：只要两行写了同一个 `grp`，设置里就会
+    # 出现两个同名标题（0.4.63 的「触摸」就这么撞过一次，当时靠改分组绕过）。
+    # 0.4.64 的「反馈」里有开关 + 滑条两个控件，绕不过去 —— 而且那种重复本身
+    # 就是错的。现在按「组名变化」切组，后续项的 note 并进同一段 footerText。
+    group = None
     for it in items:
         # 分组标题给「这一类是什么」，行标题给「这一项是什么」。
         # 两处写同一个字会在设置里读成「高度 / 高度 ——⚪——」，像半成品。
-        specs.append({"cell": "PSGroupCell", "label": it["grp"],
-                      "footerText": it["note"]})
+        if group is None or it["grp"] != group["label"]:
+            group = {"cell": "PSGroupCell", "label": it["grp"],
+                     "footerText": it["note"]}
+            specs.append(group)
+        elif it.get("note"):
+            group["footerText"] = (group.get("footerText") or "") + "\n" + it["note"]
         specs.append(spec_of(it))
     # 圆盘的三个动作：编辑器与预览是这一页唯一的「能改东西」的入口。
     if panel_id == "Ring":
