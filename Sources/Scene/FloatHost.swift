@@ -127,12 +127,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard let card = card, let content = content else { return }
         // 0.4.50 — 挂回**画布**（有的话），画布自己挂回卡片 —— 承载面在画布里
         // 永远是 `(0,0,natural)` + 单位阵，这是系统重设它时写的同一组值。
-        let home: UIView = canvas ?? card
+        let home: UIView = canvasView ?? card
         content.removeFromSuperview()
         content.transform = .identity
         content.frame = CGRect(origin: .zero, size: natural)
         home.insertSubview(content, at: 0)
-        if let canvas = canvas {
+        if let canvas = canvasView {
             canvas.removeFromSuperview()
             card.insertSubview(canvas, at: 0)
         }
@@ -142,7 +142,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         reapplyPlacement("revive")
         reassertCanvas()
         Log.write("win: canvas revived " + size(card.bounds.size)
-                  + (canvas == nil ? " surface flat, no wrapper"
+                  + (canvasView == nil ? " surface flat, no wrapper"
                                    : " surface wrapped in canvas"))
     }
 
@@ -574,7 +574,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         content?.isUserInteractionEnabled = false
         // 0.4.50 — 画布在承载面上层，它不禁用就会先接住那一下（命中测试返回
         // canvas，而不是卡片）。两者同开同关，命中路径才与加画布之前一致。
-        canvas?.isUserInteractionEnabled = false
+        canvasView?.isUserInteractionEnabled = false
         Log.write("win: mini touch lock content=0")
         // 0.1.8 — 告诉 App 进程「你被停靠了」（Aevon(95) 第 1 条）。
         //
@@ -830,8 +830,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 系统的那个写法**恰好就是「铺满父视图」**。所以给它一层尺寸恒为
     /// `natural` 的父视图：`content` 在里面永远是 `(0,0,natural)` + 单位阵，
     /// 系统怎么重设都等于我们想要的值 —— 它不再是干扰，而是同一次赋值。
-    /// 缩放交给 `canvas`，那上面没有任何系统代码会碰。
-    private var canvas: UIView?
+    /// 缩放交给 `canvasView`，那上面没有任何系统代码会碰。
+    private var canvasView: UIView?
     /// 0.2.42 — 卡片里最下面那层不透明底板（见 `show` 里创建它的那一段）。
     ///
     /// 它只做一件事：App 的画面真的透出来时，露出来的是系统底色，不是桌面。
@@ -1460,7 +1460,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         canvas.clipsToBounds = true
         canvas.isOpaque = false
         card.addSubview(canvas)
-        host.canvas = canvas
+        host.canvasView = canvas
         view.transform = .identity
         view.frame = CGRect(origin: .zero, size: source)
         canvas.addSubview(view)
@@ -1806,7 +1806,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 视图的引用，下一次 `applyBars` 就会往一个不在屏幕上的对象里填色。
         backing = nil
         content = nil
-        canvas = nil
+        canvasView = nil
         visible = .zero
         cropTop = 0
         pan = nil
@@ -3719,7 +3719,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         shield = nil
         // 0.1.7 — 画面重新可操作（小窗那条锁在 `placeDock` 里上）。
         content?.isUserInteractionEnabled = true
-        canvas?.isUserInteractionEnabled = true
+        canvasView?.isUserInteractionEnabled = true
         // 0.1.8 — 标记必须在几何恢复之后立刻撤掉：留在里面等于「App 永远收不到触摸」。
         setMiniFlag(false)
         Log.write("win: card undocked " + size(card.bounds.size)
@@ -3744,7 +3744,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard let card = card, let content = content, visible.height > 16 else { return }
         let scale = FloatHost.fitScale(for: visible, in: card.bounds.size)
         let want = CGRect(origin: .zero, size: natural)
-        if let canvas = canvas {
+        if let canvas = canvasView {
             // 0.4.50 — 承载面在画布里的位置**恒定**：铺满、单位阵。系统重设它时
             // 写的正是这组值（见属性上那段），所以这里只在真的被改成别的值时
             // 才落笔 —— 写一次 `frame` 就是一次跨进程合成重排，不能每拍来一发。
@@ -4438,7 +4438,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private func noteKeyboardGeometry(_ why: String) {
         guard let card = card, let content = content else { return }
         // 0.4.50 — 缩放写在 `canvas` 上（没有画布时仍是承载面自己）。
-        let subject = canvas ?? content
+        let subject = canvasView ?? content
         let scale = subject.transform.a
         let shown = CGSize(width: visible.width * scale, height: visible.height * scale)
         var bars = 0
@@ -4511,8 +4511,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                              y: card.bounds.midY - (cropTop + kbTopCrop) * scale / 2)
         // 0.4.50 — 判的是 `canvas`（缩放在它身上）。`content` 只保一件事：
         // 留在画布里、铺满 —— 系统把它挪出父视图是这里唯一需要处理的意外。
-        let subject = canvas ?? content
-        if let canvas = canvas, content.superview !== canvas {
+        let subject = canvasView ?? content
+        if let canvas = canvasView, content.superview !== canvas {
             content.removeFromSuperview()
             content.transform = .identity
             content.frame = CGRect(origin: .zero, size: natural)
