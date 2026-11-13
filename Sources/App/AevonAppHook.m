@@ -649,6 +649,35 @@ static void AevonPageWrite(const char *body) {
     AevonAppLogWrite(line);
 }
 
+/// 0.4.53 — **翻页器主动干预整体退休。**
+///
+/// 0.0.7x 那一整套（钉行下标 → 算落点 → 写 `contentOffset` → `beginUpdates`
+/// 请 App 重建 → 换屏后替它按 `play`）从 0.0.71 起一共十九版，用户的原话是
+/// 「这些问题在之前那的多个版本都没有修复」。336 的日志把原因写得很直白：
+///
+///   13:41:44  page transition h=717 last=932 full=932
+///   13:41:46  page inside settle box=717 c0=932 … vid=DDanmakuPlayerView:…430x849
+///   13:41:49  page align settle y=717 -> 0 … moves=1
+///   13:41:50  page align settle y=717 -> 0 … moves=2
+///   …（一直写到）
+///   13:41:55  page align settle y=717 -> 0 … moves=8
+///
+/// 六秒里 App 每一次把视口放回 717，我们就再按回 0 —— 一根滚动条被两只手来回
+/// 推八次。那几次 `setContentOffset` 每一次都会打断抖音自己的翻页与吸附，于是：
+///
+///   · 上滑之后它又回到打开时那一条（它的「当前条目」被我们按回了第 0 行）；
+///   · 关掉卡片再全屏，看到的不是刚才那一条（同上，索引与 offset 已经不一致）；
+///   · 反复重建单元格 ⇒ 视频层被反复改尺寸 ⇒ 画面出现断层，要杀进程才好。
+///
+/// 这三条都不是「算得不准」，是**根本不该去按**。翻页器是 App 自己的，它比我们
+/// 更清楚下一页在哪；我们连「一页多高」都要靠猜（932 还是 717 取决于它重排到
+/// 哪一拍），却还在替它写 offset。0.4.51 退休视频居中时用的是同一条判据：一个
+/// 机制连续多版没带来可验证的收益、又只能靠改别人的几何实现，就该撤。
+///
+/// 所以这里只留一个常量。改回 0 = 整套 0.0.7x 行为原样回来（函数体一个字节都
+/// 没删），改回之前请先看 336 那段 `align … moves=8`。
+static volatile const int AevonPageRideRetired = 1;
+
 /// 认出来的那个翻页器，**由我们自己持有一份**。
 ///
 /// 0.0.71 每次都重新扫一遍，扫到才算数 —— 而关卡那一拍正好是「窗口已经回去、
@@ -1030,6 +1059,10 @@ static void AevonPlayNote(void) {
 static void AevonResumeTick(void *context) {
     const char *reason = (const char *)context;
     if (!AevonEverHosted) return;
+    // 0.4.53 — 替 App 按 `play` 随整套干预退休。它只在这一个地方出手，而
+    // 「换屏之后画面停住」的真正原因是我们的 offset 写入打断了自己恢复的那一拍
+    // （见 `AevonPageRideRetired`）。把方向盘还回去之后，这一手就不需要了。
+    if (AevonPageRideRetired) return;
     if (AevonPlayBefore <= 0) return;
     UIScrollView *view = AevonPagerGet();
     if (view == nil || [view window] == nil) return;
@@ -1274,7 +1307,18 @@ static BOOL AevonTableRemeasure(UITableView *table) {
     if ([table isEditing]) return NO;
     CGRect box = [table bounds];
     CGFloat span = [table contentSize].height;
-    if (box.size.height > 1.0 && span > box.size.height * 12.0) {
+    // 0.4.53 — 门槛从 12 屏放到 40 屏。
+    //
+    // 12 屏是 0.1.38 在「没有任何耗时读数」的情况下拍的保守值。336 第一次把它
+    // 量出来：`page remeasure 2.8ms cls=AWEFeedTableView rows=11`（11 屏的表），
+    // `3.3ms rows=8`、`3.0ms rows=11` —— 三毫秒，而 30 ms 的死亡闸一直挂着。
+    //
+    // 这个保守值正是「开卡之后要等 5~10 s 才排对」的直接原因：卡片是 717，
+    // 抖音那张表的内容高 10252 = 14.3 屏 > 12 ⇒ 一次都没敢发，于是顶部那一页
+    // 一直停在 932（`inside settle box=717 c0=932 … 430x849`），底部 215 pt 被裁
+    // —— 用户说的「点赞栏只显示一半、标题栏不显示」。40 屏仍然是一道闸（无限
+    // feed 真到几百屏时不碰），只是不再把 11~14 屏这种正常尺寸挡在外面。
+    if (box.size.height > 1.0 && span > box.size.height * 40.0) {
         if (AevonTableRemeasureNotes < 3) {
             AevonTableRemeasureNotes += 1;
             char skip[160];
@@ -1321,8 +1365,172 @@ static BOOL AevonTableRemeasure(UITableView *table) {
     return finished;
 }
 
+// ===========================================================================
+// 0.4.53 — 换屏之后**唯一**还允许做的动作：请 App 把自己的行高重量一遍
+// ===========================================================================
+//
+// 退休 `AevonPageRideRetired` 之后，剩下的真问题只有一个，而且它是 336 里最直白
+// 的一条读数：
+//
+//   13:41:44  page transition h=717 last=932 full=932      ← 卡片已经 717
+//   13:41:46  page inside settle box=717 c0=932 … vid=DDanmakuPlayerView:…430x849
+//
+// 视口是 717，顶部那一页还是 932 高、视频还是 849 高 —— 底部 215 pt 被裁，就是
+// 「点赞栏只显示一半、标题栏不显示」。App 自己会重排，但要等到它下一次复用那一页
+// （336 里是 5~10 s 之后，还是被我们那八次 offset 写入推着走的）。
+//
+// 它缺的只是一句「你缓的行高过期了」。`beginUpdates`/`endUpdates` 在 336 里每次
+// 只花 2.8~3.3 ms（`page remeasure` 那三行），所以这里把它留成唯一的手段，四道闸：
+//
+//   ① 一次尺寸变化最多**两拍**，间隔 0.45 s；
+//   ② 手指在动 / 惯性中不发（`AevonTableRemeasure` 里那一组判据）；
+//   ③ 真花超过 30 ms 就本次启动永久闭嘴（`AevonTableRemeasureDead`）；
+//   ④ 量到「页高齐了」立刻收工 —— 不是定时发，是发到对齐为止。
+//
+// 第二手段只有一条，用在「发完还是不对齐」的那一页上：只重载**那一行**
+// （`reloadRowsAtIndexPaths:`），不是整表。用户的抱怨是「打开时排版慢」，而慢的
+// 那一页就是视口压着的那一页；重载它一次 ≈ 一次普通的 cell 复用，代价可控，
+// 而整表 `reloadData` 会把所有在播的播放器一起重启，那是另一类事故。
+//
+// ⛔ 这里一行 `setContentOffset` 都没有。退休之后我们不再动用户的落点。
+static int AevonSettleTries = 0;
+static int AevonSettleReloads = 0;
+static CFAbsoluteTime AevonSettleAt = 0.0;
+static int AevonSettleNotes = 0;
+/// `ride retired off=1` 只报一次（每进程一行）。
+static int AevonRideNotes = 0;
+static char AevonSettleWhy[] = "settle";
+
+static BOOL AevonPagerAcquire(void);
+
+/// 只重载「视口压着、但高度不是视口高」的那一行。返回 1 = 真的重载了一次。
+static BOOL AevonTableReloadStaleRow(UITableView *table, CGFloat box) {
+    if (table == nil) return NO;
+    if ([table window] == nil) return NO;
+    if ([table isTracking] || [table isDragging] || [table isDecelerating]) return NO;
+    CGFloat y = [table contentOffset].y;
+    UIView *bad = nil;
+    NSArray *kids = [table subviews];
+    NSUInteger limit = kids.count < 12 ? kids.count : 12;
+    for (NSUInteger i = 0; i < limit; i++) {
+        UIView *kid = [kids objectAtIndex:i];
+        CGRect f = [kid frame];
+        CGFloat h = f.size.height;
+        if (h < box * 0.5 || h > box * 1.5) continue;
+        if (CGRectGetMaxY(f) <= y + 2.0) continue;      // 回收池里的旧行
+        if (f.origin.y >= y + box - 2.0) continue;      // 整页在视口下面
+        if (fabs(h - box) <= 2.0) continue;             // 这一页是干净的
+        bad = kid;
+        break;
+    }
+    if (bad == nil) return NO;
+    if (![bad isKindOfClass:[UITableViewCell class]]) return NO;
+    NSIndexPath *path = [table indexPathForCell:(UITableViewCell *)bad];
+    if (path == nil) return NO;
+    NSArray *one = [NSArray arrayWithObject:path];
+    BOOL ok = NO;
+    @try {
+        [UIView performWithoutAnimation:^{
+            [table reloadRowsAtIndexPaths:one withRowAnimation:UITableViewRowAnimationNone];
+        }];
+        ok = YES;
+    } @catch (NSException *exception) {
+        ok = NO;
+    }
+    if (ok) {
+        char body[200];
+        snprintf(body, sizeof(body), "settle reload row=%ld,%ld h=%.0f box=%.0f",
+                 (long)[path section], (long)[path row],
+                 [bad frame].size.height, box);
+        AevonPageWrite(body);
+    }
+    return ok;
+}
+
+/// 一拍。`reason` 只是日志里的名字。
+static void AevonLayoutSettle(void *context) {
+    const char *reason = (const char *)context;
+    if (reason == NULL) reason = AevonSettleWhy;
+    if (!AevonEverHosted) return;
+    if (!AevonPageRideRetired) return;      // 常量改回 0 ⇒ 交还给 0.0.7x 那条路
+    UIScrollView *view = AevonPagerGet();
+    if (view == nil || [view window] == nil) {
+        (void)AevonPagerAcquire();
+        view = AevonPagerGet();
+    }
+    if (view == nil || [view window] == nil) return;
+    CGRect box = [view bounds];
+    if (box.size.height < 200.0) return;
+    int clean = 0;
+    int stale = 0;
+    int aligned = 0;
+    AevonPagerStats(view, box.size.height, &clean, &stale, &aligned);
+    UIView *kid = AevonPageKidAt(view, box.size.height, [view contentOffset].y);
+    CGFloat top = kid != nil ? [kid frame].size.height : 0.0;
+    BOOL rowsOk = (stale == 0 && fabs(top - box.size.height) <= 2.0);
+    // 判据只看**视口这一屏**：用户看见的是这一屏。`aligned`（内容高是不是视口的
+    // 整数倍）取决于整张表都重排完，而抖音在卡片里往往只重排当前页 —— 拿它当
+    // 收工条件会让这条通道永远在等一个不会到的状态。它只进日志，不进判据。
+    if (rowsOk) {
+        if (AevonSettleNotes < 6) {
+            AevonSettleNotes += 1;
+            char body[220];
+            snprintf(body, sizeof(body),
+                     "settle ok %s clean=%d stale=%d top=%.0f box=%.0f al=%d",
+                     reason, clean, stale, top, box.size.height, aligned);
+            AevonPageWrite(body);
+        }
+        AevonSettleTries = 2;               // 对齐了：这一轮不再发
+        return;
+    }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (AevonSettleAt > 0.0 && now - AevonSettleAt < 0.45) return;
+    // ① 先请它重排行高（两次机会）。
+    if (AevonSettleTries < 2 && [view isKindOfClass:[UITableView class]]) {
+        AevonSettleAt = now;
+        AevonSettleTries += 1;
+        BOOL did = AevonTableRemeasure((UITableView *)view);
+        char body[220];
+        snprintf(body, sizeof(body),
+                 "settle again %s n=%d clean=%d stale=%d top=%.0f box=%.0f r=%d",
+                 reason, AevonSettleTries, clean, stale, top, box.size.height,
+                 did ? 1 : 0);
+        AevonPageWrite(body);
+        return;
+    }
+    // ② 两次都发完还是只有「视口压着的那一页」不对 ⇒ 只重载那一行一次。
+    if (AevonSettleTries >= 2 && AevonSettleReloads < 1 && top > 200.0
+        && [view isKindOfClass:[UITableView class]]) {
+        AevonSettleAt = now;
+        if (AevonTableReloadStaleRow((UITableView *)view, box.size.height)) {
+            AevonSettleReloads = 1;
+        }
+        return;
+    }
+    if (AevonSettleTries >= 2 && AevonSettleNotes < 6) {
+        AevonSettleNotes += 1;
+        char body[200];
+        snprintf(body, sizeof(body), "settle give up %s clean=%d stale=%d top=%.0f box=%.0f",
+                 reason, clean, stale, top, box.size.height);
+        AevonPageWrite(body);
+    }
+}
+
+/// 一次尺寸变化把上面那个计数器全部归零（两个方向各自一轮）。
+static void AevonLayoutSettleArm(void) {
+    AevonSettleTries = 0;
+    AevonSettleReloads = 0;
+    AevonSettleAt = 0.0;
+}
+
 static NSInteger AevonPagerRebuild(const char *reason) {
     UIScrollView *view = AevonPagerGet();
+    // 0.4.53 — 这条路上唯一做的事是 `beginUpdates` / `endUpdates`（整表作废行高
+    // 缓存）。它本身不改几何，但它是「页不齐就重建」那条自激链的最后一环：
+    // `AevonAlignPager` 见页不齐就发它，发完再算落点、写 offset，写歪了又见页不齐。
+    // 退休整套干预之后它也不该再被任何人叫起来 —— 唯一还允许的那一次在
+    // `AevonLayoutSettle`，它直接调 `AevonTableRemeasure`，有自己的配额与上限。
+    if (AevonPageRideRetired) return -1;
     if (view == nil || [view window] == nil) return -1;
     if ([view isTracking] || [view isDragging] || [view isDecelerating]) return -1;
     CGRect box = [view bounds];
@@ -1860,6 +2068,16 @@ static void AevonPresentHook(UIViewController *self, SEL _cmd, UIViewController 
 ///
 /// 返回 1 改了一个，0 已经在整页上，-1 没有可改的对象（或还没到时候）。
 static NSInteger AevonAlignPager(const char *reason) {
+    // 0.4.53 — 退休。见 `AevonPageRideRetired`：这一条下面每一行都会写
+    // `contentOffset`，而那正是 336 里 `align … moves=8` 那只手。
+    //
+    // 欠账仍然要销：`AevonRemeasurePending` 是「交还整屏的重排等 App 回到前台
+    // 再做」的记号，退休之后没人消费它；留着会让以后把常量改回 0 的那一版带着
+    // 上一次会话的旧账醒来。
+    if (AevonPageRideRetired) {
+        AevonRemeasurePending = 0;
+        return -1;
+    }
     UIScrollView *view = AevonPagerGet();
     if (view == nil) return -1;
     if ([view window] == nil) return -1;
@@ -3891,10 +4109,21 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
     // `off=0,14912 / 行 14554` 就是这件事的形状 —— 19 × 932 没算错，行不在那儿。
     if (real) {
         if (AevonPagerGet() == nil || [AevonPagerGet() window] == nil) AevonPagerAcquire();
-        // 0.0.79 — 换屏之前记下「本来在播」，换屏之后三拍复看（见 `AevonPlayNote`）。
-        // 必须在 `AevonAlignPager` 之前：它会把视口挪到那一页的开头，挪的过程本身
-        // 就可能让 App 停掉播放 —— 那时候再记，「本来在播」就已经看不见了。
+        // 0.4.53 — 「整套干预已退休」只报一行。它是这一版的验收判据本身：
+        // 下一份日志里出现它、且不再有 `align … moves=`，就说明方向盘真的还回去了。
+        if (AevonPageRideRetired && AevonRideNotes == 0) {
+            AevonRideNotes = 1;
+            AevonPageWrite("ride retired off=1");
+        }
+        // 0.0.79 — 换屏之前记下「本来在播」。**只记，不管**：替它按 play 的那三拍
+        // 随干预一起退休（0.4.53）。这一行读数仍然有用 —— 下一份日志里
+        // `play note was=1` 而画面确实自己回来了，就证明那些「停住」本来是我们的
+        // offset 写入造成的。
         AevonPlayNote();
+        // 0.4.53 — 这三拍**照旧排上去，但一拍都不会动手**：`AevonResumeTick` 的
+        // 第一行就是 `if (AevonPageRideRetired) return;`。留着调用点有两个用处：
+        // 常量改回 0 时整条路原样回来；以及不让这个函数变成「没人调用的静态函数」
+        // （`-Wunused-function` 在 `-Werror` 下是编译失败）。
         AevonResumes = 0;
         for (int i = 0; i < 3; i++) {
             int64_t when = (int64_t)((0.5 + 0.85 * (double)i) * NSEC_PER_SEC);
@@ -3902,9 +4131,20 @@ static void AevonViewTransition(id self, SEL _cmd, CGSize size, id coordinator) 
                              dispatch_get_main_queue(), (void *)AevonResumeWhy, AevonResumeTick);
         }
         // 先记一张「换算前」的：这一张能回答「App 收到 932↔717 时，它的页是不是
-        // 也跟着变了」。之后每一拍都在回答「行下标还在不在同一页上」。
+        // 也跟着变了」。
         AevonPageState("on transition");
         AevonAnchorRemember(AevonPagerGet(), before);
+        // 0.4.53 — 换屏之后唯一还允许的动作（见 `AevonLayoutSettle`）。
+        // 四拍：0.30 / 0.85 / 1.40 / 3.00 s。前两拍量到对齐就收工，最后一拍只为
+        // 「慢」留一条证词 —— 抖音自己的重排有时要两三秒。
+        AevonLayoutSettleArm();
+        for (int i = 0; i < 4; i++) {
+            double when = 0.30 + 0.55 * (double)i;      // 0.30 / 0.85 / 1.40 / 1.95
+            if (i == 3) when = 3.00;                    // 最后一拍只读数
+            dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,
+                                           (int64_t)(when * (double)NSEC_PER_SEC)),
+                             dispatch_get_main_queue(), (void *)AevonSettleWhy, AevonLayoutSettle);
+        }
         for (int i = 0; i < 5; i++) {
             int64_t when = (int64_t)((0.4 + 1.1 * (double)i) * NSEC_PER_SEC);
             dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, when),

@@ -1348,6 +1348,32 @@ def main():
                       # 判据：日志里出现 `video retired off=1`（只报一次），
                       # 而不是「没有 video band」—— 后者也可能只是没遇到能居中的画面。
                       b"video retired off=1",
+                      # 0.4.53 — 翻页器那一整套「钉行下标 → 算落点 → 写 offset →
+                      # beginUpdates 重建 → 换屏后补 play」**整体退休**
+                      # （`AevonPageRideRetired`）。336 的物证是一段拔河：
+                      #
+                      #   13:41:49 page align settle y=717 -> 0 … moves=1
+                      #   …
+                      #   13:41:55 page align settle y=717 -> 0 … moves=8
+                      #
+                      # 六秒里 App 每把视口放回 717，我们就再按回 0 一次。用户报的
+                      # 「上滑不跳下一个、自己退回打开时那条」「全屏看到的不是关闭
+                      # 时那条」都是这八次 `setContentOffset` 的直接后果。
+                      #
+                      # 判据：日志里出现一次 `ride retired off=1`，**且不再出现**
+                      # `align … moves=` / `rebuild …` / `resume play …`。
+                      b"ride retired off=1",
+                      # 0.4.53 — 退休之后唯一留下的动作：请 App 把行高重量一遍。
+                      # 336 里 `beginUpdates/endUpdates` 只花 2.8~3.3 ms（那三行
+                      # `page remeasure`），所以它留着；四行读数分开四种结局：
+                      #   `settle again` = 发了第 n 次重排（`r=` 是它有没有真跑）；
+                      #   `settle ok`    = 视口那一屏的高度已经等于视口，收工；
+                      #   `settle reload` = 两次重排都没修好，只重载了那一行；
+                      #   `settle give up` = 这一轮到此为止（下一份日志的判据）。
+                      b"settle again %s n=%d clean=%d stale=%d top=%.0f box=%.0f r=%d",
+                      b"settle ok %s clean=%d stale=%d top=%.0f box=%.0f al=%d",
+                      b"settle reload row=%ld,%ld h=%.0f box=%.0f",
+                      b"settle give up %s clean=%d stale=%d top=%.0f box=%.0f",
                       # 0.4.51 — 卡片里的排版对账（`AevonHostedAudit`）。三个症状
                       # 「内容显示不全 / 点赞栏一半 / 底部标题条不见」是同一个形状：
                       # 版式比窗口高。这两行把「谁还停在 932」写成数：
