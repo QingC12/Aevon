@@ -6378,6 +6378,11 @@ static void AevonBandDropAllHighlights(void) {
     }
 }
 
+/// 0.4.66 — 横屏通道的入口在这个文件的后半段（`AevonRotApplyWant`）。宿主把
+/// 「转横 / 转竖」写在同一份偏好域里、用同一通 Darwin 通知叫醒我们，所以这里
+/// 只提前声明一下，回调里照着叫一声。
+static void AevonRotApplyWant(void);
+
 static void AevonBandNote(CFNotificationCenterRef __unused center,
                           void *__unused observer,
                           CFStringRef name,
@@ -6390,6 +6395,9 @@ static void AevonBandNote(CFNotificationCenterRef __unused center,
         AevonAppLogWrite("app: band note from host\n");
     }
     AevonBandReload();
+    // 0.4.66 — 同一通通知里宿主可能还夹了一个「转横 / 转竖」（`AevonRotWant`）。
+    // 读数与判重都在 `AevonRotApplyWant` 里，这里只负责「来了一通就问一次」。
+    AevonRotApplyWant();
     // 0.4.7 — 这里原本补一拍 `AevonKbLiftApply`（把键盘窗按场景底平移）。
     // 键盘不再由我们摆位：母版让 App 认为屏就是承载面那么高，键盘窗的几何由
     // UIKit 在建窗那一拍自己摆（`AevonKeyboardNative.m` 的 `remoteKeyboardWindowForScreen:`）。
@@ -6577,6 +6585,238 @@ static void AevonAppSendEvent(id self, SEL _cmd, UIEvent *event) {
     ((void (*)(id, SEL, UIEvent *))AevonOriginalUISendEvent)(self, _cmd, event);
 }
 
+// ===========================================================================
+// 0.4.66 — 横屏：**App 自己转，宿主跟随。**
+// ===========================================================================
+//
+// 343 的日志把 0.4.65 的假设推翻了。那一版在宿主的 `settings` 里写
+// `frame=717x403` 和 `interfaceOrientation=3`，**一个字都没落地**：
+//
+//     16:57:58  win: orientation -> 3 slot=0 geo=717x403
+//     16:58:13  win: frame drift now=430x717@0 want=717x403@0
+//     16:57:59  app: page state after change box=430x717   ← 哔哩哔哩从没转
+//
+// 真正转过去的只有抖音自己点「横屏」那一次（`page sheet
+// AWELandscapeNavigationController` 之后 `box=717x430`），因为那是 App 自己调的
+// `-[UIWindowScene requestGeometryUpdateWithPreferences:]`。
+//
+// 所以这条路拆成两半，各做各的：
+//   · App 侧（这里）：把「我现在的世界是横的」报给宿主；宿主请求时**替用户
+//     按一下那个按钮** —— 同一个 `requestGeometryUpdateWithPreferences:`。
+//   · 宿主侧：读到「App 的世界横了」就把卡片切成 16:9 并跟随
+//     （`AevonScene.m` 的 `AevonRotSweep` → `FloatHost.setLandscape`）。
+//
+// ⛔ 不要回到「宿主替 App 转」：那条路要走私有 `_rotateWindowToOrientation:`
+// （PullOver-X 自己都先 `respondsToSelector`），而 Aevon 的 scene 被我们改成了
+// 小胖屏，宿主写进去的 frame 会被系统的下一次协商覆盖回去，读数上看着写了、
+// 行为上什么都没有 —— 这正是 0.4.65 的形状。
+
+static CFStringRef AevonRotDomain(void) {
+    static CFStringRef domain = NULL;
+    if (domain != NULL) return domain;
+    NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
+    if (bundle.length == 0) return NULL;
+    domain = CFStringCreateCopy(kCFAllocatorDefault, (CFStringRef)bundle);
+    return domain;
+}
+
+static dispatch_queue_t AevonRotQueue = NULL;
+static dispatch_queue_t AevonRotQueueGet(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        AevonRotQueue = dispatch_queue_create("com.aevon.rot.publish", DISPATCH_QUEUE_SERIAL);
+    });
+    return AevonRotQueue;
+}
+
+/// 上一次报出去的状态：-1 还没报过，0 竖，1 横。只给同一进程内判重。
+static int AevonRotSent = -1;
+static int AevonRotSentW = 0;
+static int AevonRotSentH = 0;
+/// 宿主最近一次要求（`AevonRotWant`）：「已经发过的那一个值」，防重复请求。
+static int AevonRotWantSeen = -1;
+/// 心跳计数，只用来把偏好域读值降频（读不受 0.1.35 那条纪律管，但也不必每拍一问）。
+static int AevonRotTicks = 0;
+
+static void AevonRotPostNow(const char *text) {
+    @autoreleasepool {
+        if (text == NULL) return;
+        CFStringRef domain = AevonRotDomain();
+        if (domain == NULL) return;
+        NSString *value = [NSString stringWithUTF8String:text];
+        if (value == nil) return;
+        CFPreferencesSetAppValue(CFSTR("AevonRotState"), (CFStringRef)value, domain);
+        CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             CFSTR("com.aevon.rot"), NULL, NULL, true);
+    }
+}
+
+/// 报一次「我的世界多大、横的还是竖的」。没变就什么都不做。
+///
+/// 值写成 `"1 717 430"`：第一个数是横竖（宿主拿它做唯一判据），后两个只是日志
+/// 里的证词 —— 宿主那张卡片按自己的画布换宽高就能得到同一个结果，不靠这两个数
+/// 去算几何。少一个「两边对同一件事各记一份」的机会。
+static void AevonRotPublish(BOOL on, CGSize world) {
+    int w = (int)(world.width + 0.5);
+    int h = (int)(world.height + 0.5);
+    int flag = on ? 1 : 0;
+    if (AevonRotSent == flag && AevonRotSentW == w && AevonRotSentH == h) return;
+    AevonRotSent = flag;
+    AevonRotSentW = w;
+    AevonRotSentH = h;
+    char text[64];
+    snprintf(text, sizeof(text), "%d %d %d", flag, w, h);
+    char *copy = strdup(text);
+    if (copy == NULL) return;
+    dispatch_async(AevonRotQueueGet(), ^{
+        AevonRotPostNow(copy);
+        free(copy);
+    });
+}
+
+/// 能承载旋转的那个 `UIWindowScene`。优先按键窗认，认不到退回第一个。
+static UIWindowScene *AevonRotScene(void) {
+    UIApplication *app = [UIApplication sharedApplication];
+    if (app == nil) return nil;
+    UIWindowScene *fallback = nil;
+    for (UIScene *scene in app.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *ws = (UIWindowScene *)scene;
+        if (fallback == nil) fallback = ws;
+        for (UIWindow *window in ws.windows) {
+            if (window.isKeyWindow) return ws;
+        }
+    }
+    return fallback;
+}
+
+static CGSize AevonRotWorld(void) {
+    UIWindowScene *ws = AevonRotScene();
+    if (ws == nil) return CGSizeZero;
+    for (UIWindow *window in ws.windows) {
+        if (window.isKeyWindow) return window.bounds.size;
+    }
+    if ([ws respondsToSelector:@selector(coordinateSpace)]) {
+        id space = ((id (*)(id, SEL))objc_msgSend)(ws, @selector(coordinateSpace));
+        if (space != nil) {
+            CGRect rect = ((CGRect (*)(id, SEL))objc_msgSend)(space, @selector(bounds));
+            return rect.size;
+        }
+    }
+    return CGSizeZero;
+}
+
+/// 替用户按一下那个「横屏」按钮。
+///
+/// 这是 iOS 15+ 唯一公开的旋转入口。参数是 `UIWindowSceneGeometryPreferencesIOS`
+/// （类名只在运行期存在，所以走 `objc_getClass` + 判选择子），蒙版给
+/// 「左右都行」而不是只给右：App 的界面朝哪边由系统和设备决定，我们只表达
+/// 「要横」。失败一律只有一行日志，不改任何几何 —— 猜一个形状出来就是 0.4.65
+/// 那种「看着转了、其实没转」的样子。
+static void AevonRotAsk(BOOL on) {
+    UIWindowScene *ws = AevonRotScene();
+    if (ws == nil) {
+        AevonAppLogWrite("app: rot ask scene none\n");
+        return;
+    }
+    Class prefsCls = objc_getClass("UIWindowSceneGeometryPreferencesIOS");
+    SEL reqSel = sel_registerName("requestGeometryUpdateWithPreferences:errorHandler:");
+    if (prefsCls == Nil || ![ws respondsToSelector:reqSel]) {
+        AevonAppLogWrite("app: rot ask no selector\n");
+        return;
+    }
+    // 先让根视图表个态：不少 App 用 `supportedInterfaceOrientations` 关着横屏，
+    // 不叫它重新算一遍，系统会拿上一份缓存直接把请求拒掉。
+    UIViewController *root = nil;
+    for (UIWindow *window in ws.windows) {
+        if (window.isKeyWindow) { root = window.rootViewController; break; }
+    }
+    SEL nudge = sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
+    if (root != nil && [root respondsToSelector:nudge]) {
+        ((void (*)(id, SEL))objc_msgSend)(root, nudge);
+    }
+    NSUInteger mask = on
+        ? (UIInterfaceOrientationMaskLandscapeRight | UIInterfaceOrientationMaskLandscapeLeft)
+        : UIInterfaceOrientationMaskPortrait;
+    id (*initFn)(id, SEL, NSUInteger) = (id (*)(id, SEL, NSUInteger))objc_msgSend;
+    id prefs = initFn([prefsCls alloc],
+                      sel_registerName("initWithInterfaceOrientations:"), mask);
+    if (prefs == nil) {
+        AevonAppLogWrite("app: rot ask no prefs\n");
+        return;
+    }
+    char line[96];
+    snprintf(line, sizeof(line), "app: rot ask %d mask=%lu\n",
+             on ? 1 : 0, (unsigned long)mask);
+    AevonAppLogWrite(line);
+    ((void (*)(id, SEL, id, id))objc_msgSend)(ws, reqSel, prefs, ^(NSError *error) {
+        char note[192];
+        snprintf(note, sizeof(note), "app: rot ask failed %s\n",
+                 (error != nil && error.localizedDescription != nil)
+                     ? [error.localizedDescription UTF8String] : "-");
+        AevonAppLogWrite(note);
+    });
+#if !__has_feature(objc_arc)
+    [prefs release];
+#endif
+}
+
+/// 读一次宿主要求（`AevonRotWant`）。值和上一次一样就什么都不做。
+static void AevonRotApplyWant(void) {
+    CFStringRef domain = AevonRotDomain();
+    if (domain == NULL) return;
+    CFStringRef value = CFPreferencesCopyAppValue(CFSTR("AevonRotWant"), domain);
+    if (value == NULL) return;
+    char text[32] = {0};
+    Boolean ok = CFStringGetCString(value, text, sizeof(text) - 1, kCFStringEncodingUTF8);
+    CFRelease(value);
+    if (!ok || text[0] == '\0') return;
+    int want = (text[0] == '1') ? 1 : 0;
+    if (want == AevonRotWantSeen) return;
+    AevonRotWantSeen = want;
+    // 已经在这个状态上就不再发：`requestGeometryUpdate` 每发一次都要走一趟系统
+    // 协商，重复发等于让窗口闪一下。
+    if (AevonRotSent == want) return;
+    AevonRotAsk(want == 1);
+}
+
+/// 0.3 s 一拍：**读数 + 上报**，顺带每 10 拍看一次宿主要求（≈3 s）。
+///
+/// 只读两个属性（键窗 bounds），不遍历、不改几何。上报本身有判重，稳态下
+/// 一拍的开销就是两次属性访问。
+static void AevonRotTick(void) {
+    static int busy = 0;
+    if (busy) return;
+    busy = 1;
+    CGSize world = AevonRotWorld();
+    if (world.width > 16 && world.height > 16) {
+        // 40 pt 的余量：分屏 / 键盘 / 浮层都可能让「宽高很接近」，只认真的横。
+        BOOL on = world.width > world.height + 40;
+        AevonRotPublish(on, world);
+    }
+    AevonRotTicks += 1;
+    if (AevonRotTicks % 10 == 1) AevonRotApplyWant();
+    busy = 0;
+}
+
+static void AevonRotStart(void) {
+    static int started = 0;
+    if (started) return;
+    started = 1;
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                     dispatch_get_main_queue());
+    if (timer == NULL) return;
+    uint64_t interval = (uint64_t)(0.30 * NSEC_PER_SEC);
+    dispatch_source_set_timer(timer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)interval),
+                              interval, (uint64_t)(0.05 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(timer, ^{
+        AevonRotTick();
+    });
+    dispatch_resume(timer);
+}
+
 /// 0.0.90 — 每个进程一行证词。
 ///
 /// Aevon(80) 两次「只剩白色光晕」只能靠 `geom early/late` 出现两对来反推
@@ -6618,6 +6858,10 @@ static void AevonAppBoot(void) {
     // 为什么不是七条、为什么这两条安全：见 `AevonKeyboardNative.m` 的
     // `AevonKbEarlyInstall` 上面那一段（0.4.8 白屏的边界在那里，别越）。
     AevonKbEarlyInstall();
+    // 0.4.66 — 横屏那条通道的心跳（0.3 s，见 `AevonRotTick`）。挂在构造这一拍，
+    // 因为「App 自己转过去」可能发生在卡片建好之前的任何一帧（冷启动直接进
+    // 横屏播放就是这种），晚建一次就漏一次。
+    AevonRotStart();
     dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(NSEC_PER_SEC / 4)),
                      dispatch_get_main_queue(), NULL, AevonMainBeatTick);
     // 0.1.2 — 独立心跳链（1 s）。原先挂在 0.15 s 的翻页器守卫上，那条链 6 分钟后

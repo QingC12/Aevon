@@ -1101,7 +1101,18 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 母版的手势矩阵里这一格是「边中 · 长按 = 切换横竖」，Aevon 的边中已经被
     /// 「按住上滑关闭」占着，0.1.0 就把这一格单独分出来留给横屏；现在接上。
     func toggleLandscape() {
-        setLandscape(!landscape)
+        // 0.4.66 — 长按**不再是「我们切」**，而是「替用户按一下 App 自己那个横屏
+        // 按钮」：宿主把 `AevonRotWant` 写进 App 的偏好域并叫醒它，App 在自己的
+        // 进程里调 `requestGeometryUpdateWithPreferences:`，转成功之后它把新尺寸
+        // 报回来，卡片才跟着变（`AevonRotSweep` → `setLandscape`）。
+        //
+        // 为什么不直接 `setLandscape(!landscape)`：343 证明宿主写进去的方向与 frame
+        // 对已建好的托管 scene 一个字都不生效 —— 那样切出来的卡片是横的、画面
+        // 还是竖的，比没反应更糟。这里只发出请求，成败由 App 与系统决定，
+        // 转不成就是原地不动，日志里留一行 `app: rot ask failed`。
+        Log.write("win: landscape ask sent b=" + bundle
+                  + (landscape ? " want=0" : " want=1"))
+        AevonRotAsk(bundle, landscape ? 0 : 1)
     }
 
     /// 0.4.65 — 这张卡现在是横的还是竖的。只读出口给 `SceneProbe` 那条回调判重。
@@ -1125,9 +1136,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard let card = card, let window = window else { return }
         guard on != landscape else { return }
         if docked {
-            // 停靠小窗只有 30 % 屏高，横过来连一行字都放不下。先还原再切。
-            Log.write("win: landscape refused while docked b=" + bundle)
-            return
+            // 停靠小窗只有 30 % 屏高，横过来连一行字都放不下。0.4.65 这里是
+            // 「拒绝切换」—— 那时切换由我们发起，拒绝就等于什么都没发生。
+            // 0.4.66 不行了：这一拍是**App 已经转过去了**，卡片留在竖屏只会得到
+            // 「横的画面塞在竖框里」。所以先解除停靠，再照常切。
+            Log.write("win: landscape undock first b=" + bundle)
+            performUndock()
         }
         if kbFilled {
             // 横屏态不参与键盘让位（视频播放不弹输入框）；带着一块让过位的几何
@@ -1136,7 +1150,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
         let bounds = window.bounds
         let portrait = FloatHost.fatRender(in: bounds.size)
-        let target = on ? FloatHost.videoRender(from: portrait) : portrait
+        // 0.4.66 — 横版画布 = 竖版画布**换宽高**，不是 16:9 的 717x403。
+        //
+        // 343 的读数：抖音自己转过去之后 `box=717x430` —— 正好是 430x717 换宽高。
+        // 那是系统的换算规则（scene 的 frame 一直是 430x717，方向改成 3 之后
+        // App 的世界就是 717x430）。我们按 717x403 去摆，等于让 App 在一个它
+        // 没有的尺寸上重排一次，而它上一次重排的痕迹（视频控件、进度条）会留在
+        // 403 与 430 之间那 27 pt 里。
+        let target = on
+            ? CGSize(width: portrait.height, height: portrait.width)
+            : portrait
 
         // 0. 先把场上那条可能还留着的变换摘掉，再记「切之前长什么样」。
         // `card.frame` 是 `bounds`/`center`/`transform` 算出来的派生量，带着一条
@@ -1146,20 +1169,27 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         card.transform = .identity
         glow?.transform = .identity
 
-        // 1. 画布与方向（`AevonWriteOrientation` 按这块画布的宽高比写 3 / 1）
+        // 1. 画布。⛔ 横屏**不推 scene frame**。
+        //
+        // App 是自己调的 `requestGeometryUpdateWithPreferences:`，它已经把世界
+        // 摆成 717x430；我们再推一个「717x430 的 frame」（宽超过屏幕的 430）系统
+        // 会拒，推「430x717」又等于把它按回竖屏 —— 0.4.65 那版两种都试过，读数上
+        // 写着 `orientation -> 3`、行为上一点没变（`frame drift now=430x717`）。
+        // 所以横屏只改卡片的形状，scene 一个字节都不碰；切回竖屏时才把目标写回
+        // 竖版画布，让守护循环把可能漂掉的 frame 纠回来。
         natural = target
         visible = target
-        AevonSceneFrameSet(bundle, 0, 0, Double(target.width), Double(target.height))
+        if !on {
+            AevonSceneFrameSet(bundle, 0, 0, Double(target.width), Double(target.height))
+        }
 
-        // 2. 卡片几何。横版满屏宽、上下居中；竖版回到切之前那一帧。
+        // 2. 卡片几何。横版满屏宽、**固定 16:9**（用户要的是「高 9 宽 16 的视频窗」，
+        // 不是把 App 的 5:3 横版界面原样端上来）；竖版回到切之前那一帧。
         var frame: CGRect
         if on {
             portraitFrame = card.frame
             let w = bounds.width
-            // 高度按**这块画布**的宽高比算，不按常量 16:9：`videoRender` 会取整
-            // （717×403 而不是 403.3），照常量算出来的卡片与画布差 0.3 pt，而
-            // `applyBars` 只在差 0.5 pt 以内才判「满铺」—— 差一点就把底板刷黑。
-            let h = (w * (target.height / target.width)).rounded()
+            let h = (w * FloatHost.videoAspect).rounded()
             frame = CGRect(x: 0,
                            y: ((bounds.height - h) * 0.5).rounded(),
                            width: w, height: h)
@@ -1170,11 +1200,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         }
         if !on { portraitFrame = nil }
 
-        // 3. 同一拍：推场景 + 落卡片。`Strict` 是因为这一拍不允许「写了没门」——
-        // 画布和卡片必须同时到位，分开到就是一次错位。
+        // 3. 同一拍：落卡片。横屏**不推场景**（见上面第 1 条），所以这里只写卡片
+        // 几何；竖屏那一条仍走 `Strict` —— 画布和卡片必须同时到位，分开到就是
+        // 一次错位。
         settleEnter()
         var door: Int = 0
-        if let sc = window.windowScene { door = Int(AevonPushSceneFrameStrict(sc)) }
+        if !on, let sc = window.windowScene {
+            door = Int(AevonPushSceneFrameStrict(sc))
+        }
         card.bounds = CGRect(origin: .zero, size: frame.size)
         card.center = CGPoint(x: frame.midX, y: frame.midY)
         applyGlow()
@@ -1205,6 +1238,18 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         guard source.width > 16, source.height > 16,
               card.width > 16, card.height > 16 else { return 1 }
         return Swift.min(card.width / source.width, card.height / source.height)
+    }
+
+    /// 0.4.66 — 装法之二：**填满**（取大的那一边）。只给横屏那张 16:9 的卡用。
+    ///
+    /// 为什么需要第二个装法：横屏的 App 世界是 5:3（717x430），卡片是 16:9
+    /// （430x242）。`fitScale` 会把整块世界缩进卡片，左右各留 13 pt 黑边；
+    /// 而用户要的是「一块播放视频的窗」，那 13 pt 属于抖音横屏界面自己的黑底。
+    /// 按 `max` 装，多出来的只有上下各 8 pt，切掉的是同一片黑底。
+    static func fillScale(for source: CGSize, in card: CGSize) -> CGFloat {
+        guard source.width > 16, source.height > 16,
+              card.width > 16, card.height > 16 else { return 1 }
+        return Swift.max(card.width / source.width, card.height / source.height)
     }
 
     /// 0.0.49 — 卡片下面那层柔光。跟着 card 的 frame 与圆角走。
@@ -3927,7 +3972,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 否则缩小一次之后顶部那一条又会滑回卡片里。
     private func followContent(updateCorner: Bool = true) {
         guard let card = card, let content = content, visible.height > 16 else { return }
-        let scale = FloatHost.fitScale(for: visible, in: card.bounds.size)
+        // 0.4.66 — 横屏按**填满**装，不按「装得下」：App 的世界是 717x430（5:3），
+        // 卡片是 430x242（16:9）。取小的那一边会在左右各留 13 pt 黑边，正好压在
+        // 视频两侧；取大的那一边只在上下的黑底里各切 8 pt —— 抖音横屏播放器那两条
+        // 本来就是黑的，切掉看不见。用户要的是「像画中画」，不是把别人的界面
+        // 完整端上来。
+        let scale = landscape
+            ? FloatHost.fillScale(for: natural, in: card.bounds.size)
+            : FloatHost.fitScale(for: visible, in: card.bounds.size)
         let want = CGRect(origin: .zero, size: natural)
         if let canvas = canvasView {
             // 0.4.50 — 承载面在画布里的位置**恒定**：铺满、单位阵。系统重设它时
@@ -4589,7 +4641,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 留边会变成一条系统底色，而不是留边该有的黑。
     private func applyBars() {
         guard let card = card else { return }
-        let scale = FloatHost.fitScale(for: visible, in: card.bounds.size)
+        // 0.4.66 — 与 `followContent` 同一个口径：横屏是填满，不是装得下。
+        // 两处用不同的比例算「有没有黑边」，结果就是一张铺满画面的卡被人为刷黑。
+        let scale = landscape
+            ? FloatHost.fillScale(for: natural, in: card.bounds.size)
+            : FloatHost.fitScale(for: visible, in: card.bounds.size)
         let shown = CGSize(width: visible.width * scale, height: visible.height * scale)
         let bars = shown.width < card.bounds.width - 0.5 || shown.height < card.bounds.height - 0.5
         let wanted: UIColor = bars ? .black : .systemBackground

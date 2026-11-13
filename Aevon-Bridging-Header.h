@@ -124,6 +124,18 @@ void AevonSceneFrameClearBundle(NSString *_Nullable bundle);
 long AevonFrameArmedCount(void);
 long AevonFrameOrphanCount(void);
 
+/// 0.4.66 — 请**卡片里那个 App 自己**转一次（长按左下侧的出口）。
+///
+/// 宿主写 scene 的 `frame` / `interfaceOrientation` 对已建好的托管 scene 不生效
+/// （343 实测：`orientation -> 3` 之后 `frame drift now=430x717`，App 全程竖屏），
+/// 只有 App 自己调的 `requestGeometryUpdateWithPreferences:` 才真的把世界转过去。
+/// 所以这里只发请求：偏好域写一格 `AevonRotWant` + 一通 Darwin 通知，App 收到
+/// 之后自己按一下那个按钮。转成功它会把新尺寸报回来，卡片才跟着变。
+///
+/// ⛔ 不要在这里改任何几何：转没转成只有 App 与系统知道，猜一次就是 0.4.65 那种
+/// 「卡片横了、画面还是竖的」。
+void AevonRotAsk(const char *_Nullable bundle, int on);
+
 /// 主动推一次。返回门编号：3 = transition，1 = 普通，0 = 没写成或没有门。
 /// 主线程、且不能从钩子里面调（与 push foreground 同一条纪律）。
 ///

@@ -1013,9 +1013,17 @@ def main():
                   b"win: card landscape entered by app b=",
                   b"win: card landscape left by app b=",
                   b"win: card landscape reset to %.0fx%.0f at %.0f,%.0f",
-                  # 两条「横屏态里被拒」的证词：停靠小窗切不了、键盘让位不参与。
-                  # 它们在日志里出现，说明那两条闸真的在拦，而不是悄悄跑过去。
-                  b"win: landscape refused while docked b=",
+                  # 0.4.66 — **App 自己转、宿主跟随**这条路的三个证词：
+                  #   rot follow N world=WxH    App 报了新世界，卡片跟着变
+                  #   landscape ask sent b=     长按把「请转一次」发给 App 了
+                  #   landscape undock first    停靠小窗先解除再横（0.4.65 是拒绝）
+                  # 判据：`rot follow 1` 出现、`card landscape 1` 跟着出现 ⇒ 通了；
+                  # 只有 `rot follow` 没有 `card landscape` ⇒ 卡片那侧没接上；
+                  # 一条 `rot follow` 都没有而画面仍是竖的 ⇒ App 侧那条通道没通
+                  # （看 `app: rot ask` / `app: band note` 有没有）。
+                  b"win: rot follow %d world=%.0fx%.0f slot=%d b=%s",
+                  b"win: landscape ask sent b=",
+                  b"win: landscape undock first b=",
                   b"win: keyboard fill ignored in landscape b=",
                   # 0.4.0 — `com.ss.iphone.ugc.Aweme`（抖音在「出生整屏」名单里）原本
                   # 断言在这里，但它四个出现点全在 `Sources/App/AevonAppHook.m`；
@@ -1571,6 +1579,15 @@ def main():
                       # 下一份日志能直接分开，不用再猜。
                       b"app: band note from host",
                       b"app: band prefs on=",
+                      # 0.4.66 — 横屏：App 自己转、宿主跟随（`AevonRotAsk` / `AevonRotTick`）。
+                      #   `app: rot ask N mask=`  ⇒ 宿主那声「请转一次」真到了 App，
+                      #                              并且走到了 requestGeometryUpdate；
+                      #   `app: rot ask failed %s` ⇒ 系统拒了（App 关着横屏，或场景
+                      #                              不支持），错误原文就在后面。
+                      # 判据：有 `rot ask` 却没有 `rot follow` ⇒ 请求发了、没转成；
+                      # 连 `rot ask` 都没有 ⇒ 宿主那侧没发（看 `landscape ask sent`）。
+                      b"app: rot ask %d mask=%lu",
+                      b"app: rot ask failed %s",
                       # ------------------------------------------------------------------
                       # 0.4.7 — 键盘整条换成母版机制（`Sources/App/AevonKeyboardNative.m`）。
                       #

@@ -897,6 +897,16 @@ static int AevonLandscapeCount[AEVON_ARMED_MAX];
 /// 退出横屏时 App 会写一次整屏竖版，那个形状和「用户点桌面图标全屏打开」一模一样，
 /// 只能靠「刚刚是横屏」这个上下文分开，宽限期就是这个上下文。
 static CFAbsoluteTime AevonLandscapeExitAt[AEVON_ARMED_MAX];
+/// 0.4.66 — App 自己报上来的「我的世界是横的还是竖的」。1 横 / 0 竖 / -1 没读数。
+///
+/// 343 的日志证明：宿主在 `settings` 里写 `frame` 与 `interfaceOrientation` 对
+/// 一个已经建好的托管 scene **一律不生效**（`orientation -> 3` 之后下一拍
+/// `frame drift now=430x717`，哔哩哔哩全程 `box=430x717`），只有 App 自己调的
+/// `requestGeometryUpdateWithPreferences:` 才真的把世界转过去。所以方向这件事
+/// 我们不再「写」，只「读」—— 读的是 App 自己报的那一份。
+static int AevonRotState[AEVON_ARMED_MAX];
+static double AevonRotWorldW[AEVON_ARMED_MAX];
+static double AevonRotWorldH[AEVON_ARMED_MAX];
 /// 0.3.61 — 冷分享静默期里，这一槽被系统的整屏 frame 顶到了几次。
 ///
 /// Aevon(286) 的 5/7 次失败全是同一件事：卡已经出帧，`land: url fire` 之后
@@ -1127,6 +1137,11 @@ id AevonSeenSceneForBundle(NSString *bundle) {
 /// 表里现在记了几个 —— 日志用，不参与任何判断。
 int AevonSeenCountOf(void) { return AevonSeenCount; }
 
+/// 0.4.66 — 横屏通道的两条前置声明。定义在这个文件后半段（`AevonRotNote`
+/// 旁边），而 `AevonHookArm` 在前半段 —— C 里只能先声明后使用。
+static void AevonRotInstallObserver(void);
+static dispatch_queue_t AevonBandQueueGet(void);
+
 /// 追加一个名字。已经在表里的不重复登记（同一个 App 被再选一次会走到这里）。
 void AevonHookArm(NSString *bundle) {
     if (bundle == nil) return;
@@ -1140,6 +1155,12 @@ void AevonHookArm(NSString *bundle) {
         if (AevonArmed[i][0] != '\0') continue;
         strlcpy(AevonArmed[i], text, sizeof(AevonArmed[i]));
         AevonArmedAt[i] = CFAbsoluteTimeGetCurrent();
+        // 0.4.66 — 新卡从「没有读数」开始：上一张卡是横的，不代表这一张也是。
+        AevonRotState[i] = -1;
+        AevonRotWorldW[i] = 0;
+        AevonRotWorldH[i] = 0;
+        // 通道只在真正有卡的时候才需要听。
+        AevonRotInstallObserver();
         __sync_fetch_and_add(&AevonArmedCount, 1);
         return;
     }
@@ -1157,6 +1178,10 @@ void AevonHookDisarm(NSString *bundle) {
             AevonLandscapeAt[i] = 0;
             AevonLandscapeCount[i] = 0;
             AevonLandscapeExitAt[i] = 0;
+            // 0.4.66 — App 报的横竖也跟着作废：下一张卡从「没有读数」开始。
+            AevonRotState[i] = -1;
+            AevonRotWorldW[i] = 0;
+            AevonRotWorldH[i] = 0;
             }
         AevonArmedCount = 0;
         return;
@@ -1171,6 +1196,9 @@ void AevonHookDisarm(NSString *bundle) {
         AevonLandscapeAt[i] = 0;
         AevonLandscapeCount[i] = 0;
         AevonLandscapeExitAt[i] = 0;
+        AevonRotState[i] = -1;
+        AevonRotWorldW[i] = 0;
+        AevonRotWorldH[i] = 0;
         if (AevonArmedCount > 0) __sync_fetch_and_sub(&AevonArmedCount, 1);
     }
 }
@@ -1691,6 +1719,12 @@ static BOOL AevonWriteOrientation(id settings, int slot) {
     if (slot < 0 || slot >= AEVON_ARMED_MAX) return NO;
     if (!(AevonFrameMask & (1 << slot))) return NO;
     if (!AevonSettingsMutable(settings)) return NO;
+    // 0.4.66 — **App 自己已经转过去了，这一格就别碰。**
+    //
+    // 343 证明宿主写方向对已建好的托管 scene 不生效（写 3 之后 App 仍是竖的），
+    // 反过来还成立：抖音把自己转到 717x430 之后，如果我们继续按「目标是 430x717」
+    // 写 1，就等于把它按回去。方向从此只有 App 说了算，我们只负责跟随。
+    if (AevonRotState[slot] == 1) return NO;
     NSInteger want = AevonOrientationOf(AevonFrameTargets[slot].size);
     SEL setter = sel_registerName("setInterfaceOrientation:");
     if (![settings respondsToSelector:setter]) return NO;
@@ -1807,6 +1841,139 @@ static void AevonLandscapeExit(int slot, NSInteger orient) {
         if (name[0] == '\0') { free(name); return; }
         AevonCardLandscapeExit(name);
         free(name);
+    });
+}
+
+// ===========================================================================
+// 0.4.66 — 横屏：App 自己转，宿主只跟随。
+// ===========================================================================
+//
+// 343 的读数（同一份日志，相隔 16 秒）：
+//
+//   16:57:58  win: orientation -> 3 slot=0 geo=717x403     ← 宿主写了方向
+//   16:57:59  app: page state after change box=430x717     ← 哔哩哔哩没转
+//   16:58:13  win: frame drift now=430x717@0 want=717x403  ← frame 也没落地
+//   16:58:55  app: page sheet AWELandscapeNavigationController h=430
+//   16:58:59  app: page state after change box=717x430     ← 抖音自己转成了
+//
+// 两件事各自成立、互不相干：**宿主写的不生效，App 自己转的有效。** 于是方向
+// 这件事从「写」改成「读」—— App 在它自己的进程里读 `keyWindow.bounds`，
+// 横竖一变就写一份偏好 + 发一通 Darwin 通知（`Sources/App/AevonAppHook.m` 的
+// `AevonRotPublish`），宿主收到就把卡片切成 16:9。
+//
+// 为什么不猜：`requestGeometryUpdate` 的成败由系统与 App 共同决定（有的 App 用
+// `supportedInterfaceOrientations` 关着横屏）。猜一个「应该转过去了」再去改
+// 几何，就是 0.4.65 那种「看着转了、其实没转」的样子 —— 卡片横了、画面还是竖的。
+
+/// 读一次 App 自己报的世界。返回 1 横 / 0 竖 / -1 没有读数（不猜）。
+int AevonRotPoll(const char *bundle, double *w, double *h) {
+    if (bundle == NULL || bundle[0] == '\0') return -1;
+    NSString *bid = [NSString stringWithUTF8String:bundle];
+    if (bid.length == 0) return -1;
+    CFStringRef value = CFPreferencesCopyAppValue(CFSTR("AevonRotState"),
+                                                  (CFStringRef)bid);
+    if (value == NULL) return -1;
+    char text[64] = {0};
+    Boolean ok = CFStringGetCString(value, text, sizeof(text) - 1, kCFStringEncodingUTF8);
+    CFRelease(value);
+    if (!ok) return -1;
+    int on = 0;
+    double ww = 0;
+    double hh = 0;
+    if (sscanf(text, "%d %lf %lf", &on, &ww, &hh) < 1) return -1;
+    if (w != NULL) *w = ww;
+    if (h != NULL) *h = hh;
+    return on == 1 ? 1 : 0;
+}
+
+/// 请 App 自己转（长按左下侧那条路的出口）。
+///
+/// 和 `AevonBandPublish` 走同一个通道：偏好域写一格 + 发那通 `com.aevon.band.<id>`。
+/// 不新开通知名 —— 名字一多，下一份日志就要多对一次账。
+void AevonRotAsk(const char *bundle, int on) {
+    if (bundle == NULL || bundle[0] == '\0') return;
+    char *bid = strdup(bundle);
+    if (bid == NULL) return;
+    int flag = on ? 1 : 0;
+    dispatch_async(AevonBandQueueGet(), ^{
+        @autoreleasepool {
+            NSString *identifier = [NSString stringWithUTF8String:bid];
+            free(bid);
+            if (identifier.length == 0) return;
+            CFStringRef domain = (CFStringRef)identifier;
+            CFStringRef text = flag ? CFSTR("1") : CFSTR("0");
+            CFPreferencesSetAppValue(CFSTR("AevonRotWant"), text, domain);
+            CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+            NSString *name = [NSString stringWithFormat:@"com.aevon.band.%@", identifier];
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                 (CFStringRef)name, NULL, NULL, true);
+        }
+    });
+}
+
+/// 把「App 说我横了」落到卡片上。主线程。
+static void AevonRotApplySeen(void) {
+    for (int i = 0; i < AEVON_ARMED_MAX; i++) {
+        if (AevonArmed[i][0] == '\0') continue;
+        int on = AevonRotState[i];
+        if (on < 0) continue;
+        char *name = strdup(AevonArmed[i]);
+        if (name == NULL) continue;
+        AevonLogRaw([[NSString stringWithFormat:
+                      @"win: rot follow %d world=%.0fx%.0f slot=%d b=%s",
+                      on, AevonRotWorldW[i], AevonRotWorldH[i], i,
+                      AevonArmed[i]] UTF8String]);
+        if (on == 1) {
+            AevonCardLandscapeEnter(name);
+        } else {
+            AevonCardLandscapeExit(name);
+        }
+        free(name);
+    }
+}
+
+/// 通道的读端：重新问一遍每一张在册的卡。跑在 `AevonBandQueue` 上。
+static void AevonRotSweep(void) {
+    dispatch_async(AevonBandQueueGet(), ^{
+        @autoreleasepool {
+            int changed = 0;
+            for (int i = 0; i < AEVON_ARMED_MAX; i++) {
+                if (AevonArmed[i][0] == '\0') continue;
+                double w = 0;
+                double h = 0;
+                int on = AevonRotPoll(AevonArmed[i], &w, &h);
+                if (on < 0) continue;
+                if (AevonRotState[i] == on) continue;
+                AevonRotState[i] = on;
+                AevonRotWorldW[i] = w;
+                AevonRotWorldH[i] = h;
+                changed = 1;
+            }
+            if (!changed) return;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AevonRotApplySeen();
+            });
+        }
+    });
+}
+
+static void AevonRotNote(CFNotificationCenterRef __unused center,
+                         void *__unused observer,
+                         CFStringRef __unused name,
+                         const void *__unused object,
+                         CFDictionaryRef __unused userInfo) {
+    AevonRotSweep();
+}
+
+/// 装一次。名字固定（不带 bundle）：一条通道对上所有卡，读的时候按在册的
+/// bundle 逐个去问 —— 这样一张卡关上又开另一张，不需要重新注册。
+static void AevonRotInstallObserver(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                        NULL, AevonRotNote,
+                                        CFSTR("com.aevon.rot"), NULL,
+                                        CFNotificationSuspensionBehaviorDeliverImmediately);
     });
 }
 
