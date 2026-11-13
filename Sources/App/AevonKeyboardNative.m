@@ -487,6 +487,28 @@ static CGRect  (*AevonKbOrigGuideFrame)(id, SEL) = NULL;
 /// 被读到的次数。`scn … gh=` 打的就是它 —— 0 表示钩子装了但没人读（或者类名不对）。
 static volatile int AevonKbGuideHits = 0;
 
+/// 0.4.39 — 键盘矩形**按哪套坐标报**。0 = 窗口坐标（默认），1 = 屏幕坐标。
+///
+/// 322 把威锋那条算式钉死了（不用再猜）：
+///
+///   `WeiFeng.PostDetailReplyInput 430x175@0,-32`  ⇒ 底边 = 143
+///   我们报出去的 kbtop = 358
+///   358 − 143 = **215** = 卡片偏移（`physicalH − worldH`）
+///
+/// 而它的父链全是 717（`UIView 430x717@0,0 > UITransitionView 430x717@0,0`）
+/// ⇒ 它的世界没歪，是它在**把屏幕坐标换算成窗口坐标时又减了一次 215**。
+///
+/// 数值上这和「App 启动时缓存了 screenH=932」完全等价（932 − 717 = 215），
+/// 322 也证明改 `nativeBounds` 治不了它（`nbr` 涨到 499、`d` 还是 215）。
+/// 两种成因有同一个解 —— **按屏幕坐标报**（`origin.y += shift`）：
+///   · 会做 screen→window 换算的 App：573 − 215 = 358 ✓
+///   · 拿 932 去减的 App：           932 − 573 = 359 ✓
+/// 而 QQ / 微信 / 酷安这类把矩形直接当窗口坐标用的 App 不能这样报
+/// （会拿到 573，输入条掉到窗口底之外），所以**只在测出它正好错了 215 之后**
+/// 才翻；单向、进程内粘住，靠 `kbScreenModeOff` 关掉。
+static volatile int AevonKbScreenMode = 0;
+static volatile int AevonKbScreenVotes = 0;
+
 // ===========================================================================
 // 跨文件事实：本 App 现在是不是被卡片托着
 // ===========================================================================
@@ -1212,6 +1234,20 @@ static BOOL AevonKbGuideFixEnabled(void) {
     return on;
 }
 
+/// 0.4.39 — 自动换口径的开关。缺省开；写 `true` 即回到「一律窗口坐标」。
+static BOOL AevonKbScreenModeEnabled(void) {
+    BOOL on = YES;
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("kbScreenModeOff"),
+                                                        AevonKbDomain);
+    if (value != NULL) {
+        if (CFGetTypeID(value) == CFBooleanGetTypeID()) {
+            on = CFBooleanGetValue((CFBooleanRef)value) ? NO : YES;
+        }
+        CFRelease(value);
+    }
+    return on;
+}
+
 /// 物理屏高。`UIScreen.bounds` 此刻已被我们钩成承载面（717）、`nativeBounds`
 /// 自 0.4.38 起也被钩成承载面，所以这里必须走**系统原值**
 /// （`AevonKbRealNativeBounds`），不能读 `nativeBounds`。
@@ -1637,6 +1673,46 @@ static void AevonKbProbeScreenChannels(const char *tag) {
     AevonKbLog(line);
 }
 
+/// 0.4.39 — 把「窗口坐标的键盘矩形」换成「真正写进 userInfo 的那一个」。
+///
+/// 只在 `AevonKbScreenMode` 翻起来之后加回那 215。`AevonKbLastTop` 仍然存窗口坐标
+/// （`guide` 钩子、`begin` 自建、所有探针都按窗口坐标算），否则量测会自己咬到自己。
+static CGRect AevonKbReportRect(CGRect windowRect, CGFloat shift) {
+    if (!AevonKbScreenMode) return windowRect;
+    CGRect r = windowRect;
+    r.origin.y += shift;
+    return r;
+}
+
+/// 0.4.39 — 记一票「这个 App 把键盘矩形当屏幕坐标在换算」。
+///
+/// 判据只有一条：`d = 报出去的 kbtop − 输入条底边` 正好等于卡片偏移（±12）。
+/// 两票（同一轮弹键盘的 1.7 s 与 2.9 s 两拍）才翻，且只翻一次、不往回翻。
+/// 误判的代价是把输入条再往下推 215（会被键盘盖住），所以门槛必须硬。
+static void AevonKbScreenVote(CGFloat d, int barDepth) {
+    if (AevonKbScreenMode || !AevonKbTakeOver) return;
+    if (!AevonKbShown || barDepth < 1) return;
+    if (AevonKbScreenVotes >= 2) return;
+    CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
+    CGFloat shift = AevonKbPhysicalHeight() - worldH;
+    if (shift < 20.0 || shift > 400.0) return;          // 全屏 / 横屏不参与
+    if (fabs(d - shift) > 12.0) return;                 // 必须**正好**错了 215
+    if (!AevonKbScreenModeEnabled()) return;
+    AevonKbScreenVotes += 1;
+    char line[200];
+    if (AevonKbScreenVotes >= 2) {
+        AevonKbScreenMode = 1;
+        snprintf(line, sizeof(line),
+                 "app: kb: mode screen shift=%.0f d=%.0f votes=%d next=screen\n",
+                 shift, d, (int)AevonKbScreenVotes);
+    } else {
+        snprintf(line, sizeof(line),
+                 "app: kb: mode vote d=%.0f shift=%.0f votes=%d\n",
+                 d, shift, (int)AevonKbScreenVotes);
+    }
+    AevonKbLog(line);
+}
+
 /// 0.4.35 — 两行只读取证：焦点视图（含父链）与 App 主窗 scene 的落点。
 /// 0.4.36 — 焦点改成扫**全部窗口**，并多打一行「输入条容器」的底边。
 ///
@@ -1709,10 +1785,13 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
         if (barDepth >= 0) {
             // `d = kbtop − barBot`，与 `gap` 同向：正 = 抬高、负 = 被盖。
             // 这条取代 `gap` 当判据 —— QQ 正常时 barBot 恒 = 358 = kbtop ⇒ d=0。
+            CGFloat d = kbTop - barBot;
             snprintf(line, sizeof(line),
                      "app: kb: fr %s bar=%.28s %.0f d=%.0f depth=%d\n",
-                     tag, barCls, barBot, kbTop - barBot, barDepth);
+                     tag, barCls, barBot, d, barDepth);
             AevonKbLog(line);
+            // 0.4.39 — 顺手记一票「这个 App 是不是在按屏幕坐标换算」（见 `AevonKbScreenVote`）。
+            AevonKbScreenVote(d, barDepth);
         } else {
             snprintf(line, sizeof(line),
                      "app: kb: fr %s bar=none d=999\n", tag);
@@ -2094,7 +2173,10 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     CGRect end2 = end;
     end2.origin.y = worldH - realH;
     end2.size.height = realH;
-    [fixed setObject:[NSValue valueWithCGRect:end2] forKey:UIKeyboardFrameEndUserInfoKey];
+    // 0.4.39 — 写进去的那一份可能再加回 215（`AevonKbScreenMode`，见它的注释）。
+    // `end2` 本身保持窗口坐标：`AevonKbLastTop` / `guide` / 探针全都按窗口坐标算。
+    CGRect endRep = AevonKbReportRect(end2, shift);
+    [fixed setObject:[NSValue valueWithCGRect:endRep] forKey:UIKeyboardFrameEndUserInfoKey];
     // 0.4.34 — **同一份 userInfo 里还有第三个矩形，0.4.33 之前一直没改。**
     //
     // `UIKeyboardBoundsUserInfoKey` 是「键盘自身多大」，坐标系是键盘本地（origin 恒 0,0），
@@ -2132,18 +2214,20 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
     }
     NSValue *beginValue = [info objectForKey:UIKeyboardFrameBeginUserInfoKey];
     if (beginValue != nil && [beginValue isKindOfClass:[NSValue class]]) {
-        [fixed setObject:[NSValue valueWithCGRect:begin2] forKey:UIKeyboardFrameBeginUserInfoKey];
+        [fixed setObject:[NSValue valueWithCGRect:AevonKbReportRect(begin2, shift)]
+                  forKey:UIKeyboardFrameBeginUserInfoKey];
     }
     // 0.4.34 — 老 API 的两个中心点（iOS 3.2 起就在，至今仍在 userInfo 里）。
     // 它们和 frame 是同一件事的另一种写法，留着旧值就等于留了一条「多抬 70 pt」的路。
     NSValue *centerEnd = [info objectForKey:AevonKbCenterEndKey];
     if (centerEnd != nil && [centerEnd isKindOfClass:[NSValue class]]) {
-        [fixed setObject:[NSValue valueWithCGPoint:CGPointMake(CGRectGetMidX(end2), CGRectGetMidY(end2))]
+        [fixed setObject:[NSValue valueWithCGPoint:CGPointMake(CGRectGetMidX(endRep), CGRectGetMidY(endRep))]
                   forKey:AevonKbCenterEndKey];
     }
     NSValue *centerBegin = [info objectForKey:AevonKbCenterBeginKey];
     if (centerBegin != nil && [centerBegin isKindOfClass:[NSValue class]]) {
-        [fixed setObject:[NSValue valueWithCGPoint:CGPointMake(CGRectGetMidX(begin2), CGRectGetMidY(begin2))]
+        CGRect beginRep = AevonKbReportRect(begin2, shift);
+        [fixed setObject:[NSValue valueWithCGPoint:CGPointMake(CGRectGetMidX(beginRep), CGRectGetMidY(beginRep))]
                   forKey:AevonKbCenterBeginKey];
     }
     AevonKbLastTop = end2.origin.y;
@@ -2155,11 +2239,12 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
         AevonKbNoteFixes += 1;
         char line[320];
         snprintf(line, sizeof(line),
-                 "app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f bgn=%.0fx%.0f@%.0f,%.0f\n",
+                 "app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f bgn=%.0fx%.0f@%.0f,%.0f m=%d\n",
                  end.size.width, end.size.height, end.origin.x, end.origin.y,
-                 end2.size.width, end2.size.height, end2.origin.x, end2.origin.y,
+                 endRep.size.width, endRep.size.height, endRep.origin.x, endRep.origin.y,
                  src, worldH - end2.origin.y,
-                 begin2.size.width, begin2.size.height, begin2.origin.x, begin2.origin.y);
+                 begin2.size.width, begin2.size.height, begin2.origin.x, begin2.origin.y,
+                 (int)AevonKbScreenMode);
         AevonKbLog(line);
     }
     orig(self, _cmd, name, object, fixed);

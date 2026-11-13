@@ -1530,7 +1530,17 @@ def main():
                       # 时它给出的差值会把输入条一次推出去，且之后差值恒 0 回不来。
                       # ⛔ 0.4.26 的 `src=shift`（只减 215 不改高度）已整条删除：
                       # 311 证明它留下 142 pt 黑边，猜值比不动更坏。
-                      b"app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f bgn=%.0fx%.0f@%.0f,%.0f",
+                      # `m=` 0.4.39 起：这一拍写进 userInfo 的口径。
+                      #      0 = 窗口坐标（默认）、1 = 屏幕坐标（origin.y 已加回 215）。
+                      #      322 里威锋的回复条底边 = 我们报的 358 − 215，说明它把矩形
+                      #      当屏幕坐标在做 screen→window 换算 ⇒ 只能按屏幕坐标喂它。
+                      b"app: kb: note fix end=%.0fx%.0f@%.0f,%.0f -> %.0fx%.0f@%.0f,%.0f src=%s rem=%.0f bgn=%.0fx%.0f@%.0f,%.0f m=%d",
+                      # 0.4.39 — 口径自动校准（见 `AevonKbScreenVote`）。
+                      # 判据只有一条：`d`（报出去的 kbtop − 输入条底边）正好等于卡片偏移。
+                      # 两票才翻，单向、进程内粘住；`kbScreenModeOff` 可关。
+                      # `next=screen` 之后，下一次弹键盘就按屏幕坐标报。
+                      b"app: kb: mode vote d=%.0f shift=%.0f votes=%d",
+                      b"app: kb: mode screen shift=%.0f d=%.0f votes=%d next=screen",
                       # 0.4.31 — 输入条被摆到哪儿了（只读，每次弹键盘三拍）。
                       # 314 里 24 条的配额在第一次会话就用光，第二次开键盘整段在
                       # 日志之外 ⇒ 只能看到「键盘起来了」，看不到「输入条去哪儿了」。
