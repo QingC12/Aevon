@@ -508,6 +508,9 @@ static volatile int AevonKbGuideHits = 0;
 /// 才翻；单向、进程内粘住，靠 `kbScreenModeOff` 关掉。
 static volatile int AevonKbScreenMode = 0;
 static volatile int AevonKbScreenVotes = 0;
+/// 0.4.42 — 「一拍一票」用的拍号：每进一次 `AevonKbProbeFocusAndScene` 加一。
+static volatile int AevonKbVoteTick = 0;
+static volatile int AevonKbVoteLastTick = -1;
 
 // ===========================================================================
 // 跨文件事实：本 App 现在是不是被卡片托着
@@ -1608,6 +1611,8 @@ static void AevonKbScheduleChannelProbes(void) {
 // 找的是 `UITextField` / `UITextView`（评论区的输入条几乎都是这两种），深度优先
 // 第一个命中。窗口坐标系里 b = 0 在上，和 `UIScreen.bounds` 同一套（钩过 ⇒ 717）。
 static volatile int AevonKbBarProbes = 0;
+/// 0.4.42 — 收起后的「静止位」取证配额（见通知钩子里 `down` 那一支）。
+static volatile int AevonKbDownProbes = 0;
 
 /// 0.4.34 — 收集**全部**命中，不再边扫边选。
 ///
@@ -1804,28 +1809,42 @@ static CGRect AevonKbReportRect(CGRect windowRect, CGFloat shift) {
 /// 判据只有一条：`d = 报出去的 kbtop − 输入条底边` 正好等于卡片偏移（±12）。
 /// 两票（同一轮弹键盘的 1.7 s 与 2.9 s 两拍）才翻，且只翻一次、不往回翻。
 /// 误判的代价是把输入条再往下推 215（会被键盘盖住），所以门槛必须硬。
-static void AevonKbScreenVote(CGFloat d, int barDepth) {
+/// 0.4.42 — 投票内核。判据一字不差，`src` 只进日志。
+///
+/// 0.4.42 之前只有容器那一票（`src=bar`）。Turrit 证明容器票会被容器自己的
+/// 「底板」骗掉：可见输入条 `430x40@0,95`（底 135）、外面那层玻璃底板 104 高
+/// 一直铺到 199 ⇒ 容器票 `d=159`（差 56，投不出），焦点票 `d=227`（差 12，正好）。
+static void AevonKbScreenVoteCore(CGFloat d, const char *src) {
     if (AevonKbScreenMode || !AevonKbTakeOver) return;
-    if (!AevonKbShown || barDepth < 1) return;
+    if (!AevonKbShown) return;
     if (AevonKbScreenVotes >= 2) return;
+    // 一拍只记一票：0.4.42 起同一拍里「容器票」与「焦点票」可能同时成立，
+    // 若都算进去就变成「一拍翻」，把原本「两拍才翻」的保险丝短路了。
+    if (AevonKbVoteTick == AevonKbVoteLastTick) return;
     CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
     CGFloat shift = AevonKbPhysicalHeight() - worldH;
     if (shift < 20.0 || shift > 400.0) return;          // 全屏 / 横屏不参与
     if (fabs(d - shift) > 12.0) return;                 // 必须**正好**错了 215
     if (!AevonKbScreenModeEnabled()) return;
+    AevonKbVoteLastTick = AevonKbVoteTick;
     AevonKbScreenVotes += 1;
     char line[200];
     if (AevonKbScreenVotes >= 2) {
         AevonKbScreenMode = 1;
         snprintf(line, sizeof(line),
-                 "app: kb: mode screen shift=%.0f d=%.0f votes=%d next=screen\n",
-                 shift, d, (int)AevonKbScreenVotes);
+                 "app: kb: mode screen shift=%.0f d=%.0f votes=%d src=%s next=screen\n",
+                 shift, d, (int)AevonKbScreenVotes, src);
     } else {
         snprintf(line, sizeof(line),
-                 "app: kb: mode vote d=%.0f shift=%.0f votes=%d\n",
-                 d, shift, (int)AevonKbScreenVotes);
+                 "app: kb: mode vote d=%.0f shift=%.0f votes=%d src=%s\n",
+                 d, shift, (int)AevonKbScreenVotes, src);
     }
     AevonKbLog(line);
+}
+
+static void AevonKbScreenVote(CGFloat d, int barDepth) {
+    if (barDepth < 1) return;
+    AevonKbScreenVoteCore(d, "bar");
 }
 
 /// 0.4.41 — Safari 的底部地址栏：**它根本没读我们报的那个矩形**。
@@ -1961,6 +1980,7 @@ static void AevonKbProbeCoveredChain(const char *tag, UIView *focus, UIWindow *w
 static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
                                       UIView *rootView, CGFloat kbTop) {
     if (appWin == nil) return;
+    AevonKbVoteTick += 1;                               // 0.4.42 — 一拍一票（见 `AevonKbScreenVoteCore`）
     UIWindow *focusWin = nil;
     UIView *focus = AevonKbFindFirstResponderAnyWindow(&focusWin);
     if (focus == nil) {
@@ -1969,6 +1989,7 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
     }
     if (focusWin == nil) focusWin = appWin;
     CGFloat worldW = [UIScreen mainScreen].bounds.size.width;
+    CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
     char line[400];
     if (focus == nil) {
         snprintf(line, sizeof(line),
@@ -1986,6 +2007,21 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
         AevonKbLog(line);
         // 0.4.41 — 焦点整块压在键盘底下（不是抖动）⇒ 把祖先链的 inset 摊开看。
         if (bot > kbTop + 40.0) AevonKbProbeCoveredChain(tag, focus, focusWin, kbTop);
+
+        // 0.4.42 — 焦点自己的底边也投一票。
+        //
+        // Turrit（`com.seastar.turrit`，Texture）证明容器票会被「底板」骗掉：
+        // 可见输入条 `430x40@0,95`（底 135）、玻璃底板 104 高一路铺到 199，
+        // 容器票 `d = 358−199 = 159`（差 56，投不出），而焦点票 `d = 358−131 = 227`
+        // （差 12，正好）。它自己的算式与 minis 一模一样：`135 = 358 − 215 − 8`。
+        //
+        // 两道闸，缺一不可：
+        //   ① **只有焦点在主窗里才算** —— 换窗口换算跨不出那 215（见 `hostm` 注释）；
+        //   ② **焦点底边必须落在世界上三分之一** —— 输入条跟着键盘上来时才这么高；
+        //      正常 App 的输入条贴着 kbtop（`d≈0`）直接出局，不会被这条投歪。
+        if (focusWin == appWin && bot < worldH / 3.0) {
+            AevonKbScreenVoteCore(kbTop - bot, "focus");
+        }
 
         // 父链五层 + 「输入条容器」。SwiftUI 的类名很长，每段截 28 字符，
         // 够认出「是不是整套被移动的容器」。
@@ -2119,11 +2155,71 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
     AevonKbProbeScreenChannels(tag);
 }
 
+/// 0.4.42 — 窗口清单（只读）。
+///
+/// Filza 的取证在 325 里整段缺 `bar`/`fr`（`chan` 与 `graw` 都在，说明探针排过队），
+/// 而它家「重命名」的输入框到底在哪个窗口、谁把它托起来、离键盘多远，必须看见。
+/// 这一条不依赖「扫到输入条」，也不依赖焦点一定在主窗：每个窗口连它自己的第一响应者
+/// 一起打，一行一个，`bot` 按窗口坐标算（与 `note fix` 报出去的口径可比）。
+static volatile int AevonKbWinListProbes = 0;
+
+static void AevonKbProbeWindowList(const char *tag) {
+    if (AevonKbWinListProbes >= 3) return;
+    Class appCls = objc_getClass("UIApplication");
+    if (appCls == Nil) return;
+    id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls, @selector(sharedApplication));
+    if (app == nil) return;
+    NSArray *wins = ((id (*)(id, SEL))objc_msgSend)(app, @selector(windows));
+    if (wins == nil) return;
+    AevonKbWinListProbes += 1;
+    CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
+    CGFloat kbTop = AevonKbShown ? (CGFloat)AevonKbLastTop : worldH;
+    char line[360];
+    snprintf(line, sizeof(line), "app: kb: winl %s n=%d world=%.0f kbtop=%.0f\n",
+             tag, (int)[wins count], worldH, kbTop);
+    AevonKbLog(line);
+    NSUInteger count = [wins count];
+    for (NSUInteger i = 0; i < count && i < 6; i++) {
+        id w = [wins objectAtIndex:i];
+        if (![w isKindOfClass:[UIWindow class]]) continue;
+        UIWindow *win = (UIWindow *)w;
+        CGRect f = [win frame];
+        id rvc = [win rootViewController];
+        const char *rvcCls = (rvc != nil) ? class_getName([rvc class]) : "nil";
+        UIView *fr = AevonKbFindFirstResponder(win, 24);
+        if (fr != nil) {
+            CGRect r = [fr convertRect:[fr bounds] toView:win];
+            snprintf(line, sizeof(line),
+                     "app: kb: winl   %d %.24s L=%.0f %.0fx%.0f@%.0f,%.0f hid=%d rvc=%.20s fr=%.24s %.0fx%.0f@%.0f,%.0f bot=%.0f\n",
+                     (int)i, class_getName([win class]), [win windowLevel],
+                     f.size.width, f.size.height, f.origin.x, f.origin.y,
+                     (int)[win isHidden], rvcCls, class_getName([fr class]),
+                     r.size.width, r.size.height, r.origin.x, r.origin.y,
+                     r.origin.y + r.size.height);
+        } else {
+            snprintf(line, sizeof(line),
+                     "app: kb: winl   %d %.24s L=%.0f %.0fx%.0f@%.0f,%.0f hid=%d rvc=%.20s fr=none\n",
+                     (int)i, class_getName([win class]), [win windowLevel],
+                     f.size.width, f.size.height, f.origin.x, f.origin.y,
+                     (int)[win isHidden], rvcCls);
+        }
+        AevonKbLog(line);
+    }
+}
+
 static void AevonKbProbeBarText(const char *tag) {
-    if (AevonKbBarProbes >= 24) return;
+    if (AevonKbBarProbes >= 40) return;
     if (![NSThread isMainThread]) return;
+    AevonKbProbeWindowList(tag);
     UIWindow *appWin = AevonKbAppMainWindow();
-    if (appWin == nil) return;
+    if (appWin == nil) {
+        // 0.4.42 — 以前这里静默返回，日志里就只剩「探针没跑」的错觉。
+        AevonKbBarProbes += 1;
+        char miss[80];
+        snprintf(miss, sizeof(miss), "app: kb: bar %s appwin=none\n", tag);
+        AevonKbLog(miss);
+        return;
+    }
     AevonKbBarProbes += 1;
     UIView *rootView = nil;
     id rvc = ((id (*)(id, SEL))objc_msgSend)(appWin, @selector(rootViewController));
@@ -2203,6 +2299,11 @@ static void AevonKbScheduleBarProbes(void) {
                    dispatch_get_main_queue(), ^{ AevonKbProbeBarText("t1.7"); });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.90 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ AevonKbProbeBarText("t2.9"); });
+    // 0.4.42 — 4.6 s 再补一拍：抓「前半拍正常、后半拍自己又抬上去」那种迟到的第二次布局
+    // （Turrit 用户看到的是 0.5 s，但 App 的第二段动画常常更晚），也用来确认换口径之后
+    // App 有没有自己重排过一次 —— 重排了，下一拍读数就会变；没变，就只能等下一次弹键盘。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.60 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ AevonKbProbeBarText("t4.6"); });
     // 0.4.41 — guide **引擎**那一拍：0.40 s 时动画已收尾、布局引擎有值；1.30 s 再补
     // 一次，抓「App 在动画后又自己排了一遍」的情形。两拍都只对「引擎顶比真顶低
     // 正好一个 shift」那一族动手（见 `AevonKbGuideEngineNudge`）。
@@ -2418,6 +2519,16 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
         if (!visible && (hideNote || end.size.height < 40.0
                          || end.origin.y >= worldH - 40.0)) {
             AevonKbShown = 0;
+            // 0.4.42 — 收起之后补一拍「静止位」：输入条回到哪儿、滚动视图 inset 归零没有。
+            // Safari 那条线全靠这一拍分辨两种情形：
+            //   · 静止位 = 世界底（638 附近）⇒ 键盘本来能让它动，是键盘给的高度不对；
+            //   · 静止位 = 455（= 717 − 215 − 45）⇒ 地址栏本来就停在那儿、跟键盘无关，
+            //     那是另一条 bug（App 自己留了 215 的底边），得换钩点，别再调矩形。
+            if (AevonKbDownProbes < 4) {
+                AevonKbDownProbes += 1;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{ AevonKbProbeBarText("down"); });
+            }
         }
         orig(self, _cmd, name, object, userInfo);
         return;

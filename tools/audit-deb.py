@@ -1539,8 +1539,16 @@ def main():
                       # 判据只有一条：`d`（报出去的 kbtop − 输入条底边）正好等于卡片偏移。
                       # 两票才翻，单向、进程内粘住；`kbScreenModeOff` 可关。
                       # `next=screen` 之后，下一次弹键盘就按屏幕坐标报。
-                      b"app: kb: mode vote d=%.0f shift=%.0f votes=%d",
-                      b"app: kb: mode screen shift=%.0f d=%.0f votes=%d next=screen",
+                      b"app: kb: mode vote d=%.0f shift=%.0f votes=%d src=%s",
+                      b"app: kb: mode screen shift=%.0f d=%.0f votes=%d src=%s next=screen",
+                      # 0.4.42 — 焦点票（`src=focus`）。容器票会被「底板」骗掉：
+                      # Turrit 的可见输入条底 135、玻璃底板底 199，容器票差 56 投不出，
+                      # 焦点票 227 只差 12。闸门见 `AevonKbProbeFocusAndScene`。
+                      # 0.4.42 — 窗口清单与静止位取证（Filza 那段整段缺读数）。
+                      b"app: kb: winl %s n=%d world=%.0f kbtop=%.0f",
+                      b"app: kb: winl   %d %.24s L=%.0f %.0fx%.0f@%.0f,%.0f hid=%d rvc=%.20s fr=%.24s %.0fx%.0f@%.0f,%.0f bot=%.0f",
+                      b"app: kb: winl   %d %.24s L=%.0f %.0fx%.0f@%.0f,%.0f hid=%d rvc=%.20s fr=none",
+                      b"app: kb: bar %s appwin=none",
                       # 0.4.31 — 输入条被摆到哪儿了（只读，每次弹键盘三拍）。
                       # 314 里 24 条的配额在第一次会话就用光，第二次开键盘整段在
                       # 日志之外 ⇒ 只能看到「键盘起来了」，看不到「输入条去哪儿了」。
