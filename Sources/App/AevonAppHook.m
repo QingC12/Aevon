@@ -6720,6 +6720,15 @@ static CGSize AevonRotWorld(void) {
 /// 「要横」。失败一律只有一行日志，不改任何几何 —— 猜一个形状出来就是 0.4.65
 /// 那种「看着转了、其实没转」的样子。
 static void AevonRotAsk(BOOL on) {
+    // ⛔ 同 `AevonRotForce`：这条路上全是 UIKit（`connectedScenes` / `windows` /
+    // `requestGeometryUpdate`），只在主线程成立。放到函数最前面，所有调用点
+    // 都不用各记一遍这条纪律。
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonRotAsk(on);
+        });
+        return;
+    }
     UIWindowScene *ws = AevonRotScene();
     if (ws == nil) {
         AevonAppLogWrite("app: rot ask scene none\n");
@@ -6795,15 +6804,27 @@ static void AevonRotApplyWant(void) {
 ///
 /// 限流 0.8 s：band 在拖动过程中会被反复发布，每来一通就写一次偏好域 + 刷盘
 /// 是不必要的；而「开卡」这件事本身不会 0.8 s 内来两次。
+static void AevonRotForceNow(void) {
+    CGSize world = AevonRotWorld();
+    if (world.width <= 16 || world.height <= 16) return;
+    AevonRotSent = -1;
+    AevonRotPublish(world.width > world.height + 40, world);
+}
+
 static void AevonRotForce(void) {
     static CFAbsoluteTime last = 0;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (last > 0 && now - last < 0.8) return;
-    CGSize world = AevonRotWorld();
-    if (world.width <= 16 || world.height <= 16) return;
     last = now;
-    AevonRotSent = -1;
-    AevonRotPublish(world.width > world.height + 40, world);
+    // ⛔ Darwin 通知的回调**不保证在主线程**（`AevonBandNote` 上面那段写过这条），
+    // 而 `AevonRotWorld` 要读 `window.bounds` —— UIKit 的属性只在主线程安全。
+    if ([NSThread isMainThread]) {
+        AevonRotForceNow();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonRotForceNow();
+        });
+    }
 }
 
 /// 0.3 s 一拍：**读数 + 上报**，顺带每 10 拍看一次宿主要求（≈3 s）。
