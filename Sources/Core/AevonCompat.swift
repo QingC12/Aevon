@@ -230,9 +230,15 @@ enum AevonFloatMotion {
         let value = String(format: "%.2f", Double(strength))
         if kind == "震动" {
             AevonLog.info("[圆盘] 震动 i=" + value + " src=" + source)
+        } else if kind == "齿轮" {
+            // 字面量各自成串（不拼 `[圆盘] ` + kind）：审计按整条前缀查产物，
+            // 拼起来常量池里只剩半截，构建会在 Gate 那一步拦下来。
+            let via = playWithVolume != nil ? "1" : "0"
+            AevonLog.info("[圆盘] 齿轮 id=1157 v=" + value
+                          + " vol=" + via + " src=" + source)
         } else {
             let via = playWithVolume != nil ? "1" : "0"
-            AevonLog.info("[圆盘] " + kind + " id=1157 v=" + value
+            AevonLog.info("[圆盘] 声音 id=1157 v=" + value
                           + " vol=" + via + " src=" + source)
         }
     }
