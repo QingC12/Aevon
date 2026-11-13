@@ -4704,11 +4704,18 @@ static int AevonAliveLines = 0;
 //
 // 四拍 × 3 行（`win` / `scroll` / 可能的 `tall`）≈ 12~16 行，加上 nudge 也还在
 // 20 行以内 —— 一份 941 行的日志不会因为这几行变难读。
-#define AEVON_AUDIT_LINES 26
-#define AEVON_AUDIT_PASSES 4
-/// 四拍的时刻（相对首拍）。第一项必须是 0：它同时用来记 `AevonAuditAt`。
-static const double AevonAuditGap[AEVON_AUDIT_PASSES] = {0.0, 0.30, 0.80, 1.50};
+#define AEVON_AUDIT_LINES 30
+#define AEVON_AUDIT_PASSES 8
+/// 八拍的时刻（相对首拍）。第一项必须是 0：它同时用来记 `AevonAuditAt`。
+///
+/// 0.4.62 — 后四拍（2.5 / 3.5 / 5.0 / 7.0 s）只在**前几拍 `scroll none`** 时启用。
+/// 342 的第三次开卡（冷启动）四拍全是 `scroll none`（`walk=74/273/279/279`），
+/// 四拍之后这张卡就再没有读数了 —— 而用户看到的断层正好在那之后。
+/// 不知道「表什么时候建好、建好时是几 px」，下一版就只能猜。
+static const double AevonAuditGap[AEVON_AUDIT_PASSES] = {0.0, 0.30, 0.80, 1.50, 2.50, 3.50, 5.00, 7.00};
 static int AevonAuditPass = 0;
+/// 0.4.62 — 这一张卡允许几拍。默认 4；第一拍 `scroll none`（表还没建）放到 8。
+static int AevonAuditLimit = 4;
 static CFTimeInterval AevonAuditAt = 0.0;
 static int AevonAuditLines = 0;
 static int AevonAuditNudges = 0;
@@ -4725,7 +4732,7 @@ static void AevonHostedAudit(void) {
     // 0.4.52 — 闸从 `AevonEverHosted` 换成「宿主此刻还说这个 App 被托着」。
     // 前者要等一次 24 pt 的高度跳变才置位，而这一版正是要拍「跳变之前」那一段。
     if (!AevonBandHostedNow()) return;
-    if (AevonAuditPass >= AEVON_AUDIT_PASSES) return;
+    if (AevonAuditPass >= AevonAuditLimit) return;
     if (AevonAuditLines >= AEVON_AUDIT_LINES) return;
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
     if (AevonAuditPass == 0) {
@@ -4817,6 +4824,12 @@ static void AevonHostedAudit(void) {
                  AevonAuditPass, (unsigned long)walked);
         AevonPageWrite(line);
         used += 1;
+        // 0.4.62 — 表还没建 ⇒ 把窗口从四拍拉到八拍（到 7 s）。
+        //
+        // 342 第三次开卡：`scroll none` 四拍全中，四拍之后这张卡一行读数都没有，
+        // 而用户报的断层就在那一段。表建好是几 px、那时我们在哪一拍 —— 全都没
+        // 记下来，只能靠猜。八拍 24 行仍在配额里（正常情形四拍 12 行不变）。
+        if (AevonAuditPass <= 1) AevonAuditLimit = AEVON_AUDIT_PASSES;
     }
 
     if (tall != nil) {
@@ -4941,6 +4954,7 @@ static void AevonPagerWatchTick(void *context) {
             AevonAuditPass = 0;
             AevonAuditLines = 0;
             AevonAuditNudges = 0;
+            AevonAuditLimit = 4;
             AevonCellFitNotes = 0;
             AevonCellFixes = 0;
             AevonCellFitSame = 0;
@@ -4987,6 +5001,7 @@ static void AevonPagerWatchTick(void *context) {
             AevonCellCvAt = 0.0;
         }
         AevonAuditPass = 0;
+        AevonAuditLimit = 4;
     }
 
     // 窗口高度变了（过渡钩子没响的那一类 App、或者系统自己去改的）：上一拍的

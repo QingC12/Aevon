@@ -681,6 +681,8 @@ static volatile int AevonKbEarlyDone = 0;
 /// 0.4.52 — 「进程最早读到的那一版尺寸」只写一行。
 static volatile int AevonKbEarlyNotes = 0;
 static void AevonKbEarlyNote(void *context);
+/// 0.4.62 — 第一拍之后 0.6 s 的 `set=` 复查（`scene.settings.frame`）。
+static void AevonKbLateNote(void *context);
 
 /// 0.4.37 — `UIKeyboardLayoutGuide -layoutFrame` 的原件。
 ///
@@ -1016,6 +1018,28 @@ static UIWindowScene *AevonKbMainScene(void) {
 /// （宿主把 scene frame 摆成 430×717@0,215 时，这里就是 430×717）。
 typedef CGRect (*AevonKbBoundsForOrientationIMP)(id, SEL, long);
 
+/// 0.4.62 — `scene.settings.frame`：宿主**同步提交**的那一份承载面矩形。
+///
+/// `UIScene.settings` 返回 `FBSSceneSettings` 子类，`-frame` 是它的属性（CGRect）。
+/// 三条合法性闸缺一不可：
+///   · `respondsToSelector:` —— 私有属性，版本之间可能不在；
+///   · `isfinite` —— 没设置过时可能是 `CGRectNull`（inf）；
+///   · 边长 > 200 —— 挡住 `CGRectZero` 与中间态。
+/// 取值失败一律返回 `CGRectZero`，调用方按「没有这个读数」处理。
+static CGRect AevonKbSceneSettingsFrame(UIWindowScene *scene) {
+    if (scene == nil) return CGRectZero;
+    SEL ssel = NSSelectorFromString(@"settings");
+    if (ssel == NULL || ![scene respondsToSelector:ssel]) return CGRectZero;
+    id settings = ((id (*)(id, SEL))objc_msgSend)(scene, ssel);
+    if (settings == nil) return CGRectZero;
+    SEL fsel = NSSelectorFromString(@"frame");
+    if (fsel == NULL || ![settings respondsToSelector:fsel]) return CGRectZero;
+    CGRect f = ((CGRect (*)(id, SEL))objc_msgSend)(settings, fsel);
+    if (!isfinite(f.size.width) || !isfinite(f.size.height)) return CGRectZero;
+    if (f.size.width < 200.0 || f.size.height < 200.0) return CGRectZero;
+    return f;
+}
+
 static CGRect AevonKbSceneBounds(UIWindowScene *scene) {
     if (scene == nil) return CGRectZero;
     CGRect box = CGRectZero;
@@ -1052,8 +1076,42 @@ static CGRect AevonKbSceneBounds(UIWindowScene *scene) {
             space = ((CGRect (*)(id, SEL))objc_msgSend)(spaceObject, @selector(bounds));
         }
     }
-    if (box.size.height < 1.0) return space;
-    if (space.size.height < 1.0) return box;
+    // 0.4.62 — 第三读数：`scene.settings.frame`。**这是「第一拍」唯一可能已经对的数**。
+    //
+    // 342 把冷启动那 2~3 s 钉在了这一条上。抖音进程重启时（从圆盘打开，进程已被
+    // 系统回收），我们的两条读数都还是全屏：
+    //
+    //   15:22:29  app: boot pid=79205
+    //   15:22:29  app: kb: bounds -> 430x932@0,0 (hosted=0 shrunk=0)   ×6
+    //   15:22:29  app: kb: first early=1 bounds=430x932 … scene=430x932 band=0
+    //   15:22:30  app: page transition h=717 last=932 full=717          ← 才知道是 717
+    //   15:22:30  app: page layout audit n=1 tall cls=AWEFeedViewCell b=430x932 over=215
+    //   15:22:30~32  scroll none walk=74/273/279/279                    ← 表都还没建
+    //
+    // 它拿 932 建了第一版（`tall b=430x932 over=215`），等我们改口成 717 时那版
+    // 已经在屏上了 —— 抖音不重新排，用户第一眼就是断层。上一次（15:21:29）它
+    // 3 s 后自己 reload 成 717（`pager keep span=7170`），所以「滑几条会自己好」；
+    // 这一次 3 s 内就关卡了，于是断层原样留在用户眼里。
+    //
+    // 宿主侧的时序（342）说明 settings 是**在 activate 之前**就写好的：
+    //
+    //   15:22:29  win: scene frame asked=430x717 screen=430x932
+    //   15:22:29  win: scene frame push door=3 wrote=5
+    //   15:22:29  win: activate ran=yes          ← 在这一句之才拉起/唤醒 App
+    //
+    // `_boundsForInterfaceOrientation:` 要等 interfaceOrientation 生效、
+    // `coordinateSpace.bounds` 要等承载视图（`_UIScenePresentationView`）建出来，
+    // 两者都晚；而 `settings` 是随 scene 一起到进程里的同步对象 —— 不排队、不等
+    // 通知。所以它是唯一能在**第一次 `-bounds` 调用**就答出承载面的读数。
+    //
+    // ⛔ 这不是把 band 请回来（0.4.54 撤掉的那个）：band 是 Darwin 通知，比
+    // settings 晚几百毫秒，那正是 337 的病根。settings 与 scene 同寿命。
+    CGRect sframe = AevonKbSceneSettingsFrame(scene);
+    if (box.size.height < 1.0) box = space;
+    if (box.size.height < 1.0) box = sframe;
+    if (box.size.height < 1.0) return sframe;
+    if (space.size.height < 1.0) space = box;
+    if (sframe.size.height < 1.0) sframe = box;
     // ⛔ 0.4.54 起这条**不再问 band**。
     //
     // 0.4.52 的写法是 `AevonBandHostedNow() && 差 > 40`。337 证明那个闸就是
@@ -1088,7 +1146,17 @@ static CGRect AevonKbSceneBounds(UIWindowScene *scene) {
         && fabs(box.size.width - space.size.width) <= 40.0) {
         // 原点仍用私有方法那一份：UIKit 读 `UIScreen.bounds` 时基本不看 origin，
         // 而它原来给的 (0,0) 已经在 215 那套换算里被验过很多轮，不动。
-        return CGRectMake(box.origin.x, box.origin.y, space.size.width, space.size.height);
+        box = CGRectMake(box.origin.x, box.origin.y, space.size.width, space.size.height);
+    }
+    // 0.4.62 — 再与 settings.frame 比一次，同一把尺子（同宽、矮 40 pt 以上）。
+    //
+    // 顺序放在最后不是随意的：前两个读数**只可能**给出「已建好的承载面」或
+    // 「全屏」，而 settings 在浮窗刚拉起时可以给出「还没建出来的承载面」。
+    // 三者取最矮的那一个，「同宽」这一条挡住横屏（见上面那段宽度闸的理由）。
+    if (box.size.height - sframe.size.height > 40.0
+        && fabs(box.size.width - sframe.size.width) <= 40.0) {
+        box = CGRectMake(box.origin.x, box.origin.y,
+                         sframe.size.width, sframe.size.height);
     }
     return box;
 }
@@ -1173,12 +1241,18 @@ static CGRect AevonKbBounds(id self, SEL _cmd) {
                 // 若它的原点恒为 (0,0)，键盘就永远贴在 0..717，离屏底 215。
                 if (AevonKbBoundsNotes < 6) {
                     AevonKbBoundsNotes += 1;
-                    char line[224];
+                    char line[256];
+                    // 0.4.62 — 尾部带 `set=`（`scene.settings.frame`）。
+                    // 冷启动那几拍里，`box` 是 932 而 `set` 若是 717，说明
+                    // `-bounds` 已经答对、问题在别处；两者都是 932，说明这条路
+                    // 拿不到 —— 343 一眼就能分开这两种情形。
+                    CGRect setBox = AevonKbSceneSettingsFrame(AevonKbAppScene);
                     snprintf(line, sizeof(line),
-                             "app: kb: bounds -> %.0fx%.0f@%.0f,%.0f (hosted=%d shrunk=%d)\n",
+                             "app: kb: bounds -> %.0fx%.0f@%.0f,%.0f (hosted=%d shrunk=%d set=%.0fx%.0f)\n",
                              box.size.width, box.size.height,
                              box.origin.x, box.origin.y,
-                             1 - (int)AevonKbIsFrontMost(), (int)shrunk);
+                             1 - (int)AevonKbIsFrontMost(), (int)shrunk,
+                             setBox.size.width, setBox.size.height);
                     AevonKbLog(line);
                 }
                 return box;
@@ -4751,14 +4825,49 @@ static void AevonKbEarlyNote(void *context) {
     // 小 40 pt 以上，说明 App 的第一版版式本该按它排。`hook`/`take` 是那两条闸的
     // 当下值 —— 0.4.54 之后它们不再参与决定，留着是为了和旧日志对照。
     CGRect space = first != nil ? AevonKbSceneBounds(first) : CGRectZero;
+    // 0.4.62 — 单列 `set=`：`AevonKbSceneBounds` 取的是三者最小，这一行给出
+    // 第三读数**本身**的原始值。判据很干脆：
+    //   `set=430x717` 而 `scene=430x717` ⇒ 这条路成立，冷启动第一眼就该是对的；
+    //   `set=430x932`                   ⇒ settings 那时还没提交，得另找入口；
+    //   `set=0x0`                       ⇒ 私有属性不在或被合法性闸挡下。
+    CGRect sframe = first != nil ? AevonKbSceneSettingsFrame(first) : CGRectZero;
     char line[288];
     snprintf(line, sizeof(line),
-             "app: kb: first early=%d bounds=%.0fx%.0f@%.0f,%.0f sys=%.0fx%.0f scene=%.0fx%.0f scenes=%lu active=%d key=%d band=%d hook=%d take=%d\n",
+             "app: kb: first early=%d bounds=%.0fx%.0f@%.0f,%.0f sys=%.0fx%.0f scene=%.0fx%.0f set=%.0fx%.0f scenes=%lu active=%d key=%d band=%d hook=%d take=%d\n",
              (int)AevonKbEarlyDone,
              got.size.width, got.size.height, got.origin.x, got.origin.y,
              sys.size.width, sys.size.height,
              space.size.width, space.size.height,
+             sframe.size.width, sframe.size.height,
              (unsigned long)scenes, active, key, AevonBandHostedNow(),
              (int)AevonKbHookUIScreen, (int)AevonKbTakeOver);
+    AevonKbLog(line);
+    // 0.4.62 — 0.6 s 后再看一次第三读数。只回答一件事：
+    // `scene.settings.frame` 是什么时候变成承载面的。
+    //   第一拍就是 717           ⇒ 这条路成立，冷启动第一眼就该是对的；
+    //   第一拍 932、这里 717     ⇒ settings 到得晚，第一眼仍然会错，得换更早的入口；
+    //   这里还是 932             ⇒ settings 在这条路上根本不可用，整条撤掉。
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), NULL, AevonKbLateNote);
+}
+
+/// 0.4.62 — 第一拍之后 0.6 s 的复查（见 `AevonKbEarlyNote` 尾部）。一行。
+static void AevonKbLateNote(void *context) {
+    (void)context;
+    UIWindowScene *scene = AevonKbMainScene();
+    if (scene == nil) {
+        AevonKbLog("app: kb: set late scene none\n");
+        return;
+    }
+    CGRect setBox = AevonKbSceneSettingsFrame(scene);
+    CGRect sceneBox = AevonKbSceneBounds(scene);
+    UIScreen *screen = [UIScreen mainScreen];
+    CGRect got = screen != nil ? [screen bounds] : CGRectZero;
+    char line[192];
+    snprintf(line, sizeof(line),
+             "app: kb: set late bounds=%.0fx%.0f scene=%.0fx%.0f set=%.0fx%.0f\n",
+             got.size.width, got.size.height,
+             sceneBox.size.width, sceneBox.size.height,
+             setBox.size.width, setBox.size.height);
     AevonKbLog(line);
 }

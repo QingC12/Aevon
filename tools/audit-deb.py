@@ -1535,7 +1535,10 @@ def main():
                       b"app: kb: native on installed=%d mask=0x%x bundle=%s",
                       # 钩子 4 —— `UIScreen.bounds` 换成了承载面尺寸。整套机制的核心
                       # 证词：没有它，App 仍然认为屏是 932，键盘就还会悬在 215 之上。
-                      b"app: kb: bounds -> %.0fx%.0f@%.0f,%.0f (hosted=%d shrunk=%d)",
+                      # 0.4.62 — 尾部加 `set=`（`scene.settings.frame`）。这是
+                      # 「第一拍就能答对」的唯一读数，冷启动那几拍里 `box` 与 `set`
+                      # 的关系直接决定下一版走哪条路（见 `first early` 那段注释）。
+                      b"app: kb: bounds -> %.0fx%.0f@%.0f,%.0f (hosted=%d shrunk=%d set=%.0fx%.0f)",
                       # 0.4.15 — `-bounds` 的系统原值（钩子关着那个数），配额 1。
                       # 与上一行并排看才知道「我们到底改掉了什么」：若 sys 的 origin
                       # 也是 (0,0)，那 215 这个偏移从头到尾不在 `UIScreen` 上，
@@ -1556,7 +1559,17 @@ def main():
                       # 0.4.54 — 加 `scene=` 与 `hook=`/`take=`。`bounds` 与 `scene`
                       # 不一致、而 `scene` 比 `sys` 小 215，就是「App 第一眼本该按
                       # 承载面排」；`hook=0` 则是那两条旧闸（band 晚到）在拦。
-                      b"app: kb: first early=%d bounds=%.0fx%.0f@%.0f,%.0f sys=%.0fx%.0f scene=%.0fx%.0f scenes=%lu active=%d key=%d band=%d hook=%d take=%d",
+                      #
+                      # 0.4.62 — 加 `set=`（`scene.settings.frame` 的原始值）。342 的
+                      # 冷启动读数是 `bounds=430x932 scene=430x932 band=0`，两条读数
+                      # 都是全屏 —— 于是抖音按 932 建了启动占位页（`tall cls=AWEFeedViewCell
+                      # b=430x932 over=215`），用户第一眼就是断层。第三读数若在那一拍
+                      # 已是 717，这条就通了；若也是 932，说明 settings 那时还没提交。
+                      b"app: kb: first early=%d bounds=%.0fx%.0f@%.0f,%.0f sys=%.0fx%.0f scene=%.0fx%.0f set=%.0fx%.0f scenes=%lu active=%d key=%d band=%d hook=%d take=%d",
+                      # 0.4.62 — 第一拍之后 0.6 s 的复查：`set=` 是**什么时候**变成
+                      # 承载面的。第一拍就是 717 ⇒ 这条路成立；第一拍 932、这里 717
+                      # ⇒ settings 到得晚，第一眼仍会错；这里还是 932 ⇒ 这条读数不可用。
+                      b"app: kb: set late bounds=%.0fx%.0f scene=%.0fx%.0f set=%.0fx%.0f",
                       # 钩子 1 —— 交集高度换算。**0.4.23 起只有一个出口：母版公式。**
                       # 0.4.17 加的「量出来的占高优先」和 0.4.21/22 的采样锁存已整层
                       # 删除：那两层都是为「display 被改成卡片尺寸」的旧世界打的补丁，
