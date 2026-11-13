@@ -9,6 +9,43 @@
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
 //
 // ---------------------------------------------------------------------------
+// 0.4.38 — 321：guide 修好了，932 只剩一个公开入口
+// ---------------------------------------------------------------------------
+// 321 先确认 0.4.37 那一条真的生效了（这次不是推的，是读数）：
+//
+//   `scn … guide=430x359@0,358 gh=2..8` —— 六个 App、每一个探针拍都是**同一个正确值**，
+//   而且 `gh` 在涨（备忘录 2→7、威锋 2→8），说明钩子不但装了，还被真的读到。
+//   320 里那七个错值（683 / 314 / 298 / 573 …）一条不剩。
+//
+// 落点也仍然干净：`note fix` 全线 `rem == meas`，取值只有 {359,386,404,431,476}。
+//
+// 于是 321 把问题切成两半，各自有明确读数：
+//
+//   ① **酷安 / QQ 正常**（用户 321 明确确认）。酷安 `bar 底边 314 d=44` 是探针误判：
+//      它的回复容器 `_TtCC10CoolMarket23ReplyFeed 430x150@0,164` 自带一条 44 高的表头，
+//      可见输入条在 302，视觉上贴着键盘。`d` 在这一家不作判据。
+//   ② **威锋仍然抬高 215**，而它的读数把算式钉死了：
+//      `WeiFeng.PostDetailReplyInput 430x175@0,-32` —— 静止位置是窗口底
+//      （`717−175=542`），实际被上移到 −32，也就是**上移了 574 = 932 − 358**。
+//      574 只可能是「屏幕高 932」减「我们报出去的键盘顶 358」。
+//
+// 932 的来源，321 的 `scr` 已经缩到两条（其余全部排除）：
+//
+//   `uin=430x717`             → `-bounds` 已钩，读它就是 717，**不是**来源
+//   `key=… 430x717@0,0`       → keyWindow 也是 717，**不是**来源
+//   `nb=1290x2796 ns=3.00`    → /3 = **932**，`-nativeBounds` 我们从来没钩
+//   `list=… w1/w2=UITextEffectsWindow 430x932@0,0` → 窗口表里还有两个 932
+//
+// 本版只处理第一条，理由是它是**我们自己的不自洽**：`-bounds` 说 717、
+// `-nativeBounds` 说 932，等于同时宣称两块屏。`-nativeBounds` 同时打 `nbf=`
+// （钩后值）与 `nbr=`（被读次数）—— 若威锋修好，`nbr` 会很明显；若仍 215 而
+// `nbr` 几乎不涨，那 574 就来自窗口表，下一版只关那一个口子，不用再猜。
+//
+// 顺带补一条只读 `ins`：系统应用（备忘录 / minis / Safari）的输入条量不到
+// （焦点分别是整屏文档视图、屏幕顶搜索框、WebContent 进程），改看
+// **滚动视图的内边距** —— 那是 App 自己对「键盘有多高」的结论，不依赖猜层级。
+//
+// ---------------------------------------------------------------------------
 // 0.4.37 — 320：同一个进程里有**两面屏**，guide 就是那条缝
 // ---------------------------------------------------------------------------
 // 320 先钉死三件事：
@@ -738,6 +775,79 @@ static CGRect AevonKbBounds(id self, SEL _cmd) {
 }
 
 // ===========================================================================
+// 0.4.38 — `UIScreen.nativeBounds`：`bounds` 说是 717，`nativeBounds` 还说是 932
+// ===========================================================================
+//
+// 321 的 `scr` 把「932 还能从哪来」缩到两条，其余全部排除：
+//
+//   uin=430x717      ← `-bounds` 已钩，App 读它就是 717，不是来源
+//   key=UIWindow 430x717@0,0   ← keyWindow 也是 717，不是来源
+//   nb=1290x2796 ns=3.00       ← /3 = **932**，没有钩
+//   list=… w1/w2=UITextEffectsWindow 430x932@0,0 ← 窗口表里还有两个 932
+//
+// 威锋的算式被 321 的读数钉死了：它的回复条静止位置是窗口底（`717−175=542`），
+// 实际落在 `y=−32`，也就是被上移了 **574 = 932 − 358**。574 只能来自「屏幕高 932」
+// 减「我们报出去的键盘顶 358」—— 而 932 只剩 `nativeBounds` 这一个公开入口。
+//
+// 这一条不是「再编一个补偿」，它补的是**我们自己的不自洽**：我们把 `-bounds` 改成
+// 承载面(717)，却把 `-nativeBounds` 留在物理屏(932)，等于同时对外宣称
+// 「逻辑屏 717 / 物理屏 932」。分屏（Split View）里系统确实会这样，但那里
+// App 不该拿 nativeBounds 排版；我们把 App 塞进卡片，就得给它一个说得通的屏。
+//
+// 三条纪律与 `-bounds` 完全相同：建窗那一拍读真值、只在本 App 被托着时动、
+// 拿不到承载 scene 就原样返回。另外内部所有「物理屏高」都必须走
+// `AevonKbRealNativeBounds()` —— 否则 `AevonKbPhysicalHeight()` 会读到自己伪造的
+// 717，整套量测（meas / shift / 建窗）会一起塌。
+static CGRect  (*AevonKbOrigNativeBounds)(id, SEL) = NULL;
+static volatile int AevonKbNativeHits = 0;
+static volatile int AevonKbNativeFixOn = 0;
+
+/// 0.4.38 — 开关（缺省开）。`com.aevon.kbNativeOff = true` + respring
+/// 即回到「nativeBounds 用系统值」（其余各条不受影响）。
+static BOOL AevonKbNativeFixEnabled(void) {
+    BOOL on = YES;
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("kbNativeOff"),
+                                                        AevonKbDomain);
+    if (value != NULL) {
+        if (CFGetTypeID(value) == CFBooleanGetTypeID()) {
+            on = CFBooleanGetValue((CFBooleanRef)value) ? NO : YES;
+        }
+        CFRelease(value);
+    }
+    return on;
+}
+
+/// 系统真值，**不过钩子**。内部一切「物理屏」都必须用这个。
+static CGRect AevonKbRealNativeBounds(void) {
+    UIScreen *screen = [UIScreen mainScreen];
+    if (screen == nil) return CGRectZero;
+    if (AevonKbOrigNativeBounds != NULL) {
+        return AevonKbOrigNativeBounds(screen, @selector(nativeBounds));
+    }
+    return [screen nativeBounds];
+}
+
+static CGRect AevonKbNativeBoundsGet(id self, SEL _cmd) {
+    if (AevonKbOrigNativeBounds == NULL) return CGRectZero;
+    CGRect real = AevonKbOrigNativeBounds(self, _cmd);
+    if (AevonKbWinReal > 0) return real;        // 建窗那一拍：读真值
+    if (!AevonKbNativeFixOn || !AevonKbTakeOver || !AevonKbHookUIScreen) return real;
+    if (AevonKbAppScene == nil) {
+        AevonKbAppScene = AevonKbMainScene();
+    }
+    if (AevonKbAppScene == nil) return real;
+    CGRect box = AevonKbSceneBounds(AevonKbAppScene);
+    if (CGRectIsEmpty(box)) return real;
+    CGFloat ns = ((CGFloat (*)(id, SEL))objc_msgSend)(self, @selector(nativeScale));
+    if (ns <= 0.0) return real;
+    // 计数的是「被读了几次」。322 里若威锋修好，`nbr` 会是几千；若仍 215 而
+    // `nbr=0`，说明那 574 来自窗口表里的 `UITextEffectsWindow`，不是这里 ——
+    // 两条路都能被这一列判死，不用再猜。
+    AevonKbNativeHits += 1;
+    return CGRectMake(0.0, 0.0, box.size.width * ns, box.size.height * ns);
+}
+
+// ===========================================================================
 // 0.4.17 — 键盘在这一块屏上的**真实占高**
 // ===========================================================================
 //
@@ -1007,7 +1117,7 @@ static void AevonKbProbeAppInsets(id keyboardWindow) {
         if (host != nil) {
             CGRect inKbWin = [host convertRect:[host bounds] toView:kbWin];
             CGRect kbFrame = [kbWin frame];
-            CGRect native = [[UIScreen mainScreen] nativeBounds];
+            CGRect native = AevonKbRealNativeBounds();
             CGFloat nativeScale = [[UIScreen mainScreen] nativeScale];
             CGFloat physicalH = nativeScale > 0.0 ? native.size.height / nativeScale : 0.0;
             // App 主窗贴屏幕底是卡片侧一直保证的，所以 shift = 物理屏高 − App 世界高。
@@ -1102,10 +1212,11 @@ static BOOL AevonKbGuideFixEnabled(void) {
     return on;
 }
 
-/// 物理屏高。`UIScreen.bounds` 此刻已被我们钩成承载面（717），所以必须走
-/// `nativeBounds / nativeScale`（932），不能读 bounds。
+/// 物理屏高。`UIScreen.bounds` 此刻已被我们钩成承载面（717）、`nativeBounds`
+/// 自 0.4.38 起也被钩成承载面，所以这里必须走**系统原值**
+/// （`AevonKbRealNativeBounds`），不能读 `nativeBounds`。
 static CGFloat AevonKbPhysicalHeight(void) {
-    CGRect native = [[UIScreen mainScreen] nativeBounds];
+    CGRect native = AevonKbRealNativeBounds();
     CGFloat scale = [[UIScreen mainScreen] nativeScale];
     if (scale <= 0.0) return 0.0;
     return native.size.height / scale;
@@ -1464,8 +1575,9 @@ static BOOL AevonKbSceneRect(UIWindowScene *scene, CGRect *out, const char **out
 ///
 /// `uin=430x717` 已经排除了 `[UIScreen mainScreen].bounds` 这一条。剩下的口子
 /// 只有三个，本行把它们并排打出来：
-///   nb/ns  `nativeBounds / nativeScale` —— 物理屏的像素尺寸，我们**没有**钩它，
-///          1290/3 = 430、2796/3 = 932，是 932 最廉价的来源；
+///   nb/ns  `nativeBounds / nativeScale` **系统真值**（不走钩子）；
+///   nbf    0.4.38 起：钩后 App 读到的 nativeBounds —— 应与「承载面 × ns」一致
+///          （1290/3 = 430、2796/3 = 932，未钩之前 932 最廉价的来源就是它）；
 ///   key    `[UIApplication keyWindow]` 的类名与 frame —— 如果它是键盘窗，那 App
 ///          读 `keyWindow.bounds.height` 就直接拿到 932；
 ///   list   `[UIApplication windows]` 全表（类名 / frame / level），最多 6 条 ——
@@ -1473,7 +1585,10 @@ static BOOL AevonKbSceneRect(UIWindowScene *scene, CGRect *out, const char **out
 static void AevonKbProbeScreenChannels(const char *tag) {
     UIScreen *main = [UIScreen mainScreen];
     if (main == nil) return;
-    CGRect nb = [main nativeBounds];
+    // 0.4.38 — `nb` 打**系统真值**（不走钩子），`nbf` 打**钩后 App 看到的**。
+    // 两个并排是为了让 322 能直接判「钩子有没有生效」，而不是靠推。
+    CGRect nb = AevonKbRealNativeBounds();
+    CGRect nbf = [main nativeBounds];
     CGFloat ns = [main nativeScale];
     CGFloat sc = [main scale];
     UIApplication *app = [UIApplication sharedApplication];
@@ -1493,8 +1608,9 @@ static void AevonKbProbeScreenChannels(const char *tag) {
     char line[420];
     CGRect kf = (key != nil) ? [key frame] : CGRectZero;
     snprintf(line, sizeof(line),
-             "app: kb: scr %s nb=%.0fx%.0f ns=%.2f sc=%.2f key=%.24s %.0fx%.0f@%.0f,%.0f wins=%d\n",
-             tag, nb.size.width, nb.size.height, (double)ns, (double)sc,
+             "app: kb: scr %s nb=%.0fx%.0f nbf=%.0fx%.0f ns=%.2f sc=%.2f key=%.24s %.0fx%.0f@%.0f,%.0f wins=%d\n",
+             tag, nb.size.width, nb.size.height,
+             nbf.size.width, nbf.size.height, (double)ns, (double)sc,
              (key != nil) ? class_getName([key class]) : "none",
              kf.size.width, kf.size.height, kf.origin.x, kf.origin.y,
              (int)[wins count]);
@@ -1602,6 +1718,34 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
                      "app: kb: fr %s bar=none d=999\n", tag);
             AevonKbLog(line);
         }
+
+        // 0.4.38 — 系统应用（备忘录 / Safari / minis）量不到输入条：焦点视图要么是
+        // 整屏文档视图（321 备忘录 `ICTK2TextView 430x717@0,0`），要么在屏幕顶上的
+        // 搜索框（321 minis `@28,23`），要么在 WebContent 进程（Safari）。
+        // 它们避让键盘的最终落点一定是**滚动视图的内边距**，那个数就是
+        // 「这个 App 认为键盘有多高」，不必再去猜哪一层是输入条。
+        // 判据：`ai`（adjustedContentInset.bottom）应等于 `世界高 − kbtop`（359）；
+        // 大 215 ⇒ 它按 932 算；大 44/60 ⇒ 它把顶部占位也算成了键盘。
+        UIScrollView *scroll = nil;
+        UIView *node = focus;
+        for (int up = 0; up < 8 && node != nil; up++) {
+            if ([node isKindOfClass:[UIScrollView class]]) {
+                scroll = (UIScrollView *)node;
+                break;
+            }
+            node = [node superview];
+        }
+        if (scroll != nil) {
+            UIEdgeInsets ci = [scroll contentInset];
+            UIEdgeInsets ai = [scroll adjustedContentInset];
+            CGPoint off = [scroll contentOffset];
+            CGRect sr = [scroll convertRect:[scroll bounds] toView:focusWin];
+            snprintf(line, sizeof(line),
+                     "app: kb: ins %s sc=%.24s ci=%.0f ai=%.0f off=%.0f h=%.0f kb=%.0f\n",
+                     tag, class_getName([scroll class]), ci.bottom, ai.bottom,
+                     off.y, sr.size.height, kbTop);
+            AevonKbLog(line);
+        }
     }
 
     UIWindowScene *scene = [appWin windowScene];
@@ -1634,7 +1778,7 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
         kbwb = [kbw bounds];
     }
     snprintf(line, sizeof(line),
-             "app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f uin=%.0fx%.0f kbw=%.0fx%.0f@%.0f,%.0f b=%.0f,%.0f gh=%d\n",
+             "app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f uin=%.0fx%.0f kbw=%.0fx%.0f@%.0f,%.0f b=%.0f,%.0f gh=%d nbr=%d\n",
              tag, wf.size.width, wf.size.height,
              sf.size.width, sf.size.height, sf.origin.x, sf.origin.y, ssrc,
              co.size.width, co.size.height, co.origin.x, co.origin.y,
@@ -1642,7 +1786,8 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
              (int)hasGuide, ins.top, ins.bottom,
              uin.size.width, uin.size.height,
              kbwf.size.width, kbwf.size.height, kbwf.origin.x, kbwf.origin.y,
-             kbwb.origin.x, kbwb.origin.y, (int)AevonKbGuideHits);
+             kbwb.origin.x, kbwb.origin.y,
+             (int)AevonKbGuideHits, (int)AevonKbNativeHits);
     AevonKbLog(line);
     // 0.4.37 — 同一拍把「这个进程能看到的每一面屏」也打出来（见函数上方注释）。
     AevonKbProbeScreenChannels(tag);
@@ -2486,7 +2631,7 @@ static id AevonKbRemoteWindow(id self, SEL _cmd, UIScreen *screen, BOOL create) 
                 rvf = ((CGRect (*)(id, SEL))objc_msgSend)(probe, @selector(frame));
             }
         }
-        CGRect nativeBox = [main nativeBounds];
+        CGRect nativeBox = AevonKbRealNativeBounds();
         CGFloat nativeScale = [main nativeScale];
         CGFloat phys = nativeScale > 0.0 ? nativeBox.size.height / nativeScale : height;
         snprintf(line, sizeof(line),
@@ -2650,6 +2795,8 @@ static void AevonKbNativeInstall(void) {
     AevonKbNoteFixOn = (AevonKbInjectApp && AevonKbNoteFixEnabled()) ? 1 : 0;
     // 0.4.37 — guide 那条线单独一个开关（`kbGuideFixOff`）。
     AevonKbGuideFixOn = (AevonKbInjectApp && AevonKbGuideFixEnabled()) ? 1 : 0;
+    // 0.4.38 — `nativeBounds` 那条线也单独一个开关（`kbNativeOff`）。
+    AevonKbNativeFixOn = (AevonKbInjectApp && AevonKbNativeFixEnabled()) ? 1 : 0;
     if (!AevonKbInjectApp) {
         AevonKbLog("app: kb: native off, inject=0\n");
         return;
@@ -2731,6 +2878,20 @@ static void AevonKbNativeInstall(void) {
         AevonKbOrigGuideFrame = (CGRect (*)(id, SEL))oldGuide;
         installed += 1;
         mask |= 1 << 5;
+    }
+
+    // 0.4.38 — 第七条：`-[UIScreen nativeBounds]`（理由见函数上方那一节）。
+    //
+    // 它与 `-bounds` 必须同步：`-bounds` 给 717 而 `-nativeBounds` 给 932，等于
+    // 同时宣称两块屏。威锋按「屏幕高 − 键盘顶」算键盘高，正好吃这条 932 ⇒ 多抬 215。
+    // `UIScreen` 自己就实现了 `nativeBounds`，所以仍走 `AevonKbInstallOwn`
+    // （万一某版本它是从父类继承的，也不能在父类上打洞）。
+    IMP oldNative = AevonKbInstallOwn([UIScreen class], @selector(nativeBounds),
+                                      (IMP)AevonKbNativeBoundsGet);
+    if (oldNative != NULL) {
+        AevonKbOrigNativeBounds = (CGRect (*)(id, SEL))oldNative;
+        installed += 1;
+        mask |= 1 << 6;
     }
 
     char line[192];

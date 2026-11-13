@@ -1587,17 +1587,31 @@ def main():
                       #   kbw=   键盘窗 frame / b= 它的 bounds.origin（0.4.36）
                       #          319 的 `kb: win ask=430x932@0,0` 说明键盘窗是**物理屏**
                       #          尺寸，比 App 世界高 215 —— guide 的三种错值都出在这里。
-                      b"app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f uin=%.0fx%.0f kbw=%.0fx%.0f@%.0f,%.0f b=%.0f,%.0f gh=%d",
+                      b"app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f uin=%.0fx%.0f kbw=%.0fx%.0f@%.0f,%.0f b=%.0f,%.0f gh=%d nbr=%d",
                       # 0.4.37 — 「这个进程能看到几面屏」（只读）。
                       # 320 的威锋 bar 底边两次都是 143 = `717 − (932 − 358)`，说明它
                       # 取到的 screenH 是 932；而 `uin=430x717` 已经排除 bounds 这一条。
-                      #   nb/ns  nativeBounds / nativeScale（物理屏像素，我们没钩它）
+                      #   nb/ns  系统真值 nativeBounds / nativeScale（不走钩子）
+                      #   nbf    0.4.38 起：钩后的 nativeBounds —— 应与 bounds×ns 一致
+                      #          （321 里 `nb=1290x2796 ns=3.00` ⇒ 932，威锋就是拿它
+                      #          算「键盘高 = 932 − 358 = 574」，多抬了 215）
                       #   sc     UIScreen.scale
                       #   key    [UIApplication keyWindow] 类名 + frame（若它是键盘窗，
                       #          读 keyWindow.bounds 就直接拿到 932）
                       #   list   windows 全表，最多 6 条：类名 / frame / level
-                      b"app: kb: scr %s nb=%.0fx%.0f ns=%.2f sc=%.2f key=%.24s %.0fx%.0f@%.0f,%.0f wins=%d",
+                      b"app: kb: scr %s nb=%.0fx%.0f nbf=%.0fx%.0f ns=%.2f sc=%.2f key=%.24s %.0fx%.0f@%.0f,%.0f wins=%d",
                       b"app: kb: scr %s list=%s",
+                      # 0.4.38 — 系统应用量不到输入条时，改看**滚动视图的内边距**。
+                      # 321 里备忘录的焦点是整屏文档视图、minis 是屏幕顶的搜索框、
+                      # Safari 在 WebContent 进程，`bar`/`fr` 三家都判不了。
+                      # App 避让键盘最后一定落在 `contentInset.bottom` 上：
+                      #   ci=  contentInset.bottom（App 自己设的）
+                      #   ai=  adjustedContentInset.bottom（含系统自动调整）
+                      #   off= contentOffset.y（看它有没有真的滚动）
+                      #   h=   滚动视图高、kb= 我们报出去的键盘顶边
+                      # 判据：`ai` 应等于 `世界高 − kb`（359）；大 215 ⇒ 按 932 算；
+                      # 大 44/60 ⇒ 把顶部那条透明占位也算成了键盘。
+                      b"app: kb: ins %s sc=%.24s ci=%.0f ai=%.0f off=%.0f h=%.0f kb=%.0f",
                       # 0.4.28 — 「第二条通道」取证（**只读**，一次会话两拍）。
                       # 312：QQ 正确、微信先对后错，而 App 主窗十次都是 430x717
                       # ⇒ 不是悬浮窗的事，是微信自己又排了一次版、没走通知。
