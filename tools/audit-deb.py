@@ -1370,17 +1370,32 @@ def main():
                       #   `settle ok`    = 视口那一屏的高度已经等于视口，收工；
                       #   `settle reload` = 两次重排都没修好，只重载了那一行；
                       #   `settle give up` = 这一轮到此为止（下一份日志的判据）。
-                      b"settle again %s n=%d clean=%d stale=%d top=%.0f box=%.0f r=%d",
-                      b"settle ok %s clean=%d stale=%d top=%.0f box=%.0f al=%d",
+                      #
+                      # 0.4.56 — 两处 `cell=` 是补上的那把尺子。338 里
+                      # `settle ok … top=717 box=717` 与 `tall cls=AWEFeedViewCell
+                      # b=430x932` 出现在同一秒：`top` 量的是「子视图里最像一页的
+                      # 那个」，压着视口的那一格可以是另一页 ⇒ 判据说「齐了」，用户
+                      # 看到的却是底部 215 pt 被裁。现在没有 `cell` 齐就不许说 ok。
+                      b"settle again %s n=%d clean=%d stale=%d top=%.0f cell=%.0f box=%.0f r=%d",
+                      b"settle ok %s clean=%d stale=%d top=%.0f cell=%.0f box=%.0f al=%d",
                       b"settle reload row=%ld,%ld h=%.0f box=%.0f",
                       b"settle give up %s clean=%d stale=%d top=%.0f box=%.0f",
+                      # 0.4.56 — 「每一次滑动都量一次」的那三行。判据只有一条：
+                      # 视口正中压着的那一页必须正好是视口那么高。
+                      #   `cell fit ok`      = 这一拍是齐的；
+                      #   `cell fit stale`   = 这一页比视口高（底部被裁）；
+                      #   `cell fit fix`     = 请 App 重量行高（`r=` 有没有真跑）；
+                      #   `cell fit give up` = 同一个高度两次都改不动 ⇒ 收手。
+                      b"cell fit %s cell=%.0f box=%.0f over=%.0f%s",
+                      b"cell fit fix n=%d cell=%.0f box=%.0f r=%d",
+                      b"cell fit give up cell=%.0f box=%.0f n=%d",
                       # 0.4.51 — 卡片里的排版对账（`AevonHostedAudit`）。三个症状
                       # 「内容显示不全 / 点赞栏一半 / 底部标题条不见」是同一个形状：
                       # 版式比窗口高。这两行把「谁还停在 932」写成数：
                       # `win` 与 `scene` 不一致 ⇒ App 自己按旧尺寸排了版；
                       # `scroll box` 比 `win` 高 ⇒ 视口没跟着窗口变，`tall` 指名道姓。
                       b"layout audit n=%d win=%.0fx%.0f scene=%.0fx%.0f root=%.0fx%.0f",
-                      b"layout audit n=%d scroll cls=%.28s box=%.0fx%.0f span=%.0f off=%.0f paging=%d",
+                      b"layout audit n=%d scroll cls=%.24s box=%.0fx%.0f span=%.0f off=%.0f paging=%d cell=%.0f",
                       b"layout audit n=%d scroll none walk=%lu",
                       b"layout audit n=%d tall cls=%.28s b=%.0fx%.0f over=%.0f",
                       # 0.4.54 — 卡片里播放器那一层多高。336 的

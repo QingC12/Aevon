@@ -2119,6 +2119,25 @@ private func restoreScreenBack(closingBundle: String, scene: NSObject?,
                 }
                 return
             }
+            // 0.4.56 — 「已经是整屏了」这一问必须**每一拍都问**。
+            //
+            // 0.4.54 只在进阶梯之前问了一次，而那一问发生在 `AevonScreenBack`
+            // 刚写完、模型还没回读到的几十毫秒里 —— 338 里三次关卡全是
+            // `screen back … frame=430x932@0 want=430x932`（已经是整屏）却照样
+            // `frame restore again step=1/2/3`，同一个值被强制提交三次。
+            // `AevonScreenBack` 不吃节流、不判重，每提交一次 App 就要再收一次
+            // settings、再排一次版 —— 切回全屏那一刀「视频断层」正落在这里。
+            if restoredDoor == 3 {
+                let got = AevonSceneFrameOf(scene)
+                let full = UIScreen.main.bounds.size
+                if full.height > 200.0,
+                   got.height >= full.height - 1.0, got.width >= full.width - 1.0 {
+                    Log.write("win: frame restore settled door=3 step=" + String(step)
+                              + " (already full)")
+                    clearFrameTarget(closingBundle)
+                    return
+                }
+            }
             let door = AevonScreenBack(closingBundle.isEmpty ? nil : closingBundle, scene)
             if last || door > 0 { clearFrameTarget(closingBundle) }
             Log.write("win: frame restore again door=" + String(door)

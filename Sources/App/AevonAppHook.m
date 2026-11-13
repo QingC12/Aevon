@@ -1403,6 +1403,9 @@ static char AevonSettleWhy[] = "settle";
 
 static BOOL AevonPagerAcquire(void);
 
+// 0.4.56 — `AevonLayoutSettle` 的判据要用它，实现在下面（`AevonCellFitTick` 旁边）。
+static CGFloat AevonCellOnScreen(UIScrollView *view, CGFloat box, UIView **cellOut);
+
 /// 只重载「视口压着、但高度不是视口高」的那一行。返回 1 = 真的重载了一次。
 static BOOL AevonTableReloadStaleRow(UITableView *table, CGFloat box) {
     if (table == nil) return NO;
@@ -1467,17 +1470,25 @@ static void AevonLayoutSettle(void *context) {
     AevonPagerStats(view, box.size.height, &clean, &stale, &aligned);
     UIView *kid = AevonPageKidAt(view, box.size.height, [view contentOffset].y);
     CGFloat top = kid != nil ? [kid frame].size.height : 0.0;
-    BOOL rowsOk = (stale == 0 && fabs(top - box.size.height) <= 2.0);
+    // 0.4.56 — 判据补上「视口正中那一页」。
+    //
+    // 338 里 `settle ok … top=717 box=717` 与 `tall cls=AWEFeedViewCell b=430x932`
+    // 出现在同一秒：`top` 量的是「子视图里最像一页的那个」，而压着视口的那一页
+    // 可以是另一格 —— 判据因此说「齐了」，用户看到的却是底部 215 pt 被裁。
+    // 现在两把尺子都要过：子视图页高，与 `visibleCells` 里正中那一格。
+    CGFloat cellH = AevonCellOnScreen(view, box.size.height, NULL);
+    BOOL cellOk = (cellH < 200.0 || cellH - box.size.height <= 40.0);
+    BOOL rowsOk = (stale == 0 && fabs(top - box.size.height) <= 2.0 && cellOk);
     // 判据只看**视口这一屏**：用户看见的是这一屏。`aligned`（内容高是不是视口的
     // 整数倍）取决于整张表都重排完，而抖音在卡片里往往只重排当前页 —— 拿它当
     // 收工条件会让这条通道永远在等一个不会到的状态。它只进日志，不进判据。
     if (rowsOk) {
         if (AevonSettleNotes < 6) {
             AevonSettleNotes += 1;
-            char body[220];
+            char body[240];
             snprintf(body, sizeof(body),
-                     "settle ok %s clean=%d stale=%d top=%.0f box=%.0f al=%d",
-                     reason, clean, stale, top, box.size.height, aligned);
+                     "settle ok %s clean=%d stale=%d top=%.0f cell=%.0f box=%.0f al=%d",
+                     reason, clean, stale, top, cellH, box.size.height, aligned);
             AevonPageWrite(body);
         }
         AevonSettleTries = 2;               // 对齐了：这一轮不再发
@@ -1490,10 +1501,10 @@ static void AevonLayoutSettle(void *context) {
         AevonSettleAt = now;
         AevonSettleTries += 1;
         BOOL did = AevonTableRemeasure((UITableView *)view);
-        char body[220];
+        char body[240];
         snprintf(body, sizeof(body),
-                 "settle again %s n=%d clean=%d stale=%d top=%.0f box=%.0f r=%d",
-                 reason, AevonSettleTries, clean, stale, top, box.size.height,
+                 "settle again %s n=%d clean=%d stale=%d top=%.0f cell=%.0f box=%.0f r=%d",
+                 reason, AevonSettleTries, clean, stale, top, cellH, box.size.height,
                  did ? 1 : 0);
         AevonPageWrite(body);
         return;
@@ -1521,6 +1532,138 @@ static void AevonLayoutSettleArm(void) {
     AevonSettleTries = 0;
     AevonSettleReloads = 0;
     AevonSettleAt = 0.0;
+}
+
+// ===========================================================================
+// 0.4.56 — 每一拍量一次「视口压着的那一页，还是视口那么高吗」
+// ===========================================================================
+//
+// 338 把「滑一会儿它自己就好了」拍成了读数：
+//
+//   14:18:53  page transition h=717 last=932 full=717      ← 卡片 717，`full` 也对了
+//   14:18:54  layout audit n=1 tall cls=AWEFeedViewCell b=430x932 over=215
+//   14:18:57  page pager keep box=717 span=430x4302 … pages=6
+//
+// 那三秒里视口是 717、压在上面那一页是 932（底部 215 pt 被裁、视频 849 高），
+// 直到 App 自己把表建起来才按 717 重排。用户说的「滑动之后自动恢复真重排」，
+// 恢复的那一刻不是滑动带来的魔法 —— 是那一页终于被复用重建。
+//
+// 所以这里只做一件事：**每一拍量一次页高**，不齐就请 App 重量行高
+// （`AevonTableRemeasure`，338 里实测 2.8 / 5.1 ms）。五道闸：
+//
+//   ① 只在「这个进程被托管过」之后跑 —— 全屏抖音也跑，用户要求两边一致；
+//      从没进过卡片的进程一律不碰（我们没有任何权限理由动它）；
+//   ② 手指在动 / 惯性中只记账不动手（`AevonTableRemeasure` 本来也拒发）；
+//   ③ 同一个高度连着两次都改不动 ⇒ 收手（`CellFitDead`），别把 App 拖进自激；
+//   ④ 每张卡最多 6 次、间隔 ≥ 0.8 s；
+//   ⑤ 动作永远只有 `beginUpdates`/`endUpdates` —— 一行 `setContentOffset`
+//      都没有，落点归用户。
+//
+// ⛔ 判据只用「这一页 vs 视口」，不用屏幕高、不用窗口高：两套世界（卡片 717 /
+// 全屏 932）用的是同一个算式，所以同一个函数在两个世界里都成立。
+static int AevonCellFitNotes = 0;
+static int AevonCellFixes = 0;
+static int AevonCellFitSame = 0;
+static int AevonCellFitDead = 0;
+static int AevonCellFitStale = -1;
+static int AevonCellFitBeats = 0;
+static CGFloat AevonCellFitSeen = 0.0;
+static CFAbsoluteTime AevonCellFitAt = 0.0;
+
+/// 视口正中压着的那一页有多高。`visibleCells` 优先（表格自己知道谁在屏上，
+/// 回收池里的旧行不会混进来）；拿不到就退到「子视图里命中视口中心的那一个」。
+/// `cellOut` 只用来在日志里指名道姓（播放器那一层在不在这一格里）。
+static NSString *AevonFindPlayer(UIView *root, CGRect *out);
+
+static CGFloat AevonCellOnScreen(UIScrollView *view, CGFloat box, UIView **cellOut) {
+    if (cellOut != NULL) *cellOut = nil;
+    if (view == nil || box < 1.0) return 0.0;
+    CGFloat mid = [view contentOffset].y + box * 0.5;
+    // `visibleCells` 只有表格/集合视图有，`UIScrollView` 没有声明它 —— 走
+    // `NSSelectorFromString` + `objc_msgSend`，免得 `-Werror` 把「未知选择子」
+    // 当成错误。
+    SEL visibleSel = NSSelectorFromString(@"visibleCells");
+    if ([view respondsToSelector:visibleSel]) {
+        NSArray *cells = ((NSArray *(*)(id, SEL))objc_msgSend)(view, visibleSel);
+        for (UIView *cell in cells) {
+            CGRect frame = [cell frame];
+            if (frame.origin.y <= mid && mid < CGRectGetMaxY(frame)) {
+                if (cellOut != NULL) *cellOut = cell;
+                return frame.size.height;
+            }
+        }
+    }
+    UIView *kid = AevonPageKidAt(view, box, [view contentOffset].y);
+    if (kid != nil && cellOut != NULL) *cellOut = kid;
+    return kid != nil ? [kid frame].size.height : 0.0;
+}
+
+static void AevonCellFitTick(UIScrollView *view) {
+    if (view == nil) return;
+    if (AevonCellFitDead) return;
+    if (!AevonEverHosted) return;
+    CGRect box = [view bounds];
+    if (box.size.height < 200.0) return;
+    UIView *cell = nil;
+    CGFloat cellH = AevonCellOnScreen(view, box.size.height, &cell);
+    if (cellH < 200.0) return;
+    CGFloat over = cellH - box.size.height;
+    BOOL stale = (over > 40.0);
+    BOOL moving = ([view isTracking] || [view isDragging] || [view isDecelerating]);
+    AevonCellFitBeats += 1;
+    // 状态翻转时报一行；头两拍各报一行（那两拍正是开卡那一段，也是「打开要等
+    // 两三秒」唯一能被看见的地方）；之后每 200 拍（≈30 s）报一行「我还在量」，
+    // 让下一份日志能证明这条通道整场都在跑，而不是只在开头响了一声。
+    BOOL beat = (AevonCellFitBeats % 200) == 0 && AevonCellFitNotes < 20;
+    if (AevonCellFitNotes < 24
+        && (AevonCellFitStale < 0 || stale != (AevonCellFitStale != 0)
+            || AevonCellFitNotes < 2 || beat)) {
+        AevonCellFitNotes += 1;
+        char line[240];
+        CGRect vid = CGRectZero;
+        NSString *name = (cell != nil) ? AevonFindPlayer(cell, &vid) : nil;
+        if (name != nil) {
+            snprintf(line, sizeof(line),
+                     "cell fit %s cell=%.0f box=%.0f over=%.0f%s vid=%.18s %.0fx%.0f",
+                     stale ? "stale" : "ok", cellH, box.size.height, over,
+                     moving ? " moving=1" : "",
+                     [name UTF8String], vid.size.width, vid.size.height);
+        } else {
+            snprintf(line, sizeof(line), "cell fit %s cell=%.0f box=%.0f over=%.0f%s",
+                     stale ? "stale" : "ok", cellH, box.size.height, over,
+                     moving ? " moving=1" : "");
+        }
+        AevonPageWrite(line);
+    }
+    AevonCellFitStale = stale ? 1 : 0;
+    if (!stale) {
+        AevonCellFitSame = 0;
+        return;
+    }
+    // 手指还在动：只记账。这时候插一脚只会把同一次布局拉长一倍。
+    if (moving) return;
+    if (![view isKindOfClass:[UITableView class]]) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (AevonCellFitAt > 0.0 && now - AevonCellFitAt < 0.8) return;
+    if (AevonCellFixes >= 6) return;
+    if (fabs(cellH - AevonCellFitSeen) < 1.0) AevonCellFitSame += 1;
+    else AevonCellFitSame = 0;
+    AevonCellFitSeen = cellH;
+    if (AevonCellFitSame >= 2) {
+        AevonCellFitDead = 1;
+        char stop[176];
+        snprintf(stop, sizeof(stop), "cell fit give up cell=%.0f box=%.0f n=%d",
+                 cellH, box.size.height, AevonCellFixes);
+        AevonPageWrite(stop);
+        return;
+    }
+    AevonCellFitAt = now;
+    AevonCellFixes += 1;
+    BOOL did = AevonTableRemeasure((UITableView *)view);
+    char line[220];
+    snprintf(line, sizeof(line), "cell fit fix n=%d cell=%.0f box=%.0f r=%d",
+             AevonCellFixes, cellH, box.size.height, did ? 1 : 0);
+    AevonPageWrite(line);
 }
 
 static NSInteger AevonPagerRebuild(const char *reason) {
@@ -4227,6 +4370,8 @@ static int AevonAuditPass = 0;
 static CFTimeInterval AevonAuditAt = 0.0;
 static int AevonAuditLines = 0;
 static int AevonAuditNudges = 0;
+/// 0.4.56 — 上一拍宿主有没有说「被托着」。上升沿 = 新的一张卡。
+static int AevonAuditHostedWas = 0;
 
 static const char *AevonAuditCls(UIView *view) {
     if (view == nil) return "none";
@@ -4312,12 +4457,17 @@ static void AevonHostedAudit(void) {
     }
 
     if (pager != nil) {
+        // 0.4.56 — 补一个 `cell=`：`tall` 是从整棵树里挑「最高的一层」，
+        // 回收池里的旧行也能被挑中（338 的 `tall cls=AWEFeedViewCell b=430x932`
+        // 与 `k0=…:717,717x430` 同时出现就是这么来的）。真正决定用户看到什么的
+        // 是「视口正中压着的那一页」，用同一把尺子写进同一行。
+        CGFloat cellNow = AevonCellOnScreen(pager, [pager bounds].size.height, NULL);
         snprintf(line, sizeof(line),
-                 "layout audit n=%d scroll cls=%.28s box=%.0fx%.0f span=%.0f off=%.0f paging=%d",
+                 "layout audit n=%d scroll cls=%.24s box=%.0fx%.0f span=%.0f off=%.0f paging=%d cell=%.0f",
                  AevonAuditPass, AevonAuditCls(pager),
                  [pager bounds].size.width, [pager bounds].size.height,
                  [pager contentSize].height, [pager contentOffset].y,
-                 [pager isPagingEnabled] ? 1 : 0);
+                 [pager isPagingEnabled] ? 1 : 0, cellNow);
         AevonPageWrite(line);
         used += 1;
     } else {
@@ -4436,6 +4586,25 @@ static void AevonPagerWatchTick(void *context) {
     // 都没有，就是因为它挂在这个永远不进的支里（判据因此失效，不是功能失效）。
     // 判据换成「宿主此刻说这个 App 被托着」，与 `-bounds` 的口径无关。
     if (AevonBandHostedNow()) {
+        // 0.4.56 — 新的一张卡 = 新的一轮。0.4.55 之前 `AevonAuditLines` 是
+        // **全进程总闸**（26 行），338 里第一次开卡（冷启动，正好是最需要读数
+        // 的那一次）就把配额烧光了：14:20:04 第二次开卡、14:20:31 关卡那两段
+        // `layout audit` **一行都没有**。现在按「宿主刚说它被托着」这个上升沿
+        // 归零，每张卡各有自己的四拍。
+        if (!AevonAuditHostedWas) {
+            AevonAuditHostedWas = 1;
+            AevonAuditPass = 0;
+            AevonAuditLines = 0;
+            AevonAuditNudges = 0;
+            AevonCellFitNotes = 0;
+            AevonCellFixes = 0;
+            AevonCellFitSame = 0;
+            AevonCellFitDead = 0;
+            AevonCellFitStale = -1;
+            AevonCellFitBeats = 0;
+            AevonCellFitSeen = 0.0;
+            AevonCellFitAt = 0.0;
+        }
         // 0.0.84 — 横版画面贴顶：每 0.6 s 看一眼「那块矩形在不在容器正中」。
         // 0.4.51 — 退休了（`AevonVideoCenterRetired`）。调用保留一行是为了留个
         // 明确的落点：以后要重开，把那个常量改成 0 就够，不必再把整条链接回来。
@@ -4443,8 +4612,8 @@ static void AevonPagerWatchTick(void *context) {
         // 0.4.51 / 0.4.52 — 卡片里的排版对账，开卡前 1.5 s 四拍。
         AevonHostedAudit();
     } else {
-        // 出了卡：下一张卡是新一轮，对账从第一拍重新开始（`AevonAuditLines`
-        // 是全进程的总闸，防的是日志被反复开卡冲掉）。
+        // 出了卡：下一张卡是新一轮，对账从第一拍重新开始。
+        AevonAuditHostedWas = 0;
         AevonAuditPass = 0;
     }
 
@@ -4533,6 +4702,10 @@ static void AevonPagerWatchTick(void *context) {
         AevonAcquireTries = 0;
         return;
     }
+    // 0.4.56 — 每一拍、两个方向都量一次页高（见 `AevonCellFitTick`）。
+    // 放在「手指在动」那条 return 之前：正在滑的那几拍也要记账 —— 用户要的
+    // 正是「每一次滑动都检测」。真正的动作仍然等手指离开之后才发。
+    AevonCellFitTick(view);
     if ([view isTracking] || [view isDragging] || [view isDecelerating]) {
         AevonGuardHold = 0;
         // 用户自己动了手 = 他要看哪一帖由他决定。行下标作废，剩下的交给
