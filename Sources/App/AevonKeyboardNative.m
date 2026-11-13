@@ -9,6 +9,49 @@
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
 //
 // ---------------------------------------------------------------------------
+// 0.4.37 — 320：同一个进程里有**两面屏**，guide 就是那条缝
+// ---------------------------------------------------------------------------
+// 320 先钉死三件事：
+//
+//   ① 落点还是干净的：六个 App 的 `rem` 只有 {359, 386, 404, 431}，每条 `rem == meas`。
+//      我们发出去的五条矩形通道没有一处错 —— 这条线从 0.4.34 起就一直是对的。
+//   ② App 的坐标世界确实是 717：`co=430x717@0,0`、`uin=430x717`。0.4.36 猜的
+//      「App 以为世界是 932」在**坐标空间这一层不成立**，那一版猜错了方向。
+//   ③ 但同一个进程里还有第二面屏：`kbw=430x932@0,0`（键盘窗 = 整块物理屏），
+//      而 App 的 scene 是 `430x717@0,215`。**原点差 215、高差 215。**
+//
+// 320 里 54 条 `guide` 读数，七个取值，全都能用这条缝算出来：
+//
+//     `430x34@0,683`   ×33  = 717 − 34（窗口底减安全区）＝「键盘没出现」
+//     `430x403@0,314`  ×7   = 世界系宿主顶 314，高 403（含 44 占位，314+403=717）
+//     `430x419@0,298`  ×4   同上，Safari 的占位是 60（298+419=717）
+//     `430x188@0,529`  ×2   = 屏幕系宿主顶 529，配世界高 717−529=188
+//     `430x204@0,513`  ×2   同上，Safari（513 = 573−60）
+//     `430x144@0,573`  ×3   = 屏幕系可视顶 573，配世界高 717−573=144
+//     `430x359@0,358`  ×3   **唯一那一组正确的**（minis 某一拍）
+//
+// 同一块 359 高的键盘，guide 在七个值之间跳；错的两族各有一个固定形状：
+// 「顶边对、高度含占位」（抬高 44 / 60）与「顶边是屏幕坐标、高度被 717 夹住」
+// （落在 573 / 683 ⇒ 被盖）。凡是按它排版的 App 只可能这两种表现。
+//
+// 威锋是另一条腿，而且更直白：`bar=WeiFeng.PostDetailReplyInput 143 d=215`。
+// 它两次会话的 guide 分别是 403 和 188，而 bar 底边**两次都是 143**
+// ⇒ 它根本不读 guide，自己算：`717 − (932 − 358) = 143`。
+// 这个公式在全屏世界里是**对的**（`viewH == screenH` 时恒等于键盘顶边），
+// 它需要的只是「screenH 等于 viewH」。它从某个通道拿到了 932。
+//
+// 所以本版两件事：
+//   1. 把 `keyboardLayoutGuide.layoutFrame` 钉到我们已经在通知里报出去的矩形
+//      （`AevonKbShown` / `AevonKbLastTop`）。改的是**读出来那一层**：不动键盘窗
+//      几何、不动落点、不动 scene —— 那三样各有三次翻车记录，一个字符都不碰。
+//   2. 只读把「这个进程能看到的每一面屏」打出来（`scr`），看 932 从哪个口子漏进
+//      威锋：`nativeBounds/nativeScale`、`keyWindow`、`windows` 全表。
+//
+// 判据（321）：
+//   `scn … gh=` 不为 0 ⇒ guide 钩子真的被 App 读到了（没读到就说明类名不对）；
+//   `scn guide=` 应恒为 `430x359@0,358` 这一类（随候选条升降，但顶边 = 报出去的顶边）；
+//   `scr` 两行里唯一那个 932 就是威锋公式的来源，下一版只关那一个口子。
+// ---------------------------------------------------------------------------
 // 0.4.35 — 318 把「谁错了」缩小到两个候选：焦点视图与 `keyboardLayoutGuide`
 // ---------------------------------------------------------------------------
 // 0.4.34 之后五条矩形通道（End / Begin / Bounds / CenterEnd / CenterBegin）已经
@@ -395,6 +438,17 @@ static CGFloat (*AevonKbOrigIntersection)(id, SEL, id, BOOL *, BOOL) = NULL;
 static id      (*AevonKbOrigRemoteWindow)(id, SEL, UIScreen *, BOOL) = NULL;
 static void    (*AevonKbOrigSceneSettings)(id, SEL, id, id, id, id) = NULL;
 static CGRect  (*AevonKbOrigBounds)(id, SEL) = NULL;
+
+/// 0.4.37 — `UIKeyboardLayoutGuide -layoutFrame` 的原件。
+///
+/// 这条**不属于母版**（母版四钩子里没有 guide），是 320 实测出来的第六条：
+/// 落点全对、`co`/`uin` 全是 717，唯一还在给 App 递错值的接口就是它。
+/// 它只改「读出来的矩形」，不参与任何几何写入，所以关掉它（`kbGuideFixOff`）
+/// 就等于回到 0.4.36 的行为。
+static CGRect  (*AevonKbOrigGuideFrame)(id, SEL) = NULL;
+
+/// 被读到的次数。`scn … gh=` 打的就是它 —— 0 表示钩子装了但没人读（或者类名不对）。
+static volatile int AevonKbGuideHits = 0;
 
 // ===========================================================================
 // 跨文件事实：本 App 现在是不是被卡片托着
@@ -1027,6 +1081,27 @@ static BOOL AevonKbNoteFixEnabled(void) {
     return on;
 }
 
+/// 0.4.37 — `keyboardLayoutGuide` 的修正开关（缺省开）。
+/// `com.aevon.kbGuideFixOff = true` + respring 即回到「guide 用系统值」。
+///
+/// 为什么给它单独一个开关：它和落点那条线是**两件独立的事**。落点错了，
+/// 键盘会画在错的位置；guide 错了，只有按它排版的 App 会把输入框放错。
+/// 分开开关，出问题时能一句话定位是谁在起作用。
+static volatile int AevonKbGuideFixOn = 0;
+
+static BOOL AevonKbGuideFixEnabled(void) {
+    BOOL on = YES;
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("kbGuideFixOff"),
+                                                        AevonKbDomain);
+    if (value != NULL) {
+        if (CFGetTypeID(value) == CFBooleanGetTypeID()) {
+            on = CFBooleanGetValue((CFBooleanRef)value) ? NO : YES;
+        }
+        CFRelease(value);
+    }
+    return on;
+}
+
 /// 物理屏高。`UIScreen.bounds` 此刻已被我们钩成承载面（717），所以必须走
 /// `nativeBounds / nativeScale`（932），不能读 bounds。
 static CGFloat AevonKbPhysicalHeight(void) {
@@ -1381,6 +1456,71 @@ static BOOL AevonKbSceneRect(UIWindowScene *scene, CGRect *out, const char **out
     return NO;
 }
 
+/// 0.4.37 — 「这个进程能看到几个『屏幕』」的只读取证。
+///
+/// 320 的威锋给出了一个和 guide 无关的恒等式：bar 底边 **两次会话都是 143**，
+/// 而 `143 = 717 − (932 − 358)`。这个公式在全屏世界里恒等于键盘顶边（因为那时
+/// `viewH == screenH`），只有在 `screenH` 被取成 932 时才会错 215。
+///
+/// `uin=430x717` 已经排除了 `[UIScreen mainScreen].bounds` 这一条。剩下的口子
+/// 只有三个，本行把它们并排打出来：
+///   nb/ns  `nativeBounds / nativeScale` —— 物理屏的像素尺寸，我们**没有**钩它，
+///          1290/3 = 430、2796/3 = 932，是 932 最廉价的来源；
+///   key    `[UIApplication keyWindow]` 的类名与 frame —— 如果它是键盘窗，那 App
+///          读 `keyWindow.bounds.height` 就直接拿到 932；
+///   list   `[UIApplication windows]` 全表（类名 / frame / level），最多 6 条 ——
+///          查「App 枚举窗口找键盘」时会不会把 932 那扇窗挑走。
+static void AevonKbProbeScreenChannels(const char *tag) {
+    UIScreen *main = [UIScreen mainScreen];
+    if (main == nil) return;
+    CGRect nb = [main nativeBounds];
+    CGFloat ns = [main nativeScale];
+    CGFloat sc = [main scale];
+    UIApplication *app = [UIApplication sharedApplication];
+    if (app == nil) return;
+    UIWindow *key = nil;
+    SEL ksel = NSSelectorFromString(@"keyWindow");
+    if ([app respondsToSelector:ksel]) {
+        id raw = ((id (*)(id, SEL))objc_msgSend)(app, ksel);
+        if ([raw isKindOfClass:[UIWindow class]]) key = (UIWindow *)raw;
+    }
+    NSArray *wins = nil;
+    SEL wsel = NSSelectorFromString(@"windows");
+    if ([app respondsToSelector:wsel]) {
+        id raw = ((id (*)(id, SEL))objc_msgSend)(app, wsel);
+        if ([raw isKindOfClass:[NSArray class]]) wins = (NSArray *)raw;
+    }
+    char line[420];
+    CGRect kf = (key != nil) ? [key frame] : CGRectZero;
+    snprintf(line, sizeof(line),
+             "app: kb: scr %s nb=%.0fx%.0f ns=%.2f sc=%.2f key=%.24s %.0fx%.0f@%.0f,%.0f wins=%d\n",
+             tag, nb.size.width, nb.size.height, (double)ns, (double)sc,
+             (key != nil) ? class_getName([key class]) : "none",
+             kf.size.width, kf.size.height, kf.origin.x, kf.origin.y,
+             (int)[wins count]);
+    AevonKbLog(line);
+
+    char list[420] = "";
+    NSUInteger n = [wins count];
+    for (NSUInteger i = 0; i < n && i < 6; i++) {
+        id obj = [wins objectAtIndex:i];
+        if (obj == nil || ![obj isKindOfClass:[UIWindow class]]) continue;
+        UIWindow *w = (UIWindow *)obj;
+        CGRect f = [w frame];
+        char bit[104];
+        snprintf(bit, sizeof(bit), "%sw%lu=%.20s %.0fx%.0f@%.0f,%.0f L=%.0f",
+                 (list[0] == '\0') ? "" : " ", (unsigned long)i,
+                 class_getName([w class]),
+                 f.size.width, f.size.height, f.origin.x, f.origin.y,
+                 (double)[w windowLevel]);
+        size_t room = sizeof(list) - strlen(list) - 1;
+        if (room > 1) strncat(list, bit, room);
+    }
+    snprintf(line, sizeof(line), "app: kb: scr %s list=%s\n", tag,
+             (list[0] != '\0') ? list : "none");
+    AevonKbLog(line);
+}
+
 /// 0.4.35 — 两行只读取证：焦点视图（含父链）与 App 主窗 scene 的落点。
 /// 0.4.36 — 焦点改成扫**全部窗口**，并多打一行「输入条容器」的底边。
 ///
@@ -1494,7 +1634,7 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
         kbwb = [kbw bounds];
     }
     snprintf(line, sizeof(line),
-             "app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f uin=%.0fx%.0f kbw=%.0fx%.0f@%.0f,%.0f b=%.0f,%.0f\n",
+             "app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f uin=%.0fx%.0f kbw=%.0fx%.0f@%.0f,%.0f b=%.0f,%.0f gh=%d\n",
              tag, wf.size.width, wf.size.height,
              sf.size.width, sf.size.height, sf.origin.x, sf.origin.y, ssrc,
              co.size.width, co.size.height, co.origin.x, co.origin.y,
@@ -1502,8 +1642,10 @@ static void AevonKbProbeFocusAndScene(const char *tag, UIWindow *appWin,
              (int)hasGuide, ins.top, ins.bottom,
              uin.size.width, uin.size.height,
              kbwf.size.width, kbwf.size.height, kbwf.origin.x, kbwf.origin.y,
-             kbwb.origin.x, kbwb.origin.y);
+             kbwb.origin.x, kbwb.origin.y, (int)AevonKbGuideHits);
     AevonKbLog(line);
+    // 0.4.37 — 同一拍把「这个进程能看到的每一面屏」也打出来（见函数上方注释）。
+    AevonKbProbeScreenChannels(tag);
 }
 
 static void AevonKbProbeBarText(const char *tag) {
@@ -2427,6 +2569,63 @@ static IMP AevonKbInstallClass(Class cls, SEL sel, IMP replacement) {
     return method_setImplementation(method, replacement);
 }
 
+/// 只在**类自己拥有**这条方法时换实现；否则用 `class_addMethod` 加一条遮蔽父类的。
+///
+/// 这条是为 `UIKeyboardLayoutGuide -layoutFrame` 写的。`layoutFrame` 声明在
+/// `UILayoutGuide` 上，如果 `UIKeyboardLayoutGuide` 自己没实现它，
+/// `class_getInstanceMethod` 返回的是**父类那个 Method** —— 直接
+/// `method_setImplementation` 会在 `UILayoutGuide` 上打洞，整个进程所有布局指南
+/// （输入框、占位、第三方自定义 guide）全都跟着变。那不是「修键盘」，那是改 UIKit。
+static IMP AevonKbInstallOwn(Class cls, SEL sel, IMP replacement) {
+    if (cls == Nil || sel == NULL) return NULL;
+    Method method = class_getInstanceMethod(cls, sel);
+    if (method == NULL) return NULL;
+    IMP old = method_getImplementation(method);
+    const char *types = method_getTypeEncoding(method);
+    if (types == NULL) return NULL;
+    // 新增成功 ⇒ 类原本没有自己那一版，原实现仍在父类，直接返回刚才取到的 old。
+    if (class_addMethod(cls, sel, replacement, types)) return old;
+    return method_setImplementation(method, replacement);
+}
+
+// ---------------------------------------------------------------------------
+// 钩子 6：`-[UIKeyboardLayoutGuide layoutFrame]`（0.4.37 新增，母版没有）
+// ---------------------------------------------------------------------------
+//
+// 320 的 54 条 guide 读数只有 3 条是对的，其余分成两族（见文首 0.4.37 那一段），
+// 两族都是「键盘窗（430x932@0,0）」与「App 的 scene（430x717@0,215）」这条 215 的
+// 缝算出来的。我们改不了那两块几何（各有三次翻车记录），但可以改**读出来那一层**：
+// 交给 App 的矩形，就用我们已经在通知里报出去的那个。
+//
+// 只做三件事：
+//   · 键盘不在屏上（`AevonKbShown == 0`）⇒ 原值返回，绝不介入「没有键盘」的布局；
+//   · 只处理 **level 0 的窗口**（App 自己的窗）。键盘窗里的 guide 是系统在用的，不碰；
+//   · 换算进 `owningView` 的坐标系 —— `layoutFrame` 的定义就是这个坐标系，
+//     直接给窗口坐标会在 owner 有偏移时又错一次。
+static CGRect AevonKbGuideLayoutFrame(id self, SEL _cmd) {
+    CGRect orig = CGRectZero;
+    if (AevonKbOrigGuideFrame != NULL) orig = AevonKbOrigGuideFrame(self, _cmd);
+    if (!AevonKbGuideFixOn || AevonKbShown == 0) return orig;
+    UIView *owner = nil;
+    SEL osel = NSSelectorFromString(@"owningView");
+    if ([self respondsToSelector:osel]) {
+        owner = ((id (*)(id, SEL))objc_msgSend)(self, osel);
+    }
+    if (owner == nil) return orig;
+    UIWindow *win = [owner window];
+    if (win == nil) return orig;
+    if ([win windowLevel] != 0.0) return orig;          // 键盘窗 / 状态栏窗不是 0
+    CGFloat worldH = [UIScreen mainScreen].bounds.size.height;
+    CGFloat top = (CGFloat)AevonKbLastTop;
+    // 顶边必须落在世界里面，否则宁可返回原值 —— 这一条挡的是「通知还没来、
+    // `AevonKbShown` 却是旧值」那种脏状态。
+    if (top <= 0.0 || top >= worldH - 8.0) return orig;
+    CGRect want = CGRectMake(0.0, top, [win bounds].size.width, worldH - top);
+    want = [owner convertRect:want fromView:win];
+    AevonKbGuideHits += 1;
+    return want;
+}
+
 static void AevonKbNativeInstall(void) {
     // 无论后面装成没装成，这一进程只做这一次决定。
     AevonKbInstalled = 1;
@@ -2449,6 +2648,8 @@ static void AevonKbNativeInstall(void) {
     // 0.4.26 — 通知帧校正的开关。走盘只在这一拍（主队列、App 已跑起来），
     // 钩子热路径上只读这个 int。
     AevonKbNoteFixOn = (AevonKbInjectApp && AevonKbNoteFixEnabled()) ? 1 : 0;
+    // 0.4.37 — guide 那条线单独一个开关（`kbGuideFixOff`）。
+    AevonKbGuideFixOn = (AevonKbInjectApp && AevonKbGuideFixEnabled()) ? 1 : 0;
     if (!AevonKbInjectApp) {
         AevonKbLog("app: kb: native off, inject=0\n");
         return;
@@ -2516,6 +2717,20 @@ static void AevonKbNativeInstall(void) {
         AevonKbOrigPostNote = oldPost;
         installed += 1;
         mask |= 1 << 4;
+    }
+
+    // 0.4.37 — 第六条：`keyboardLayoutGuide` 的读出口。
+    //
+    // 320 里 54 条 guide 读数只有 3 条正确，而落点、`co`、`uin` 全都是对的 ——
+    // 这一条就是最后一处还在给 App 递错值的接口。类名取不到（iOS 15 以前没有
+    // 这个类）就跳过，`mask` 第 5 位为 0 就是「没装成」。
+    Class guideCls = NSClassFromString(@"UIKeyboardLayoutGuide");
+    IMP oldGuide = AevonKbInstallOwn(guideCls, @selector(layoutFrame),
+                                     (IMP)AevonKbGuideLayoutFrame);
+    if (oldGuide != NULL) {
+        AevonKbOrigGuideFrame = (CGRect (*)(id, SEL))oldGuide;
+        installed += 1;
+        mask |= 1 << 5;
     }
 
     char line[192];

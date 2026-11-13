@@ -1587,7 +1587,17 @@ def main():
                       #   kbw=   键盘窗 frame / b= 它的 bounds.origin（0.4.36）
                       #          319 的 `kb: win ask=430x932@0,0` 说明键盘窗是**物理屏**
                       #          尺寸，比 App 世界高 215 —— guide 的三种错值都出在这里。
-                      b"app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f uin=%.0fx%.0f kbw=%.0fx%.0f@%.0f,%.0f b=%.0f,%.0f",
+                      b"app: kb: scn %s win=%.0fx%.0f scene=%.0fx%.0f@%.0f,%.0f src=%s co=%.0fx%.0f@%.0f,%.0f guide=%.0fx%.0f@%.0f,%.0f has=%d safe=%.0f/%.0f uin=%.0fx%.0f kbw=%.0fx%.0f@%.0f,%.0f b=%.0f,%.0f gh=%d",
+                      # 0.4.37 — 「这个进程能看到几面屏」（只读）。
+                      # 320 的威锋 bar 底边两次都是 143 = `717 − (932 − 358)`，说明它
+                      # 取到的 screenH 是 932；而 `uin=430x717` 已经排除 bounds 这一条。
+                      #   nb/ns  nativeBounds / nativeScale（物理屏像素，我们没钩它）
+                      #   sc     UIScreen.scale
+                      #   key    [UIApplication keyWindow] 类名 + frame（若它是键盘窗，
+                      #          读 keyWindow.bounds 就直接拿到 932）
+                      #   list   windows 全表，最多 6 条：类名 / frame / level
+                      b"app: kb: scr %s nb=%.0fx%.0f ns=%.2f sc=%.2f key=%.24s %.0fx%.0f@%.0f,%.0f wins=%d",
+                      b"app: kb: scr %s list=%s",
                       # 0.4.28 — 「第二条通道」取证（**只读**，一次会话两拍）。
                       # 312：QQ 正确、微信先对后错，而 App 主窗十次都是 430x717
                       # ⇒ 不是悬浮窗的事，是微信自己又排了一次版、没走通知。
