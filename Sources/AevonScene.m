@@ -48,6 +48,14 @@ extern void AevonLogRaw(const char *line);
 // 自建承载把 scene 挂进卡片的入口 —— 都在这一版删掉的功能里，没有调用点了。
 extern int AevonCardYieldForFullscreen(const char *bundle);
 
+// 0.4.65 — 「App 自己要横屏了，把承载它的卡片转过去」。
+//
+// 与上面那条让路同一个形状（C 侧发现事实、Swift 侧执行），区别是它**不拆卡**：
+// 卡片只是换一个方向继续演同一个 scene。返回 1 = 真转了，0 = 没有这张卡。
+extern int AevonCardLandscapeEnter(const char *bundle);
+/// 0.4.65 — App 退出横屏（或用户从全屏缩回卡片）。返回 1 = 真切回竖版。
+extern int AevonCardLandscapeExit(const char *bundle);
+
 /// The scene manager is a singleton with no public door, and its spelling has
 /// changed across releases. Resolving it here keeps the class-method dispatch
 /// out of Swift, where `AnyClass` + `perform` needs casts that the compiler is
@@ -451,6 +459,20 @@ static id AevonOwnDisplayOverride(id base, CGRect frame) {
 
 
 
+/// 0.4.65 — 一块画布是横的还是竖的。**只有宽高比一个判据。**
+///
+/// 1 = 竖（portrait）/ 3 = 横（landscapeRight），与 `setInterfaceOrientation:`
+/// 和 `setContentReferenceSize:withContentOrientation:andContainerOrientation:`
+/// 两处共用的那套取值一致（母版只用到这两档，`UIInterfaceOrientationLandscapeLeft`
+/// 的 4 不出现 —— 卡片是自己的窗口，没有「往哪边转」这回事）。
+///
+/// ⛔ 不读 `UIDevice`、不读 `UIScreen`、不读任何开关：目标是几何，方向就该由
+/// 几何推出来。多一个来源就多一次「目标已改、方向还没改」的中间态。
+static NSInteger AevonOrientationOf(CGSize size) {
+    if (size.width < 16.0 || size.height < 16.0) return 1;
+    return size.width > size.height ? 3 : 1;
+}
+
 /// 0.2.46 — 建 scene 时一次定型「内容参考尺寸」（对比报告第六节第 2 条）。
 ///
 /// 抖音那种 App 的排版入口不是 `UIScreen` 一处：`UIWindowScene` 上还有一份
@@ -466,10 +488,15 @@ static id AevonOwnDisplayOverride(id base, CGRect frame) {
 ///
 /// 形状闸：选择子在、参数 5 个（self/_cmd + 3）、编码里带 `CGSize`。缺一条就跳过 ——
 /// 私有的选择子同名不同参是常事，宁可少设一项也不发一个错的结构体进去。
-/// 方向两个参数都传 1（竖屏），与 `setInterfaceOrientation:` 同一个约定。
+///
+/// 0.4.65 — 方向两个参数**不再恒为 1**。原来传 1（竖屏）是事实陈述：画布一直是
+/// 430x717。横屏画布 717x403 进来之后，这两个参数若还答 1，App 内部就会出现
+/// 「参考尺寸是横的、方向说是竖的」，UIKit 会把横版一行行竖着排 —— 那是最难查的
+/// 一类错位。所以方向由画布自己算（`AevonOrientationOf`），三个数（frame /
+/// display / 参考尺寸）仍然是同一套。
 ///
 /// 返回 1 = 写了；0 = 这个宿主没有这一格（记为事实，不重试）。
-static int AevonOwnRefSet(id host, CGSize size, const char *tag) {
+static int AevonOwnRefSet(id host, CGSize size, NSInteger orientation, const char *tag) {
     if (host == nil) return 0;
     SEL sel = sel_registerName(
         "setContentReferenceSize:withContentOrientation:andContainerOrientation:");
@@ -485,7 +512,7 @@ static int AevonOwnRefSet(id host, CGSize size, const char *tag) {
     }
     @try {
         ((void (*)(id, SEL, CGSize, NSInteger, NSInteger))objc_msgSend)(
-            host, sel, size, (NSInteger)1, (NSInteger)1);
+            host, sel, size, orientation, orientation);
     } @catch (NSException *exception) {
         AevonOwnDisplayLog(@"win: own ref threw %s",
                            exception.reason != nil ? [exception.reason UTF8String] : "-");
@@ -859,6 +886,17 @@ static char AevonArmed[AEVON_ARMED_MAX][128];
 /// 的年龄闸用：建卡那一两百毫秒里系统本来就会把 scene 从整屏改成卡片尺寸，
 /// 那一次不是「系统要全屏接管它」。卡片活过 0.9 秒还收到整屏 frame 才是。
 static CFAbsoluteTime AevonArmedAt[AEVON_ARMED_MAX];
+/// 0.4.65 — 「App 自己要横屏」这条路的限流表（见 `AevonLandscapeAsk`）。
+///
+/// 定义放在登记表这里而不是函数旁边：`AevonHookDisarm` 要用它把两格清零，
+/// 而那个函数在这个文件的前半段。C 里静态变量只能先定义后使用，挪一次比
+/// 在两处各写一份「清零」便宜。
+static CFAbsoluteTime AevonLandscapeAt[AEVON_ARMED_MAX];
+static int AevonLandscapeCount[AEVON_ARMED_MAX];
+/// 0.4.65 — 这张卡上一次「App 退出横屏」的时刻。见 `AevonWriteFrame` 的让路段：
+/// 退出横屏时 App 会写一次整屏竖版，那个形状和「用户点桌面图标全屏打开」一模一样，
+/// 只能靠「刚刚是横屏」这个上下文分开，宽限期就是这个上下文。
+static CFAbsoluteTime AevonLandscapeExitAt[AEVON_ARMED_MAX];
 /// 0.3.61 — 冷分享静默期里，这一槽被系统的整屏 frame 顶到了几次。
 ///
 /// Aevon(286) 的 5/7 次失败全是同一件事：卡已经出帧，`land: url fire` 之后
@@ -1115,6 +1153,10 @@ void AevonHookDisarm(NSString *bundle) {
         for (int i = 0; i < AEVON_ARMED_MAX; i++) {
             AevonArmed[i][0] = '\0';
             AevonArmedAt[i] = 0;
+            // 0.4.65 — 槽清空 = 这张卡没了，横屏请求的配额跟着作废。
+            AevonLandscapeAt[i] = 0;
+            AevonLandscapeCount[i] = 0;
+            AevonLandscapeExitAt[i] = 0;
             }
         AevonArmedCount = 0;
         return;
@@ -1126,6 +1168,9 @@ void AevonHookDisarm(NSString *bundle) {
         if (strcmp(AevonArmed[i], text) != 0) continue;
         AevonArmed[i][0] = '\0';
         AevonArmedAt[i] = 0;
+        AevonLandscapeAt[i] = 0;
+        AevonLandscapeCount[i] = 0;
+        AevonLandscapeExitAt[i] = 0;
         if (AevonArmedCount > 0) __sync_fetch_and_sub(&AevonArmedCount, 1);
     }
 }
@@ -1620,11 +1665,51 @@ static BOOL AevonWriteDisplay(id settings, int slot) {
     // 它和 `-bounds` 的返回值是一对：App 排版读的是 `-bounds`（717），参考尺寸若
     // 写成 932，那些读 `referenceSize` 的 App 就会按 932 排进 717 的窗口。
     // 母版没有这一步，因为母版只换 `-bounds`；我们两个都写，就必须让这两个同值。
-    AevonOwnRefSet(settings, target.size, hold ? "follow" : "release");
+    AevonOwnRefSet(settings, target.size, AevonOrientationOf(target.size),
+                   hold ? "follow" : "release");
     AevonDisplayAt[slot] = at;
     AevonOwnDisplayLog(@"win: display release was=%.0fx%.0f -> %.0fx%.0f slot=%d",
                        current.size.width, current.size.height,
                        want.width, want.height, slot);
+    return YES;
+}
+
+/// 0.4.65 — **界面方向**：卡片画布是横的，App 就得按横的排。
+///
+/// 这是「悬浮窗里点视频横屏没反应」的第一个成因。Aevon 从 0.0.61 起把 scene 的
+/// `frame` 写成 430x717，却从没写过 `interfaceOrientation` —— 系统看到的永远是
+/// 一块竖屏，App 发起的旋转（iOS 15+ 唯一入口 `requestGeometryUpdateWithPreferences:`）
+/// 会以「当前场景不支持横屏」被拒，抖音于是什么都不做，用户看到的就是「没反应」。
+///
+/// 写的位置与 `frame` / `displayConfiguration` 是同一份 candidate、同一趟提交：
+/// 三个数分开到达就是三次重排，而方向是其中最贵的一次（它会重建窗口几何）。
+///
+/// 形状闸只认一条：`setInterfaceOrientation:` 在。读值只用来判重 —— 选择子不在
+/// 就读不到，读不到就当不同，宁可多写一次，也不要因为读不到而永远不写。
+static BOOL AevonWriteOrientation(id settings, int slot) {
+    if (settings == nil) return NO;
+    if (slot < 0 || slot >= AEVON_ARMED_MAX) return NO;
+    if (!(AevonFrameMask & (1 << slot))) return NO;
+    if (!AevonSettingsMutable(settings)) return NO;
+    NSInteger want = AevonOrientationOf(AevonFrameTargets[slot].size);
+    SEL setter = sel_registerName("setInterfaceOrientation:");
+    if (![settings respondsToSelector:setter]) return NO;
+    SEL getter = sel_registerName("interfaceOrientation");
+    if ([settings respondsToSelector:getter]) {
+        NSInteger now = ((NSInteger (*)(id, SEL))objc_msgSend)(settings, getter);
+        if (now == want) return NO;
+    }
+    @try {
+        ((void (*)(id, SEL, NSInteger))objc_msgSend)(settings, setter, want);
+    } @catch (NSException *exception) {
+        AevonOwnDisplayLog(@"win: orientation threw %s",
+                           exception.reason != nil ? [exception.reason UTF8String] : "-");
+        return NO;
+    }
+    AevonOwnDisplayLog(@"win: orientation -> %ld slot=%d geo=%.0fx%.0f",
+                       (long)want, slot,
+                       AevonFrameTargets[slot].size.width,
+                       AevonFrameTargets[slot].size.height);
     return YES;
 }
 
@@ -1660,12 +1745,69 @@ static void AevonYieldDisplayBack(id settings, CGSize screen, const char *bundle
     if (copy == nil) return;
     ((void (*)(id, SEL, id))objc_msgSend)(settings, setter, copy);
     [copy release];
-    AevonOwnRefSet(settings, screen, "yield");
+    AevonOwnRefSet(settings, screen, AevonOrientationOf(screen), "yield");
     AevonLogRaw([[NSString stringWithFormat:
                   @"win: card yield display back %.0fx%.0f -> %.0fx%.0f b=%s",
                   current.size.width, current.size.height,
                   screen.width, screen.height,
                   bundle != NULL ? bundle : "-"] UTF8String]);
+}
+
+/// 0.4.65 — App 自己要横屏了：记一行，并让对应卡片跟着转。
+///
+/// 抖音那种播放器点「横屏」走的是 `-[UIWindowScene requestGeometryUpdateWithPreferences:]`
+/// （iOS 15+ 唯一入口），系统批准后把 scene 的 frame 写成 932x430。Aevon 的
+/// `AevonWriteFrame` 不认识这个形状，把它当漂移写回 430x717 —— 用户看到的就是
+/// 「点了没反应」。
+///
+/// 这一条**不改那个写回**，只是在写回之前把「App 要过横屏」这个事实交给 Swift
+/// 侧，由它把卡片真转过去；下一拍 target 已经是横版 717x403，写回就不再是撤销，
+/// 而是同一件事的第二半。两拍之间最多一次重排，换来的是「按钮真的有用」。
+///
+/// 限流两条：同一张卡 2 秒内只放一次、每张卡最多 3 次。`requestGeometryUpdate`
+/// 会被 App 自己重试好几拍，没有限流就是一行接一行的日志和反复横竖。
+static void AevonLandscapeAsk(int slot, CGSize now, CGSize target, NSInteger orient) {
+    if (slot < 0 || slot >= AEVON_ARMED_MAX) return;
+    if (AevonLandscapeCount[slot] >= 3) return;
+    CFAbsoluteTime at = CFAbsoluteTimeGetCurrent();
+    if (AevonLandscapeAt[slot] > 0 && at - AevonLandscapeAt[slot] < 2.0) return;
+    AevonLandscapeAt[slot] = at;
+    AevonLandscapeCount[slot] += 1;
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"win: landscape ask now=%.0fx%.0f want=%.0fx%.0f o=%ld slot=%d n=%d",
+                  now.width, now.height, target.width, target.height,
+                  (long)orient, slot, AevonLandscapeCount[slot]] UTF8String]);
+    char *name = strdup(AevonArmed[slot]);
+    if (name == NULL) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (name[0] == '\0') { free(name); return; }
+        AevonCardLandscapeEnter(name);
+        free(name);
+    });
+}
+
+/// 0.4.65 — App 退出横屏：把卡片切回竖版。
+///
+/// 触发形状：**横屏目标 + 系统写来整屏竖版**。这个形状与「系统要把这个 App
+/// 全屏接管」一模一样（都是 430x932），区别只在上下文 —— 我们刚才在横屏。
+/// 所以处理也分开：这一条切卡片，`AevonWriteFrame` 那条让路拆卡片。两条都
+/// 不能省：把「退出横屏」当接管 = 视频一退出卡片就没了；把「全屏打开」当退出
+/// = 用户点桌面图标，卡片赖着不走还和全屏页抢同一个 scene。
+static void AevonLandscapeExit(int slot, NSInteger orient) {
+    if (slot < 0 || slot >= AEVON_ARMED_MAX) return;
+    CFAbsoluteTime at = CFAbsoluteTimeGetCurrent();
+    if (AevonLandscapeExitAt[slot] > 0 && at - AevonLandscapeExitAt[slot] < 1.0) return;
+    AevonLandscapeExitAt[slot] = at;
+    AevonLogRaw([[NSString stringWithFormat:
+                  @"win: landscape exit slot=%d o=%ld b=%s",
+                  slot, (long)orient, AevonArmed[slot]] UTF8String]);
+    char *name = strdup(AevonArmed[slot]);
+    if (name == NULL) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (name[0] == '\0') { free(name); return; }
+        AevonCardLandscapeExit(name);
+        free(name);
+    });
 }
 
 /// 把目标尺寸写进一份 settings。返回「这一次真的写了」。
@@ -1686,6 +1828,42 @@ static BOOL AevonWriteFrame(id settings, int slot) {
     SEL getter = sel_registerName("frame");
     if ([settings respondsToSelector:getter]) {
         CGRect now = ((CGRect (*)(id, SEL))objc_msgSend)(settings, getter);
+        // 0.4.65 — 两个方向的「App 自己改主意」，都在让路判据之前分拣。
+        //
+        //   · 横屏目标 + 竖版信号 ⇒ App 要退出横屏（切卡片，别拆）；
+        //   · 竖版目标 + 横版信号 ⇒ App 要横屏（转卡片，别按回去）。
+        //
+        // 0.4.65 记两条信号，**不只是 frame**：
+        //
+        //   ① `frame` 或方向说「横」—— 系统把 geometry 一起提交了（932x430）；
+        //   ② `frame` 已经是横的、只把 `interfaceOrientation` 从 1 改成 3 ——
+        //      有些 App 只发 `UIWindowSceneGeometryPreferencesIOS.interfaceOrientations`，
+        //      不带尺寸。只认 ① 的话这条路一次都收不到，用户看到的就是「点了没反应」。
+        //
+        // ⛔ 两条都要求**这一份 settings 的 frame 已经是那个形状**。只按方向不按
+        // 形状判会走进一个死循环：系统若没接受我们写的 `interfaceOrientation`，
+        // 之后每一次例行更新都带着 1，而我们的目标已经是横的 —— 那一句判据会
+        // 把卡片一秒翻一次，用户看到的还是「长按没反应」。
+        BOOL cardLandscape = target.size.width > target.size.height;
+        if (AevonInPush == 0) {
+            NSInteger nowOrient = 0;
+            SEL orientSel = sel_registerName("interfaceOrientation");
+            if ([settings respondsToSelector:orientSel]) {
+                nowOrient = ((NSInteger (*)(id, SEL))objc_msgSend)(settings, orientSel);
+            }
+            BOOL shapedLandscape = now.size.width > now.size.height;
+            BOOL shapedPortrait = now.size.height > now.size.width;
+            BOOL saysLandscape = shapedLandscape
+                && (nowOrient == 3 || now.size.width > 800.0);
+            BOOL saysPortrait = shapedPortrait
+                && (nowOrient == 1 || now.size.height > 850.0);
+            if (cardLandscape && saysPortrait) {
+                AevonLandscapeExit(slot, nowOrient);
+            }
+            if (!cardLandscape && saysLandscape) {
+                AevonLandscapeAsk(slot, now.size, target.size, nowOrient);
+            }
+        }
         // 0.2.37 — **系统要整屏接管卡片里这个 App 了，卡片该让路。**
         //
         // 用户现场（0.2.36）：悬浮窗开着 QQ → 回桌面 → 点桌面 QQ 图标。系统把
@@ -1708,14 +1886,20 @@ static BOOL AevonWriteFrame(id settings, int slot) {
         // 命中之后先撤掉 frame 目标（不再抢），再异步拆卡 —— 这里在 settings
         // 更新路径里，同步拆卡会重入，只能排到主队列下一拍。
         if (AevonInPush == 0
+            && !cardLandscape
             && now.size.height > 850
             && target.size.height < 800) {
             CFAbsoluteTime age = CFAbsoluteTimeGetCurrent() - AevonArmedAt[slot];
+            // 0.4.65 — 刚退出横屏的 1.5 秒里，App 还会把整屏竖版再写一两次。
+            // 那不是「用户要从桌面全屏打开」，不能拆卡（见 `AevonLandscapeExit`）。
+            // 宽限期一过还写，才按原判据让路 —— 两条路都有出口，不会互相让死。
+            CFAbsoluteTime sinceExit =
+                CFAbsoluteTimeGetCurrent() - AevonLandscapeExitAt[slot];
             // 0.4.0 — 0.3.61 那段「冷分享静默期」整块删除。它存在的唯一理由是
             // 「我们自己放过去的那次延迟激活会在 2~3 秒后提交一次 430x932」，
             // 而延迟激活属于 URL 投递链，这一版没有那条链。剩下的就是原来那条
             // 让路判据：卡片活过 0.40 s 还收到整屏 frame，就是系统要接管它。
-            if (age > 0.40) {
+            if (age > 0.40 && sinceExit > 1.5) {
                 __sync_fetch_and_and(&AevonFrameMask, ~(1 << slot));
                 AevonArmedAt[slot] = 0;
                 AevonLogRaw([[NSString stringWithFormat:
@@ -1786,8 +1970,11 @@ NSInteger AevonPushSceneFrame(id scene) {
     // 了、屏幕没跟上）。`AevonWriteDisplay` 自己判重，尺寸一样就返回 0，稳态下
     // 一个字节都不花。
     BOOL screen = AevonWriteDisplay(candidate, slot);
+    // 0.4.65 — 方向与 frame / display 同一趟提交。横屏那一趟里它和 frame 是
+    // 同一件事的两面：只改 frame 不改方向，App 会把横版画布竖着排。
+    BOOL orient = AevonWriteOrientation(candidate, slot);
     NSInteger path = 0;
-    if (wrote || screen) {
+    if (wrote || screen || orient) {
         // 0.2.46 — 先走带回执的那条门（第 5 个参数不再传 nil），失败再退回
         // 0.0.43 那条同签名的无回执门。两条门的形状闸一样，差别只有回执。
         path = AevonCallSettingsAck(scene, candidate, slot);
@@ -1798,7 +1985,10 @@ NSInteger AevonPushSceneFrame(id scene) {
     // 只有屏幕、没有 frame 的那一次也算「写成了」：它是 staged 之后的那一次
     // display 纠正，调用方（`pushSceneLater` / 守护循环）要看见它真的落了地。
     // 两边都是假就是「一次 settings 也没花」—— 返回 0，调用方应当立刻收手。
-    return (wrote || screen) ? path : 0;
+    //
+    // 0.4.65 — 方向也算「写成了」：横竖切换里 frame 那一格有时已经等于目标
+    // （717x403 与 430x717 的原点/尺寸都可能撞上），只有方向这一项真的变了。
+    return (wrote || screen || orient) ? path : 0;
 }
 
 // 0.4.4 — 「写进了那份 settings」与「系统收到了」是两件事，这个函数只回答后者。
@@ -1837,6 +2027,7 @@ NSInteger AevonPushSceneFrameStrict(id scene) {
     AevonInPush = 1;
     (void)AevonWriteFrame(candidate, slot);
     (void)AevonWriteDisplay(candidate, slot);
+    (void)AevonWriteOrientation(candidate, slot);
     NSInteger path = AevonCallSettingsAck(scene, candidate, slot);
     if (path == 0) path = AevonCallSettingsTransition(scene, candidate);
     if (path == 0 && AevonCallSettings(scene, candidate)) path = 1;
@@ -1893,7 +2084,23 @@ NSInteger AevonScreenBack(NSString *bundle, id scene) {
             }
         }
     }
-    AevonOwnRefSet(candidate, full, "back");
+    AevonOwnRefSet(candidate, full, AevonOrientationOf(full), "back");
+    // 0.4.65 — 交还整屏 = 竖屏。卡片有可能是从横屏被系统拽走的（用户在桌面上
+    // 点了这个 App），那一拍 scene 还挂着 3，只还 frame 不还方向的话，全屏页会
+    // 按横屏排在 430x932 里 —— 用户看到的是一整屏横着的内容，比黑屏更难懂。
+    {
+        SEL oset = sel_registerName("setInterfaceOrientation:");
+        if ([candidate respondsToSelector:oset]) {
+            @try {
+                ((void (*)(id, SEL, NSInteger))objc_msgSend)(candidate, oset,
+                                                            AevonOrientationOf(full));
+            } @catch (NSException *exception) {
+                AevonOwnDisplayLog(@"win: screen back orientation threw %s",
+                                   exception.reason != nil
+                                       ? [exception.reason UTF8String] : "-");
+            }
+        }
+    }
 
     AevonInPush = 1;
     int slot = AevonSlotOfScene(scene);

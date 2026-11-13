@@ -1062,6 +1062,130 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return CGSize(width: w.rounded(), height: h.rounded())
     }
 
+    /// 0.4.65 — 横版画布的高宽比：16:9（用户定档「原生视频播放比例」）。
+    ///
+    /// ⛔ 横版**不是**把 `fatAspect` 取倒数。手机竖着的时候，卡片宽度上限还是
+    /// 430 pt（屏幕宽），所以横版能给出的画面最高就是 430 × 242 —— 一个 16:9 的
+    /// 视频窗。母版用的是「整屏等比缩入」，她有一块真横屏画布的余量；我们的 scene
+    /// 被改成了卡片大小，画布多高卡片就得多高，5:3 的横版（717×430）比屏幕还宽，
+    /// 放不下，所以那个形状在这里不可能成立。
+    static let videoAspect: CGFloat = 9.0 / 16.0
+
+    /// 横版画布：长边沿用竖版画布的高（430 宽 × 5/3 ⇒ 717），短边按 16:9。
+    ///
+    /// 为什么长边不是 932：画布是「App 以为的屏幕」，它得和卡片同形。932×524
+    /// 缩进 430 宽的卡片是 0.46 倍，控件会掉一半；717×403 是 0.60 倍，与竖版的
+    /// 0.80 同一量级 —— 切过去字号不会突然变小，切回来也不会。
+    static func videoRender(from portrait: CGSize) -> CGSize {
+        let w = Swift.max(320, portrait.height.rounded())
+        return CGSize(width: w, height: (w * videoAspect).rounded())
+    }
+
+    // MARK: - 0.4.65 横屏（16:9 视频窗）
+
+    /// 这张卡现在是横的还是竖的。**判据只有 `natural` 的宽高比。**
+    ///
+    /// 不另存一个 Bool：`natural` 是画布唯一的真相（`AevonSceneFrameSet` 写进去
+    /// 的也是它），多一个开关就多一次「开关说横、画布还是竖」的中间态 —— 横竖
+    /// 错位在这个工程里的表现是内容按 717 排进 242 的卡片，一眼就是坏的。
+    private var landscape: Bool { natural.width > natural.height + 1.0 }
+
+    /// 切横屏前那张卡的几何。`nil` = 现在不在横屏。
+    ///
+    /// 只记 frame、不记画布 —— 画布按 `window.bounds` 重算得出（`fatRender`），
+    /// 存第二份就是「同一个尺寸两个来源」，0.2.39 已经为这个形状付过一次账。
+    private var portraitFrame: CGRect?
+
+    /// 0.4.65 — 长按左下侧（`bottomLeftSide`）= 横竖切换。
+    ///
+    /// 母版的手势矩阵里这一格是「边中 · 长按 = 切换横竖」，Aevon 的边中已经被
+    /// 「按住上滑关闭」占着，0.1.0 就把这一格单独分出来留给横屏；现在接上。
+    func toggleLandscape() {
+        setLandscape(!landscape)
+    }
+
+    /// 0.4.65 — 这张卡现在是横的还是竖的。只读出口给 `SceneProbe` 那条回调判重。
+    var isLandscapeCard: Bool { landscape }
+
+    /// 0.4.65 — 按 bundle 找还活着的宿主。给「App 自己请求横屏」那条路用：
+    /// C 侧只知道名字，卡片这一侧的状态全在宿主里。
+    static func host(of bundle: String) -> FloatHost? {
+        guard bundle.count > 2 else { return nil }
+        return everySlot.first {
+            $0.bundle == bundle && $0.window != nil && $0.card != nil
+        }
+    }
+
+    /// 横竖切换的唯一落点。
+    ///
+    /// 顺序与键盘那条纪律一致：**先登记画布、推场景，再动卡片**。反过来会有一拍
+    /// 「卡片已经是横的、App 还按竖的排」—— 那一拍里 717 高的内容被塞进 242 高的
+    /// 框，露出的是中间一条，用户看到的是闪。
+    func setLandscape(_ on: Bool) {
+        guard let card = card, let window = window else { return }
+        guard on != landscape else { return }
+        if docked {
+            // 停靠小窗只有 30 % 屏高，横过来连一行字都放不下。先还原再切。
+            Log.write("win: landscape refused while docked b=" + bundle)
+            return
+        }
+        if kbFilled {
+            // 横屏态不参与键盘让位（视频播放不弹输入框）；带着一块让过位的几何
+            // 过去，切回来时会按 `kbSavedFrame` 把横屏卡塞进竖屏的尺寸。
+            performKeyboardUnfill()
+        }
+        let bounds = window.bounds
+        let portrait = FloatHost.fatRender(in: bounds.size)
+        let target = on ? FloatHost.videoRender(from: portrait) : portrait
+
+        // 0. 先把场上那条可能还留着的变换摘掉，再记「切之前长什么样」。
+        // `card.frame` 是 `bounds`/`center`/`transform` 算出来的派生量，带着一条
+        // 非单位阵去读，记下来的就是一个被缩过的数 —— 切回来时尺寸不对，而且
+        // 每次都差得不一样（0.1.28 的「吸附翻转」是同一个形状）。
+        liveFrame = nil
+        card.transform = .identity
+        glow?.transform = .identity
+
+        // 1. 画布与方向（`AevonWriteOrientation` 按这块画布的宽高比写 3 / 1）
+        natural = target
+        visible = target
+        AevonSceneFrameSet(bundle, 0, 0, Double(target.width), Double(target.height))
+
+        // 2. 卡片几何。横版满屏宽、上下居中；竖版回到切之前那一帧。
+        var frame: CGRect
+        if on {
+            portraitFrame = card.frame
+            let w = bounds.width
+            // 高度按**这块画布**的宽高比算，不按常量 16:9：`videoRender` 会取整
+            // （717×403 而不是 403.3），照常量算出来的卡片与画布差 0.3 pt，而
+            // `applyBars` 只在差 0.5 pt 以内才判「满铺」—— 差一点就把底板刷黑。
+            let h = (w * (target.height / target.width)).rounded()
+            frame = CGRect(x: 0,
+                           y: ((bounds.height - h) * 0.5).rounded(),
+                           width: w, height: h)
+        } else if let back = portraitFrame {
+            frame = back
+        } else {
+            frame = plan(in: bounds, source: target).frame
+        }
+        if !on { portraitFrame = nil }
+
+        // 3. 同一拍：推场景 + 落卡片。`Strict` 是因为这一拍不允许「写了没门」——
+        // 画布和卡片必须同时到位，分开到就是一次错位。
+        settleEnter()
+        var door: Int = 0
+        if let sc = window.windowScene { door = Int(AevonPushSceneFrameStrict(sc)) }
+        card.bounds = CGRect(origin: .zero, size: frame.size)
+        card.center = CGPoint(x: frame.midX, y: frame.midY)
+        applyGlow()
+        followContent()
+        syncGrip()
+        Log.write(String(format: "win: card landscape %d source=%.0fx%.0f card=%.0fx%.0f@%.0f,%.0f door=%d b=%@",
+                         on ? 1 : 0, target.width, target.height,
+                         frame.width, frame.height,
+                         frame.minX, frame.minY, door, bundle))
+    }
+
     /// 0.0.81 — 画布装进卡片的那个比例。
     ///
     /// 0.0.60~0.0.80 只有一个比例：卡片是画布的等比缩小，两者形状永远相同。于是
@@ -1809,6 +1933,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         canvasView = nil
         visible = .zero
         cropTop = 0
+        // 0.4.65 — 横屏那一份「切之前长什么样」也归零。这个 host 会被下一张卡
+        // 复用，留一个上张卡的 frame，新卡第一次切竖屏就会跳到别人家的位置。
+        portraitFrame = nil
         pan = nil
         press = nil
         tap = nil
@@ -2352,6 +2479,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
         guard let grip = grip else { return true }
         let zone = zoneFor(cardPoint(gesture.location(in: grip)))
+        // 0.4.65 — 横屏：左右两条边**整条撤掉**（用户定档「左右的手势移除」）。
+        //
+        // 竖屏那两条边是「点击停靠 / 长按开闸拖动」，横屏卡满屏宽贴边，两侧
+        // 根本没有可停靠的余量；留着只会让「从卡片边缘往里滑」变成搬窗口。
+        // `top` 不在这里挡：横屏时它反而要变成把手（见 `dragMove`）。
+        if landscape && (zone == .left || zone == .right) { return false }
         if gesture === tap {
             return zone == .left || zone == .right
         }
@@ -2487,6 +2620,32 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let dy = total.y - panStep.y
         panStep = total
         if zone.isCorner, let start = resizeStart {
+            // 0.4.65 — 横屏缩放：**宽度驱动、锁 16:9**。
+            //
+            // 竖屏那一套是高度驱动，因为竖卡的形状由高度系数决定；横卡的形状
+            // 由屏幕宽决定（满宽 430 是上限），所以主变量换成宽度。两个界都来自
+            // 屏幕：小到 180（再小就只剩一行字），大到满宽（左右两条边已经撤了，
+            // 不需要再给环留 `margin`）。
+            if landscape {
+                let minW: CGFloat = 180
+                let maxW = window.bounds.width
+                let grown = total.x * (resizeFromLeft ? -1 : 1)
+                let w = Swift.min(maxW, Swift.max(minW, start.width + grown))
+                let h = (w * (natural.height / natural.width)).rounded()
+                let frame: CGRect
+                if resizeFromLeft {
+                    frame = CGRect(x: start.maxX - w, y: start.minY,
+                                   width: w, height: h)
+                } else {
+                    frame = CGRect(x: start.minX, y: start.minY,
+                                   width: w, height: h)
+                }
+                // 与竖屏一样只写变换：画布不动，App 不知道窗口在变，没有重排。
+                liveFrame = frame
+                liveTransform(frame)
+                return
+            }
+
             // 边角拖动 = 等比例缩放（0.0.43 起；0.0.65 起只剩这一种）。
             //
             // 0.0.63/0.0.64 在这里分过两条路：宽度跟手指（改窗口比例、抬手换画布
@@ -2569,7 +2728,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 的闸：`rawTouch` 已经不再认领 `.top`，但 `GripView` 上的
             // UIPanGestureRecognizer 仍然可能在卡片外那一条上成立 —— 两条路必须
             // 给同一个答案，否则「原始触摸关了、识别器还在搬窗口」。
-            if zone == .top {
+            //
+            // 0.4.65 — 横屏时反过来：顶部是唯一的拖动把手（左右撤了、底部是
+            // 动作格），所以这一条只在竖屏成立。
+            if zone == .top && !landscape {
                 return
             }
             // 0.1.34 — 基准取 `liveFrame`（这一场手势的目标），不读 `card.frame`：
@@ -2662,7 +2824,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 0.1.5 — 顶部不是把手：这一拍什么都没发生，不该写 `card moved to`，
         // 更不该把「桌上原来的位置」覆盖成记忆（Aevon(93) 里 5 次误拖就是这么
         // 把位置改掉的）。
-        if zone == .top {
+        //
+        // 0.4.65 — 横屏时顶部就是把手，落到下面那条普通移动分支。
+        if zone == .top && !landscape {
             gateReset()
             return
         }
@@ -2676,7 +2840,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             Log.write("win: card resized to " + point(card.frame.origin)
                       + " size=" + size(card.bounds.size))
             logResize()
-            remember(in: window.bounds)
+            // 0.4.65 — 横屏不写竖版记忆：那格存的是「竖屏时卡片多大、贴哪边」，
+            // 把 430×242 存进去，下次开卡会按 16:9 的宽高比去还原一个大竖窗。
+            if !landscape { remember(in: window.bounds) }
             return
         }
         if zone == .bottomMiddle {
@@ -2704,7 +2870,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         gateReset()
         Log.write("win: card moved to " + point(card.frame.origin)
                   + " size=" + size(card.bounds.size))
-        remember(in: window.bounds)
+        // 0.4.65 — 横屏的位置同样不写竖版记忆（理由见角缩放那条）。
+        if !landscape { remember(in: window.bounds) }
     }
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
@@ -2757,9 +2924,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 return
             }
             if here == .bottomLeftSide {
-                // V4 的位子。本版只确认「这一格的长按收到了」—— 真去改
-                // `interfaceOrientation` 是单独一版的事，不跟手势混在一起。
-                Log.write("win: gesture long press bottom-left-side, 横屏 not wired yet")
+                // 0.4.65 — **接线了**（0.1.0 起这里只记日志）。
+                //
+                // 长按左下侧 = 横竖切换，与「长按右下侧 = 恢复默认尺寸」同一排、
+                // 同一套判据：格子只认长按，没有拖动（见 `isBottomSide`）。
+                //
+                // `pan.isEnabled = false`：长按成立之后这根手指还可能在屏幕上划，
+                // 那一划不该同时把卡片搬走 —— 右下侧复位也是这么干的。
+                pan?.isEnabled = false
+                Log.write("win: gesture long press bottom-left-side, toggle landscape")
+                toggleLandscape()
                 return
             }
             if here.isCorner {
@@ -3075,6 +3249,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 竖条的地盘也不抢：卡片开着的时候换 App 的路不能被我自己的环堵死。
             guard !AevonRingGrip.summonRect.contains(screen) else { return false }
             guard ringHolds(local, size: card.bounds.size) else { return false }
+            // 0.4.65 — 横屏撤掉左右两条边。这条路比识别器更早（事件还没进
+            // UIKit），所以 `gestureRecognizerShouldBegin` 里那一条在这里必须
+            // 有同一个答案 —— 否则「识别器不认、原始触摸认」，卡片照飞。
+            if landscape {
+                let here = zoneFor(local)
+                if here == .left || here == .right { return false }
+            }
             // 0.1.5 — **顶部那一条不再是把手**（Aevon(93) 第 1 条）。
             //
             // `zoneFor` 把 `y < 0` 判成 `.top`，而 `dragMove` 的非缩放分支对
@@ -3085,7 +3266,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             //
             // 五格图里没有顶部这一格：移动是两侧（长按 0.25 s）和底中（轻滑）。
             // 顶部留着**只让系统手势过**（状态栏下拉），我们自己一格都不认。
-            if zoneFor(local) == .top {
+            if zoneFor(local) == .top && !landscape {
                 if rawTopIgnored < 8 {
                     rawTopIgnored += 1
                     Log.write("win: zone top ignored at " + point(local))
@@ -3153,7 +3334,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                 // 必须在同一处收口：长按是宿主动作，可能已经上过锁，而点按
                 // 根本没上过（见 `bandLocked`）。两侧轻滑照旧停靠。
                 endLiveWithoutDrag()
-                if zone == .left || zone == .right {
+                if (zone == .left || zone == .right) && !landscape {
                     dock(zone: zone)
                 }
             }
@@ -3181,7 +3362,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return
         }
         if zone == .bottomLeftSide {
-            Log.write("win: raw long press bottom-left-side, 横屏 not wired yet")
+            // 0.4.65 — 与 `handlePress` 同一条。这条路没有 pan 可关：`rawActive`
+            // 在长按成立时已置真、`rawMoved` 还是假，后面真要划起来，`dragMove`
+            // 的 `isBottomSide` 会挡。
+            Log.write("win: raw long press bottom-left-side, toggle landscape")
+            toggleLandscape()
             return
         }
         // 0.0.99 — 两侧与底中：长按成立 = 开闸门。手指还在屏幕上，接下来的移动
@@ -4008,6 +4193,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
 
     func setKeyboardFill(_ on: Bool) {
         guard let card = card, let window = window, visible.height > 16 else { return }
+        // 0.4.65 — 横屏（16:9 视频窗）不参与键盘让位。
+        //
+        // 让位那一套数（`kbSavedFrame` / `canvasHeight` / 撑到整块画布高）是按
+        // 竖版画布的 717 算的；横版画布只有 403 高，套进来就是「卡片被拉到 717、
+        // 画面只剩中间一条」。抖音横屏播放不弹输入框，所以这一整条通道在横屏态
+        // 关掉；切回竖屏时真实的键盘通知会再走一遍。
+        if landscape {
+            if on && !kbNoticeOn {
+                kbNoticeOn = true
+                Log.write("win: keyboard fill ignored in landscape b=" + bundle)
+            } else if !on {
+                kbNoticeOn = false
+            }
+            return
+        }
         // 0.2.62 — 「键盘保持浮窗尺寸」把这个开关关掉才生效。
         //
         // 用户要的是**原生尺寸的键盘**（Aevon(203) 第 3 条）。iOS 把键盘挂在
@@ -4570,6 +4770,35 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     @discardableResult
     private func resetToPlan(in bounds: CGRect) -> Bool {
         guard let card = card, natural.height > 16, bounds.width > 64 else { return false }
+        // 0.4.65 — 横屏的「默认」只有一个答案：满屏宽、上下居中。
+        //
+        // 横卡的形状由屏幕宽决定（16:9 锁死），不像竖卡那样还能从高度系数与
+        // 记忆里算出第三种可能。所以这一支不经过 `plan`、也不写 `CardLayout`：
+        // 那张表存的是竖版的「多大、贴哪边」，横屏写进去就是污染。
+        if landscape {
+            let w = bounds.width
+            // 与 `setLandscape` 同一个算法：高度从**这块画布**的宽高比推出来。
+            let h = (w * (natural.height / natural.width)).rounded()
+            let frame = CGRect(x: 0, y: ((bounds.height - h) * 0.5).rounded(),
+                               width: w, height: h)
+            if abs(card.frame.width - frame.width) < 1.5,
+               abs(card.frame.height - frame.height) < 1.5,
+               abs(card.frame.midX - frame.midX) < 1.5,
+               abs(card.frame.midY - frame.midY) < 1.5 {
+                Log.write("win: card landscape already default")
+                return false
+            }
+            AevonMotion.spring {
+                card.bounds = CGRect(origin: .zero, size: frame.size)
+                card.center = CGPoint(x: frame.midX, y: frame.midY)
+                self.applyGlow()
+                self.followContent()
+                self.syncGrip()
+            }
+            Log.write(String(format: "win: card landscape reset to %.0fx%.0f at %.0f,%.0f",
+                             frame.width, frame.height, frame.minX, frame.minY))
+            return true
+        }
         // 0.0.65 — 形状不再存盘，也就没有「复位形状」这件事：画布永远是
         // `fatRender` 算出来的那一块，复位只把卡片摆回开窗时的位置与大小。
         // 0.0.54 — 复位要和 `show` 算同一件事：按原始比例布局，再把高度减掉

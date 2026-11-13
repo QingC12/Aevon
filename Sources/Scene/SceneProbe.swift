@@ -2155,6 +2155,42 @@ private func clearFrameTarget(_ closingBundle: String) {
     }
 }
 
+/// 0.4.65 — App 自己请求横屏了（见 `AevonScene.m` 的 `AevonLandscapeAsk`）。
+///
+/// 只做一件事：把承载它的那张卡从竖版切到 16:9 视频窗。返回 1 = 真切了，
+/// 0 = 没有这张卡（或者它正在停靠，切不了）。
+///
+/// ⛔ 不在这里改 scene：`setLandscape` 自己会登记画布、推帧、写方向。两处各写
+/// 一份几何，结果一定是「卡片横了、App 还是竖的」。
+@_cdecl("AevonCardLandscapeEnter")
+public func AevonCardLandscapeEnter(_ bundle: UnsafePointer<CChar>?) -> Int32 {
+    guard let bundle = bundle else { return 0 }
+    let identifier = String(cString: bundle)
+    guard identifier.count > 2 else { return 0 }
+    guard Thread.isMainThread else { return 0 }
+    guard let host = FloatHost.host(of: identifier) else { return 0 }
+    guard !host.isLandscapeCard else { return 0 }
+    host.setLandscape(true)
+    Log.write("win: card landscape entered by app b=" + identifier)
+    return 1
+}
+
+/// 0.4.65 — App 退出横屏（见 `AevonScene.m` 的 `AevonLandscapeExit`）。
+///
+/// 与进入对称：只切卡片，几何由 `setLandscape(false)` 一处算。
+@_cdecl("AevonCardLandscapeExit")
+public func AevonCardLandscapeExit(_ bundle: UnsafePointer<CChar>?) -> Int32 {
+    guard let bundle = bundle else { return 0 }
+    let identifier = String(cString: bundle)
+    guard identifier.count > 2 else { return 0 }
+    guard Thread.isMainThread else { return 0 }
+    guard let host = FloatHost.host(of: identifier) else { return 0 }
+    guard host.isLandscapeCard else { return 0 }
+    host.setLandscape(false)
+    Log.write("win: card landscape left by app b=" + identifier)
+    return 1
+}
+
 /// 0.2.36 — 「系统要全屏打开这个 App 了，把正在承载它的卡片让开」。
 ///
 /// 只在 `AevonOpenDecide` 的 `plain` 那一支调用：那里是**系统原实现之前**，

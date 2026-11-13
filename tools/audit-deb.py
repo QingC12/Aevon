@@ -994,6 +994,29 @@ def main():
                   # 少任意一条 = 这条反应式让路没有编进产物。
                   b"win: card yield seen b=%s now=%.0fx%.0f want=%.0fx%.0f",
                   b"win: card yielded to fullscreen b=",
+                  # ------------------------------------------------------------------
+                  # 0.4.65 — 横屏（16:9 视频窗）。这一整条通道有四个必须能分开的
+                  # 现场，少任何一个，下一份日志就只能看到「没反应」三个字：
+                  #
+                  #   landscape ask      App 自己请求横屏（带 `o=` 方向读数）
+                  #   landscape exit     App 自己退回竖屏
+                  #   card landscape N   卡片真的切过去了（`source=` 画布 / `card=` 卡片）
+                  #   orientation -> N   方向那一格真的写进了 settings
+                  #
+                  # `ask` 有、`card landscape` 没有 ⇒ 卡片这一侧没接上；
+                  # `card landscape` 有、`orientation ->` 没有 ⇒ 宿主没有那一格，
+                  # 画布横了而 App 仍按竖的排（下一版要换写法，不能再猜）。
+                  b"win: landscape ask now=%.0fx%.0f want=%.0fx%.0f o=%ld slot=%d n=%d",
+                  b"win: landscape exit slot=%d o=%ld b=%s",
+                  b"win: orientation -> %ld slot=%d geo=%.0fx%.0f",
+                  b"win: card landscape %d source=%.0fx%.0f card=%.0fx%.0f@%.0f,%.0f door=%d b=%@",
+                  b"win: card landscape entered by app b=",
+                  b"win: card landscape left by app b=",
+                  b"win: card landscape reset to %.0fx%.0f at %.0f,%.0f",
+                  # 两条「横屏态里被拒」的证词：停靠小窗切不了、键盘让位不参与。
+                  # 它们在日志里出现，说明那两条闸真的在拦，而不是悄悄跑过去。
+                  b"win: landscape refused while docked b=",
+                  b"win: keyboard fill ignored in landscape b=",
                   # 0.4.0 — `com.ss.iphone.ugc.Aweme`（抖音在「出生整屏」名单里）原本
                   # 断言在这里，但它四个出现点全在 `Sources/App/AevonAppHook.m`；
                   # SB 侧那份是自建承载的 `own staged` 名单，随 URL 链删掉了。
@@ -2438,8 +2461,9 @@ def main():
                   #     这一行是那次修复的读数。
                   #   `win: gesture long press bottom-right-side` = 底右内那格的长按真的
                   #     收到了（用户：「底部右侧的长按恢复默认尺寸不易触发」）。
-                  #   `win: gesture long press bottom-left-side, 横屏 not wired yet` =
-                  #     底左内那格是 V4 的位子，本版只确认格子能收到手指。
+                  #   `win: gesture long press bottom-left-side, toggle landscape` =
+                  #     底左内那格的长按真的收到了，而且真的去切横竖（0.1.0 起这里
+                  #     只记日志，0.4.65 接线）。
                   #   `win: grip ring band=` 后面带 `cell=`：两个数都是卡片宽度的比例，
                   #     卡片一变它们就变 —— 用户第 2 条「热区随悬浮窗大小变化」的判据。
                   b"win: grip ring band=",
@@ -2447,6 +2471,7 @@ def main():
                   # 只到逗号：`b"..."` 里不能放中文（bytes 只能 ASCII），而源码里
                   # 这个前缀已经唯一 —— 半句就够定位。
                   b"win: gesture long press bottom-left-side, ",
+                  b"win: raw long press bottom-left-side, ",
                   b"win: raw long press bottom-right-side, already default",
                   # 0.1.1 — 修 Aevon(89) 三条反馈的一组证据：
                   #   `win: card already default … target …` = 复位判定的**两端**都
