@@ -1376,19 +1376,24 @@ def main():
                       # b=430x932` 出现在同一秒：`top` 量的是「子视图里最像一页的
                       # 那个」，压着视口的那一格可以是另一页 ⇒ 判据说「齐了」，用户
                       # 看到的却是底部 215 pt 被裁。现在没有 `cell` 齐就不许说 ok。
-                      b"settle again %s n=%d clean=%d stale=%d top=%.0f cell=%.0f box=%.0f r=%d",
+                      b"settle again %s n=%d clean=%d stale=%d top=%.0f cell=%.0f box=%.0f bad=%d blind=%d r=%d",
                       b"settle ok %s clean=%d stale=%d top=%.0f cell=%.0f box=%.0f al=%d",
                       b"settle reload row=%ld,%ld h=%.0f box=%.0f",
                       b"settle give up %s clean=%d stale=%d top=%.0f box=%.0f",
-                      # 0.4.56 — 「每一次滑动都量一次」的那三行。判据只有一条：
-                      # 视口正中压着的那一页必须正好是视口那么高。
-                      #   `cell fit ok`      = 这一拍是齐的；
-                      #   `cell fit stale`   = 这一页比视口高（底部被裁）；
-                      #   `cell fit fix`     = 请 App 重量行高（`r=` 有没有真跑）；
-                      #   `cell fit give up` = 同一个高度两次都改不动 ⇒ 收手。
-                      b"cell fit %s cell=%.0f box=%.0f over=%.0f%s",
-                      b"cell fit fix n=%d cell=%.0f box=%.0f r=%d",
-                      b"cell fit give up cell=%.0f box=%.0f n=%d",
+                      # 0.4.56 — 「每一次滑动都量一次」的那几行。
+                      # 0.4.59 — 判据从「正中那一格」换成**整幅视口**：339 的
+                      # 14:42:24 里落点 21436、最远的行只到 18140，正中那一格
+                      # 根本不存在 ⇒ 旧读数返回 0 被当成「齐了」，这条通道整整
+                      # 2.5 秒不记账也不动作，而屏幕上是空的。现在：
+                      #   `n=` 视口里有几页；`bad=` 其中高度不对的；
+                      #   `blind=1` 有格子但没有一格盖住视口中心（落点飞了）；
+                      #   `cv=` 正中那一格的 contentView 高度（内层跟没跟）。
+                      b"cell fit %s n=%d bad=%d cell=%.0f worst=%.0f box=%.0f cv=%.0f%s%s%s",
+                      b"cell fit fix n=%d bad=%d blind=%d cell=%.0f box=%.0f r=%d",
+                      b"cell fit give up cell=%.0f box=%.0f n=%d blind=%d",
+                      # 0.4.59 — 格子 frame 对了、contentView 还按旧高度排：只请
+                      # **这一格**重新排自己（`setNeedsLayout`，不写任何几何）。
+                      b"cell cv fix n=%d cv=%.0f cell=%.0f box=%.0f",
                       # 0.4.51 — 卡片里的排版对账（`AevonHostedAudit`）。三个症状
                       # 「内容显示不全 / 点赞栏一半 / 底部标题条不见」是同一个形状：
                       # 版式比窗口高。这两行把「谁还停在 932」写成数：
@@ -1402,7 +1407,11 @@ def main():
                       # `inside settle box=717 c0=932 vid=DDanmakuPlayerView:430x849`
                       # 说明视频是按 932 排的（849 = 932 − 83 标签栏）而视口只有
                       # 717 ⇒ 用户报的「视频断层」就是这一刀。修好之后应当 634。
-                      b"layout audit n=%d vid=%.24s %.0fx%.0f cell=%.0fx%.0f",
+                      # 0.4.59 — 补上原点、contentView 与**画面那一层**（`pre=`）：
+                      # 339 里 `vid=430x634` 与 `cell=430x717` 都"对"，用户仍然看到
+                      # 断层 ⇒ 下一份日志要把「播放器摆在格子里的哪儿」与「画面图层
+                      # 自己的尺寸」也写出来，这是唯一还没被量过的两处。
+                      b"layout audit n=%d vid=%.20s %.0fx%.0f@%.0f,%.0f cv=%.0f pre=%.0fx%.0f",
                       # 唯一会动手的一句：视口比窗高 60 pt 时对**视口自己**
                       # `setNeedsLayout`。⛔ 不是 `layoutIfNeeded`（0.0.65/0.0.67
                       # 两次「应用打不开、桌面黑屏」正是「替别人的窗口补一次布局」）；
