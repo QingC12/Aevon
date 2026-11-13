@@ -9,7 +9,33 @@
 //           `stheno-逆向分析/final3/analysis/disasm-SthenoKeyboard-s0.txt`
 //
 // ---------------------------------------------------------------------------
-// 0.4.48 — 331：安全区通道**静默失效**，根因是入口量错了框（差 13 pt）
+// 0.4.49 — 332：通道通了，但输入框迟 0.5 s 才上来 —— 延迟全在入口位置
+// ---------------------------------------------------------------------------
+// 332 三组全部走完两档，一档到位、`gap=12`，用户第一次看到「输入框出现了」：
+//   `safe try why=rect cover=150 was=0 now=150 bar=500 kbtop=358 tries=1`
+//   `safe hit bot=486 kbtop=358 gap=-128 fit=0 tries=1`
+//   `safe try why=step cover=290 was=0 now=290 bar=486 kbtop=358 tries=2`
+//   `safe hit bot=346 kbtop=358 gap=12 fit=1 tries=2` → 保位到收起 → `safe back bottom=0`
+//
+// 但用户说「键盘出现 0.5 s 后输入框才出现，不是同时的」。延迟不是通道不灵，
+// 是入口挂错了拍：它挂在 `t0.7` 的 `bar` 探针上，探针 0.7 s + 复量 0.8 s，
+// 两档加起来 ≈1.5 s。而地址栏是被安全区顶上去的，写晚一秒它就晚一秒上来。
+//
+// 332 还顺手把死区量死了（两条独立读数完全一致）：
+//   `cover=150 → bar 500→486`（位移 14）  ⇒ 死区 136
+//   `cover=290 → bar 500→346`（位移 154） ⇒ 死区 136
+// ⇒ 第一档就该是「还差多少 + 136」，根本不用先写 150 白试一次。
+//
+// 0.4.49 四处：
+//   ① 入口提前到**键盘升起那一拍**（`note fix` 之后），用第一响应者现量，不等探针；
+//   ② 第一档 `cover = need + AevonKbSafePad`（初值 140，实测死区 136）；
+//      上一次 fit 过就直接照抄 `AevonKbSafeGood`，连算都不用算；
+//   ③ 复量 0.8 s → 0.35 s（332 的终值在 0.8 s 时已经稳，0.35 s 足够）；
+//   ④ 复量时用「写之前 − 写之后」的位移反推真实死区，把 `AevonKbSafePad` 校正准。
+//
+// 预期（333）：Safari 一次弹键盘只出现**一档**
+//   `safe try why=rect cover=290 … tries=1` → `safe hit bot≈346 gap≈12 fit=1 tries=1`
+//   且 `safe try` 这一行紧跟在 `note fix` 后面（同一批通知内），不再是 0.7 s 之后。
 // ---------------------------------------------------------------------------
 // 331 的 Safari 跟 329 一模一样：`bar bot=487`、`fr bot=500`、`scn safe=59/34`
 // （底部安全区还是 iOS 原值 34），而且**一条 `safe` 行都没有** —— 通道根本没进。
@@ -733,6 +759,21 @@ static volatile CGFloat AevonKbSafeNeed = 0;      ///< 本会话第一次算出�
 /// 每一档都要落在上一档之上，所以必须记住它（`×2 / ×3` 那套会过头，见下）。
 static volatile CGFloat AevonKbSafeCover = 0;
 static volatile int AevonKbSafeVerifyGen = 0;     ///< 复量代际：连写两次时作废旧的那条
+
+/// 0.4.49 — Safari 底部安全区的「死区」：写进去但不产生任何位移的那一段。
+///
+/// 332 两档读数把它量死了：
+///   `cover=150 → bar 500→486`（位移 14）  ⇒ 死区 150−14 = 136
+///   `cover=290 → bar 500→346`（位移 154） ⇒ 死区 290−154 = 136
+/// 330 推的 137 也是同一个数。所以第一档就该是「还差多少 + 136」，
+/// 而不是先写「还差多少」白等一拍。初值取 140（留 4 pt 余量，宁可略高）。
+static volatile CGFloat AevonKbSafePad = 140.0;
+/// 0.4.49 — 上一次真正 fit 时用的那个 `cover`。同一个 App 进程里第二次弹键盘
+/// 直接照抄，一档到位。332 用户报的症状就是「键盘出来 0.5 s 后输入框才出来」，
+/// 根因不是通道不灵，而是**第一次每档都要等 0.7 s 探针 + 0.8 s 复量**。
+static volatile CGFloat AevonKbSafeGood = 0.0;
+/// 0.4.49 — 这一档写下去之前量到的底边，用来算真实位移（校正 `AevonKbSafePad`）。
+static volatile CGFloat AevonKbSafeBotBefore = 0.0;
 
 /// 0.4.47 — 高度口径（0.4.45）**默认不再自动启动**。
 ///
@@ -2369,9 +2410,18 @@ static void AevonKbSafeTry(CGFloat barBot, CGFloat kbTop, const char *why) {
     // `cover=274 → barBot 487→349`（位移 138）⇒ Safari 底部安全区里有一段
     // ≈137 的死区，位移 ≈ cover − 137。所以 ×3 = 411 会多让 130 多，
     // 把地址栏顶到屏幕中间；而「按差值 + 12」两到三档就能收在 `gap≈12`。
+    //
+    // 0.4.49 — 但两档本身就是延迟的来源（332：键盘出来 0.5 s 后输入框才出来）。
+    // 死区已经是**已知量**（332 实测 136），第一档就该把它一起加进去：
+    //   `cover = 还差多少 + 136` = 150 + 140 = 290 ⇒ 位移 154 ⇒ bar 346 ⇒ 一档到位。
+    // 上一次 fit 过的话更省，直接照抄那个值。
     CGFloat cover;
     if (AevonKbSafeTries == 0) {
-        cover = AevonKbSafeNeed;
+        if (AevonKbSafeGood > 40.0 && AevonKbSafeGood < worldH - 140.0) {
+            cover = AevonKbSafeGood;
+        } else {
+            cover = AevonKbSafeNeed + AevonKbSafePad;
+        }
     } else {
         CGFloat step = (bot > 1.0) ? (bot - kbTop + 12.0) : (AevonKbSafeNeed * 0.5);
         if (step < 8.0) step = 8.0;
@@ -2379,6 +2429,7 @@ static void AevonKbSafeTry(CGFloat barBot, CGFloat kbTop, const char *why) {
     }
     if (cover > worldH - 140.0) cover = worldH - 140.0;
     AevonKbSafeCover = cover;
+    AevonKbSafeBotBefore = bot;         // 0.4.49 — 复量时用它算真实位移
     UIEdgeInsets now = AevonKbSafeInsetsRead(rvc);
     if (AevonKbSafeSaved < 0.0) AevonKbSafeSaved = now.bottom;
     CGFloat want = AevonKbSafeSaved + cover;
@@ -2396,7 +2447,12 @@ static void AevonKbSafeTry(CGFloat barBot, CGFloat kbTop, const char *why) {
     }
     AevonKbSafeVerifyGen += 1;
     int gen = AevonKbSafeVerifyGen;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.80 * NSEC_PER_SEC)),
+    // 0.4.49 — 复量 0.8 s → 0.35 s。
+    //
+    // 安全区写下去之后 App 的重排是跟键盘动画并行的，332 的两档读数在 0.8 s
+    // 时已经完全稳定（`bot=486` / `bot=346` 都是终值），0.35 s 足够，
+    // 而这一刀直接把「第二档什么时候发生」提前了 0.45 s。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (gen != AevonKbSafeVerifyGen) return;
         AevonKbSafeVerify();
@@ -2461,7 +2517,18 @@ static void AevonKbSafeVerify(void) {
                  bot, kbTop, kbTop - bot, (int)fit, (int)AevonKbSafeTries);
         AevonKbLog(line);
     }
+    // 0.4.49 — 从「写之前」到「写之后」的位移里反推真实死区。
+    // 332：`cover=150 → 500→486`（位移 14）⇒ 死区 136；`cover=290 → 500→346`
+    // （位移 154）⇒ 也是 136。两条独立读数一致，所以这个量是稳定的，
+    // 学到之后 `cover = need + Pad` 就能一档到位。
+    CGFloat moved = AevonKbSafeBotBefore - bot;
+    if (moved > 5.0 && AevonKbSafeCover > moved + 20.0) {
+        CGFloat pad = AevonKbSafeCover - moved;
+        if (pad > 20.0 && pad < 400.0) AevonKbSafePad = pad;
+    }
     if (fit) {
+        // 0.4.49 — 记下这次成功的 `cover`，同一个 App 进程里下次弹键盘直接照抄。
+        if (AevonKbSafeCover > 40.0) AevonKbSafeGood = AevonKbSafeCover;
         AevonKbSafeKept = 1;
         return;
     }
@@ -3683,6 +3750,24 @@ static void AevonKbPostNote(id self, SEL _cmd, id name, id object, id userInfo) 
                  begin2.size.width, begin2.size.height, begin2.origin.x, begin2.origin.y,
                  (int)AevonKbScreenMode, (int)AevonKbHeightMode);
         AevonKbLog(line);
+    }
+    // 0.4.49 — 安全区让位在**键盘升起这一拍**就写，不再等 0.7 s 的 `bar` 探针。
+    //
+    // 332 用户报的是「键盘出来 0.5 s 后输入框才出来」：通道本身通了（两档
+    // `cover=150 → 290` 都命中），延迟全部来自入口的位置 —— 它挂在 `t0.7` 探针上，
+    // 探针 0.7 s + 复量 0.8 s，两档就是 1.5 s。而 Safari 的地址栏是被安全区
+    // 顶上去的，写晚一秒它就晚一秒上来，视觉上就是「先出键盘、再出输入框」。
+    //
+    // 这里改用第一响应者**现量**（`AevonKbSafeFocusBottom`，不依赖探针），
+    // 通知到达即写。App 的重排与键盘升起动画并行，观感就是同时的。
+    // ⛔ 只在主窗量得到焦点时才走这条；量不到（Filza 那种自绘面板）仍然由
+    // `why=kbwin` 那一支在探针里处理。
+    if (end2.origin.y > 40.0 && AevonKbSafeWrote == 0
+        && AevonKbSafeKept == 0 && AevonKbSafeDead == 0) {
+        CGFloat focusBot = AevonKbSafeFocusBottom(AevonKbAppMainWindow());
+        if (focusBot > 1.0 && AevonKbRectGivenUp(end2.origin.y - focusBot)) {
+            AevonKbSafeTry(0.0, end2.origin.y, "rect");
+        }
     }
     orig(self, _cmd, name, object, fixed);
     [fixed release];
