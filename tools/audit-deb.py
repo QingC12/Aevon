@@ -1652,6 +1652,32 @@ def main():
                       b"app: rot hook n=%d app=%d",
                       b"app: rot hook restore n=%d",
                       b"app: rot scene act=%ld win=%lu",
+                      # 0.4.78 — 切横换杠杆：**present 一个只答横屏的透明 VC**
+                      # 让 UIKit 自己去要几何（355 判决：`rot chain` 十层 + `hook
+                      # n=5 app=1` 全换成「答放行」之后，`rot ask 1 mask=24` 与
+                      # `rot ask 0 mask=2` 报的是**同一个** BSActionErrorDomain 1
+                      # ⇒ 我们直发的那条请求根本没走到 VC 协商；而用户手点全屏时
+                      # 世界确实按 `page sheet AWELandscapeNavigationController`
+                      # 转过去了 ⇒ 能转世界的是 presentation，不是 request）。
+                      #   `app: rot keeper show from=类名` ⇒ 守门 VC 立起来了；
+                      #   `app: rot keeper hide`           ⇒ want=0 撤下来；
+                      #   `app: rot keeper passthru cls=类名 off=1` ⇒ 转场容器
+                      #        交互已关（触摸穿透到承载页）；off=0 表示 superview
+                      #        是 window、宁可不穿透也没动它；
+                      #   `app: rot keeper spin world=WxH` ⇒ 立起来 1.2 s 后世界
+                      #        的形状。**717x430 = UIKit 真转了；430x717 = 没转**
+                      #        （下一版改 presentation 风格 / 包 UINavigationController）；
+                      #   `app: rot keeper wait n=N` / `give up` ⇒ 找不到可 present
+                      #        的顶层 VC（转场中），重试三次后放弃；
+                      #   `app: rot ask retired n=2`       ⇒ 直发请求连续被拒两次，
+                      #        自动退场不再刷日志（守门 VC 那条路不依赖它）。
+                      b"app: rot keeper show from=%s",
+                      b"app: rot keeper hide",
+                      b"app: rot keeper passthru cls=%s off=%d",
+                      b"app: rot keeper spin world=%.0fx%.0f",
+                      b"app: rot keeper wait n=%d",
+                      b"app: rot keeper give up",
+                      b"app: rot ask retired n=2",
                       # 0.4.72 — 撤 0.4.71 的 `app: rot exit ask`（抖音全屏态竖屏请求
                       # 一律 BSActionErrorDomain错误1，两次全拒，纯噪音）。
                       # 退出判据看宿主侧：unpin → frame drift want=430x717 →

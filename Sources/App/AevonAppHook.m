@@ -6937,6 +6937,11 @@ static CGSize AevonRotWorld(void) {
 /// 「要横」。失败一律只有一行日志，不改任何几何 —— 猜一个形状出来就是 0.4.65
 /// 那种「看着转了、其实没转」的样子。
 static void AevonSioNudgeAll(void);
+/// 0.4.78 — `requestGeometryUpdate` 在本工程里的失败次数。355 里两种蒙版
+/// （横 24 / 竖 2）、十几发、每一发都是 `BSActionErrorDomain错误1` —— 请求
+/// 根本没走到 VC 协商那一层，再发只是刷日志。满两次自动退场，留一行
+/// `rot ask retired` 作证；守门 VC 那条路不依赖它。
+static int AevonRotAskFails = 0;
 static void AevonRotAsk(BOOL on) {
     // ⛔ 同 `AevonRotForce`：这条路上全是 UIKit（`connectedScenes` / `windows` /
     // `requestGeometryUpdate`），只在主线程成立。放到函数最前面，所有调用点
@@ -6945,6 +6950,14 @@ static void AevonRotAsk(BOOL on) {
         dispatch_async(dispatch_get_main_queue(), ^{
             AevonRotAsk(on);
         });
+        return;
+    }
+    if (AevonRotAskFails >= 2) {
+        static int noted = 0;
+        if (!noted) {
+            noted = 1;
+            AevonAppLogWrite("app: rot ask retired n=2\n");
+        }
         return;
     }
     UIWindowScene *ws = AevonRotScene();
@@ -6999,6 +7012,7 @@ static void AevonRotAsk(BOOL on) {
                  (error != nil && error.localizedDescription != nil)
                      ? [error.localizedDescription UTF8String] : "-");
         AevonAppLogWrite(note);
+        if (error != nil) AevonRotAskFails += 1;
     });
 #if !__has_feature(objc_arc)
     [prefs release];
@@ -7238,8 +7252,193 @@ static void AevonOrientHookRestore(void) {
     AevonSioNudgeAll();
 }
 
+/// 0.4.78 — **透明横屏守门 VC：复刻抖音自己那条路。**
+///
+/// 355 把「让 App 转横」这条线判决完了：
+/// ① `rot chain` 摊出十层类名（TabBar → …Nav → feed → cell → playInteraction），
+///    `rot hook n=5 app=1` 说明整条链 + AppDelegate 的方向门**全部**换成了
+///    「答放行」；
+/// ② 即便如此，`rot ask 1 mask=24` 仍然 `BSActionErrorDomain错误1` —— 而且
+///    `rot ask 0 mask=2`（请求**竖屏**）报的是同一个错。**请求根本没走到 VC
+///    协商那一层**，所以方向回答换多少层都是白换；
+/// ③ 13:05:58 用户手点抖音全屏：`card landscape entered by app vid=717x430@0,0`
+///    + `rot follow 1 world=717x430` —— App 自己把世界转过去了，而同一份日志
+///    里紧挨着的是 `page sheet AWELandscapeNavigationController`。
+///
+/// 把 ③ 和 ② 放一起只剩一条解释：**能转世界的不是 `requestGeometryUpdate`，
+/// 是「present 一个只支持横屏的全屏 VC」**。UIKit 在 presentation 落地时按
+/// presented VC 的 `supportedInterfaceOrientations` /
+/// `preferredInterfaceOrientationForPresentation` 自己去要一次几何更新，那条
+/// 请求从 UIKit 内部发出 —— 抖音的全屏播放器走的就是它，我们直接发的那条却
+/// 一律被拒（四版、十几次、两种蒙版）。
+///
+/// 所以这一版不再猜「该 hook 谁」，改成**造一个和抖音全屏播放器同构的东西**：
+/// 背景全透明、`OverFullScreen`、只答横屏的 VC。want=1 时 present 它，世界被
+/// UIKit 转过去；want=0 时 dismiss，世界转回竖。抖音的播放器是「看得见的那个」，
+/// 我们这个是「看不见的那个」，对系统来说同一类东西。
+///
+/// ⚠️ 触摸必须穿透：presented 那一层容器会把落在自己身上的触摸吃掉，横屏后
+/// 视频就拖不动了。容器里只有我们这一个透明视图，所以 `viewDidAppear` 里把
+/// **容器**的交互整体关掉，命中测试继续往下走到承载页（见 `passthru` 那行）。
+@interface AevonRotKeeper : UIViewController
+@end
+
+@implementation AevonRotKeeper
+- (void)loadView {
+    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 480)];
+    v.backgroundColor = [UIColor clearColor];
+    v.opaque = NO;
+    v.userInteractionEnabled = NO;
+    v.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.view = v;
+#if !__has_feature(objc_arc)
+    [v release];
+#endif
+}
+- (BOOL)shouldAutorotate {
+    return YES;
+}
+- (NSUInteger)supportedInterfaceOrientations {
+    // 只在窗口期答横屏：want=0 之后答竖屏，dismiss 的那一拍世界自己转回去。
+    return (AevonRotWantSeen == 1)
+        ? (UIInterfaceOrientationMaskLandscapeLeft | UIInterfaceOrientationMaskLandscapeRight)
+        : UIInterfaceOrientationMaskPortrait;
+}
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+    return UIInterfaceOrientationLandscapeRight;
+}
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    UIView *host = self.view.superview;
+    if (host == nil) return;
+    // ⛔ 只关「转场容器」这一层。若 superview 直接是 window（某些 presentation
+    // 风格会这样），关掉它等于全 App 没触摸 —— 那比不能拖视频严重得多，宁可
+    // 放弃穿透也不动 window。
+    BOOL isWindow = [host isKindOfClass:[UIWindow class]];
+    if (!isWindow) host.userInteractionEnabled = NO;
+    NSString *name = NSStringFromClass([host class]);
+    char line[160];
+    snprintf(line, sizeof(line), "app: rot keeper passthru cls=%s off=%d\n",
+             name.length > 0 ? [name UTF8String] : "-", isWindow ? 0 : 1);
+    AevonAppLogWrite(line);
+}
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    UIView *host = self.view.superview;
+    if (host != nil && ![host isKindOfClass:[UIWindow class]]) {
+        host.userInteractionEnabled = YES;
+    }
+}
+@end
+
+static AevonRotKeeper *AevonRotKeeperVC = nil;
+static int AevonRotKeeperTries = 0;
+
+/// 把守门 VC 立起来。presenter 取 key window 的 presented 链顶层 —— present
+/// 到非顶层会被 UIKit 转投到顶层，日志里就分不清是谁presented的。
+static void AevonRotKeeperShow(void) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonRotKeeperShow();
+        });
+        return;
+    }
+    if (AevonRotKeeperVC != nil) {
+        if (AevonRotKeeperVC.presentingViewController != nil) {
+            // 已经挂着：只叫系统重算一遍（窗口期页面可能换过，缓存老了）。
+            // ⛔ 走 `sel_registerName`：这个选择子 iOS 16 才有，直接写消息发送
+            // 会触发 `-Wunguarded-availability`（TARGET 是 15.0），CI 当错误。
+            SEL nudge = sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
+            if ([AevonRotKeeperVC respondsToSelector:nudge]) {
+                ((void (*)(id, SEL))objc_msgSend)(AevonRotKeeperVC, nudge);
+            }
+            return;
+        }
+        // 被抖音换页一并带走了（presenting 变 nil）：放掉，下面重建。
+#if !__has_feature(objc_arc)
+        [AevonRotKeeperVC release];
+#endif
+        AevonRotKeeperVC = nil;
+    }
+    UIWindow *kw = AevonKeyWindow();
+    UIViewController *from = [kw rootViewController];
+    int hops = 0;
+    while (from != nil && hops < 10) {
+        UIViewController *p = [from presentedViewController];
+        if (p == nil || p.isBeingDismissed) break;
+        from = p;
+        hops += 1;
+    }
+    // present 的三条前置：有 VC、它的 view 已经在窗上、它自己不在转场里。
+    if (from == nil || from.view.window == nil
+        || from.isBeingPresented || from.isBeingDismissed) {
+        if (AevonRotKeeperTries < 3) {
+            AevonRotKeeperTries += 1;
+            char line[96];
+            snprintf(line, sizeof(line), "app: rot keeper wait n=%d\n",
+                     AevonRotKeeperTries);
+            AevonAppLogWrite(line);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         (int64_t)(0.45 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                AevonRotKeeperShow();
+            });
+        } else {
+            AevonAppLogWrite("app: rot keeper give up\n");
+            // 计数归零：下一次 `ApplyWant`（band 通知那一拍）还能再试三轮 ——
+            // 抖音正在做长转场时，present 会连着失败好几次。
+            AevonRotKeeperTries = 0;
+        }
+        return;
+    }
+    AevonRotKeeper *k = [[AevonRotKeeper alloc] init];
+    k.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    k.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    AevonRotKeeperVC = k;
+    NSString *fromName = NSStringFromClass([from class]);
+    char line[192];
+    snprintf(line, sizeof(line), "app: rot keeper show from=%s\n",
+             fromName.length > 0 ? [fromName UTF8String] : "-");
+    AevonAppLogWrite(line);
+    [from presentViewController:k animated:NO completion:^{
+        AevonRotKeeperTries = 0;
+    }];
+}
+
+/// 撤掉守门 VC。dismiss 之后 UIKit 按底层（已还原成竖屏的）层级再要一次几何。
+static void AevonRotKeeperHide(void) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonRotKeeperHide();
+        });
+        return;
+    }
+    AevonRotKeeper *k = AevonRotKeeperVC;
+    if (k == nil) return;
+    AevonRotKeeperVC = nil;
+    AevonRotKeeperTries = 0;
+    UIViewController *p = k.presentingViewController;
+    if (p != nil) {
+        [p dismissViewControllerAnimated:NO completion:nil];
+    }
+    AevonAppLogWrite("app: rot keeper hide\n");
+#if !__has_feature(objc_arc)
+    [k release];
+#endif
+    AevonSioNudgeAll();
+}
+
 /// 读一次宿主要求（`AevonRotWant`）。值和上一次一样就什么都不做。
 static void AevonRotApplyWant(void) {
+    // 0.4.78 — 整条路（present / dismiss / method_setImplementation / UIKit 查询）
+    // 只认主线程。判重之前就切，否则「非主线程那一通被 dispatch 走、判重又把
+    // 重投进来的那一通吞掉」＝ App 侧零动作零日志（0.4.67 踩过一次）。
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonRotApplyWant();
+        });
+        return;
+    }
     char text[32] = {0};
     Boolean ok = NO;
     CFStringRef domain = AevonRotDomain();
@@ -7273,6 +7472,12 @@ static void AevonRotApplyWant(void) {
     if (want == AevonRotWantSeen && !retry) return;
     AevonRotWantSeen = want;
     AevonWantTryAt = fsNow;
+    // 0.4.78 — 守门 VC 立在**判重之前**：`AevonRotSent` 那两条早退还留着（它们
+    // 挡的是「重复发请求」），但「守门 VC 还在不在」不能靠那两个值推断 ——
+    // 抖音自己转横时 `RotSent` 也会变 1，那种状态下长按一次不能让 VC 缺位。
+    if (want == 1 && AevonRotKeeperVC == nil) {
+        AevonRotKeeperShow();
+    }
     // 已经在这个状态上就不再发：`requestGeometryUpdate` 每发一次都要走一趟系统
     // 协商，重复发等于让窗口闪一下。
     if (AevonRotSent == want && !retry) return;
@@ -7287,16 +7492,13 @@ static void AevonRotApplyWant(void) {
     // door=3 wrote=2`），问了也白问。直接报「全屏已退」—— 宿主收到 0 会把
     // scene frame、画布、卡片一起收回去，与「抖音自己退全屏」同一条路。
     if (want == 0) {
-        if (![NSThread isMainThread]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                AevonRotApplyWant();
-            });
-            return;
-        }
         // 0.4.75 — 先还原 0.4.74 的方向回答窗口（`supportedInterfaceOrientations`
         // 换回原实现 + 全链 setNeedsUpdate）：系统重算后 VC 重答 portrait，
         // 世界自己转回竖 —— 不再需要等宿主解钉或抖音自己退。
         AevonOrientHookRestore();
+        // 0.4.78 — 再撤守门 VC：它一撤，底层那份「答竖屏」的层级接管，UIKit
+        // 按它再要一次几何，世界转回竖。
+        AevonRotKeeperHide();
         CGSize w2 = AevonRotWorld();
         if (w2.width > w2.height + 40.0) {
             AevonRotFeedExit = 1;
@@ -7304,18 +7506,35 @@ static void AevonRotApplyWant(void) {
             AevonRotPublish(NO, w2, CGRectNull);
             return;
         }
+        return;
     }
-    // 0.4.77 — 切横主路：整条协商链（presented → TabBar.selected → Nav.top →
-    // 子 VC）**每层**的方向回答与 shouldAutorotate 全部临时换成「答放行」，
-    // 外加 AppDelegate 的 `application:supportedInterfaceOrientationsForWindow:`
-    // 方向门（353 挂根无效、354 挂叶子也无效 ⇒ 协商节点在链中间或 App 级，
-    // 再猜一个类又是一版空跑）。然后正常发 `requestGeometryUpdate`。
+    // 0.4.78 — 切横主路：**present 一个只答横屏的透明 VC**，让 UIKit 自己去要
+    // 那一次几何更新（抖音的全屏播放器就是这么转的，见 `AevonRotKeeper` 注释）。
+    // 0.4.77 的整链 hook 保留：它保证世界转过去之后，底下那十层 VC 不会立刻
+    // 把方向掰回竖屏（`shouldAutorotate` 也一起换了）。
     // 0.4.74 的 tap 全屏按钮已删：352 七连 miss，且 sheet 全屏页链路本身
     // 就要 1~2 s —— 慢的来源。
-    if (want == 1 && [NSThread isMainThread]) {
-        AevonOrientHookInstall();
-    }
-    AevonRotAsk(want == 1);
+    AevonOrientHookInstall();
+    AevonRotKeeperShow();
+    // 备用杠杆：守门 VC 已在场时，系统对 `requestGeometryUpdate` 的校验对象变成
+    // 「顶层那个答横屏的 VC」，这一发有机会放行。真放行了也就不需要 UIKit 自己
+    // 那一次；失败满两次自动退场（`AevonRotAskFails`）。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (AevonRotWantSeen == 1) AevonRotAsk(YES);
+    });
+    // 判据：守门 VC 立起来 1.2 s 后世界是什么形状。`717x430` ⇒ UIKit 真替我们
+    // 要到了那一次几何（长按就该直接转）；`430x717` ⇒ presentation 没触发旋转，
+    // 下一版改 presentation 风格 / 换成包一个 UINavigationController。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (AevonRotWantSeen != 1) return;
+        CGSize w = AevonRotWorld();
+        char line[128];
+        snprintf(line, sizeof(line), "app: rot keeper spin world=%.0fx%.0f\n",
+                 w.width, w.height);
+        AevonAppLogWrite(line);
+    });
 }
 
 /// 0.4.66 — 宿主刚给这张卡发过 band：**把当前横竖重报一次**，判重放行。
