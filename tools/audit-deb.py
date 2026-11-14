@@ -1820,6 +1820,19 @@ def main():
                       b"app: rot pinch dest=%ld cls=%s",
                       b"app: rot pinch miss why=nogesture leaf=%s",
                       b"app: rot pinch fire round=%d scale=%.2f ok=%d world=%.0fx%.0f",
+                      # 0.4.86 — 两条新主线：
+                      #   · `rot land hold world=…` ⇒ 抖音横版播放器在位、世界被它
+                      #     请求回竖，我们**不报 0**（363 那个「横一下又回竖」的修复）；
+                      #   · `rot auto enter fire cls=X how=find|saved` ⇒ 直接调
+                      #     `autoEnterLandscapeFeed` 让抖音进横屏（363 的方法级答案）。
+                      #     `seen` / `miss` / `nosel` / `throw` 是它没动手的四种原因。
+                      b"app: rot land hold world=%.0fx%.0f vid=%.0fx%.0f",
+                      b"app: rot land have cls=%s",
+                      b"app: rot auto enter seen",
+                      b"app: rot auto enter miss",
+                      b"app: rot auto enter fire cls=%s how=%s",
+                      b"app: rot auto enter nosel cls=%s",
+                      b"app: rot auto enter throw",
                       b"app: rot feed hold land page",
                       b"app: rot turn n=%d world=%.0fx%.0f door=%d hookn=%d",
                       b"app: rot turn ok n=%d world=%.0fx%.0f",
