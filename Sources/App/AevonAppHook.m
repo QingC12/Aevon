@@ -6674,6 +6674,15 @@ static int AevonRotFeedStreak = 0;
 /// 判据：链上**现在**有 Landscape 页 ⇒ 保持上一拍的上报（什么都不发），
 /// 宿主会继续把 scene 钉在横版画布上。
 static int AevonLandHoldNotes = 0;
+/// 0.4.87 — 「世界第一次变横」的时刻。只给「刚进横屏那一小段」的退出闸用。
+///
+/// 364 的那两秒里世界是横的、链上还没有 Landscape 页，两条判据都不成立 ⇒
+/// 我们自己把刚点开的全屏报了 0。但「世界横」不能当永久判据：宿主把 scene 钉
+/// 在 717x430 之后，App 的世界**永远不会自己回竖** —— 拿它做唯一条件就是
+/// 自锁（用户点返回退出横屏，卡片也不再回来）。所以只认「刚变横的 6 秒」：
+/// 那正好是抖音回头请求一次竖屏几何的窗口（363/364 都是 2 秒内），窗口之外
+/// 仍按老规矩（链上有没有 Landscape 页 + `rot feed exit` 三拍）判退出。
+static double AevonRotOnSince = 0;
 /// 0.4.83 — 「横版播放器在位、所以不收卡」这条判据的日志配额：只证明这条闸真
 /// 生效过，稳态下一行都不写。刷新源 = want 上升沿清零。
 static int AevonRotFeedHoldNotes = 0;
@@ -7866,16 +7875,29 @@ static void AevonRotLookDump(BOOL withPanes) {
 /// 链上有没有抖音自己的横版页（`AWELandscapeNavigationController` 那一路）。
 /// 只读：走一遍容器链读类名，代价等同 `AevonOrientChain`。
 static BOOL AevonChainHasLandscape(void) {
-    UIWindow *kw = AevonKeyWindow();
-    UIViewController *top = [kw rootViewController];
-    if (top == nil) return NO;
-    Class chain[12];
-    int n = AevonOrientChain(top, chain, 12);
-    int i;
-    for (i = 0; i < n; i++) {
-        NSString *nm = NSStringFromClass(chain[i]);
-        if (nm.length == 0) continue;
-        if ([nm rangeOfString:@"Landscape"].location != NSNotFound) return YES;
+    // 0.4.87 — 扫**全部** window，不再只看 keyWindow。
+    //
+    // 364（18:17:13 竖屏点全屏）已经在 `page sheet AWELandscapeNavigationController
+    // h=430` 里看见横版页了，可同一轮 `rot land hold` 却没能在 18:17:15 之前成立
+    // —— 横版页是 present 出来的，它挂的那个 window 不一定是 `AevonKeyWindow()`
+    // 选中的那一个（那里按 `isKeyWindow` 挑，浮层窗往往不是 key）。链上少看一眼，
+    // 就把「刚点开的全屏」当成了「App 自己退回竖屏」。
+    UIApplication *application = [UIApplication sharedApplication];
+    if (application == nil) return NO;
+    for (UIScene *one in [application connectedScenes]) {
+        if (![one isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *win in [(UIWindowScene *)one windows]) {
+            UIViewController *top = [win rootViewController];
+            if (top == nil) continue;
+            Class chain[12];
+            int n = AevonOrientChain(top, chain, 12);
+            int i;
+            for (i = 0; i < n; i++) {
+                NSString *nm = NSStringFromClass(chain[i]);
+                if (nm.length == 0) continue;
+                if ([nm rangeOfString:@"Landscape"].location != NSNotFound) return YES;
+            }
+        }
     }
     return NO;
 }
@@ -9084,6 +9106,32 @@ static void AevonRotApplyWant(void) {
     AevonRotPursue();
 }
 
+/// 0.4.87 — 「世界此刻还横着」= 横屏仍然成立。见 `AevonRotTick` 里那段 364 的现场。
+///
+/// 364（18:17:13 竖屏点全屏）：`rot follow 1 world=717x430 vid=717x430@0,0` 之后
+/// 两秒，抖音回头请求一次竖屏几何，`AevonRotProbe` 立刻答不出视频区（`vid=0x0`）
+/// ⇒ on=0。那一拍链上 `AWELandscapeNavigationController` 还没排进来，0.4.86 的
+/// 闸（只看链上有没有 Landscape 页）放它过去了 ⇒ 宿主 `rot follow 0` → unpin →
+/// scene 被推回 430x717，而 App 的 window 已经是 717x430 —— 呈现层只显示左边
+/// 430 pt，右边 287 pt 就是用户报的「右边空白」。
+///
+/// ⇒ 只要**世界自己还横着**（宽 > 高 + 40，与全工程同一个判据），退出就一律不算数。
+static BOOL AevonRotWorldSideways(CGSize world) {
+    return world.width > world.height + 40.0;
+}
+
+/// 0.4.87 — 维护「世界第一次变横」的时刻，并回答「是不是刚进去的那几秒」。
+/// 见 `AevonRotOnSince` 上那段：窗口之外不能拿「世界横」当退出判据，否则自锁。
+static BOOL AevonRotFreshLandscape(CGSize world) {
+    if (!AevonRotWorldSideways(world)) {
+        AevonRotOnSince = 0;
+        return NO;
+    }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (AevonRotOnSince == 0) AevonRotOnSince = now;
+    return (now - AevonRotOnSince) < 6.0;
+}
+
 /// 0.4.66 — 宿主刚给这张卡发过 band：**把当前横竖重报一次**，判重放行。
 ///
 /// 为什么需要这一下：`AevonRotPublish` 只报「变化」。一个**暖启动**的 App
@@ -9100,6 +9148,9 @@ static void AevonRotForceNow(void) {
     char why[12] = {0};
     BOOL on = AevonRotProbe(&video, why, sizeof(why));
     AevonRotSent = -1;
+    // 0.4.87 — 与 `AevonRotTick` 同一条闸：开卡握手也不许把「刚横过来的世界」
+    // 报成竖屏（`band` 在切横那一拍会被宿主反复发，这条路上的 0 一样会收卡）。
+    if (!on && (AevonChainHasLandscape() || AevonRotFreshLandscape(world))) return;
     AevonRotPublish(on, world, video);
 }
 
@@ -9129,6 +9180,14 @@ static void AevonRotTick(void) {
     busy = 1;
     CGSize world = AevonRotWorld();
     if (world.width > 16 && world.height > 16) {
+        // 0.4.87 — 时间戳从「世界第一次变横」起算，不是从「on 掉下来」那一刻
+        // 起算（那样用户真退出也要白等 6 秒）。364 是 18:17:13 变横、18:17:15
+        // 就来了错误的 0，差 2 s ⇒ 落在窗口里。
+        if (AevonRotWorldSideways(world)) {
+            if (AevonRotOnSince == 0) AevonRotOnSince = CFAbsoluteTimeGetCurrent();
+        } else {
+            AevonRotOnSince = 0;
+        }
         BOOL on = NO;
         BOOL hold = NO;
         CGRect video = CGRectNull;
@@ -9150,10 +9209,12 @@ static void AevonRotTick(void) {
                 // 一次竖屏，是因为 `UIScreen.bounds` 始终是竖的（硬禁令，不许改）——
                 // 它「觉得不合法」，但画面本身是铺满的（`vid=717x430@0,0`）。
                 //
-                // ⇒ 判据：链上**现在**有 Landscape 页就保持上一拍的上报（什么都不发），
-                // 宿主会继续把 scene 钉在横版画布上；等抖音真把播放页拆掉（链上没有了）
-                // 才按原路报 0。日志配额 8 行，want 上升沿清零。
-                if (!on && AevonChainHasLandscape()) {
+                // ⇒ 判据（0.4.87 起两条）：链上**现在**有 Landscape 页，或者
+                // 世界**刚**横过来那 6 秒（`AevonRotFreshLandscape`，364 的现场
+                // 就是抖音在 2 秒内回头请求竖屏几何）—— 任一成立就保持上一拍的
+                // 上报（什么都不发），宿主会继续把 scene 钉在横版画布上；等世界
+                // 真回竖、抖音也真把播放页拆掉才按原路报 0。日志配额 8 行。
+                if (!on && (AevonChainHasLandscape() || AevonRotFreshLandscape(world))) {
                     hold = YES;
                     AevonRotFeedExit = 0;
                     AevonRotFeedStreak = 0;
@@ -9162,9 +9223,10 @@ static void AevonRotTick(void) {
                         AevonLandHoldNotes += 1;
                         char hl[176];
                         snprintf(hl, sizeof(hl),
-                                 "app: rot land hold world=%.0fx%.0f vid=%.0fx%.0f\n",
+                                 "app: rot land hold world=%.0fx%.0f vid=%.0fx%.0f why=%s\n",
                                  world.width, world.height,
-                                 video.size.width, video.size.height);
+                                 video.size.width, video.size.height,
+                                 why[0] != 0 ? why : "-");
                         AevonAppLogWrite(hl);
                     }
                 }

@@ -1043,6 +1043,18 @@ def main():
                   # 判据：`unpin` 后 2 秒内应看到 `frame drift … want=430x717 door>0`
                   # （看门狗真推下去了），再后 `exit phase2 world=430x717`。
                   b"win: landscape unpin canvas=%.0fx%.0f b=%@",
+                  # 0.4.87 — 364 的「点全屏 / 长按转横之后只有左边有画面、右边空白」。
+                  #
+                  # 根因不在 App：横屏卡一直是 `满屏宽 × 1.667 = 430x258` 的横条，
+                  # 它只盖住屏幕左边那一条；世界 717x430 缩进这条横条之后，右边
+                  # 287 pt 是**屏幕本身**从没被盖住 —— 用户看到的就是那片空白。
+                  # 这一版横屏卡改成**整屏转置**：bounds 932x430、整块转 -90°，
+                  # 视觉正好 430x932 铺满（假横/真横同一个形状，世界两侧各 107 pt
+                  # 是 1.667 与 2.167 的比例差，不是留白 bug）。
+                  #
+                  # 判据：这一行 `card` 报的是**视觉**尺寸 —— 430x932@0,0 才算铺满；
+                  # 再出现 430x258 就是退回横条了。
+                  b"win: landscape full=1 rot=-90 card=%.0fx%.0f@%.0f,%.0f b=%@",
                   b"win: card landscape exit phase1 b=",
                   b"win: card landscape exit phase2 world=%.0fx%.0f waited=%.1f b=%s",
                   b"win: keyboard fill ignored in landscape b=",
@@ -1827,6 +1839,13 @@ def main():
                       #     `autoEnterLandscapeFeed` 让抖音进横屏（363 的方法级答案）。
                       #     `seen` / `miss` / `nosel` / `throw` 是它没动手的四种原因。
                       b"app: rot land hold world=%.0fx%.0f vid=%.0fx%.0f",
+                      # 0.4.87 — 364 的第二条：`hold` 的判据从「链上有没有 Landscape
+                      # 页」扩成「链上有没有 或 世界刚横过来那 6 秒」。364 的 on=0
+                      # 发生在 18:17:15，`vid=0x0`、链上那一拍还没排进横版页 ⇒ 0.4.86
+                      # 的闸放行 ⇒ 宿主 unpin 把 scene 推回 430x717，而 App 的 window
+                      # 已经是 717x430：呈现层只显示左边 430，右边 287 空白。
+                      # `why=` 就是那一拍探针的答案（feed/pinch/land…）。
+                      b"app: rot land hold world=%.0fx%.0f vid=%.0fx%.0f why=%s",
                       b"app: rot land have cls=%s",
                       b"app: rot auto enter seen",
                       b"app: rot auto enter miss",
