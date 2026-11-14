@@ -1135,6 +1135,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         if landscapeOn && landscapeFake {
             Log.write("win: landscape toggle off fake b=" + bundle)
             setLandscape(false)
+            // 0.4.74 — tap 命中的那一拍 App 世界可能已经转横（假横只是过渡态，
+            // App 正在进全屏页）：不补发 want=0，探针下一拍报 on=1，sweep 会把
+            // 刚退竖的卡片又掰回横版（351 的 10:38:01→10:38:02 就是这一幕）。
+            // 发 0 走真横退出链路（解钉 → phase2），与「抖音自己退全屏」对齐。
+            AevonRotAsk(bundle, 0)
             return
         }
         if !landscapeOn {

@@ -1629,6 +1629,16 @@ def main():
                       # frame 一起收回去；没有这一行而卡片横着不退 ⇒ 翻页器没
                       # 认出来（看 `page pager keep`）。
                       b"app: rot feed exit world=%.0fx%.0f pager=%.0fx%.0f",
+                      # 0.4.74 — 长按切横的真通路：替用户按抖音自己的全屏按钮。
+                      #   `app: fullscreen tap hit=类名` ⇒ 找到并 tap 了（抖音进
+                      #        全屏页 → 世界转横 → promote 升真横，视频跟着转）；
+                      #   `app: fullscreen tap miss` ⇒ 当前页面没有全屏按钮，
+                      #        宿主假横兜底挂着（视频竖版横躺）。
+                      # 判据：`hit=` 后 1~2 s 内应看到 `rot probe on=1 world=717x430`
+                      # 或 `rot follow 1`；一直 miss ⇒ 按钮类名不匹配，看
+                      # `fullscreen tap miss` 出现的页面。
+                      b"app: fullscreen tap hit=%s",
+                      b"app: fullscreen tap miss",
                       # 0.4.72 — 撤 0.4.71 的 `app: rot exit ask`（抖音全屏态竖屏请求
                       # 一律 BSActionErrorDomain错误1，两次全拒，纯噪音）。
                       # 退出判据看宿主侧：unpin → frame drift want=430x717 →

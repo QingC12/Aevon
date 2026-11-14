@@ -6993,6 +6993,72 @@ static void AevonRotAsk(BOOL on) {
 #endif
 }
 
+/// 0.4.74 — 长按切横的真通路：**替用户按一下抖音自己的全屏按钮**。
+///
+/// 351 判决：假横只是 canvas 的视觉转置，App 世界纹丝不动（`rot probe on=0
+/// world=430x717`），视频永远是竖版画面横躺 —— 用户要的是「视频跟着转」。
+/// App 世界转横的唯一通路是抖音自己进全屏页（351 实证：点全屏按钮 →
+/// `page sheet AWELandscapeNavigationController` → 世界 717x430 →
+/// `AWELandscapeMediumVideoPlaye` 横版播放器 → sweep 跟随、退出还原全链正常）。
+/// `requestGeometryUpdate` 求不动（350 六次 + 351 一次，全被
+/// `supportedInterfaceOrientations: portrait` 拒）。
+///
+/// 找法：DFS 遍历 key window（上限 600 个视图），类名（小写化）含
+/// `fullscreen` 的 UIControl，可见（enabled、alpha、尺寸）才 tap。命中打
+/// `app: fullscreen tap hit=类名`；没找到打 `app: fullscreen tap miss` ——
+/// 宿主侧假横继续兜底（假横先转、本函数命中后 promote 升真横），不受影响。
+/// 0.4.74 — 上一次 tap 的时刻。限频用：同一值 1.2 s 内不重复 tap（判重
+/// 放宽后 band 通知可能连着来），但 sendActions 无效也每次都重试 ——
+/// 用户长按的意图就是转横，不能被上一次的失败堵死。
+static CFAbsoluteTime AevonFullscreenTryAt = 0;
+
+static BOOL AevonTapFullscreen(void) {
+    // ⛔ 同 `AevonRotAsk`：DFS + `sendActions` 全是 UIKit，只主线程。
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonTapFullscreen();
+        });
+        return NO;
+    }
+    UIWindow *kw = AevonKeyWindow();
+    if (kw == nil) {
+        AevonAppLogWrite("app: fullscreen tap miss (no window)\n");
+        return NO;
+    }
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:kw];
+    int seen = 0;
+    UIControl *hit = nil;
+    while (stack.count > 0 && seen < 600 && hit == nil) {
+        UIView *v = [stack lastObject];
+        [stack removeLastObject];
+        seen += 1;
+        if (v == nil) continue;
+        for (UIView *s in [v subviews]) [stack addObject:s];
+        if (![v isKindOfClass:[UIControl class]]) continue;
+        UIControl *c = (UIControl *)v;
+        if (!c.isEnabled || c.hidden || c.alpha < 0.05) continue;
+        CGSize sz = [c bounds].size;
+        if (sz.width < 8.0 || sz.height < 8.0) continue;
+        NSString *name = NSStringFromClass([c class]);
+        if (name.length == 0) continue;
+        NSRange r = [[name lowercaseString] rangeOfString:@"fullscreen"];
+        if (r.location == NSNotFound) continue;
+        hit = c;
+    }
+    if (hit != nil) {
+        NSString *name = NSStringFromClass([hit class]);
+        [hit sendActionsForControlEvents:UIControlEventTouchUpInside];
+        char line[128];
+        snprintf(line, sizeof(line), "app: fullscreen tap hit=%s\n", [name UTF8String]);
+        AevonAppLogWrite(line);
+        AevonFullscreenTryAt = CFAbsoluteTimeGetCurrent();
+        return YES;
+    }
+    AevonFullscreenTryAt = CFAbsoluteTimeGetCurrent();
+    AevonAppLogWrite("app: fullscreen tap miss\n");
+    return NO;
+}
+
 /// 读一次宿主要求（`AevonRotWant`）。值和上一次一样就什么都不做。
 static void AevonRotApplyWant(void) {
     char text[32] = {0};
@@ -7018,11 +7084,20 @@ static void AevonRotApplyWant(void) {
     }
     if (text[0] == '\0') return;
     int want = (text[0] == '1') ? 1 : 0;
-    if (want == AevonRotWantSeen) return;
+    // 0.4.74 — 判重放宽：351 里 10:37:55 的一次 ask 把 `AevonRotWantSeen` 置 1，
+    // 10:37:59 用户的长按（want=1）被 `want == WantSeen` 直接吞掉 —— App 侧零
+    // 动作零日志。切横的重试条件改成「距上次 tap > 1.2 s」：tap 命中后 App 自己
+    // 转横、不需要重发；miss（页面没有全屏按钮）⇒ 用户切到有按钮的页面再按
+    // 一次必须真的尝试。
+    CFAbsoluteTime fsNow = CFAbsoluteTimeGetCurrent();
+    int retry = (want == 1
+                 && (AevonFullscreenTryAt == 0
+                     || fsNow - AevonFullscreenTryAt > 1.2));
+    if (want == AevonRotWantSeen && !retry) return;
     AevonRotWantSeen = want;
     // 已经在这个状态上就不再发：`requestGeometryUpdate` 每发一次都要走一趟系统
     // 协商，重复发等于让窗口闪一下。
-    if (AevonRotSent == want) return;
+    if (AevonRotSent == want && !retry) return;
     // 0.4.70 — 再要转横先把上一轮的退出锁存清掉，否则「长按切竖再切横」的第二
     // 次请求会被锁存吞成又一次退出。
     if (want == 1) {
@@ -7047,6 +7122,13 @@ static void AevonRotApplyWant(void) {
             AevonRotPublish(NO, w2, CGRectNull);
             return;
         }
+    }
+    // 0.4.74 — 切横先试「按抖音自己的全屏按钮」（351 实证的唯一真通路）：
+    // 命中 ⇒ App 自己进全屏横播页、世界转横、探针/sweep 全链跟随，到此为止；
+    // 没命中（当前页面没有全屏按钮，如评论区/个人页）⇒ 才发
+    // `requestGeometryUpdate` 兜底（几乎必被拒，但一行日志留下证据）。
+    if (want == 1) {
+        if (AevonTapFullscreen()) return;
     }
     AevonRotAsk(want == 1);
 }
