@@ -1629,17 +1629,29 @@ def main():
                       # frame 一起收回去；没有这一行而卡片横着不退 ⇒ 翻页器没
                       # 认出来（看 `page pager keep`）。
                       b"app: rot feed exit world=%.0fx%.0f pager=%.0fx%.0f",
-                      # 0.4.75 — 长按切横主路：临时改掉顶层 VC 类的
-                      # `supportedInterfaceOrientations` 回答（352 实证：转设备
-                      # 能自动旋转 = Autorotate 放行横屏，挡住 requestGeometryUpdate
-                      # 的只是这个回答），然后 requestGeometryUpdate 直接放行。
+                      # 0.4.76 — 长按切横主路：沿协商路径走到叶子 VC，把叶子的
+                      # `supportedInterfaceOrientations` + `shouldAutorotate`
+                      # 一起临时换成「答放行」（353 实锤：0.4.75 挂根顶层
+                      # AWENormalModeTabBarController 后 ask 仍「受支持：
+                      # portrait」—— 系统问的是容器链叶子，不问根；挂叶子级后
+                      # 错误升级成事务层 BSActionErrorDomain 1，且 0.4.71 时
+                      # 全屏态竖屏请求也是这个错 —— 事务拒绝都发生在全屏过渡
+                      # 活跃期）。
                       #   `app: rot hook cls=类名`        ⇒ hook 挂上了（want=1）；
                       #   `app: rot hook restore cls=类名` ⇒ 换回原实现（want=0），
                       #        世界应随后转回竖。
+                      #   `app: rot scene act=N win=N`    ⇒ 每次 ask 前的 scene
+                      #        活跃态与窗口数 —— 事务层拒绝时的取证读数。
+                      # 判读：hook cls=叶子类 + ask failed 仍是「受支持：portrait」
+                      #  ⇒ 走链没到真叶子（容器还有更深一层，看类名再加）；
+                      # ask failed BSActionErrorDomain 1 且 scene act=0（前台活跃）
+                      #  ⇒ scene 事务在飞，等判重窗后的重试；
+                      # ask 成功（无 failed）+ rot follow 1 ⇒ 世界转横，promote fake。
                       # 0.4.74 的 `app: fullscreen tap` 已删：352 七连 miss 且
                       # sheet 链路 1~2 s 是「转横慢」的来源。
                       b"app: rot hook cls=%s",
                       b"app: rot hook restore cls=%s",
+                      b"app: rot scene act=%ld win=%lu",
                       # 0.4.72 — 撤 0.4.71 的 `app: rot exit ask`（抖音全屏态竖屏请求
                       # 一律 BSActionErrorDomain错误1，两次全拒，纯噪音）。
                       # 退出判据看宿主侧：unpin → frame drift want=430x717 →

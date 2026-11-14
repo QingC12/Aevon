@@ -6936,6 +6936,7 @@ static CGSize AevonRotWorld(void) {
 /// 「左右都行」而不是只给右：App 的界面朝哪边由系统和设备决定，我们只表达
 /// 「要横」。失败一律只有一行日志，不改任何几何 —— 猜一个形状出来就是 0.4.65
 /// 那种「看着转了、其实没转」的样子。
+static void AevonSioNudgeAll(void);
 static void AevonRotAsk(BOOL on) {
     // ⛔ 同 `AevonRotForce`：这条路上全是 UIKit（`connectedScenes` / `windows` /
     // `requestGeometryUpdate`），只在主线程成立。放到函数最前面，所有调用点
@@ -6957,16 +6958,27 @@ static void AevonRotAsk(BOOL on) {
         AevonAppLogWrite("app: rot ask no selector\n");
         return;
     }
-    // 先让根视图表个态：不少 App 用 `supportedInterfaceOrientations` 关着横屏，
-    // 不叫它重新算一遍，系统会拿上一份缓存直接把请求拒掉。
-    UIViewController *root = nil;
-    for (UIWindow *window in ws.windows) {
-        if (window.isKeyWindow) { root = window.rootViewController; break; }
+    // 先让全链每个 VC 表个态：0.4.76 — 353 实锤系统协商问的是容器链叶子
+    // （TabBar→selected→Nav→top→presented），0.4.75 只叫 root 不够 —— hook
+    // 挂了根、叶子仍答 portrait，ask 照样被拒。沿叶子走链逐个叫，顺带把
+    // 老接口 `attemptRotationToDeviceOrientation` 兜底叫一遍（deprecated
+    // 但 iOS 16 仍会触发一次重算）。
+    AevonSioNudgeAll();
+    {
+        SEL legacy = sel_registerName("attemptRotationToDeviceOrientation");
+        Method lm = class_getClassMethod([UIViewController class], legacy);
+        if (lm != NULL) {
+            ((void (*)(id, SEL))objc_msgSend)([UIViewController class], legacy);
+        }
     }
-    SEL nudge = sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
-    if (root != nil && [root respondsToSelector:nudge]) {
-        ((void (*)(id, SEL))objc_msgSend)(root, nudge);
-    }
+    // 0.4.76 — scene 状态读数：353 里 hook 到叶子级后错误升级成
+    // `BSActionErrorDomain错误1`（VC 检查过了、事务层被拒，当时抖音刚退全屏
+    // 1 秒、页面在狂刷 layout）。下一步取证要看事务被拒那一拍 scene 是否
+    // 前台活跃、有没有 key 窗 —— 事务拒绝若与活跃态相关，读数直接定位。
+    char sline[96];
+    snprintf(sline, sizeof(sline), "app: rot scene act=%ld win=%lu\n",
+             (long)ws.activationState, (unsigned long)ws.windows.count);
+    AevonAppLogWrite(sline);
     NSUInteger mask = on
         ? (UIInterfaceOrientationMaskLandscapeRight | UIInterfaceOrientationMaskLandscapeLeft)
         : UIInterfaceOrientationMaskPortrait;
@@ -6993,27 +7005,33 @@ static void AevonRotAsk(BOOL on) {
 #endif
 }
 
-/// 0.4.75 — 长按切横的真通路：**临时改掉 `supportedInterfaceOrientations`
-/// 的回答，让 `requestGeometryUpdate` 放行**。
+/// 0.4.76 — 长按切横的真通路：**临时改掉叶子 VC 的方向回答，让
+/// `requestGeometryUpdate` 放行**。
 ///
-/// 352 判决了两件事：① 0.4.74 的 tap 全屏按钮 7 连 `miss`（按钮不叫这个名，
-/// 或不是 UIControl），且 sheet 全屏页链路本身就要 1~2 s —— 慢的来源；
-/// ② 用户实测「关掉系统方向锁后转设备，抖音视频会自动旋转」—— 说明
-/// **Autorotate 检查路径放行横屏**，挡住我们的只是 `requestGeometryUpdate`
-/// 时顶层 VC 对 `supportedInterfaceOrientations` 回答的 `portrait`。
+/// 353 判决了 0.4.75 的两个错：
+/// ① hook 挂根链顶层（`AWENormalModeTabBarController`）之后 ask 依旧
+///    「受支持：portrait」—— 系统协商问的不是根，是容器链**最底层叶子**：
+///    有 presented 问 presented，UITabBarController 问 selectedViewController，
+///    UINavigationController 问 topViewController。抖音信息流的 portrait
+///    回答出自 feed 叶子 VC，根上的 hook 根本不在协商路径里。
+/// ② hook 到叶子级（`AWELandscapeNavigationController`，退全屏 1 秒后还在
+///    presented 链上）之后错误升级成 `BSActionErrorDomain错误1` —— VC 检查
+///    放行了，事务层被拒。那一拍抖音刚退全屏 1 秒、页面在狂刷 layout，
+///    大概率 scene 事务在飞；1 秒后用户手点全屏世界自己转横 → promote fake
+///    → 视频跟随。这就是用户「要手动点击全屏播放」的全部机制。
 ///
-/// 做法：want=1 到达时，把 key window 的顶层 VC（root → presented 链）的
-/// **类**的 `supportedInterfaceOrientations` 实现临时换成「答
-/// AllButUpsideDown」，全链调一遍 `setNeedsUpdateOfSupportedInterfaceOrientations`
-/// 叫系统重算缓存，然后正常发 `requestGeometryUpdate` —— 系统来问，我们答
-/// 「都支持」，放行，世界亚秒级转横。want=0 时换回原实现并再叫一遍 —— 顺带
-/// 把「退出时世界迟迟不回竖」也治了（原来只能等抖音自己退）。
+/// 0.4.76 做法：走链到叶子（`AevonOrientLeaf`），把叶子的
+/// `supportedInterfaceOrientations` 和 `shouldAutorotate` 两个实现一起换成
+/// 「want=1 期间答放行」，全链 nudge + `attemptRotationToDeviceOrientation`
+/// 叫系统重算，然后发 `requestGeometryUpdate`。ask 若仍被事务层拒，1.2 s
+/// 判重窗过后会真重试（抖音 layout 风暴过去后第二发大概率过）。
 ///
-/// ⚠️ 只换顶层那个**类**：子类 override 的话 method 就是子类的，只影响它；
-/// 没子类实现的话拿到的是基类 Method，窗口期所有 VC 都答 all —— 窗口由
+/// ⚠️ 只换叶子那个**类**：子类 override 的话 method 就是子类的，只影响它；
+/// 没子类实现的话拿到的是基类 Method，窗口期所有 VC 都答放行 —— 窗口由
 /// `AevonRotWantSeen` 把守，want=0 一到立刻还原，不影响抖音日常。
-/// 0.4.75 — 上一次 hook 的类与原实现。换回用。
+/// 0.4.75 → 0.4.76 — 上一次 hook 的类与两个原实现。换回用。
 static IMP AevonOriSIOImp = NULL;
+static IMP AevonOriAutoImp = NULL;
 static Class AevonHookedCls = Nil;
 
 static NSUInteger AevonHookSIO(id self, SEL _cmd) {
@@ -7026,19 +7044,58 @@ static NSUInteger AevonHookSIO(id self, SEL _cmd) {
     return UIInterfaceOrientationMaskPortrait;
 }
 
-/// 把 setNeedsUpdate 沿 presented 链全叫一遍（`AevonRotAsk` 只叫 root，不够
-/// —— 系统缓存的是顶层那层的答案）。
+static BOOL AevonHookAutorotate(id self, SEL _cmd) {
+    if (AevonRotWantSeen == 1) return YES;
+    if (AevonOriAutoImp != NULL) {
+        return ((BOOL (*)(id, SEL))AevonOriAutoImp)(self, _cmd);
+    }
+    return YES;
+}
+
+/// 0.4.76 — 沿 UIKit 的协商路径走到叶子：presented 链优先，容器往下钻。
+/// 与系统「顶层 VC」的解析一致（353 ①：根上的回答不参与协商）。
+static UIViewController *AevonOrientLeaf(UIViewController *start) {
+    UIViewController *v = start;
+    int hops = 0;
+    while (v != nil && hops < 8) {
+        UIViewController *next = [v presentedViewController];
+        if (next == nil && [v isKindOfClass:[UITabBarController class]]) {
+            next = [(UITabBarController *)v selectedViewController];
+        }
+        if (next == nil && [v isKindOfClass:[UINavigationController class]]) {
+            next = [(UINavigationController *)v topViewController];
+        }
+        if (next == nil) {
+            NSArray *kids = [v childViewControllers];
+            if (kids.count > 0) next = [kids lastObject];
+        }
+        if (next == nil || next == v) break;
+        v = next;
+        hops += 1;
+    }
+    return v;
+}
+
+/// 把 setNeedsUpdate 沿协商路径全叫一遍：0.4.76 起不只走 presented 链，
+/// 容器（TabBar→selected、Nav→top）也逐层叫 —— 系统缓存的是叶子那层的答案。
 static void AevonSioNudgeAll(void) {
     UIWindow *kw = AevonKeyWindow();
     if (kw == nil) return;
     UIViewController *v = [kw rootViewController];
-    int hops = 0;
     SEL nudge = sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
-    while (v != nil && hops < 8) {
+    int hops = 0;
+    while (v != nil && hops < 12) {
         if ([v respondsToSelector:nudge]) {
             ((void (*)(id, SEL))objc_msgSend)(v, nudge);
         }
-        v = [v presentedViewController];
+        UIViewController *next = [v presentedViewController];
+        if (next == nil && [v isKindOfClass:[UITabBarController class]]) {
+            next = [(UITabBarController *)v selectedViewController];
+        }
+        if (next == nil && [v isKindOfClass:[UINavigationController class]]) {
+            next = [(UINavigationController *)v topViewController];
+        }
+        v = next;
         hops += 1;
     }
 }
@@ -7047,30 +7104,36 @@ static void AevonOrientHookInstall(void) {
     // ⛔ 全是 UIKit / objc runtime，只主线程（调用点在 ApplyWant 主线程段）。
     UIWindow *kw = AevonKeyWindow();
     UIViewController *top = [kw rootViewController];
-    int hops = 0;
-    while (top != nil && [top presentedViewController] != nil && hops < 6) {
-        top = [top presentedViewController];
-        hops += 1;
-    }
     if (top == nil) return;
-    Class cls = [top class];
+    UIViewController *leaf = AevonOrientLeaf(top);
+    if (leaf == nil) return;
+    Class cls = [leaf class];
     if (cls == Nil) return;
     if (cls == AevonHookedCls) {
         // 同一个类已挂着：只需叫系统重算（窗口期间页面可能没变但缓存老了）。
         AevonSioNudgeAll();
         return;
     }
-    // 类换了（用户切了页面）：先还原旧的再挂新的。
+    // 叶子换了（用户切了页面）：先还原旧的再挂新的。
     if (AevonHookedCls != Nil && AevonOriSIOImp != NULL) {
         Method om = class_getInstanceMethod(AevonHookedCls,
                                             @selector(supportedInterfaceOrientations));
         if (om != NULL) method_setImplementation(om, AevonOriSIOImp);
+        if (AevonOriAutoImp != NULL) {
+            Method om2 = class_getInstanceMethod(AevonHookedCls,
+                                                 @selector(shouldAutorotate));
+            if (om2 != NULL) method_setImplementation(om2, AevonOriAutoImp);
+        }
         AevonHookedCls = Nil;
         AevonOriSIOImp = NULL;
+        AevonOriAutoImp = NULL;
     }
     Method m = class_getInstanceMethod(cls, @selector(supportedInterfaceOrientations));
     if (m == NULL) return;
     AevonOriSIOImp = method_setImplementation(m, (IMP)AevonHookSIO);
+    Method m2 = class_getInstanceMethod(cls, @selector(shouldAutorotate));
+    AevonOriAutoImp = (m2 != NULL)
+        ? method_setImplementation(m2, (IMP)AevonHookAutorotate) : NULL;
     AevonHookedCls = cls;
     AevonSioNudgeAll();
     NSString *name = NSStringFromClass(cls);
@@ -7085,6 +7148,11 @@ static void AevonOrientHookRestore(void) {
     Method m = class_getInstanceMethod(AevonHookedCls,
                                        @selector(supportedInterfaceOrientations));
     if (m != NULL) method_setImplementation(m, AevonOriSIOImp);
+    if (AevonOriAutoImp != NULL) {
+        Method m2 = class_getInstanceMethod(AevonHookedCls,
+                                            @selector(shouldAutorotate));
+        if (m2 != NULL) method_setImplementation(m2, AevonOriAutoImp);
+    }
     NSString *name = NSStringFromClass(AevonHookedCls);
     char line[128];
     snprintf(line, sizeof(line), "app: rot hook restore cls=%s\n",
@@ -7092,6 +7160,7 @@ static void AevonOrientHookRestore(void) {
     AevonAppLogWrite(line);
     AevonHookedCls = Nil;
     AevonOriSIOImp = NULL;
+    AevonOriAutoImp = NULL;
     AevonSioNudgeAll();
 }
 
@@ -7162,10 +7231,11 @@ static void AevonRotApplyWant(void) {
             return;
         }
     }
-    // 0.4.75 — 切横主路：把顶层 VC 类的 `supportedInterfaceOrientations`
-    // 临时换成「答 AllButUpsideDown」（352 实证：转设备能自动旋转 = Autorotate
-    // 路径放行横屏，挡住 requestGeometryUpdate 的只是这个回答），然后正常
-    // 发 `requestGeometryUpdate`。0.4.74 的 tap 全屏按钮已删：352 七连 miss，
+    // 0.4.76 — 切横主路：沿协商路径走到叶子 VC，把叶子的方向回答与
+    // shouldAutorotate 临时换成「答放行」（353 实锤：0.4.75 挂根顶层后
+    // ask 仍被拒 —— 系统问的是叶子；挂叶子级后错误升级成事务层
+    // BSActionErrorDomain 1，说明 VC 检查这条路走对了），然后正常发
+    // `requestGeometryUpdate`。0.4.74 的 tap 全屏按钮已删：352 七连 miss，
     // 且 sheet 全屏页链路本身就要 1~2 s —— 慢的来源。
     if (want == 1 && [NSThread isMainThread]) {
         AevonOrientHookInstall();
