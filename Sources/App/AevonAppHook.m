@@ -7141,6 +7141,14 @@ static int AevonOrientChain(UIViewController *start, Class *out, int cap) {
         }
         if (!dup && n < cap) out[n++] = c;
         UIViewController *next = [v presentedViewController];
+        // ⛔ 0.4.82 — **跳过我们自己的守门 VC。** 它 present 在最上层、只有一张
+        // 空 view，presented 优先的走法会一头扎进它 ⇒ 整条链从这里断掉
+        // （358 的 `rot chain cls=…>AevonRotKeeper` 就是这个形状：抖音真实那
+        // 十层连探都没探到；0.4.82 的横屏取证也因此会扫到一张空 view）。
+        if (next != nil) {
+            NSString *nn = NSStringFromClass([next class]);
+            if ([nn rangeOfString:@"AevonRotKeeper"].location != NSNotFound) next = nil;
+        }
         if (next == nil && [v isKindOfClass:[UITabBarController class]]) {
             next = [(UITabBarController *)v selectedViewController];
         }
@@ -7158,6 +7166,43 @@ static int AevonOrientChain(UIViewController *start, Class *out, int cap) {
     return n;
 }
 
+/// 协商链**最深那一层**，返回实例而不是类。
+///
+/// 0.4.82 — 取证必须从视频区那层起扫。359 的 `rot look ctl` 从
+/// `[keyWindow rootViewController].view` 起扫，1200 个节点的预算全花在
+/// `UILayoutContainerView > UITransitionView > …` 这条外壳上，最后只捞到
+/// 9 个 tabbar 控件，视频区的全屏入口一个都没进 —— 0.4.74 的 7 连 tap miss
+/// 八成也是同一个坑（不是没有那个按钮，是根本没扫到）。
+///
+/// 遍历规则与 `AevonOrientChain` 逐条对齐（presented 优先，再容器），在这里
+/// 只把「收类」换成「收实例」。
+static UIViewController *AevonOrientLeaf(UIViewController *start) {
+    UIViewController *v = start;
+    int hops = 0;
+    while (v != nil && hops < 12) {
+        UIViewController *next = [v presentedViewController];
+        // 与 `AevonOrientChain` 同一把闸：keeper 是透明空壳，钻进去只会扫到空 view。
+        if (next != nil) {
+            NSString *nn = NSStringFromClass([next class]);
+            if ([nn rangeOfString:@"AevonRotKeeper"].location != NSNotFound) next = nil;
+        }
+        if (next == nil && [v isKindOfClass:[UITabBarController class]]) {
+            next = [(UITabBarController *)v selectedViewController];
+        }
+        if (next == nil && [v isKindOfClass:[UINavigationController class]]) {
+            next = [(UINavigationController *)v topViewController];
+        }
+        if (next == nil) {
+            NSArray *kids = [v childViewControllers];
+            if (kids.count > 0) next = [kids lastObject];
+        }
+        if (next == nil || next == v) break;
+        v = next;
+        hops += 1;
+    }
+    return v;
+}
+
 /// 把 setNeedsUpdate 沿协商路径全叫一遍：不只 presented 链，容器
 /// （TabBar→selected、Nav→top）也逐层叫 —— 系统缓存的是链上那层的答案。
 static void AevonSioNudgeAll(void) {
@@ -7171,6 +7216,11 @@ static void AevonSioNudgeAll(void) {
             ((void (*)(id, SEL))objc_msgSend)(v, nudge);
         }
         UIViewController *next = [v presentedViewController];
+        // 0.4.82 — 同 `AevonOrientChain`：keeper 只是空壳，nudge 它没有意义。
+        if (next != nil) {
+            NSString *nn = NSStringFromClass([next class]);
+            if ([nn rangeOfString:@"AevonRotKeeper"].location != NSNotFound) next = nil;
+        }
         if (next == nil && [v isKindOfClass:[UITabBarController class]]) {
             next = [(UITabBarController *)v selectedViewController];
         }
@@ -7479,26 +7529,125 @@ static void AevonRotLookClass(Class c, int *budget) {
     free(ms);
 }
 
-/// 视频区里所有 UIControl（那个「全屏」按钮的真实类名）。
-/// `visited` 是总访问上限：抖音的视图树几千个节点，只在预算内走，不能白遍历。
-static void AevonRotLookControls(UIView *v, int depth, int *budget, int *visited) {
+/// 0.4.82 — 「全屏」入口的类名线索。
+///
+/// ⛔ 359 的 `rot look ctl` 扫完整棵 `rootVC.view` 只捞到 9 个 UIControl、全是
+/// tabbar ⇒ 视频区那个全屏图标**不是 UIControl**。抖音互动层大量用「自定义
+/// UIView + UITapGestureRecognizer」，按 UIControl 找永远找不到（0.4.74 的
+/// 7 连 tap miss 就是这么来的）。所以这一版按**类名**找，并且要求调用方从
+/// leaf VC 的 view 起扫（见 `AevonOrientLeaf`）。
+static const char *const AevonPaneWords[] = {
+    "FullScreen", "fullScreen", "Fullscreen", "Landscape", "landscape",
+    "SwitchScreen", "Expand", "Zoom"
+};
+
+/// 类名像不像「全屏入口」。只有强特征才算候选，因为 0.4.82 的 auto 会**真的
+/// 去点它** —— 宁可漏一次，也不能误触点赞/评论。
+static BOOL AevonPaneStrong(NSString *cn) {
+    if (cn.length == 0) return NO;
+    if ([cn rangeOfString:@"FullScreen"].location != NSNotFound) return YES;
+    if ([cn rangeOfString:@"fullScreen"].location != NSNotFound) return YES;
+    if ([cn rangeOfString:@"Fullscreen"].location != NSNotFound) return YES;
+    if ([cn rangeOfString:@"Landscape"].location != NSNotFound) return YES;
+    if ([cn rangeOfString:@"landscape"].location != NSNotFound) return YES;
+    if ([cn rangeOfString:@"SwitchScreen"].location != NSNotFound) return YES;
+    return NO;
+}
+
+/// 走一遍视图树：类名命中词表的打一行 `rot look pane`（带位置、是不是
+/// UIControl、有几个手势 —— 这三样决定下一版能不能点中），强特征的收进 `out`。
+/// `visited` 是总访问上限：抖音的视图树几千个节点，只在预算内走。
+static void AevonRotLookPanes(UIView *v, int depth, int *budget, int *visited,
+                              UIView **out, int cap, int *outN, BOOL verbose) {
     if (v == nil || budget == NULL || visited == NULL) return;
-    if (*budget <= 0 || *visited <= 0 || depth > 14) return;
+    if (*budget <= 0 || *visited <= 0 || depth > 22) return;
     *visited -= 1;
-    if ([v isKindOfClass:[UIControl class]]) {
-        CGRect r = [v convertRect:[v bounds] toView:nil];
-        NSString *cn = NSStringFromClass([v class]);
-        char line[256];
-        snprintf(line, sizeof(line), "app: rot look ctl cls=%s %.0f,%.0f %.0fx%.0f\n",
-                 (cn.length > 0) ? [cn UTF8String] : "-",
-                 r.origin.x, r.origin.y, r.size.width, r.size.height);
-        AevonAppLogWrite(line);
-        *budget -= 1;
+    NSString *cn = NSStringFromClass([v class]);
+    if (cn.length > 0) {
+        const char *c = [cn UTF8String];
+        int hit = 0;
+        size_t k;
+        for (k = 0; k < sizeof(AevonPaneWords) / sizeof(AevonPaneWords[0]); k++) {
+            if (strstr(c, AevonPaneWords[k]) != NULL) { hit = 1; break; }
+        }
+        if (hit) {
+            CGRect r = [v convertRect:[v bounds] toView:nil];
+            BOOL ctl = [v isKindOfClass:[UIControl class]];
+            NSUInteger g = [v gestureRecognizers].count;
+            if (verbose) {
+                char line[288];
+                snprintf(line, sizeof(line),
+                         "app: rot look pane cls=%s %.0f,%.0f %.0fx%.0f ctl=%d tap=%lu int=%d\n",
+                         c, r.origin.x, r.origin.y, r.size.width, r.size.height,
+                         ctl ? 1 : 0, (unsigned long)g, v.userInteractionEnabled ? 1 : 0);
+                AevonAppLogWrite(line);
+                *budget -= 1;
+            }
+            if (out != NULL && outN != NULL && *outN < cap
+                && AevonPaneStrong(cn) && v.window != nil
+                && r.size.width >= 12 && r.size.height >= 12) {
+                // 只在同一拍里用（auto 扫完立刻点），不跨时间保存：非 ARC 下
+                // 裸指针存起来就会悬垂。
+                out[*outN] = v;
+                *outN += 1;
+            }
+        }
     }
     for (UIView *s in [v subviews]) {
-        AevonRotLookControls(s, depth + 1, budget, visited);
+        AevonRotLookPanes(s, depth + 1, budget, visited, out, cap, outN, verbose);
         if (*budget <= 0 || *visited <= 0) return;
     }
+}
+
+/// 0.4.82 — 把「AwemeCore + 偏移」翻译成 `- [类 选择子]`。
+///
+/// 359 的 `rot look stack` 只能给出最近的**导出**符号
+/// （`AWEAwemeModelSetUGCTopicOuterInnerIsCaseShow + 2245212`）—— 一个无关的
+/// 函数名加两兆偏移，看不出是谁 present 了 `AWELandscapeNavigationController`。
+/// 这一版改走 objc 元数据：遍历所有类的方法表，取 `imp <= addr` 里**最接近**
+/// 的那一个，命中者就是调用者所在的方法。
+///
+/// 只做一次（`done` 闸）：全表几万条，主线程上不该反复扫；副作用只是读元数据。
+/// ⛔ 两道收窄，缺一个就会指到系统库里同地址段的方法上：
+///   ① `off < 65536` —— 单个方法体不会比这更大；
+///   ② 类名不能是系统类（UI / NS / CA / _ 开头）。
+static void AevonRotNameAddr(void *addr) {
+    static int done = 0;
+    if (done || addr == NULL) return;
+    done = 1;
+    uintptr_t target = (uintptr_t)addr;
+    Class bestCls = Nil;
+    SEL bestSel = NULL;
+    uintptr_t bestImp = 0;
+    unsigned int cn = 0;
+    Class *classes = objc_copyClassList(&cn);
+    if (classes == NULL) return;
+    unsigned int i, j;
+    for (i = 0; i < cn; i++) {
+        unsigned int mn = 0;
+        Method *ms = class_copyMethodList(classes[i], &mn);
+        if (ms == NULL) continue;
+        for (j = 0; j < mn; j++) {
+            uintptr_t imp = (uintptr_t)method_getImplementation(ms[j]);
+            if (imp <= target && imp > bestImp) {
+                bestImp = imp;
+                bestCls = classes[i];
+                bestSel = method_getName(ms[j]);
+            }
+        }
+        free(ms);
+    }
+    free(classes);
+    if (bestCls == Nil || bestSel == NULL) return;
+    if (target - bestImp >= 65536) return;
+    NSString *name = NSStringFromClass(bestCls);
+    if (name.length == 0) return;
+    if ([name hasPrefix:@"UI"] || [name hasPrefix:@"NS"]
+        || [name hasPrefix:@"CA"] || [name hasPrefix:@"_"]) return;
+    char line[320];
+    snprintf(line, sizeof(line), "app: rot look who cls=%s sel=%s off=%ld\n",
+             [name UTF8String], sel_getName(bestSel), (long)(target - bestImp));
+    AevonAppLogWrite(line);
 }
 
 /// `presentViewController:animated:completion:` 的原实现，以及它的替身。
@@ -7514,8 +7663,12 @@ static void AevonPresNew(id self, SEL _cmd, id vc, BOOL animated, id completion)
             && ([cn rangeOfString:@"Landscape"].location != NSNotFound
                 || [cn rangeOfString:@"landscape"].location != NSNotFound)
             && [cn rangeOfString:@"Aevon"].location == NSNotFound) {
-            char head[192];
-            snprintf(head, sizeof(head), "app: rot look sheet cls=%s\n", [cn UTF8String]);
+            // 0.4.82 — `from=` 是这版新加的：抖音自己 present 全屏时，发起者
+            // 就是「切横之后该叫谁」的答案，比调用栈里那串偏移好读得多。
+            NSString *from = (self != nil) ? NSStringFromClass([self class]) : nil;
+            char head[288];
+            snprintf(head, sizeof(head), "app: rot look sheet cls=%s from=%s\n",
+                     [cn UTF8String], from.length > 0 ? [from UTF8String] : "-");
             AevonAppLogWrite(head);
             NSArray *st = [NSThread callStackSymbols];
             NSUInteger cap = MIN(st.count, (NSUInteger)14);
@@ -7526,6 +7679,11 @@ static void AevonPresNew(id self, SEL _cmd, id vc, BOOL animated, id completion)
                 snprintf(line, sizeof(line), "app: rot look stack %s\n",
                          (s.length > 0) ? [s UTF8String] : "-");
                 AevonAppLogWrite(line);
+            }
+            // 栈帧 [0] 是替身自己，[1] 才是调用 present 的那一方（抖音）。
+            NSArray *ra = [NSThread callStackReturnAddresses];
+            if (ra.count > 1) {
+                AevonRotNameAddr((void *)[ra[1] unsignedLongLongValue]);
             }
         }
     }
@@ -7544,34 +7702,56 @@ static void AevonLookInstallPresent(void) {
     done = 1;
 }
 
-/// 长按那一拍打一次全套证据（进程内只打一次；主线程）。
-static void AevonRotLookDump(void) {
+/// 长按那一拍打证据。两半各有自己的闸：
+///   · 类方法列表（`rot look cls=`）进程内**只打一次** —— 链不换、方法表不会变；
+///   · 控件树（`rot look pane=`）每轮最多 2 次 —— 359 只在竖屏那一拍打过（从
+///     `rootViewController.view` 起、只收 UIControl），视频区的全屏入口一个都
+///     没进预算。0.4.82 改成「竖屏打一次、世界转横后从 leaf VC 再打一次」。
+static int AevonRotLookClsDone = 0;
+static int AevonRotLookPaneRuns = 0;
+
+static void AevonRotLookDump(BOOL withPanes) {
     if (![NSThread isMainThread]) return;
-    static int done = 0;
-    if (done) return;
     UIWindow *kw = AevonKeyWindow();
     UIViewController *top = [kw rootViewController];
     if (top == nil) return;
-    done = 1;
-    Class chain[10];
-    int n = AevonOrientChain(top, chain, 10);
-    int budget = 36;
-    int i, lv;
-    for (i = 0; i < n && budget > 0; i++) {
-        Class c = chain[i];
-        // 自己 + 两层父类：抖音的实现常落在中间那层基类上（352 的 tap 就是
-        // 在子类里找错了层）。到 UIViewController 就停，那不是抖音的代码。
-        for (lv = 0; lv < 3 && c != Nil && budget > 0; lv++) {
-            if (c == [UIViewController class] || c == [NSObject class]) break;
-            AevonRotLookClass(c, &budget);
-            c = class_getSuperclass(c);
+    if (AevonRotLookClsDone == 0) {
+        AevonRotLookClsDone = 1;
+        Class chain[10];
+        int n = AevonOrientChain(top, chain, 10);
+        int budget = 36;
+        int i, lv;
+        for (i = 0; i < n && budget > 0; i++) {
+            Class c = chain[i];
+            // 自己 + 两层父类：抖音的实现常落在中间那层基类上（352 的 tap 就是
+            // 在子类里找错了层）。到 UIViewController 就停，那不是抖音的代码。
+            for (lv = 0; lv < 3 && c != Nil && budget > 0; lv++) {
+                if (c == [UIViewController class] || c == [NSObject class]) break;
+                AevonRotLookClass(c, &budget);
+                c = class_getSuperclass(c);
+            }
         }
+        AevonAppLogWrite("app: rot look cls end\n");
+        // present 钩子尽早装：用户点全屏可能就在几秒后。
+        AevonLookInstallPresent();
     }
-    int ctlBudget = 32;
-    int ctlVisited = 1200;
-    AevonRotLookControls([kw rootViewController].view, 0, &ctlBudget, &ctlVisited);
-    AevonAppLogWrite("app: rot look end\n");
-    AevonLookInstallPresent();
+    if (withPanes && AevonRotLookPaneRuns < 2) {
+        AevonRotLookPaneRuns += 1;
+        UIViewController *leaf = AevonOrientLeaf(top);
+        UIView *root = (leaf != nil) ? leaf.view : top.view;
+        if (root == nil) return;
+        NSString *ln = NSStringFromClass([leaf class]);
+        char head[192];
+        snprintf(head, sizeof(head), "app: rot look pane start leaf=%s\n",
+                 ln.length > 0 ? [ln UTF8String] : "-");
+        AevonAppLogWrite(head);
+        // 预算比 0.4.81 宽得多：从 leaf 起扫，节点全花在视频区；depth 22 是
+        // 「cell → contentView → 互动层 → 容器 → 按钮」这五层的富余量。
+        int budget = 72;
+        int visited = 7000;
+        AevonRotLookPanes(root, 0, &budget, &visited, NULL, 0, NULL, YES);
+        AevonAppLogWrite("app: rot look end\n");
+    }
 }
 
 /// 链上有没有抖音自己的横版页（`AWELandscapeNavigationController` 那一路）。
@@ -7589,6 +7769,111 @@ static BOOL AevonChainHasLandscape(void) {
         if ([nm rangeOfString:@"Landscape"].location != NSNotFound) return YES;
     }
     return NO;
+}
+
+/// 0.4.82 — **世界转横之后，替用户按一次「全屏」。**
+///
+/// 359 的证据链已经完整：
+///   · 世界能真转横，并且**站住了**（`rot turn ok n=1 world=717x430`，之后一路
+///     `rot turn ok n=0` 到用户自己长按退出，全程没有一条 `rot feed exit`
+///     —— 0.4.81 堵的两条自毁路都成了）；
+///   · 但抖音信息流在横屏世界下**不重排**（同拍 `scroll box=430x430`、
+///     `page state box=430x430`）：内容仍按 430 宽排版，右边 287 pt 空着；
+///   · 用户手点全屏那一拍：`page sheet AWELandscapeNavigationController h=430
+///     top=0 box=430` —— 它自己的横版播放器起来了，视频才铺满。
+/// ⇒ 剩下的缺口只有一个：把「手点」换成自动。
+///
+/// 三条硬约束（这一版宁可不灵，也不许出乱子）：
+///   ① 一轮 want 只点**一次**（`AevonRotLandAutoDone` 在追击里置位）；
+///   ② 只点类名带 FullScreen / Landscape / SwitchScreen 的强特征视图
+///      （`AevonPaneStrong`）—— 宁可漏，不能误触点赞/评论/分享；
+///   ③ 任何一步失败都只是「没点成」：不改几何、不改状态、不重试。
+static void AevonRotLandAuto(void) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonRotLandAuto();
+        });
+        return;
+    }
+    if (AevonRotWantSeen != 1) return;
+    CGSize w = AevonRotWorld();
+    if (w.width <= w.height + 40.0) {
+        AevonAppLogWrite("app: rot land auto skip world=portrait\n");
+        return;
+    }
+    if (AevonChainHasLandscape()) {
+        AevonAppLogWrite("app: rot land auto seen\n");
+        return;
+    }
+    UIWindow *kw = AevonKeyWindow();
+    UIViewController *top = (kw != nil) ? [kw rootViewController] : nil;
+    if (top == nil) return;
+    UIViewController *leaf = AevonOrientLeaf(top);
+    UIView *root = (leaf != nil) ? leaf.view : top.view;
+    if (root == nil) return;
+    NSString *ln = NSStringFromClass([leaf class]);
+    char head[192];
+    snprintf(head, sizeof(head), "app: rot land auto start leaf=%s\n",
+             ln.length > 0 ? [ln UTF8String] : "-");
+    AevonAppLogWrite(head);
+    // 现场扫、现场点：非 ARC 下把 view 指针存到下一拍就是悬垂。
+    UIView *hits[6];
+    int hn = 0;
+    int budget = 1000000;   // 纯收集模式不打日志，总量由 visited 控（7000 节点）
+    int visited = 7000;
+    AevonRotLookPanes(root, 0, &budget, &visited, hits, 6, &hn, NO);
+    if (hn == 0) {
+        AevonAppLogWrite("app: rot land auto miss n=0\n");
+        return;
+    }
+    int i;
+    for (i = 0; i < hn; i++) {
+        UIView *v = hits[i];
+        NSString *cn = NSStringFromClass([v class]);
+        const char *c = (cn.length > 0) ? [cn UTF8String] : "-";
+        char line[224];
+        if ([v isKindOfClass:[UIControl class]]) {
+            snprintf(line, sizeof(line), "app: rot land auto fire cls=%s how=ctl\n", c);
+            AevonAppLogWrite(line);
+            @try {
+                [(UIControl *)v sendActionsForControlEvents:UIControlEventTouchUpInside];
+            } @catch (NSException *e) {
+                AevonAppLogWrite("app: rot land auto throw ctl\n");
+            }
+            break;
+        }
+        // 不是 UIControl：抖音互动层用「自定义 view + tap 手势」，target/action
+        // 挂在私有 ivar 上，只能 KVC 摸。摸不到就换下一个候选。
+        UIGestureRecognizer *tap = nil;
+        for (UIGestureRecognizer *g in [v gestureRecognizers]) {
+            if ([g isKindOfClass:[UITapGestureRecognizer class]]) { tap = g; break; }
+        }
+        if (tap == nil) {
+            snprintf(line, sizeof(line), "app: rot land auto skip cls=%s why=notap\n", c);
+            AevonAppLogWrite(line);
+            continue;
+        }
+        BOOL fired = NO;
+        @try {
+            NSArray *ts = [tap valueForKey:@"_targets"];
+            for (id t in ts) {
+                id target = [t valueForKey:@"_target"];
+                NSValue *sv = [t valueForKey:@"_action"];
+                SEL act = (sv != nil) ? (SEL)[sv pointerValue] : NULL;
+                if (target == nil || act == NULL) continue;
+                if (![target respondsToSelector:act]) continue;
+                ((void (*)(id, SEL, id))objc_msgSend)(target, act, tap);
+                fired = YES;
+                break;
+            }
+        } @catch (NSException *e) {
+            fired = NO;
+        }
+        snprintf(line, sizeof(line), "app: rot land auto fire cls=%s how=tap ok=%d\n",
+                 c, fired ? 1 : 0);
+        AevonAppLogWrite(line);
+        if (fired) break;
+    }
 }
 
 /// 把守门 VC 立起来。presenter 取 key window 的 presented 链顶层 —— present
@@ -7762,6 +8047,9 @@ static void AevonRotKeeperHide(void) {
 /// 这版把「一次成不成」换成「看着世界量」：只要世界还是竖的，就继续推。
 ///
 /// ⛔ 上限是硬要求：抖音在长转场里 present 会一直失败，无限追 = 无限 present。
+/// 0.4.82 — 本轮是否已经排过一次「自动点全屏」（每轮一次，want 上升沿清零）。
+static int AevonRotLandAutoDone = 0;
+
 static void AevonRotPursue(void) {
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -7778,6 +8066,19 @@ static void AevonRotPursue(void) {
         snprintf(line, sizeof(line), "app: rot turn ok n=%d world=%.0fx%.0f\n",
                  AevonRotPursueTick, w.width, w.height);
         AevonAppLogWrite(line);
+        // 0.4.82 — 两件事都放在「世界已经横了」这一拍：
+        //   ① 控件树第二次取证（这次从 leaf VC 起扫、连非 UIControl 一起看）；
+        //   ② 排一次自动点全屏（1.6 s 后；那会儿抖音的横屏布局已经结算完）。
+        // 359 证明抖音在横屏世界下**不会**自己进横版播放器，这一下是唯一的缺口。
+        AevonRotLookDump(YES);
+        if (AevonRotLandAutoDone == 0) {
+            AevonRotLandAutoDone = 1;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         (int64_t)(1.6 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                               AevonRotLandAuto();
+                           });
+        }
         return;
     }
     if (AevonRotPursueTick >= 6) {
@@ -7792,8 +8093,10 @@ static void AevonRotPursue(void) {
     AevonOrientHookInstall();
     // 0.4.81 — 取证放在「hook 已经装上」那一拍：冷启动第 2 秒时链是空的
     // （357 `rot hook skip why=root`），那一拍 dump 出来什么都看不到。
-    // 内部有自己的「进程内只打一次」门，这里每拍调也只会打一次。
-    if (AevonHookN >= 3) AevonRotLookDump();
+    // 0.4.82 — 这一拍只打类方法列表（`withPanes=NO`）：竖屏这时的控件树跟
+    // 不切横没区别，359 的 9 个 tabbar 控件就是这么来的。控件树等世界转横
+    // 之后在 `land` 分支再打。
+    if (AevonHookN >= 3) AevonRotLookDump(NO);
     AevonRotKeeperShow();
     snprintf(line, sizeof(line),
              "app: rot turn n=%d world=%.0fx%.0f door=%d hookn=%d\n",
@@ -7917,6 +8220,10 @@ static void AevonRotApplyWant(void) {
         AevonRotKeeperBlockNotes = 0;
         AevonRotKeeperRebuilds = 0;
         AevonSawLandPage = 0;
+        // 0.4.82 — 「自动点全屏」这轮还没排过；控件树取证也重新给两次配额。
+        // `AevonRotLookClsDone` 不在这里清：类方法表不会因为一次长按而变。
+        AevonRotLandAutoDone = 0;
+        AevonRotLookPaneRuns = 0;
     }
     // ⛔ 0.4.79 — 0.4.78 在这里就 `AevonRotKeeperShow()`，那一行是 356 闪退的
     // 直接原因：守门 VC 立在 `AevonOrientHookInstall()` **之前**，present 那一刻

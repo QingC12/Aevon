@@ -1712,12 +1712,37 @@ def main():
                       #   `app: rot look cls=X sel=Y argc=N` ⇒ 链上类（含父类两层）
                       #        里名字带 fullscreen / landscape / enterFull 的方法。
                       #        **argc=2 才是无参、下一版才敢直接调**；
-                      #   `app: rot look ctl cls=X x,y wxh` ⇒ 视频区里 UIControl 的
-                      #        真实类名（0.4.74 的 tap 7 连 miss 就是猜错了这个）；
-                      #   `app: rot look sheet cls=X` + `rot look stack …` ⇒ 用户
-                      #        手点全屏时 present 了谁、调用栈是什么 —— 直接给出
-                      #        「怎么让抖音自己进横版播放器」的答案；
-                      #   `app: rot look end` ⇒ 这套取证打完（进程内一次）。
+                      #   `app: rot look cls end` ⇒ 类方法列表这一半打完了。
+                      #   `app: rot look pane start leaf=类名` ⇒ 控件树这一半从哪
+                      #        一层起扫（0.4.82 起是 leaf VC，竖屏一次、转横一次）；
+                      #   `app: rot look pane cls=X x,y wxh ctl=N tap=N int=N` ⇒ 类名
+                      #        命中全屏词的视图：位置 / 是不是 UIControl / 有几个
+                      #        手势 —— 这三样决定下一版怎么点中它；
+                      #   `app: rot look sheet cls=X from=Y` + `rot look stack …` ⇒
+                      #        用户手点全屏时**谁 present 了谁**；
+                      #   `app: rot look who cls=X sel=Y off=N` ⇒ 把栈帧地址按 objc
+                      #        方法表反查出来的方法（359 的栈只有「导出符号 + 两兆
+                      #        偏移」，看不出调用者，这一条才是答案）；
+                      #   `app: rot look end` ⇒ 控件树这一半打完。
+                      #
+                      # 0.4.82 — 359：世界转横这一半**成了**（`rot turn ok n=1
+                      # world=717x430`，之后一路 `rot turn ok n=0` 到用户自己长按
+                      # 退出，全程无 `rot feed exit` ⇒ 0.4.81 堵的两条自毁路都
+                      # 有效），并且拿到了抖音横版播放器的真名
+                      # （`page sheet AWELandscapeNavigationController h=430
+                      # top=0 box=430`）。缺口只剩「手点全屏」这一步，于是这版把
+                      # 它拆成两半：先取证（pane / who），再自动点一次。
+                      #   `app: rot land auto start leaf=类名` ⇒ 转横 1.6 s 后开始
+                      #        找全屏入口；
+                      #   `app: rot land auto seen` ⇒ 链上已经有 Landscape VC（用户
+                      #        自己点过 / 抖音自己进了），不再动手；
+                      #   `app: rot land auto miss n=0` ⇒ 一个强特征候选都没扫到
+                      #        ⇒ 下一版换符号法（`rot look who` 给什么就调什么）；
+                      #   `app: rot land auto fire cls=X how=ctl|tap ok=N` ⇒ 真按了
+                      #        一次；`how=ctl` 走 sendActions，`how=tap` 走手势的
+                      #        target/action（抖音互动层大量用后者）；
+                      #   `app: rot land auto skip cls=X why=notap` ⇒ 候选不是
+                      #        UIControl 也没有 tap 手势（只记，不动）。
                       b"app: rot keeper show from=%s",
                       b"app: rot keeper hide",
                       b"app: rot keeper passthru cls=%s off=%d",
@@ -1726,10 +1751,19 @@ def main():
                       b"app: rot keeper abort %s",
                       b"app: rot keeper rebuild n=%d",
                       b"app: rot look cls=%s sel=%s argc=%u",
-                      b"app: rot look ctl cls=%s",
-                      b"app: rot look sheet cls=%s",
+                      b"app: rot look cls end",
+                      b"app: rot look pane start leaf=%s",
+                      b"app: rot look pane cls=%s",
+                      b"app: rot look sheet cls=%s from=%s",
                       b"app: rot look stack %s",
+                      b"app: rot look who cls=%s sel=%s off=%ld",
                       b"app: rot look end",
+                      b"app: rot land auto start leaf=%s",
+                      b"app: rot land auto seen",
+                      b"app: rot land auto miss n=0",
+                      b"app: rot land auto fire cls=%s how=ctl",
+                      b"app: rot land auto fire cls=%s how=tap ok=%d",
+                      b"app: rot land auto skip cls=%s why=notap",
                       b"app: rot turn n=%d world=%.0fx%.0f door=%d hookn=%d",
                       b"app: rot turn ok n=%d world=%.0fx%.0f",
                       b"app: rot turn end n=%d world=%.0fx%.0f",
