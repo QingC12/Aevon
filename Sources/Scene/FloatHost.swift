@@ -839,6 +839,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// `backgroundColor` 从头到尾都是 `.clear` —— 两个答案会互相盖住。
     private var backing: UIView?
     private var grip: GripView?
+    /// 0.4.88 — 横屏时唯一一个「出得去」的按钮。
+    ///
+    /// 365 的问题不是画面不对，是**没有出口**：横屏卡铺满屏幕，手势环整个在屏幕
+    /// 外，系统边缘手势又紧贴屏幕边 —— 用户抓不到、也长按不到，只能杀进程。
+    /// 这个 46 pt 的圆钮挂在 `band` 那一层（statusBar+1，卡片窗口之上），位置在
+    /// 视觉左上角往内 30 pt，永远落在屏幕内；点一下等于长按一次左下侧
+    /// （`toggleLandscape`，三条分流原样复用）。竖屏时不显示。
+    private var landExit: UIButton?
     /// 0.1.34 — 拖动 / 缩放期间的**目标几何**，`nil` = 静止。
     ///
     /// 这一版之前，拖动的每一帧都写 `card.frame`：`bounds` 一变，卡片里那层远程
@@ -1078,6 +1086,26 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return CGSize(width: w, height: (w / landscapeAspect).rounded())
     }
 
+    /// 0.4.88 — 横屏卡离屏幕边缘留多少。
+    ///
+    /// 365 的现场：点全屏后卡片是**整屏转置**（视觉正好 430x932），四个方向的手势
+    /// 环（`band` 55 pt）整个落在屏幕外，系统边缘手势又贴在屏幕边上 —— 用户既抓
+    /// 不到环、也长按不到复位区，只剩「关不掉」这一个观感。留 12 pt 不是审美：
+    /// 它是**手势环最小可见宽度**，环的内侧那一圈落在屏幕内，四个格子才命中得了。
+    /// 12 也是「铺满」与「可操作」的折中里最小的一档，视频只少 12 pt 边。
+    static let landscapeInset: CGFloat = 12
+
+    /// 0.4.88 — 横屏卡的 `bounds`（**转置**后的屏幕，不是视觉尺寸）。
+    ///
+    /// 视觉 = `bounds` 转 90° ⇒ 宽 `bounds.height`、高 `bounds.width`。所以要
+    /// 「四边各留 12」就得让 `bounds` 的**高**减 24、**宽**减 24 —— 这两个数在
+    /// 转置之后正好对调。写反的话留白会变成上下 12、左右 0（365 之前那种）。
+    static func landscapeSize(in bounds: CGRect) -> CGSize {
+        let w = bounds.height - landscapeInset * 2
+        let h = bounds.width - landscapeInset * 2
+        return CGSize(width: Swift.max(160, w), height: Swift.max(120, h))
+    }
+
     /// 0.4.87 — 横屏卡（整屏转置）里，世界该缩到多少。
     ///
     /// 364 的现场是「点全屏只有左边有画面、右边空白」：卡片 430x258 里塞着
@@ -1281,11 +1309,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 0.4.73 — 假横从这一行起与真横分叉；几何完全同构（卡片、画布尺寸
             // 都一样），分叉只在「写不写 scene frame」与「canvas 要不要转置」。
             landscapeFake = fake
-            let size = CGSize(width: bounds.height, height: bounds.width)
+            // 0.4.88 — 四边各留 `landscapeInset`：整屏那一版把手势环推到屏幕外，
+            // 用户报「四边手势贴近屏幕、无法操作」（365）。视觉尺寸 = 转置后的
+            // bounds，所以视觉的留白与 bounds 的留白是同一个数（见 `landscapeSize`）。
+            let size = FloatHost.landscapeSize(in: bounds)
             frame = CGRect(x: bounds.midX - size.width * 0.5,
                            y: bounds.midY - size.height * 0.5,
                            width: size.width, height: size.height)
-            visual = bounds
+            visual = CGRect(x: bounds.midX - size.height * 0.5,
+                            y: bounds.midY - size.width * 0.5,
+                            width: size.height, height: size.width)
             // 转置：430x717 → 717x430。与 App 自己的 `world` 一致。
             if natural.width > 16 && natural.height > 16 {
                 natural = CGSize(width: natural.height, height: natural.width)
@@ -2599,6 +2632,55 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 光晕、圆角、环三者必须同一次事件里一起走。慢一帧就是「卡片动了、光圈
         // 还留在原地」。
         applyGlow()
+        syncLandExit()
+    }
+
+    /// 0.4.88 — 横屏「退出」钮的创建与摆位。挂在 `band` 窗口的根视图上（见
+    /// `installGrip` 那段：手势环也在同一层），所以它在卡片窗口之上、在 App 的
+    /// 画面之上，永远收得到触摸。
+    ///
+    /// 位置写死在「视觉左上角往内 30 pt」：横屏卡四边留 `landscapeInset`(12)，
+    /// 30 > 12 保证按钮整个落在屏幕内；不跟随卡片中心 —— 这一版横屏不许拖动，
+    /// 中心是恒定的屏幕中心。
+    private func syncLandExit() {
+        guard let host = grip?.superview else { return }
+        guard landscapeOn else {
+            landExit?.isHidden = true
+            return
+        }
+        let size: CGFloat = 46
+        let button: UIButton
+        if let one = landExit {
+            button = one
+        } else {
+            let one = UIButton(type: .custom)
+            one.frame = CGRect(x: 0, y: 0, width: size, height: size)
+            one.layer.cornerRadius = size / 2
+            one.backgroundColor = UIColor(white: 0, alpha: 0.55)
+            one.layer.borderWidth = 1
+            one.layer.borderColor = UIColor(white: 1, alpha: 0.25).cgColor
+            one.setTitle("✕", for: .normal)
+            one.setTitleColor(.white, for: .normal)
+            one.titleLabel?.font = .systemFont(ofSize: 20, weight: .semibold)
+            one.accessibilityLabel = "退出横屏"
+            one.addTarget(self, action: #selector(landExitTap), for: .touchUpInside)
+            host.addSubview(one)
+            landExit = one
+            button = one
+        }
+        button.isHidden = false
+        button.center = CGPoint(x: FloatHost.landscapeInset + 30,
+                                y: FloatHost.landscapeInset + 30)
+        host.bringSubviewToFront(button)
+        Log.write(String(format: "win: landscape exit btn at %.0f,%.0f",
+                         button.center.x, button.center.y))
+    }
+
+    /// 点一下 = 长按一次左下侧。三条分流（假横直接退 / 真横走解钉两拍）都在
+    /// `toggleLandscape` 里，这里不复制第二份。
+    @objc private func landExitTap() {
+        Log.write(String(format: "win: landscape exit tap b=%@", bundle))
+        toggleLandscape()
     }
 
     private var gripDrawn: CGRect = .null
@@ -5133,9 +5215,10 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 记忆里算出第三种可能。所以这一支不经过 `plan`、也不写 `CardLayout`：
         // 那张表存的是竖版的「多大、贴哪边」，横屏写进去就是污染。
         if landscape {
-            // 0.4.87 — 与 `setLandscape` 同一份几何：整屏转置（bounds 932x430、
-            // 整块转 -90°）。原来这里是「430x258、中心沿用切横前那一点」。
-            let size = CGSize(width: bounds.height, height: bounds.width)
+            // 0.4.88 — 与 `setLandscape` 同一份几何：转置后的屏幕、四边各留
+            // `landscapeInset`、整块转 -90°。两条路必须同一个数，否则「横屏里
+            // 长按复位」会把卡片弹回一个没有留白的整屏。
+            let size = FloatHost.landscapeSize(in: bounds)
             let frame = CGRect(x: bounds.midX - size.width * 0.5,
                                y: bounds.midY - size.height * 0.5,
                                width: size.width, height: size.height)

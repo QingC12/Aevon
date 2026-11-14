@@ -6683,6 +6683,25 @@ static int AevonLandHoldNotes = 0;
 /// 那正好是抖音回头请求一次竖屏几何的窗口（363/364 都是 2 秒内），窗口之外
 /// 仍按老规矩（链上有没有 Landscape 页 + `rot feed exit` 三拍）判退出。
 static double AevonRotOnSince = 0;
+/// 0.4.88 — 上一次**报出去** on=1 的时刻。
+///
+/// 365 的 18:33:13 是这一项的来历：`rot follow 1` 之后两秒，`AevonRotWorld()` 读
+/// 回 430x717（抖音把 scene frame 请求回竖，宿主 2 pt 后又纠回来），探针在
+/// 「世界不横」那一行提前返回 ⇒ on=0 ⇒ 发布 0 ⇒ 宿主 `landscape unpin`。
+/// 那一刻**画面上仍是一块 717x430 的横版播放器**（同一份日志 `page state` 里
+/// `k1=AWELandscapeMediumVideoPlaye:0,717x430`）。所以 hold 闸不能再问世界，
+/// 要问「界面上现在有没有一块横着的横版视图」，而这条时间戳只用来把那次遍历
+/// 限制在「刚报过横屏」的 25 秒里（稳态下不花这份钱）。
+static double AevonRotLandAt = 0;
+/// 0.4.88 — 宿主「要竖」的下降沿时刻（want 1 → 0）。
+///
+/// hold 闸必须给这条让路：用户点我们的退出钮 / 长按关横屏时，宿主发 want=0，
+/// 此时画面上的横版页**还没拆**，闸若照旧扣住，用户就永远退不出去。
+static double AevonRotWantOffAt = 0;
+/// 0.4.88 — 连续扣住的拍数（0.3 s/拍）。满 60 拍（18 s）强制放行：
+/// 「界面上那块横版视图」有可能残留（抖音把播放页从层级里摘掉之前会留一帧），
+/// 闸不能靠它锁死一整轮。18 s 远大于任何一次真实转场的 3.8 s。
+static int AevonLandHoldTicks = 0;
 /// 0.4.83 — 「横版播放器在位、所以不收卡」这条判据的日志配额：只证明这条闸真
 /// 生效过，稳态下一行都不写。刷新源 = want 上升沿清零。
 static int AevonRotFeedHoldNotes = 0;
@@ -6908,6 +6927,7 @@ static void AevonRotPublish(BOOL on, CGSize world, CGRect video) {
         return;
     }
     AevonRotSent = flag;
+    if (flag == 1) AevonRotLandAt = CFAbsoluteTimeGetCurrent();
     AevonRotSentW = w;
     AevonRotSentH = h;
     AevonRotSentVX = vx;
@@ -7902,7 +7922,67 @@ static BOOL AevonChainHasLandscape(void) {
     return NO;
 }
 
-/// 0.4.83 — 抖音横屏入口那条路的**只读**取证：`realEnterLandscapeFeedWithEnterMethod:`。
+/// 0.4.88 — 界面上**此刻**有没有一块横着的横版视图（`*Landscape*` 且宽 > 高）。
+///
+/// 为什么不能再问世界：365 的 18:33:13，`AevonRotWorld()` 读回 430x717
+/// （抖音把 scene frame 请求回竖），探针在第一行就返回 NO，可同一份日志的
+/// `page state after change` 里明明写着 `k1=AWELandscapeMediumVideoPlaye:0,717x430`
+/// —— 播放器在屏幕上，世界不横。0.4.86/0.4.87 两道闸（链上有没有 Landscape 页、
+/// 世界刚变横的 6 秒）都依赖容器链或世界，两个都不是"现在有没有画面"。
+///
+/// 判据就一句：**视图树上有一块类名带 Landscape、且自己宽 > 高 + 40 的视图**。
+/// 宽高比是硬的：抖音的横版播放器是 717x430，竖版信息流里的同名 cell 也是横的，
+/// 但那种只在翻页器里躺着（宿主横屏时正常形态），同样算"横版视图在位" —— 这
+/// 正是我们要的答案：**只要它还在，就别报 0**。
+///
+/// 代价：一次调用最多 1200 个节点，只在「刚报过横屏 25 秒内、且这一拍要报 0」
+/// 时调用（`AevonRotTick` 那一段），稳态一次都不走。
+static BOOL AevonLandUILive(void) {
+    UIApplication *app = [UIApplication sharedApplication];
+    if (app == nil) return NO;
+    CGFloat screenLong = 0;
+    for (UIScene *one in [app connectedScenes]) {
+        if (![one isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *ws = (UIWindowScene *)one;
+        SEL csSel = sel_registerName("coordinateSpace");
+        if (![ws respondsToSelector:csSel]) continue;
+        id space = ((id (*)(id, SEL))objc_msgSend)(ws, csSel);
+        if (space == nil) continue;
+        CGRect cb = ((CGRect (*)(id, SEL))objc_msgSend)(space, sel_registerName("bounds"));
+        CGFloat s = (cb.size.width > cb.size.height) ? cb.size.width : cb.size.height;
+        if (s > screenLong) screenLong = s;
+    }
+    if (screenLong < 200.0) screenLong = 932.0;
+    CGFloat need = screenLong * 0.5;
+    int budget = 1200;
+    for (UIScene *one in [app connectedScenes]) {
+        if (![one isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *win in [(UIWindowScene *)one windows]) {
+            if (win.hidden) continue;
+            NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
+            NSUInteger head = 0;
+            while (head < [queue count] && budget > 0) {
+                UIView *v = queue[head];
+                head += 1;
+                budget -= 1;
+                if (v.hidden || v.alpha < 0.01) continue;
+                CGRect b = [v bounds];
+                if (b.size.width > b.size.height + 40.0 && b.size.width >= need) {
+                    const char *cn = class_getName(object_getClass(v));
+                    if (cn != NULL && strstr(cn, "Landscape") != NULL) return YES;
+                }
+                NSArray *kids = [v subviews];
+                NSUInteger n = [kids count];
+                NSUInteger i;
+                for (i = 0; i < n && budget > 0; i++) {
+                    [queue addObject:[kids objectAtIndex:i]];
+                    budget -= 1;
+                }
+            }
+        }
+    }
+    return NO;
+}
 ///
 /// 360 的 `rot look who` 已经把调用者反查出来了：
 ///   `rot look who cls=AWEPlayInteractionLandscapeFeedController
@@ -9021,6 +9101,8 @@ static void AevonRotApplyWant(void) {
     if (want == AevonRotWantSeen && !retry) return;
     int wantOld = AevonRotWantSeen;
     AevonRotWantSeen = want;
+    // 0.4.88 — 宿主松手（want 1 → 0）那一刻记下来：hold 闸要在这之后的 4 s 里让路。
+    if (want == 0 && wantOld == 1) AevonRotWantOffAt = CFAbsoluteTimeGetCurrent();
     AevonWantTryAt = fsNow;
     // ⛔ 0.4.79 — `AevonRotKeeperDead` 的同寿命刷新源：want 的 0 → 1 上升沿。
     // 一次长按是一轮新尝试（进程内最多被 @try/@catch 兜一次），但不许在
@@ -9150,7 +9232,18 @@ static void AevonRotForceNow(void) {
     AevonRotSent = -1;
     // 0.4.87 — 与 `AevonRotTick` 同一条闸：开卡握手也不许把「刚横过来的世界」
     // 报成竖屏（`band` 在切横那一拍会被宿主反复发，这条路上的 0 一样会收卡）。
-    if (!on && (AevonChainHasLandscape() || AevonRotFreshLandscape(world))) return;
+    // 0.4.88 — 与心跳同一组三条判据（含视图树那条），否则 band 这条旁路会把
+    // 心跳刚扣住的 0 从这里漏出去。
+    {
+        BOOL chainHas = AevonChainHasLandscape();
+        BOOL fresh = AevonRotFreshLandscape(world);
+        BOOL landUI = NO;
+        CFAbsoluteTime gateNow = CFAbsoluteTimeGetCurrent();
+        BOOL recently = (AevonRotLandAt > 0 && (gateNow - AevonRotLandAt) < 25.0);
+        BOOL hostOff = (AevonRotWantOffAt > 0 && (gateNow - AevonRotWantOffAt) < 4.0);
+        if (!on && recently && !hostOff) landUI = AevonLandUILive();
+        if (!on && (landUI || chainHas || fresh)) return;
+    }
     AevonRotPublish(on, world, video);
 }
 
@@ -9209,26 +9302,45 @@ static void AevonRotTick(void) {
                 // 一次竖屏，是因为 `UIScreen.bounds` 始终是竖的（硬禁令，不许改）——
                 // 它「觉得不合法」，但画面本身是铺满的（`vid=717x430@0,0`）。
                 //
-                // ⇒ 判据（0.4.87 起两条）：链上**现在**有 Landscape 页，或者
-                // 世界**刚**横过来那 6 秒（`AevonRotFreshLandscape`，364 的现场
-                // 就是抖音在 2 秒内回头请求竖屏几何）—— 任一成立就保持上一拍的
-                // 上报（什么都不发），宿主会继续把 scene 钉在横版画布上；等世界
-                // 真回竖、抖音也真把播放页拆掉才按原路报 0。日志配额 8 行。
-                if (!on && (AevonChainHasLandscape() || AevonRotFreshLandscape(world))) {
+                // ⇒ 判据（0.4.88 起三条，任一成立就扣住、一个字节都不上报）：
+                //   ① 视图树上**此刻**有一块横着的横版视图（`AevonLandUILive`）——
+                //      365 的 18:33:13 只有这一条能答对：世界读到 430x717、
+                //      链上也还没有 Landscape 页，可播放器就在屏幕上；
+                //   ② 链上现在有 Landscape 页；
+                //   ③ 世界刚横过来那 6 秒（抖音回头请求竖屏几何的窗口）。
+                // 让路条件：宿主刚发过 want=0（用户点了退出钮 / 长按关横屏），
+                // 以及连续扣住满 60 拍（18 s）—— 后者防「残留视图锁死一轮」。
+                BOOL chainHas = AevonChainHasLandscape();
+                BOOL fresh = AevonRotFreshLandscape(world);
+                BOOL landUI = NO;
+                {
+                    CFAbsoluteTime gateNow = CFAbsoluteTimeGetCurrent();
+                    BOOL recently = (AevonRotLandAt > 0 && (gateNow - AevonRotLandAt) < 25.0);
+                    BOOL hostOff = (AevonRotWantOffAt > 0 && (gateNow - AevonRotWantOffAt) < 4.0);
+                    if (!on && recently && !hostOff && AevonLandHoldTicks < 60) {
+                        landUI = AevonLandUILive();
+                    }
+                }
+                if (!on && (landUI || chainHas || fresh)) {
                     hold = YES;
+                    AevonLandHoldTicks += 1;
                     AevonRotFeedExit = 0;
                     AevonRotFeedStreak = 0;
                     AevonSawLandPage = 1;
                     if (AevonLandHoldNotes < 8) {
                         AevonLandHoldNotes += 1;
-                        char hl[176];
+                        char hl[192];
                         snprintf(hl, sizeof(hl),
-                                 "app: rot land hold world=%.0fx%.0f vid=%.0fx%.0f why=%s\n",
+                                 "app: rot land hold world=%.0fx%.0f vid=%.0fx%.0f why=%s gate=%s n=%d\n",
                                  world.width, world.height,
                                  video.size.width, video.size.height,
-                                 why[0] != 0 ? why : "-");
+                                 why[0] != 0 ? why : "-",
+                                 landUI ? "ui" : (chainHas ? "chain" : "fresh"),
+                                 AevonLandHoldTicks);
                         AevonAppLogWrite(hl);
                     }
+                } else {
+                    AevonLandHoldTicks = 0;
                 }
                 // 0.4.70 — 世界横着、翻页器已翻回竖排：App 自己退了全屏，而世界
                 // 被宿主钉住，探针永远看不到。连两拍落锁；锁到世界真回竖（探针

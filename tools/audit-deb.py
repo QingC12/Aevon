@@ -1846,6 +1846,16 @@ def main():
                       # 已经是 717x430：呈现层只显示左边 430，右边 287 空白。
                       # `why=` 就是那一拍探针的答案（feed/pinch/land…）。
                       b"app: rot land hold world=%.0fx%.0f vid=%.0fx%.0f why=%s",
+                      # 0.4.88 — 365 的两条：
+                      #   · `gate=ui|chain|fresh n=%d`：hold 闸多了第三条判据 ——
+                      #     视图树上此刻有没有一块横着的横版视图。365 的 18:33:13
+                      #     世界读到 430x717、链上还没有 Landscape 页，只有这条能
+                      #     答对（同一份日志 `k1=AWELandscapeMediumVideoPlaye:0,717x430`）。
+                      #   · `landscape exit btn/tap`：横屏卡四边留 12 pt 后多出来的
+                      #     那个 46 pt 圆钮 —— 365 用户「四边手势贴屏幕、无法操作」。
+                      b"app: rot land hold world=%.0fx%.0f vid=%.0fx%.0f why=%s gate=%s n=%d",
+                      b"win: landscape exit btn at %.0f,%.0f",
+                      b"win: landscape exit tap b=%@",
                       b"app: rot land have cls=%s",
                       b"app: rot auto enter seen",
                       b"app: rot auto enter miss",
