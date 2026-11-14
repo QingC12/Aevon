@@ -1229,6 +1229,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             landscapeVideo = .null
             portraitFrame = nil
             portraitNatural = nil
+            // 0.4.72 — 退出完成：看门狗旁路撤掉，目标回到 `natural`（竖版）。
+            canvasOverrideSize = nil
+            canvasDirtyUntil = 0
         }
         // 2. 登记画布（两个方向都登记）。横屏登记的是转置后的那一个 —— 守护循环
         //    此后纠的就是 717x430，不会把 App 按回竖屏。
@@ -1261,15 +1264,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 世界立刻开始转，这一拍不动画布、不动卡片 —— 用户看到的是横屏内容
     /// 一直好好待着，转完（`AevonRotSweep` 读到竖世界）才收卡。
     func landscapeExitUnpin() {
-        guard landscapeOn, let window = window else { return }
+        guard landscapeOn, window != nil else { return }
         let pn = portraitNatural ?? CGSize(width: natural.height, height: natural.width)
         AevonSceneFrameSet(bundle, 0, 0, Double(pn.width), Double(pn.height))
-        var door: Int = 0
-        if let sc = window.windowScene {
-            door = Int(AevonPushSceneFrameStrict(sc))
-        }
-        Log.write(String(format: "win: landscape unpin frame=%.0fx%.0f door=%d b=%@",
-                         pn.width, pn.height, door, bundle))
+        // 0.4.72 — 看门狗的目标同步翻竖（`canvasFrame` 派生自 `natural`，
+        // 不设旁路它就一直是 717x430，漂移永远不算漂移）。2.5 s 窗口里每拍
+        // 对账；真正动手推的是 SceneProbe 的看门狗（它手里才有 scene）。
+        canvasOverrideSize = pn
+        canvasDirtyUntil = CFAbsoluteTimeGetCurrent() + 2.5
+        Log.write(String(format: "win: landscape unpin canvas=%.0fx%.0f b=%@",
+                         pn.width, pn.height, bundle))
     }
 
     /// 0.0.81 — 画布装进卡片的那个比例。
@@ -1491,10 +1495,28 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 0 表示「跟随 `natural.height`」。
     private var canvasHeight: CGFloat = 0
 
+    /// 0.4.72 — 退出横屏 phase1 的看门狗目标旁路。
+    ///
+    /// 349 的现场：phase1 只把 C 侧登记表（`AevonFrameTargets`）翻到竖版，
+    /// 而看门狗的「want」是这个派生量（跟着 `natural` 走，还是 717x430）——
+    /// got == want 不算漂移，看门狗一拍都不推；`AevonPushSceneFrameStrict` 在
+    /// 这条路上又恒 door=0（卡片窗不是 scene 窗，`windowScene` 为 nil）。
+    /// 两套真值只有一个改了，世界就被旧 frame 钉 20 秒，卡片竖了内容还横着。
+    /// 现在 phase1 把旁路设成竖版：看门狗看到漂移，立刻（每拍查，不等 2 s）
+    /// 把竖版 frame 推下去。
+    private var canvasOverrideSize: CGSize?
+    /// 旁路生效的窗口：看门狗从「每 10 拍查一次」提到「每拍查一次」。
+    private var canvasDirtyUntil: CFAbsoluteTime = 0
+    var isCanvasDirty: Bool {
+        canvasDirtyUntil > 0 && CFAbsoluteTimeGetCurrent() < canvasDirtyUntil
+    }
+
     /// 场景在屏幕上应该占的那块矩形。守护循环（SceneProbe）按它纠偏。
     var canvasFrame: CGRect {
-        CGRect(x: 0, y: canvasOriginY, width: natural.width,
-               height: canvasHeight > 16 ? canvasHeight : natural.height)
+        let size = canvasOverrideSize
+            ?? CGSize(width: natural.width,
+                      height: canvasHeight > 16 ? canvasHeight : natural.height)
+        return CGRect(x: 0, y: canvasOriginY, width: size.width, height: size.height)
     }
 
     /// 键盘态是否生效。守护循环据此把「每 10 拍查一次」提到「每拍查一次」——
@@ -2376,27 +2398,38 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 「胶囊」观感。降到 8 %：横屏卡 430 → 34、竖版主窗 355 → 28。小窗
     /// 98 → 8（floor 4 之上），比例制不变 —— 「一缩就变形状」的老病不会回来。
     /// 母版量法不变（比例换算），只是比例本身按用户定档收窄。
+    /// 0.4.72 — 圆角分横竖两档（349 判决：「横屏的圆角保持不变，将竖屏小胖屏
+    /// 的圆角改回 0.4.70」）。
+    ///
+    /// 0.4.70 之前一条比例 12.73 %（母版量法）。0.4.71 用户报「横屏的圆角化太
+    /// 严重」改成一条 8 % —— 竖屏主窗跟着从 45 变 28，349 又把它判回去。
+    /// 现在：横屏 8 %（430 宽 → 34 pt，横条不再胶囊），竖屏回 12.73 %
+    /// （355 宽 → 45 pt，与 0.4.70 一致）。
     static let cornerRatio: CGFloat = 0.08
+    static let cornerRatioPortrait: CGFloat = 0.1273
     static let cornerFloor: CGFloat = 4
 
     /// 唯一一处「卡宽 → 圆角」。`lift` 那条动画和 `applyCorner` 都走这里，
     /// 免得两处各算一遍再对不上。
-    static func corner(for width: CGFloat) -> CGFloat {
-        return Swift.max(cornerFloor, width * cornerRatio)
+    static func corner(for width: CGFloat, landscape: Bool) -> CGFloat {
+        let ratio = landscape ? cornerRatio : cornerRatioPortrait
+        return Swift.max(cornerFloor, width * ratio)
     }
 
     private func applyCorner() {
         guard let card = card, natural.width > 1 else { return }
-        // 0.2.39 — 档位不再参与：半径只看这一张卡当前有多宽。
-        let wanted = FloatHost.corner(for: card.bounds.width)
+        // 0.2.39 — 半径只看这一张卡当前有多宽。0.4.72 — 横竖分档（8 % / 12.73 %）。
+        let wanted = FloatHost.corner(for: card.bounds.width, landscape: landscape)
         // 再圆的角也不能超过半张卡（超过就是胶囊）。只在卡片被拖到极小时生效。
         let side = Swift.min(card.bounds.width, card.bounds.height)
         let radius = Swift.max(4, Swift.min(wanted, side / 2))
         if !cornerAnnounced {
             cornerAnnounced = true
-            Log.write(String(format: "win: corner w=%.0f r=%.0f pct=%.1f",
+            Log.write(String(format: "win: corner w=%.0f r=%.0f pct=%.1f ls=%d",
                              card.bounds.width, radius,
-                             FloatHost.cornerRatio * 100))
+                             (landscape ? FloatHost.cornerRatio
+                                         : FloatHost.cornerRatioPortrait) * 100,
+                             landscape ? 1 : 0))
         }
         // 0.1.26 — 圆角跟着尺寸一起走。
         //
@@ -3951,7 +3984,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         card.bounds = CGRect(origin: .zero, size: target.size)
         // 0.2.39 — 走同一个「卡宽 → 圆角」，否则升主窗那一下会先把角写成 38，
         // 落地后再被 `applyCorner` 改成 44，看上去是「角跳了一下」。
-        card.layer.cornerRadius = FloatHost.corner(for: target.width)
+        card.layer.cornerRadius = FloatHost.corner(for: target.width, landscape: self.landscape)
         card.transform = CGAffineTransform(scaleX: liftFrom, y: liftFrom)
         card.center = liftCentre
         // 光晕的 bounds 也先按终点备好，`outside` 里再把 frame 从视觉框长到终点。

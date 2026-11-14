@@ -1462,7 +1462,8 @@ enum SceneProbe {
             // （键盘态场景要跟卡片一起下移到 215）；②键盘态改成每拍查，因为
             // 键盘弹起只有 0.25 s，等到第 10 拍（2 s）时用户早就看见画面在错的
             // 位置上闪过了。
-            if beat % 10 == 0 || host.isKeyboardFilled || host.isKeyboardSettling {
+            if beat % 10 == 0 || host.isKeyboardFilled || host.isKeyboardSettling
+                || host.isCanvasDirty {
                 if !host.isKeyboardFilled {
                     // 键盘收起 ⇒ 原点归零这一趟必须重新允许，否则「写过 215 又被
                     // 判成不认」的标志会一直拦着还原。

@@ -938,6 +938,10 @@ static double AevonRotExitAt[AEVON_ARMED_MAX];
 /// （用户又进全屏）则取消挂起，走正常的进横屏。
 static int AevonRotRestorePending[AEVON_ARMED_MAX];
 static int AevonRotRestoreTries[AEVON_ARMED_MAX];
+/// 0.4.72 — phase1 落下的时刻。兕底改按墙钟（348→349 教训：sweep 被 Darwin
+/// 通知频繁触发，拍数计的 8 拍 2 秒就满了，兕底提前强收、世界还没回竖 ——
+/// 用户看到的「卡片竖了、内容还横着」就是这一拍）。3.5 s 墙钟。
+static CFAbsoluteTime AevonRotRestoreAt[AEVON_ARMED_MAX];
 /// 0.4.67 — App 报上来的「视频区」（keyWindow 坐标）。
 ///
 /// 0.4.68 — **只当证词**：0.4.67 拿它做「把视频区搬到卡片中心」的平移，于是
@@ -2024,6 +2028,7 @@ static void AevonRotExitDispatch(int slot) {
     if (landscape && AevonRotRestorePending[slot] == 0) {
         AevonRotRestorePending[slot] = 1;
         AevonRotRestoreTries[slot] = 0;
+        AevonRotRestoreAt[slot] = CFAbsoluteTimeGetCurrent();
         dispatch_async(dispatch_get_main_queue(), ^{
             if (name[0] != '\0') AevonCardLandscapeExitPhase1(name);
             free(name);
@@ -2101,13 +2106,15 @@ static void AevonRotSweep(void) {
                 // 0.4.71 — phase1 挂起：世界回竖（或兕底到点）才收卡。
                 // 在判重之前查：挂起期间 App 持续报 0，不能被判重吞掉。
                 if (AevonRotRestorePending[i] != 0) {
-                    if (w <= h + 40.0 || AevonRotRestoreTries[i] >= 8) {
+                    CFAbsoluteTime restoreNow = CFAbsoluteTimeGetCurrent();
+                    double waited = restoreNow - AevonRotRestoreAt[i];
+                    if (w <= h + 40.0 || waited > 3.5) {
                         AevonRotRestorePending[i] = 0;
                         char *nm = strdup(AevonArmed[i]);
                         if (nm != NULL) {
                             AevonLogRaw([[NSString stringWithFormat:
-                                          @"win: card landscape exit phase2 world=%.0fx%.0f tries=%d b=%s",
-                                          w, h, AevonRotRestoreTries[i], nm] UTF8String]);
+                                          @"win: card landscape exit phase2 world=%.0fx%.0f waited=%.1f b=%s",
+                                          w, h, waited, nm] UTF8String]);
                             dispatch_async(dispatch_get_main_queue(), ^{
                                 if (nm[0] != '\0') AevonCardLandscapeExit(nm);
                                 free(nm);

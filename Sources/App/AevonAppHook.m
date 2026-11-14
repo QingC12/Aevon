@@ -6657,15 +6657,10 @@ static int AevonRotWantSeen = -1;
 /// 进全屏那一拍横版页从第一拍就是横排（347：19:35:50 `page=717 box=717`），
 /// 不会误伤入场。
 static int AevonRotFeedExit = 0;
-/// 0.4.71 — 锁存落下的时刻 + 「请世界回竖」已发了几次（上限 2）。
-///
-/// 世界还横时它转不回来：scene frame 被宿主钉在 717x430，而解锁键在宿主手里
-/// （收 0 后两拍确认才解钉，≈0.6~1.1 s）。所以锁存后延迟 1.0 s / 2.0 s 各补
-/// 发一发 `AevonRotAsk(NO)`（真竖屏几何请求）—— 此时宿主已解钉，请求能落地。
-/// 真实退出那条路（抖音自己请求过）多一发同向请求无害；手动长按退出那条路
-/// 全靠它。世界回竖后探针自答 NO，锁存与计数一起清零。
-static CFAbsoluteTime AevonRotFeedExitAt = 0;
-static int AevonRotExitAsks = 0;
+// 0.4.72 — 撤掉 0.4.71 的「+1.0s/+2.0s 补发 rot ask」：349 两次都被系统拒
+// （BSActionErrorDomain错误1，抖音全屏态的 supportedInterfaceOrientations 不含
+// 竖屏），纯噪音。真正能转世界的是宿主看门狗的 settings 写（349：关卡那条
+// `screen back door=3` 一写世界当场回竖），phase1 已把看门狗目标翻竖。
 static int AevonRotFeedStreak = 0;
 /// 心跳计数，只用来把偏好域读值降频（读不受 0.1.35 那条纪律管，但也不必每拍一问）。
 static int AevonRotTicks = 0;
@@ -7033,8 +7028,6 @@ static void AevonRotApplyWant(void) {
     if (want == 1) {
         AevonRotFeedExit = 0;
         AevonRotFeedStreak = 0;
-        AevonRotFeedExitAt = 0;
-        AevonRotExitAsks = 0;
     }
     // 0.4.70 — 宿主要求回竖、而世界还钉在横屏：App 的 `requestGeometryUpdate`
     // 会被宿主的守护循环写回（347：`frame drift now=430x717 want=717x430
@@ -7051,7 +7044,6 @@ static void AevonRotApplyWant(void) {
         if (w2.width > w2.height + 40.0) {
             AevonRotFeedExit = 1;
             AevonRotFeedStreak = 2;
-            if (AevonRotFeedExitAt == 0) AevonRotFeedExitAt = CFAbsoluteTimeGetCurrent();
             AevonRotPublish(NO, w2, CGRectNull);
             return;
         }
@@ -7120,13 +7112,10 @@ static void AevonRotTick(void) {
                 if (!on) {
                     AevonRotFeedExit = 0;
                     AevonRotFeedStreak = 0;
-                    AevonRotFeedExitAt = 0;
-                    AevonRotExitAsks = 0;
                 } else if (AevonRotFeedPortrait(AevonKeyWindow())) {
                     AevonRotFeedStreak += 1;
                     if (AevonRotFeedStreak >= 2 && AevonRotFeedExit == 0) {
                         AevonRotFeedExit = 1;
-                        AevonRotFeedExitAt = CFAbsoluteTimeGetCurrent();
                         UIScrollView *pg = AevonPagerGet();
                         CGRect pb = pg != nil ? [pg bounds] : CGRectZero;
                         char fl[128];
@@ -7142,22 +7131,6 @@ static void AevonRotTick(void) {
                 if (AevonRotFeedExit) {
                     on = NO;
                     snprintf(why, sizeof(why), "feed");
-                    // 0.4.71 — 世界还横：补发「请回竖」。宿主收 0 后两拍才解钉，
-                    // 所以第一发压在 +1.0 s（解钉之后），第二发 +2.0 s 兕底。
-                    if (world.width > world.height + 40.0 && AevonRotExitAsks < 2
-                        && AevonRotFeedExitAt > 0) {
-                        CFAbsoluteTime now3 = CFAbsoluteTimeGetCurrent();
-                        double since = now3 - AevonRotFeedExitAt;
-                        if (since > (AevonRotExitAsks == 0 ? 1.0 : 2.0)) {
-                            AevonRotExitAsks += 1;
-                            char al[64];
-                            snprintf(al, sizeof(al),
-                                     "app: rot exit ask n=%d world=%.0fx%.0f\n",
-                                     AevonRotExitAsks, world.width, world.height);
-                            AevonAppLogWrite(al);
-                            AevonRotAsk(NO);
-                        }
-                    }
                 }
                 // 只看变化：稳态下一行都不写（0.15 s 一条 `page state` 那种日志
                 // 已经让 344 有 900 行了，这条通道不能再刷）。
