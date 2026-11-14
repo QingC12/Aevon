@@ -7298,8 +7298,10 @@ static void AevonOrientHookRestore(void) {
 - (BOOL)shouldAutorotate {
     return YES;
 }
-- (NSUInteger)supportedInterfaceOrientations {
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     // 只在窗口期答横屏：want=0 之后答竖屏，dismiss 的那一拍世界自己转回去。
+    // ⛔ 返回类型必须写 `UIInterfaceOrientationMask`：它是带类型的枚举，写成
+    // `NSUInteger` 会被 `-Werror,-Wmismatched-return-types` 判死（CI 实测）。
     return (AevonRotWantSeen == 1)
         ? (UIInterfaceOrientationMaskLandscapeLeft | UIInterfaceOrientationMaskLandscapeRight)
         : UIInterfaceOrientationMaskPortrait;
