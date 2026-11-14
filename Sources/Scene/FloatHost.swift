@@ -1070,21 +1070,18 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         return CGSize(width: w.rounded(), height: h.rounded())
     }
 
-    /// 0.4.71 — 横版卡片的宽高比：**1.667（= 世界的宽高比）**。
+    /// 0.4.89 — 横版卡片的宽高比：**16:9**（366 用户原话「不应该是高 9 宽 16 吗」）。
     ///
-    /// 0.4.68 曾按用户要求定 2.16（TrollOpen 录屏实测 443x205）。但 TrollOpen 的
-    /// 世界是**整屏转置 932x430**，卡片比例 = 世界比例 ⇒ 满宽零裁切；我们的世界
-    /// 是**画布转置 717x430**（1.667），卡片硬开 2.16 就必须裁 59 pt（上下各
-    /// 29.5）——348：返回箭头、进度条被裁掉，「页面显示不全」。
-    /// 满宽且完整只有一个解：卡片比例 = 世界比例。世界 717x430 ⇒ 卡 430x258。
-    /// 世界尺寸若变（分屏等），比例失配会回到「装得下」而非裁切，安全。
-    static let landscapeAspect: CGFloat = 1.6674
-
-    /// 横版卡片的落点尺寸：满屏宽、按 2.16 定高。
-    static func landscapeCard(in bounds: CGRect) -> CGSize {
-        let w = bounds.width
-        return CGSize(width: w, height: (w / landscapeAspect).rounded())
-    }
+    /// 这个数三代各被现场判过一次，记在这里免得再绕回去：
+    /// · 0.4.68 按 TrollOpen 录屏定 2.16（443x205）⇒ 348 判「页面显示不全」；
+    /// · 0.4.71 改成 1.667（= 世界 717x430 的比例）—— 那时卡片是「满屏宽的横条」，
+    ///   比例等于世界 ⇒ 满宽零裁切；
+    /// · 0.4.87/0.4.88 想「整屏转置铺满」，把卡片做成 406x908 再转 -90°，366 判死：
+    ///   用户要的是**一个 16:9 的横窗**，不是一块盖住整屏的布。
+    ///
+    /// 16:9 与世界 1.667 只差 6 %：铺满时上下各裁约 8 pt，正好落在播放器本来就黑
+    /// 的那两条里（抖音横版播放器的视频区 717x403 = 1.779，天生 16:9）。
+    static let landscapeAspect: CGFloat = 16.0 / 9.0
 
     /// 0.4.88 — 横屏卡离屏幕边缘留多少。
     ///
@@ -1095,36 +1092,35 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 12 也是「铺满」与「可操作」的折中里最小的一档，视频只少 12 pt 边。
     static let landscapeInset: CGFloat = 12
 
-    /// 0.4.88 — 横屏卡的 `bounds`（**转置**后的屏幕，不是视觉尺寸）。
+    /// 0.4.89 — 横屏卡的落点尺寸（**视觉尺寸 = 卡片 `bounds`**，不再有 90° 转置）。
     ///
-    /// 视觉 = `bounds` 转 90° ⇒ 宽 `bounds.height`、高 `bounds.width`。所以要
-    /// 「四边各留 12」就得让 `bounds` 的**高**减 24、**宽**减 24 —— 这两个数在
-    /// 转置之后正好对调。写反的话留白会变成上下 12、左右 0（365 之前那种）。
+    /// 宽 = 屏宽减两侧各 `landscapeInset`（430 − 24 = 406），高按 16:9 推（228）。
+    ///
+    /// 0.4.87/0.4.88 这里返的是**转置**的屏幕（908x406），再让整块卡转 -90°：
+    /// 视觉 footprint 于是变成 406x908 —— 一张几乎整屏的竖布。366 用户原话
+    /// 「悬浮窗会放大到几乎满屏，不应该是高 9 宽 16 吗」，判的就是这一行。
     static func landscapeSize(in bounds: CGRect) -> CGSize {
-        let w = bounds.height - landscapeInset * 2
-        let h = bounds.width - landscapeInset * 2
-        return CGSize(width: Swift.max(160, w), height: Swift.max(120, h))
+        let w = Swift.max(180, bounds.width - landscapeInset * 2)
+        let h = (w / landscapeAspect).rounded()
+        let cap = Swift.max(120, bounds.height - landscapeInset * 2)
+        return CGSize(width: w, height: Swift.min(h, cap))
     }
 
-    /// 0.4.87 — 横屏卡（整屏转置）里，世界该缩到多少。
-    ///
-    /// 364 的现场是「点全屏只有左边有画面、右边空白」：卡片 430x258 里塞着
-    /// 一个 717x430 的世界，`fillScale` 取 0.6 只够铺满**卡片**，而屏幕横向
-    /// 还有 287 pt 从没被这块卡片盖住过 —— 用户看到的那片空白就是屏幕本身。
-    /// 现在横屏卡是整屏转置（`card.bounds` = 932x430、整块转 -90°），世界
-    /// 能不能铺满取决于它自己的比例：717x430 放进 932x430 差 107×2，这
-    /// 107 是 1.667 与 2.167 的差，任何缩放都消不掉（拉满就裁视频上下）。
+    /// 0.4.89 — 横屏卡里世界该缩到多少：**铺满**（取大的那一边）。
     ///
     /// `rotated` = 画布要不要自己转 90°：假横时 App 世界还是竖的 430x717，
-    /// 只有补一条旋转才和真横的 717x430 同构；真横时世界已经是横的，画布
-    /// 一个字节都不转（转了就是画面躺倒）。
-    static func landscapeFit(world: CGSize, in card: CGSize, rotated: Bool) -> CGFloat {
+    /// 只有补一条旋转才落进横窗；真横时世界已经是 717x430，一个字节都不转。
+    /// 两种情况的**视觉**尺寸都是 717x430，所以 16:9 卡（406x228）铺满取
+    /// 0.566：内容 406x243，上下各被裁 7.5 pt —— 落在播放器本来黑的那两条里。
+    /// 0.4.87 用的是「装得下」（min）⇒ 同一张 16:9 卡里世界只到 380x228，
+    /// 左右各 13 pt 黑底；铺满之后是 406x243，只裁上下 7.5 pt。
+    static func landscapeFill(world: CGSize, in card: CGSize, rotated: Bool) -> CGFloat {
         let visual = rotated ? CGSize(width: world.height, height: world.width) : world
         guard visual.width > 16, visual.height > 16 else { return 1 }
-        return Swift.min(card.width / visual.width, card.height / visual.height)
+        return Swift.max(card.width / visual.width, card.height / visual.height)
     }
 
-    // MARK: - 0.4.68 横屏（整屏转置 · 2.16 视频窗）
+    // MARK: - 0.4.68 横屏（16:9 横窗 · 0.4.89 起不转卡片）
 
     /// 这张卡现在是横的还是竖的。独立开关，不从 `natural` 推。
     ///
@@ -1293,13 +1289,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         card.transform = .identity
         glow?.transform = .identity
 
-        // 1. 几何。横版 = **整屏转置**：卡片 bounds 取屏幕的转置（932x430），
-        //    再把整块卡转 -90° —— 视觉上正好盖满 430x932 的屏幕。
+        // 1. 几何。横版 = **一个 16:9 的横窗**（`landscapeAspect`），不是整屏。
         //
-        // 0.4.87 — 这里原来算的是「满屏宽 × 1.667 = 430x258、中心沿用切横前
-        // 那一点」。那个形状只在「横屏 = 一个横条小窗」的前提下成立，而 364
-        // 用户要的是**铺满**：430x258 的卡片放在 430x932 的屏幕上，右半边
-        // 287 pt 从没被盖住，量出来就是「只有左边有画面，右边空白」。
+        // 0.4.87/0.4.88 在这里做的是「整屏转置」：bounds 取屏幕的转置（908x406）
+        // 再整块转 -90° ⇒ 视觉 406x908，几乎盖满屏幕。而且卡片坐标系整体转了
+        // 90°，`followContent` 里给假横准备的那条 canvas 旋转叠上去就是 180°
+        // —— 366 用户看到的「一半竖版画面、一半黑屏」正是这两下叠出来的：
+        // 一张 430x717 的竖版画布被转两次，落进竖长条里，剩下的就是黑。
+        //
+        // 现在：卡片**不转**（transform 恒为单位阵），宽 = 屏宽 − 24 = 406、
+        // 高按 16:9 = 228；位置沿用切横之前那张卡的中心（0.4.67 用户定档
+        // 「只改宽高、位置不动」），再夹回屏幕内。
         var frame: CGRect
         var visual: CGRect
         if on {
@@ -1309,16 +1309,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             // 0.4.73 — 假横从这一行起与真横分叉；几何完全同构（卡片、画布尺寸
             // 都一样），分叉只在「写不写 scene frame」与「canvas 要不要转置」。
             landscapeFake = fake
-            // 0.4.88 — 四边各留 `landscapeInset`：整屏那一版把手势环推到屏幕外，
-            // 用户报「四边手势贴近屏幕、无法操作」（365）。视觉尺寸 = 转置后的
-            // bounds，所以视觉的留白与 bounds 的留白是同一个数（见 `landscapeSize`）。
             let size = FloatHost.landscapeSize(in: bounds)
-            frame = CGRect(x: bounds.midX - size.width * 0.5,
-                           y: bounds.midY - size.height * 0.5,
+            let c = CGPoint(x: portraitFrame?.midX ?? bounds.midX,
+                            y: portraitFrame?.midY ?? bounds.midY)
+            let inset = FloatHost.landscapeInset
+            let x = Swift.min(Swift.max(c.x - size.width * 0.5, inset),
+                              Swift.max(inset, bounds.width - size.width - inset))
+            let y = Swift.min(Swift.max(c.y - size.height * 0.5, inset),
+                              Swift.max(inset, bounds.height - size.height - inset))
+            frame = CGRect(x: x.rounded(), y: y.rounded(),
                            width: size.width, height: size.height)
-            visual = CGRect(x: bounds.midX - size.height * 0.5,
-                            y: bounds.midY - size.width * 0.5,
-                            width: size.height, height: size.width)
+            visual = frame
             // 转置：430x717 → 717x430。与 App 自己的 `world` 一致。
             if natural.width > 16 && natural.height > 16 {
                 natural = CGSize(width: natural.height, height: natural.width)
@@ -1365,22 +1366,22 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
                        options: [.beginFromCurrentState, .curveEaseInOut]) {
             card.bounds = CGRect(origin: .zero, size: frame.size)
             card.center = CGPoint(x: frame.midX, y: frame.midY)
-            // 0.4.87 — 整块卡转 -90°（真横假横同一个形状）。`card.bounds` 是
-            // 932x430、转完视觉正好 430x932；退出时这一条必须回单位阵，否则
-            // 卡片会带着 90° 回到竖屏（`frame` 是派生量，届时读到的宽高互换）。
-            card.transform = on ? CGAffineTransform(rotationAngle: -.pi / 2) : .identity
+            // 0.4.89 — 卡片**不转**：横窗本身就是横的（406x228），不需要任何
+            // 变换。0.4.87/0.4.88 那条 -90° 必须在这里归零，否则退出时卡片会
+            // 带着 90° 回竖屏（`frame` 是派生量，届时读到的宽高互换）。
+            if card.transform != .identity { card.transform = .identity }
             self.applyGlow()
             self.followContent()
         }
         syncGrip()
         if on {
-            // 0.4.87 — 一行把「横屏卡现在是整屏」钉死：`card` 报的是**视觉**尺寸
-            //（转置之后占屏幕多大），不是 `bounds`（那是旋转前的 932x430）。
-            // 下一份日志里 430x932@0,0 + rot=-90 同时出现 ⇒ 这次真的是铺满，
-            // 而不是又回到 430x258 的横条。
-            Log.write(String(format: "win: landscape full=1 rot=-90 card=%.0fx%.0f@%.0f,%.0f b=%@",
+            // 0.4.89 — 一行把「横屏卡是一个 16:9 横窗」钉死：宽高 + 比例。
+            // 366 之前这里打的是 `full=1 rot=-90 card=406x908`，那个数就是
+            // 「放大到几乎满屏」的物证；现在该读到 406x228、ratio=1.78。
+            Log.write(String(format: "win: landscape card=%.0fx%.0f@%.0f,%.0f ratio=%.3f b=%@",
                              visual.width, visual.height,
-                             visual.minX, visual.minY, bundle))
+                             visual.minX, visual.minY,
+                             visual.width / Swift.max(visual.height, 1), bundle))
         }
         Log.write(String(format: "win: card landscape %d canvas=%.0fx%.0f card=%.0fx%.0f@%.0f,%.0f vid=%.0fx%.0f@%.0f,%.0f fake=%d door=%d b=%@",
                          on ? 1 : 0, natural.width, natural.height,
@@ -2547,10 +2548,11 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 唯一一处「卡宽 → 圆角」。`lift` 那条动画和 `applyCorner` 都走这里，
     /// 免得两处各算一遍再对不上。
     static func corner(for width: CGFloat, landscape: Bool) -> CGFloat {
-        // 0.4.87 — 横屏卡现在是整屏转置（视觉正好盖住 430x932 的屏幕），四角
-        // 贴着屏幕边缘，圆角只能是 0：留一圈角等于在屏幕四角各挖掉一块黑。
-        if landscape { return 0 }
-        return Swift.max(cornerFloor, width * cornerRatioPortrait)
+        // 0.4.87 曾在这里 `if landscape { return 0 }` —— 那时横屏卡是整屏转置，
+        // 四角贴着屏幕边，留角等于在屏幕四角各挖一块黑。0.4.89 起横屏卡是
+        // 406x228 的浮窗，四角都在屏内，圆角照旧按卡宽算（横 8 % = 32 pt）。
+        let ratio = landscape ? cornerRatio : cornerRatioPortrait
+        return Swift.max(cornerFloor, width * ratio)
     }
 
     private func applyCorner() {
@@ -2639,12 +2641,14 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// `installGrip` 那段：手势环也在同一层），所以它在卡片窗口之上、在 App 的
     /// 画面之上，永远收得到触摸。
     ///
-    /// 位置写死在「视觉左上角往内 30 pt」：横屏卡四边留 `landscapeInset`(12)，
-    /// 30 > 12 保证按钮整个落在屏幕内；不跟随卡片中心 —— 这一版横屏不许拖动，
-    /// 中心是恒定的屏幕中心。
+    /// 0.4.89 — 位置改成跟着卡片走：**上边缘外侧、左对齐**。0.4.88 把它钉死在
+    /// 屏幕左上角（42,42），那时横屏卡盖住整屏，两者碰巧重合；现在横屏卡是
+    /// 406x228 的浮窗、还可能被拖动，钉在屏幕角上就变成「按钮离窗口十万八千里」。
+    /// 摆在外侧是为了不压住抖音横版播放器自己的返回箭头与视频画面。
+    /// 卡片贴顶（上方放不下）时落回卡内左上；两次摆位差不到 0.5 pt 就不写日志。
     private func syncLandExit() {
         guard let host = grip?.superview else { return }
-        guard landscapeOn else {
+        guard landscapeOn, let card = card else {
             landExit?.isHidden = true
             return
         }
@@ -2669,11 +2673,21 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             button = one
         }
         button.isHidden = false
-        button.center = CGPoint(x: FloatHost.landscapeInset + 30,
-                                y: FloatHost.landscapeInset + 30)
+        let half = size / 2
+        let c = card.frame
+        var cx = c.minX + half + 4
+        var cy = c.minY - half - 6
+        if cy < half + 8 { cy = c.minY + half + 8 }
+        cx = Swift.min(Swift.max(cx, half + 8), Swift.max(half + 8, host.bounds.width - half - 8))
+        cy = Swift.min(Swift.max(cy, half + 8), Swift.max(half + 8, host.bounds.height - half - 8))
+        let want = CGPoint(x: cx.rounded(), y: cy.rounded())
+        let moved = abs(button.center.x - want.x) > 0.5 || abs(button.center.y - want.y) > 0.5
+        button.center = want
         host.bringSubviewToFront(button)
-        Log.write(String(format: "win: landscape exit btn at %.0f,%.0f",
-                         button.center.x, button.center.y))
+        if moved {
+            Log.write(String(format: "win: landscape exit btn at %.0f,%.0f",
+                             want.x, want.y))
+        }
     }
 
     /// 点一下 = 长按一次左下侧。三条分流（假横直接退 / 真横走解钉两拍）都在
@@ -2946,13 +2960,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// resized by this very gesture and their rulers stretch.
     private func dragMove(total: CGPoint, velocity: CGPoint) {
         guard let card = card, let window = window else { return }
-        // 0.4.87 — 横屏整屏卡不参与拖动/缩放。
+        // 0.4.89 — 横屏卡可以拖、可以从角上缩放（恢复 0.4.65 的行为）。
         //
-        // 这条路的落点（`liveTransform` / `settleLive`）写的是「纯 scale + identity」，
-        // 而横屏卡的形状靠 `card.transform` 上那条 90° 撑着：一拖就会被抹成
-        // 单位阵，932x430 的 bounds 直接横躺在 430 宽的屏幕上（右边整块出屏）。
-        // 整屏也没有可拖的余地，直接不受理。
-        if landscape { return }
+        // 0.4.87/0.4.88 在这里 `if landscape { return }`：那两版横屏卡的形状靠
+        // `card.transform` 上那条 -90° 撑着，而 `liveTransform`/`settleLive` 写的是
+        // 「纯 scale + identity」，一拖就把 90° 抹掉，932x430 直接横躺在 430 宽的
+        // 屏幕上。0.4.89 起卡片不转（`transform` 恒单位阵），这条禁令的前提消失。
         FloatHost.liveUntil = CACurrentMediaTime() + 1.0
         // 0.1.39 — 第一条真的移动到了：宿主从这一刻起才接管这一根手指。
         lockBand()
@@ -2960,18 +2973,19 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         let dy = total.y - panStep.y
         panStep = total
         if zone.isCorner, let start = resizeStart {
-            // 0.4.71 — 宽度驱动、锁 1.667（= 世界比例，见 `landscapeAspect`）。
+            // 0.4.89 — 宽度驱动、锁 16:9（`landscapeAspect`）。
             //
             // 竖屏那一套是高度驱动，因为竖卡的形状由高度系数决定；横卡的形状
-            // 由屏幕宽决定（满宽 430 是上限），所以主变量换成宽度。两个界都来自
-            // 屏幕：小到 180（再小就只剩一行字），大到满宽（左右两条边已经撤了，
-            // 不需要再给环留 `margin`）。
+            // 由宽度决定，所以主变量换成宽度。两个界都来自屏幕：小到 180（再小
+            // 就只剩一行字），大到屏宽减两侧留白。
             //
-            // ⛔ 高度不是从 `natural` 的宽高比推之外的第二套数。横屏画布是 717x430
-            // （1.667），卡片锁同一个比例 ⇒ 缩放时内容始终恰好装满，无裁切。
+            // ⛔ 高度只能从 `landscapeAspect` 推，不能有第二套数。卡片 16:9 而
+            // 世界 1.667（视频区 1.779）：铺满取大的那一边，上下各裁约 3 %，
+            // 落在播放器本来就黑的那两条里，不裁视频本体。
             if landscape {
                 let minW: CGFloat = 180
-                let maxW = window.bounds.width
+                // 与默认落点同一个上限：屏宽减两侧留白，环才抓得到。
+                let maxW = window.bounds.width - FloatHost.landscapeInset * 2
                 let grown = total.x * (resizeFromLeft ? -1 : 1)
                 let w = Swift.min(maxW, Swift.max(minW, start.width + grown))
                 let h = (w / FloatHost.landscapeAspect).rounded()
@@ -3094,13 +3108,17 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// `layoutSubviews`、不碰远程 scene、不跨窗口。这就是「跟手」的全部开销。
     private func liveTransform(_ target: CGRect) {
         guard let card = card else { return }
-        // 0.4.87 — 横屏走的是 rotate + bounds，不是这条纯缩放路（见 `dragMove`）。
-        if landscape { return }
+        // 0.4.89 — 横屏也能拖动/缩放：卡片不转了（`transform` 恒单位阵），
+        // 这条纯缩放路对两种朝向都是正确的。0.4.87/0.4.88 在这里 return 是因为
+        // 那时卡片的 90° 就写在 `transform` 上，一写 scale 就把它抹掉。
         let base = card.bounds.size
         let scale = CGAffineTransform(scaleX: target.width / Swift.max(base.width, 1),
                                       y: target.height / Swift.max(base.height, 1))
         card.transform = scale
         card.center = CGPoint(x: target.midX, y: target.midY)
+        // 0.4.89 — 横屏的 ✕ 跟着卡片走（摆在卡的上边缘外侧）；差不到 0.5 pt
+        // 时它内部不写日志，所以每帧调也不会淹掉日志。
+        syncLandExit()
         guard let glow = glow else { return }
         // 光晕与卡片同尺寸（`applyGlow` 一直按 `card.frame` 摆），所以同一组
         // `center` + `transform` 就对齐，不必每帧重算外扩量。
@@ -3116,9 +3134,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     private func settleLive() {
         guard let target = liveFrame, let card = card else { return }
         liveFrame = nil
-        // 0.4.87 — 横屏整屏：几何由 `setLandscape` 负责，这里一个字节都不写
-        //（尤其不能把 transform 归成 identity，那条 90° 就是横屏本身）。
-        if landscape { return }
+        // 0.4.89 — 横屏同样落回真几何（卡片不再带 90°，identity 就是它对的样子）。
         // 0.1.35 — 手势结束，光晕退回按需重画（栅格化会冻结旧尺寸的阴影，
         // 而这一拍正要改尺寸，留着就是一圈糊的边）。
         glow?.layer.shouldRasterize = false
@@ -3133,6 +3149,7 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 尺寸、圆角、画面三件事一次收口；`syncGrip` 再把热区写回另一个窗口。
         followContent()
         syncGrip()
+        syncLandExit()
     }
 
     private func dragEnd(total: CGPoint, velocity: CGPoint) {
@@ -4295,16 +4312,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 是它上下各 ~21 pt）。这是 2.16 比例的必然代价：世界 1.667，卡 2.16，
         // 两个比例不同则必有一边留空或一边裁切，用户拍板要铺满。
         // `shift` 恒为零：居中就是终点，拿内容去决定窗口位置是上一版抖动的原因。
-        // 0.4.87 — 横屏卡是**整屏转置**（bounds 932x430），世界按「装得下」取
-        // 比例：真横 717x430 → 1.0，假横 430x717 转过之后也是 1.0。两侧各 107
-        // 是 1.667 与 2.167 的比例差，不是留白 bug；拉满（fill）只会裁掉视频
-        // 上下各 64 pt，用户上一版刚为此抱怨过「显示不全」。
+        // 0.4.89 — 横屏卡是 **16:9 横窗**（406x228，**不转**），世界一律按「铺满」
+        // 取比例：真横 717x430 → 0.566，假横 430x717 转过 90° 之后同样是 0.566。
+        // 0.4.87/0.4.88 那两版卡片自己带 -90°，画面于是在屏幕上躺倒 —— 366 的
+        // 「有画面的是竖版画面」就是这条旋转造成的，不是 App。
         let landscapeWorld = landscapeFake
             ? (portraitNatural ?? CGSize(width: natural.height, height: natural.width))
             : natural
         let scale: CGFloat = landscape
-            ? FloatHost.landscapeFit(world: landscapeWorld, in: card.bounds.size,
-                                     rotated: landscapeFake)
+            ? FloatHost.landscapeFill(world: landscapeWorld, in: card.bounds.size,
+                                      rotated: landscapeFake)
             : FloatHost.fitScale(for: visible, in: card.bounds.size)
         let want = CGRect(origin: .zero, size: natural)
         let shift = CGPoint.zero
@@ -4995,8 +5012,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             ? (portraitNatural ?? CGSize(width: natural.height, height: natural.width))
             : natural
         let scale: CGFloat = landscape
-            ? FloatHost.landscapeFit(world: landscapeWorld, in: card.bounds.size,
-                                     rotated: landscapeFake)
+            ? FloatHost.landscapeFill(world: landscapeWorld, in: card.bounds.size,
+                                      rotated: landscapeFake)
             : FloatHost.fitScale(for: visible, in: card.bounds.size)
         let source = landscape ? natural : visible
         let shown = CGSize(width: source.width * scale, height: source.height * scale)
@@ -5128,8 +5145,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             ? (portraitNatural ?? CGSize(width: natural.height, height: natural.width))
             : natural
         let scale: CGFloat = landscape
-            ? FloatHost.landscapeFit(world: landscapeWorld, in: card.bounds.size,
-                                     rotated: landscapeFake)
+            ? FloatHost.landscapeFill(world: landscapeWorld, in: card.bounds.size,
+                                      rotated: landscapeFake)
             : FloatHost.fitScale(for: visible, in: card.bounds.size)
         // 顶栏裁切只属于竖版（同 `followContent`）：横版画布没有顶栏那一条。
         let placementCrop = landscape ? CGFloat(0) : (cropTop + kbTopCrop)
@@ -5215,14 +5232,12 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 记忆里算出第三种可能。所以这一支不经过 `plan`、也不写 `CardLayout`：
         // 那张表存的是竖版的「多大、贴哪边」，横屏写进去就是污染。
         if landscape {
-            // 0.4.88 — 与 `setLandscape` 同一份几何：转置后的屏幕、四边各留
-            // `landscapeInset`、整块转 -90°。两条路必须同一个数，否则「横屏里
-            // 长按复位」会把卡片弹回一个没有留白的整屏。
+            // 0.4.89 — 与 `setLandscape` 同一份几何：16:9 横窗、居中、**不转**。
+            // 两条路必须同一个数，否则「横屏里长按复位」会把卡片弹回另一个形状。
             let size = FloatHost.landscapeSize(in: bounds)
             let frame = CGRect(x: bounds.midX - size.width * 0.5,
                                y: bounds.midY - size.height * 0.5,
                                width: size.width, height: size.height)
-            // 判重读 `bounds`：`card.frame` 带着 90° 时是外接矩形（宽高互换）。
             if abs(card.bounds.width - size.width) < 1.5,
                abs(card.bounds.height - size.height) < 1.5,
                abs(card.center.x - bounds.midX) < 1.5,
@@ -5233,13 +5248,13 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             AevonMotion.spring {
                 card.bounds = CGRect(origin: .zero, size: frame.size)
                 card.center = CGPoint(x: frame.midX, y: frame.midY)
-                card.transform = CGAffineTransform(rotationAngle: -.pi / 2)
+                if card.transform != .identity { card.transform = .identity }
                 self.applyGlow()
                 self.followContent()
                 self.syncGrip()
             }
             Log.write(String(format: "win: card landscape reset to %.0fx%.0f at %.0f,%.0f",
-                             bounds.width, bounds.height, bounds.minX, bounds.minY))
+                             size.width, size.height, frame.minX, frame.minY))
             return true
         }
         // 0.0.65 — 形状不再存盘，也就没有「复位形状」这件事：画布永远是

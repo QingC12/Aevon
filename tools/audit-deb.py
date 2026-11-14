@@ -1043,18 +1043,15 @@ def main():
                   # 判据：`unpin` 后 2 秒内应看到 `frame drift … want=430x717 door>0`
                   # （看门狗真推下去了），再后 `exit phase2 world=430x717`。
                   b"win: landscape unpin canvas=%.0fx%.0f b=%@",
-                  # 0.4.87 — 364 的「点全屏 / 长按转横之后只有左边有画面、右边空白」。
+                  # 0.4.89 — 366 判决：0.4.87/0.4.88 的「整屏转置」错在把**卡片**
+                  # 转了 -90°。视觉 footprint 变成 406x908（几乎整屏的竖布），而
+                  # `followContent` 给假横准备的那条 canvas 旋转叠上去就是 180° ——
+                  # 用户看到「一半竖版画面、一半黑屏」。现在卡片不转：
+                  # 宽 406、高按 16:9 = 228、位置沿用切横前那张卡的中心。
                   #
-                  # 根因不在 App：横屏卡一直是 `满屏宽 × 1.667 = 430x258` 的横条，
-                  # 它只盖住屏幕左边那一条；世界 717x430 缩进这条横条之后，右边
-                  # 287 pt 是**屏幕本身**从没被盖住 —— 用户看到的就是那片空白。
-                  # 这一版横屏卡改成**整屏转置**：bounds 932x430、整块转 -90°，
-                  # 视觉正好 430x932 铺满（假横/真横同一个形状，世界两侧各 107 pt
-                  # 是 1.667 与 2.167 的比例差，不是留白 bug）。
-                  #
-                  # 判据：这一行 `card` 报的是**视觉**尺寸 —— 430x932@0,0 才算铺满；
-                  # 再出现 430x258 就是退回横条了。
-                  b"win: landscape full=1 rot=-90 card=%.0fx%.0f@%.0f,%.0f b=%@",
+                  # 判据：这一行读到 `406x228` 且 `ratio=1.778`；再出现 `rot=-90`
+                  # 或者 908 就是退回整屏了。
+                  b"win: landscape card=%.0fx%.0f@%.0f,%.0f ratio=%.3f b=%@",
                   # 0.4.88 — 365 的第二条：整屏转置把手势环推到屏幕外，用户
                   # 「四边手势贴近屏幕、无法操作」。这一版横屏卡四边留 12 pt
                   # （`landscapeSize`：bounds 908x406 → 视觉 406x908@12,12），
@@ -1862,6 +1859,15 @@ def main():
                       b"app: rot land have cls=%s",
                       b"app: rot auto enter seen",
                       b"app: rot auto enter miss",
+                      # 0.4.89 — 366 的两拍都是 `miss`：竖屏时
+                      # `AWEPlayInteractionLandscapeFeedController` 还没被建出来。
+                      # 退一步直接调宿主 `AWEPlayInteractionViewController` 的
+                      # `realEnterLandscapeFeedWithEnterMethod:`（363 用户手点全屏
+                      # 时 present 就是从它发出的）。`block door` = App 门那一刻
+                      # 不含横屏，这一发**不发**（0.4.79 那条 SIGABRT 的前提）。
+                      b"app: rot auto enter by=vc realEnterLandscapeFeedWithEnterMethod:",
+                      b"app: rot auto enter block door",
+                      b"app: rot auto enter vc throw",
                       b"app: rot auto enter fire cls=%s how=%s",
                       b"app: rot auto enter nosel cls=%s",
                       b"app: rot auto enter throw",

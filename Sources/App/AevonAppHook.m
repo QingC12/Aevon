@@ -8527,6 +8527,41 @@ static void AevonRotAutoEnter(void) {
         how = @"saved";
     }
     if (inst == nil) {
+        // 0.4.89 — 366 的两拍都是 `rot auto enter miss`：竖屏时
+        // `AWEPlayInteractionLandscapeFeedController` **根本还没被建出来**，
+        // 对象图里搜不到。363 的证据说这个动作真正的发起者是它的宿主
+        // `AWEPlayInteractionViewController`（用户手点全屏那一拍，present 就是从
+        // `realEnterLandscapeFeedWithEnterMethod:` 发出的，参数 `desc=click`），
+        // 而那个 VC 竖屏时一直在链上（`rot hook cls=AWEPlayInteractionViewController`）。
+        //
+        // 所以退一步：直接调宿主那个方法，参数按 363 读到的 `click` 传字符串。
+        // ⛔ 0.4.79 的闪退前提必须排掉：present 的 VC 若只答横屏、而 App 门不含
+        // 横屏 ⇒ `UIApplicationInvalidInterfaceOrientation` 直接 SIGABRT。这里
+        // 先读门（`AevonAppOrientNow`），不含横屏就只记 `block`、不发这一发。
+        Class act = objc_getClass("AWEPlayInteractionViewController");
+        SEL realSel = sel_registerName("realEnterLandscapeFeedWithEnterMethod:");
+        UIWindow *kw = (act != Nil) ? AevonKeyWindow() : nil;
+        UIViewController *top = (kw != nil) ? [kw rootViewController] : nil;
+        if (act != Nil && top != nil) {
+            NSUInteger door = AevonAppOrientNow(kw);
+            NSUInteger land = UIInterfaceOrientationMaskLandscapeLeft |
+                              UIInterfaceOrientationMaskLandscapeRight;
+            if ((door & land) == 0) {
+                AevonAppLogWrite("app: rot auto enter block door\n");
+                return;
+            }
+            int budget2 = 900;
+            id vc = AevonFindInstance(act, top, 0, &budget2);
+            if (vc != nil && [vc respondsToSelector:realSel]) {
+                @try {
+                    AevonAppLogWrite("app: rot auto enter by=vc realEnterLandscapeFeedWithEnterMethod:\n");
+                    ((void (*)(id, SEL, id))objc_msgSend)(vc, realSel, @"click");
+                    return;
+                } @catch (NSException *e) {
+                    AevonAppLogWrite("app: rot auto enter vc throw\n");
+                }
+            }
+        }
         AevonAppLogWrite("app: rot auto enter miss\n");
         return;
     }
