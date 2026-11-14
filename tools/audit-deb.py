@@ -1699,12 +1699,37 @@ def main():
                       #   `app: rot want stale age=N` ⇒ 宿主那条 want=1 早于本进程
                       #        启动（上一轮会话的残留，357 里它让冷启动第 2 秒就去
                       #        转屏）⇒ 丢掉，不当成用户这一轮的要求。
+                      # 0.4.81 — 358：**世界第一次真转横了**（`rot turn ok n=1
+                      # world=717x430`），但立刻被两条自毁路收回：
+                      #   ① `rot feed exit world=717x430 pager=430x430` —— 抖音
+                      #      信息流在横屏世界下不重排（同拍 `scroll box=430x430`、
+                      #      `tall cell 430x932`），被这条判据读成「App 自己退了
+                      #      全屏」⇒ 报 0 ⇒ `landscape unpin` + `exit phase2`；
+                      #   ② 第二次长按 `rot chain cls=…>AevonRotKeeper` —— 残留
+                      #      keeper 在链上，present 过的那一个不会再要几何请求。
+                      #   `app: rot keeper rebuild n=N` ⇒ 撤掉残留 keeper 重建
+                      #        （每轮上限 4 次），下一拍重新 present 换一次几何请求；
+                      #   `app: rot look cls=X sel=Y argc=N` ⇒ 链上类（含父类两层）
+                      #        里名字带 fullscreen / landscape / enterFull 的方法。
+                      #        **argc=2 才是无参、下一版才敢直接调**；
+                      #   `app: rot look ctl cls=X x,y wxh` ⇒ 视频区里 UIControl 的
+                      #        真实类名（0.4.74 的 tap 7 连 miss 就是猜错了这个）；
+                      #   `app: rot look sheet cls=X` + `rot look stack …` ⇒ 用户
+                      #        手点全屏时 present 了谁、调用栈是什么 —— 直接给出
+                      #        「怎么让抖音自己进横版播放器」的答案；
+                      #   `app: rot look end` ⇒ 这套取证打完（进程内一次）。
                       b"app: rot keeper show from=%s",
                       b"app: rot keeper hide",
                       b"app: rot keeper passthru cls=%s off=%d",
                       b"app: rot keeper wait n=%d",
                       b"app: rot keeper block appmask=%lu hookn=%d n=%d",
                       b"app: rot keeper abort %s",
+                      b"app: rot keeper rebuild n=%d",
+                      b"app: rot look cls=%s sel=%s argc=%u",
+                      b"app: rot look ctl cls=%s",
+                      b"app: rot look sheet cls=%s",
+                      b"app: rot look stack %s",
+                      b"app: rot look end",
                       b"app: rot turn n=%d world=%.0fx%.0f door=%d hookn=%d",
                       b"app: rot turn ok n=%d world=%.0fx%.0f",
                       b"app: rot turn end n=%d world=%.0fx%.0f",
