@@ -1664,19 +1664,40 @@ def main():
                       #   `app: rot keeper passthru cls=类名 off=1` ⇒ 转场容器
                       #        交互已关（触摸穿透到承载页）；off=0 表示 superview
                       #        是 window、宁可不穿透也没动它；
-                      #   `app: rot keeper spin world=WxH` ⇒ 立起来 1.2 s 后世界
-                      #        的形状。**717x430 = UIKit 真转了；430x717 = 没转**
-                      #        （下一版改 presentation 风格 / 包 UINavigationController）；
+                      #   `app: rot keeper spin world=WxH door=D hookn=N` ⇒ 立起来
+                      #        1.2 s 后世界的形状。**717x430 = UIKit 真转了；
+                      #        430x717 = 没转**（door=0 是门没开，door=1 是开了
+                      #        但 presentation 不触发旋转）；
                       #   `app: rot keeper wait n=N` / `give up` ⇒ 找不到可 present
                       #        的顶层 VC（转场中），重试三次后放弃；
                       #   `app: rot ask retired n=2`       ⇒ 直发请求连续被拒两次，
                       #        自动退场不再刷日志（守门 VC 那条路不依赖它）。
+                      # 0.4.79 — 防崩三道闸（356 血案：`rot keeper show` 之后紧跟
+                      # `crash exc UIApplicationInvalidInterfaceOrientation` 与
+                      # `crash sig=6`，抖音进程被杀、悬浮窗消失）。根因是 0.4.78 把
+                      # `AevonRotKeeperShow()` 插在 `AevonOrientHookInstall()` **之前**
+                      # ——present 那一刻 App 级方向门还是抖音原生的「只竖屏」，与
+                      # 只答横屏的 keeper 交集为空，UIKit 直接抛异常。日志里「有
+                      # show、没有 rot hook n=」就是这条时序的铁证。
+                      #   闸一：keeper 的 `supportedInterfaceOrientations` /
+                      #        `preferredInterfaceOrientationForPresentation` 读
+                      #        `AevonRotKeeperDoorOpen`，门没开就答竖屏（交集永不为空）；
+                      #   闸二：`AevonRotKeeperShow` 用 `AevonAppOrientNow()` 先问门，
+                      #        不含横屏就不 present —— `rot keeper block` 两拍后
+                      #        `rot keeper hold`（本进程不再试）；
+                      #   闸三：`@try/@catch` 接住 NSException（不是崩溃信号，接得住
+                      #        进程就活着）—— `rot keeper abort`。
                       b"app: rot keeper show from=%s",
                       b"app: rot keeper hide",
                       b"app: rot keeper passthru cls=%s off=%d",
-                      b"app: rot keeper spin world=%.0fx%.0f",
+                      b"app: rot keeper spin world=%.0fx%.0f door=%d hookn=%d",
                       b"app: rot keeper wait n=%d",
                       b"app: rot keeper give up",
+                      b"app: rot keeper block appmask=%lu n=%d",
+                      b"app: rot keeper hold appmask=%lu",
+                      b"app: rot keeper abort %s",
+                      b"app: rot hook skip why=root",
+                      b"app: rot hook skip why=chain",
                       b"app: rot ask retired n=2",
                       # 0.4.72 — 撤 0.4.71 的 `app: rot exit ask`（抖音全屏态竖屏请求
                       # 一律 BSActionErrorDomain错误1，两次全拒，纯噪音）。

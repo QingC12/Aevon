@@ -7178,12 +7178,20 @@ static void AevonOrientHookRestoreQuiet(void) {
 
 static void AevonOrientHookInstall(void) {
     // ⛔ 全是 UIKit / objc runtime，只主线程（调用点在 ApplyWant 主线程段）。
+    // 0.4.79 — 两条静默 return 都补一行证词：356 的日志里 `rot hook` 一行都没有，
+    // 而第一版判断只能靠「有 show、没 hook」这个缺席来推时序，太吃力。
     UIWindow *kw = AevonKeyWindow();
     UIViewController *top = [kw rootViewController];
-    if (top == nil) return;
+    if (top == nil) {
+        AevonAppLogWrite("app: rot hook skip why=root\n");
+        return;
+    }
     Class chain[10];
     int n = AevonOrientChain(top, chain, 10);
-    if (n <= 0) return;
+    if (n <= 0) {
+        AevonAppLogWrite("app: rot hook skip why=chain\n");
+        return;
+    }
     // AppDelegate 的方向门：视频类 App 常把它当真正的总闸。
     Class appCls = [[[UIApplication sharedApplication] delegate] class];
     SEL appSel = @selector(application:supportedInterfaceOrientationsForWindow:);
@@ -7252,6 +7260,56 @@ static void AevonOrientHookRestore(void) {
     AevonSioNudgeAll();
 }
 
+/// 0.4.79 — **App 级方向门现在到底答什么。**
+///
+/// 356 的血案：present 守门 VC 那一拍，App 级方向门还是抖音原生的「只竖屏」，
+/// 而守门 VC 只答横屏 ⇒ 交集为空 ⇒ UIKit 抛出
+/// `UIApplicationInvalidInterfaceOrientation: Supported orientations has no common
+/// orientation with the application` ⇒ SIGABRT ⇒ 抖音进程被杀（用户看到的是
+/// 「长按左下中段就闪退、悬浮窗没了、只能重新打开」）。
+///
+/// 所以 present 之前必须先问这一句：**门开了才敢立 VC**。两个来源按 UIKit 自己
+/// 的优先级排：AppDelegate 实现了 `application:supportedInterfaceOrientationsForWindow:`
+/// 就问它（我们 hook 的正是它），否则读 Info.plist。
+static NSUInteger AevonAppOrientNow(UIWindow *win) {
+    id del = [[UIApplication sharedApplication] delegate];
+    SEL sel = @selector(application:supportedInterfaceOrientationsForWindow:);
+    if (del != nil && [del respondsToSelector:sel]) {
+        return ((NSUInteger (*)(id, SEL, id, id))objc_msgSend)(
+            del, sel, [UIApplication sharedApplication], win);
+    }
+    NSArray *list = [[NSBundle mainBundle]
+                     objectForInfoDictionaryKey:@"UISupportedInterfaceOrientations"];
+    if (![list isKindOfClass:[NSArray class]]) return UIInterfaceOrientationMaskPortrait;
+    NSUInteger mask = 0;
+    for (NSString *one in list) {
+        if (![one isKindOfClass:[NSString class]]) continue;
+        if ([one isEqualToString:@"UIInterfaceOrientationPortrait"]) {
+            mask |= UIInterfaceOrientationMaskPortrait;
+        } else if ([one isEqualToString:@"UIInterfaceOrientationPortraitUpsideDown"]) {
+            mask |= UIInterfaceOrientationMaskPortraitUpsideDown;
+        } else if ([one isEqualToString:@"UIInterfaceOrientationLandscapeLeft"]) {
+            mask |= UIInterfaceOrientationMaskLandscapeLeft;
+        } else if ([one isEqualToString:@"UIInterfaceOrientationLandscapeRight"]) {
+            mask |= UIInterfaceOrientationMaskLandscapeRight;
+        }
+    }
+    return mask ? mask : UIInterfaceOrientationMaskPortrait;
+}
+
+/// 1 = App 门此刻含横屏（`AevonRotKeeperShow` 里设，keeper 的两个方向方法读）。
+/// 为什么走这个全局而不是让 keeper 每次自己去问 AppDelegate：UIKit 在
+/// presentation 落地时会**同步**问 keeper 的 `supportedInterfaceOrientations`
+/// 与 `preferredInterfaceOrientationForPresentation`，在那里面回调 App 的
+/// delegate 是给系统塞一次重入；而且 keeper 的 `self.view.window` 那一刻还不
+/// 存在，传 nil 会问出另一套答案。进门之前算一次，两个方法只读结果。
+static int AevonRotKeeperDoorOpen = 0;
+
+/// 1 = 本进程里「present 守门 VC」这条路已被判死（抛过异常 / 门打不开），
+/// 不再尝试。⛔ 粘性开关必须有同寿命刷新源：只由 `AevonRotWantSeen` 的
+/// 0 → 1 上升沿清零（见 `AevonRotApplyWant` 开头），不靠心跳、不靠计时。
+static int AevonRotKeeperBan = 0;
+
 /// 0.4.78 — **透明横屏守门 VC：复刻抖音自己那条路。**
 ///
 /// 355 把「让 App 转横」这条线判决完了：
@@ -7299,14 +7357,24 @@ static void AevonOrientHookRestore(void) {
     return YES;
 }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-    // 只在窗口期答横屏：want=0 之后答竖屏，dismiss 的那一拍世界自己转回去。
-    // ⛔ 返回类型必须写 `UIInterfaceOrientationMask`：它是带类型的枚举，写成
-    // `NSUInteger` 会被 `-Werror,-Wmismatched-return-types` 判死（CI 实测）。
-    return (AevonRotWantSeen == 1)
-        ? (UIInterfaceOrientationMaskLandscapeLeft | UIInterfaceOrientationMaskLandscapeRight)
-        : UIInterfaceOrientationMaskPortrait;
+    // ⛔ 0.4.79 防崩第一道（356 血案）：App 级方向门若不含横屏，这里**绝不能**
+    // 再答横屏。UIKit 在 presentation 落地时检查「presented ∩ application」，
+    // 交集为空就抛 `UIApplicationInvalidInterfaceOrientation` 把进程带走。
+    // 门没开就答竖屏 —— present 会成，世界不转，下一拍闸再来一次。
+    // ⛔ 返回类型必须写 `UIInterfaceOrientationMask`：写成 `NSUInteger` 会被
+    // `-Werror,-Wmismatched-return-types` 判死（0.4.78 CI 实测）。
+    if (AevonRotKeeperDoorOpen != 1 || AevonRotWantSeen != 1) {
+        return UIInterfaceOrientationMaskPortrait;
+    }
+    return UIInterfaceOrientationMaskLandscapeLeft | UIInterfaceOrientationMaskLandscapeRight;
 }
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+    // ⛔ 必须落在 `supportedInterfaceOrientations` 里，否则是**另一个**异常
+    // （"preferredInterfaceOrientationForPresentation must return a supported
+    // orientation"）。所以这一问跟上面同一把闸，同生同死。
+    if (AevonRotKeeperDoorOpen != 1 || AevonRotWantSeen != 1) {
+        return UIInterfaceOrientationPortrait;
+    }
     return UIInterfaceOrientationLandscapeRight;
 }
 - (void)viewDidAppear:(BOOL)animated {
@@ -7335,6 +7403,9 @@ static void AevonOrientHookRestore(void) {
 
 static AevonRotKeeper *AevonRotKeeperVC = nil;
 static int AevonRotKeeperTries = 0;
+/// 门闸重试计数（与上面的「present 前置」计数分开：两件事失败原因不同，
+/// 共用一个计数器会让 `hold` 提前触发）。
+static int AevonRotKeeperBlockTries = 0;
 
 /// 把守门 VC 立起来。presenter 取 key window 的 presented 链顶层 —— present
 /// 到非顶层会被 UIKit 转投到顶层，日志里就分不清是谁presented的。
@@ -7345,6 +7416,9 @@ static void AevonRotKeeperShow(void) {
         });
         return;
     }
+    // ⛔ 0.4.79 — 本进程这条路已被判死（抛过方向异常 / 门打不开）：一个字都不做。
+    // 356 里同一份日志连崩三次（信息流、安全模式页各来一遍），重试没有意义。
+    if (AevonRotKeeperBan == 1) return;
     if (AevonRotKeeperVC != nil) {
         if (AevonRotKeeperVC.presentingViewController != nil) {
             // 已经挂着：只叫系统重算一遍（窗口期页面可能换过，缓存老了）。
@@ -7393,6 +7467,40 @@ static void AevonRotKeeperShow(void) {
         }
         return;
     }
+    // ⛔ 0.4.79 防崩第二道（356 血案）：present 之前先问 App 级方向门。
+    // 门里没有横屏 ⇒ 此刻 present 一个只答横屏的 VC **必**抛
+    // `UIApplicationInvalidInterfaceOrientation` ⇒ SIGABRT ⇒ 抖音被杀。
+    // 宁可这一拍不转，也不能把进程带走。
+    NSUInteger appMask = AevonAppOrientNow(kw);
+    NSUInteger landMask = UIInterfaceOrientationMaskLandscapeLeft |
+                          UIInterfaceOrientationMaskLandscapeRight;
+    if ((appMask & landMask) == 0) {
+        AevonRotKeeperDoorOpen = 0;
+        char note[144];
+        snprintf(note, sizeof(note), "app: rot keeper block appmask=%lu n=%d\n",
+                 (unsigned long)appMask, AevonRotKeeperBlockTries);
+        AevonAppLogWrite(note);
+        // 两拍重试：hook 刚换上时抖音可能还在用缓存的旧回答，第一问会读到
+        // 「只竖屏」；0.3 s 后系统重算完就开了。
+        if (AevonRotKeeperBlockTries < 2) {
+            AevonRotKeeperBlockTries += 1;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         (int64_t)(0.30 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                AevonRotKeeperShow();
+            });
+        } else {
+            AevonRotKeeperBlockTries = 0;
+            AevonRotKeeperBan = 1;
+            snprintf(note, sizeof(note), "app: rot keeper hold appmask=%lu\n",
+                     (unsigned long)appMask);
+            AevonAppLogWrite(note);
+        }
+        return;
+    }
+    AevonRotKeeperBlockTries = 0;
+    // 门开了：keeper 的两个方向方法照这个值答横屏（也是防崩第一道的数据源）。
+    AevonRotKeeperDoorOpen = 1;
     AevonRotKeeper *k = [[AevonRotKeeper alloc] init];
     k.modalPresentationStyle = UIModalPresentationOverFullScreen;
     k.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
@@ -7402,9 +7510,26 @@ static void AevonRotKeeperShow(void) {
     snprintf(line, sizeof(line), "app: rot keeper show from=%s\n",
              fromName.length > 0 ? [fromName UTF8String] : "-");
     AevonAppLogWrite(line);
-    [from presentViewController:k animated:NO completion:^{
-        AevonRotKeeperTries = 0;
-    }];
+    // ⛔ 0.4.79 防崩第三道：UIKit 的方向兼容检查抛的是 **NSException**，不是
+    // 崩溃信号 —— 非 ARC 下 `@try/@catch` 接得住，接住了进程就活着。
+    // 356 三次 `crash sig=6` 全是被这个异常带走的（前两道闸都在它之前，正常
+    // 情况下到不了这里）。
+    @try {
+        [from presentViewController:k animated:NO completion:^{
+            AevonRotKeeperTries = 0;
+        }];
+    } @catch (NSException *e) {
+        AevonRotKeeperDoorOpen = 0;
+        AevonRotKeeperBan = 1;
+        AevonRotKeeperVC = nil;
+#if !__has_feature(objc_arc)
+        [k release];
+#endif
+        NSString *why = (e.reason != nil) ? e.reason : @"-";
+        char note[256];
+        snprintf(note, sizeof(note), "app: rot keeper abort %s\n", [why UTF8String]);
+        AevonAppLogWrite(note);
+    }
 }
 
 /// 撤掉守门 VC。dismiss 之后 UIKit 按底层（已还原成竖屏的）层级再要一次几何。
@@ -7417,6 +7542,9 @@ static void AevonRotKeeperHide(void) {
     }
     AevonRotKeeper *k = AevonRotKeeperVC;
     if (k == nil) return;
+    // 先关门再 dismiss：keeper 在退出转场里还会被问一次方向，那时它必须答
+    // 竖屏（`WantSeen` 已经是 0，这里把第一道闸的数据源也一起归零）。
+    AevonRotKeeperDoorOpen = 0;
     AevonRotKeeperVC = nil;
     AevonRotKeeperTries = 0;
     UIViewController *p = k.presentingViewController;
@@ -7472,14 +7600,19 @@ static void AevonRotApplyWant(void) {
     CFAbsoluteTime fsNow = CFAbsoluteTimeGetCurrent();
     int retry = (fsNow - AevonWantTryAt > 1.2);
     if (want == AevonRotWantSeen && !retry) return;
+    int wantOld = AevonRotWantSeen;
     AevonRotWantSeen = want;
     AevonWantTryAt = fsNow;
-    // 0.4.78 — 守门 VC 立在**判重之前**：`AevonRotSent` 那两条早退还留着（它们
-    // 挡的是「重复发请求」），但「守门 VC 还在不在」不能靠那两个值推断 ——
-    // 抖音自己转横时 `RotSent` 也会变 1，那种状态下长按一次不能让 VC 缺位。
-    if (want == 1 && AevonRotKeeperVC == nil) {
-        AevonRotKeeperShow();
-    }
+    // ⛔ 0.4.79 — `AevonRotKeeperBan` 的同寿命刷新源：want 的 0 → 1 上升沿。
+    // 一次长按是一轮新尝试（进程内最多被 @try/@catch 兜一次），但不许在
+    // 同一轮里反复撞同一堵墙 —— 356 就是这样连崩三次的。
+    if (want == 1 && wantOld == 0) AevonRotKeeperBan = 0;
+    // ⛔ 0.4.79 — 0.4.78 在这里就 `AevonRotKeeperShow()`，那一行是 356 闪退的
+    // 直接原因：守门 VC 立在 `AevonOrientHookInstall()` **之前**，present 那一刻
+    // App 级方向门还是抖音原生的「只竖屏」，与只答横屏的 keeper 交集为空 ⇒
+    // UIKit 抛 `UIApplicationInvalidInterfaceOrientation` ⇒ SIGABRT ⇒ 进程被杀
+    // （日志里只有 `rot keeper show`、没有 `rot hook n=`，就是这条时序的铁证）。
+    // 现在只在这里立，顺序固定为 **先装 hook → 再 show**（见下面 want==1 段）。
     // 已经在这个状态上就不再发：`requestGeometryUpdate` 每发一次都要走一趟系统
     // 协商，重复发等于让窗口闪一下。
     if (AevonRotSent == want && !retry) return;
@@ -7510,8 +7643,10 @@ static void AevonRotApplyWant(void) {
         }
         return;
     }
-    // 0.4.78 — 切横主路：**present 一个只答横屏的透明 VC**，让 UIKit 自己去要
-    // 那一次几何更新（抖音的全屏播放器就是这么转的，见 `AevonRotKeeper` 注释）。
+    // 0.4.79 — 切横主路，**这两步的顺序是硬约束，不许调**：
+    //   ① `AevonOrientHookInstall()`：整条协商链 + AppDelegate 方向门换成「答放行」；
+    //   ② `AevonRotKeeperShow()`：才 present 那个只答横屏的透明 VC。
+    // 调过来就是 356 的闪退 —— present 时门还没开，交集为空，UIKit 抛异常杀进程。
     // 0.4.77 的整链 hook 保留：它保证世界转过去之后，底下那十层 VC 不会立刻
     // 把方向掰回竖屏（`shouldAutorotate` 也一起换了）。
     // 0.4.74 的 tap 全屏按钮已删：352 七连 miss，且 sheet 全屏页链路本身
@@ -7528,13 +7663,15 @@ static void AevonRotApplyWant(void) {
     // 判据：守门 VC 立起来 1.2 s 后世界是什么形状。`717x430` ⇒ UIKit 真替我们
     // 要到了那一次几何（长按就该直接转）；`430x717` ⇒ presentation 没触发旋转，
     // 下一版改 presentation 风格 / 换成包一个 UINavigationController。
+    // `door=` 是那一刻 App 级方向门里有没有横屏，`hookn=` 是 hook 表里挂了几份
+    // Method —— 两行一起看才知道是「门没开」还是「开了但 presentation 不转」。
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (AevonRotWantSeen != 1) return;
         CGSize w = AevonRotWorld();
-        char line[128];
-        snprintf(line, sizeof(line), "app: rot keeper spin world=%.0fx%.0f\n",
-                 w.width, w.height);
+        char line[160];
+        snprintf(line, sizeof(line), "app: rot keeper spin world=%.0fx%.0f door=%d hookn=%d\n",
+                 w.width, w.height, AevonRotKeeperDoorOpen, AevonHookN);
         AevonAppLogWrite(line);
     });
 }
