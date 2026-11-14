@@ -1743,6 +1743,23 @@ def main():
                       #        target/action（抖音互动层大量用后者）；
                       #   `app: rot land auto skip cls=X why=notap` ⇒ 候选不是
                       #        UIControl 也没有 tap 手势（只记，不动）。
+                      #
+                      # 0.4.83 — 360 把「差一步」定量了：真进去了
+                      # （`rot look sheet cls=AWELandscapeNavigationController` +
+                      # `rot look who … sel=realEnterLandscapeFeedWithEnterMethod:` +
+                      # `vid=717x430@0,0` 铺满），却被自己的
+                      # `rot feed exit world=717x430 pager=430x717` 在 0.6 s 后收回。
+                      # 入口本体是 `AWELandscapeFeedEntryView`（81x29、ctl=0、tap=1），
+                      # 但 0.4.82 的 1.6 s 单拍扫描赶上它是 `0,0 0x0` ⇒ `miss n=0`。
+                      #   `app: rot feed hold land page` ⇒ 横版播放器在位，这条闸
+                      #        把「pager 竖」判成正常形态、**不收卡**（新判据）；
+                      #   `app: rot land auto start leaf=X round=N` ⇒ 这一轮第 N 拍
+                      #        （1.6 / 2.8 / 4.0 s，每拍先查链上有没有横版页）；
+                      #   `app: rot land auto fire cls=X how=tap ok=N at=x,y wxh` ⇒
+                      #        **点的是哪个、多大**：0x0 也照点（不走 hit-test）；
+                      #   `app: rot land enter method=N cls=X` ⇒ 抖音自己那条
+                      #        `realEnterLandscapeFeedWithEnterMethod:` 的入参值
+                      #        （只记后原样调回去）—— 自动点失败时下一版的直接调依据。
                       b"app: rot keeper show from=%s",
                       b"app: rot keeper hide",
                       b"app: rot keeper passthru cls=%s off=%d",
@@ -1758,12 +1775,14 @@ def main():
                       b"app: rot look stack %s",
                       b"app: rot look who cls=%s sel=%s off=%ld",
                       b"app: rot look end",
-                      b"app: rot land auto start leaf=%s",
+                      b"app: rot land auto start leaf=%s round=%d",
                       b"app: rot land auto seen",
-                      b"app: rot land auto miss n=0",
+                      b"app: rot land auto miss n=%d round=%d",
                       b"app: rot land auto fire cls=%s how=ctl",
-                      b"app: rot land auto fire cls=%s how=tap ok=%d",
+                      b"app: rot land auto fire cls=%s how=tap ok=%d at=%.0f,%.0f %.0fx%.0f",
                       b"app: rot land auto skip cls=%s why=notap",
+                      b"app: rot land enter method=%ld cls=%s",
+                      b"app: rot feed hold land page",
                       b"app: rot turn n=%d world=%.0fx%.0f door=%d hookn=%d",
                       b"app: rot turn ok n=%d world=%.0fx%.0f",
                       b"app: rot turn end n=%d world=%.0fx%.0f",
