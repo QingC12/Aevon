@@ -1629,28 +1629,28 @@ def main():
                       # frame 一起收回去；没有这一行而卡片横着不退 ⇒ 翻页器没
                       # 认出来（看 `page pager keep`）。
                       b"app: rot feed exit world=%.0fx%.0f pager=%.0fx%.0f",
-                      # 0.4.76 — 长按切横主路：沿协商路径走到叶子 VC，把叶子的
-                      # `supportedInterfaceOrientations` + `shouldAutorotate`
-                      # 一起临时换成「答放行」（353 实锤：0.4.75 挂根顶层
-                      # AWENormalModeTabBarController 后 ask 仍「受支持：
-                      # portrait」—— 系统问的是容器链叶子，不问根；挂叶子级后
-                      # 错误升级成事务层 BSActionErrorDomain 1，且 0.4.71 时
-                      # 全屏态竖屏请求也是这个错 —— 事务拒绝都发生在全屏过渡
-                      # 活跃期）。
-                      #   `app: rot hook cls=类名`        ⇒ hook 挂上了（want=1）；
-                      #   `app: rot hook restore cls=类名` ⇒ 换回原实现（want=0），
-                      #        世界应随后转回竖。
-                      #   `app: rot scene act=N win=N`    ⇒ 每次 ask 前的 scene
-                      #        活跃态与窗口数 —— 事务层拒绝时的取证读数。
-                      # 判读：hook cls=叶子类 + ask failed 仍是「受支持：portrait」
-                      #  ⇒ 走链没到真叶子（容器还有更深一层，看类名再加）；
-                      # ask failed BSActionErrorDomain 1 且 scene act=0（前台活跃）
-                      #  ⇒ scene 事务在飞，等判重窗后的重试；
-                      # ask 成功（无 failed）+ rot follow 1 ⇒ 世界转横，promote fake。
+                      # 0.4.77 — 长按切横主路：协商链上**每层** VC 的方向回答
+                      # 与 shouldAutorotate 全部临时换成「答放行」，外加
+                      # AppDelegate 的方向门（若实现）。353/354 连判两次：
+                      # 挂根（TabBar）无效、挂叶子（AWEFeedCellViewController）
+                      # 也无效 —— 协商节点在链中间或 App 级，不再猜单个类。
+                      #   `app: rot chain cls=a>b>c`  ⇒ 这一拍协商链上的类名
+                      #        （下一版若仍被拒，看这一行定位真节点）；
+                      #   `app: rot hook cls=类名`    ⇒ 叶子类（与 0.4.76 承接）；
+                      #   `app: rot hook n=N app=M`   ⇒ 换掉的 Method 数与
+                      #        AppDelegate 方向门是否挂上（M=1 挂上）；
+                      #   `app: rot hook restore n=N` ⇒ want=0 时整批还原。
+                      #   `app: rot scene act=N win=N` ⇒ 每次 ask 前的 scene
+                      #        活跃态与窗口数（事务层拒绝时的取证读数）。
+                      # 判读：hook n=N 后 ask 无 failed + rot follow 1 ⇒ 通路；
+                      # 仍「受支持：portrait」⇒ 看 chain 找出没被换的节点；
+                      # BSActionErrorDomain 1 且 act=0 ⇒ 事务在飞等 1.2 s 重试。
                       # 0.4.74 的 `app: fullscreen tap` 已删：352 七连 miss 且
                       # sheet 链路 1~2 s 是「转横慢」的来源。
+                      b"app: rot chain cls=%s",
                       b"app: rot hook cls=%s",
-                      b"app: rot hook restore cls=%s",
+                      b"app: rot hook n=%d app=%d",
+                      b"app: rot hook restore n=%d",
                       b"app: rot scene act=%ld win=%lu",
                       # 0.4.72 — 撤 0.4.71 的 `app: rot exit ask`（抖音全屏态竖屏请求
                       # 一律 BSActionErrorDomain错误1，两次全拒，纯噪音）。
