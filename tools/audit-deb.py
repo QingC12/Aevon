@@ -1776,6 +1776,21 @@ def main():
                       #   `app: rot pinch call sel=X a0=N a1=N obj=Y cls=Z` ⇒ 捏合那条
                       #        路的**只读**记录（pinch_config / config_before_enter /
                       #        play_will_enter / play_did_exit 四个点，记完原样调回）。
+                      #   —— 0.4.85 起捏合那条路从「只看」变成「也动手」，新增六串：
+                      #   `app: rot pinch hook n=N miss=N` ⇒ 八个选择子按链上七个类
+                      #        逐个查，装上了几个 / 一个没找到几个。362 整份日志
+                      #        一条 pinch 都没有，有**两种**解释（没捏 / 钩子没命中），
+                      #        这个数就是分界线；
+                      #   `app: rot pinch look cls=X state=N en=N view=Y targets=N leaf=Z`
+                      #        ⇒ 抖音自己那枚手势的真身：类名、状态、挂在哪、
+                      #        target 数（`flexPinchGesture` 是 getter）；
+                      #   `app: rot pinch g=begin|changed|handle gcls=X state=N scale=F
+                      #        n=N cls=Y` ⇒ 手势回调（changed 只在整数级变化时记）；
+                      #   `app: rot pinch dest=N cls=X` ⇒ **捏完之后去哪的枚举**，
+                      #        全链路唯一把目的地写成数字的地方；
+                      #   `app: rot pinch miss why=nogesture leaf=X` ⇒ 手势拿不到；
+                      #   `app: rot pinch fire round=N scale=F ok=N world=WxH` ⇒
+                      #        这一拍真驱动了（Began→Changed→Ended 三连）。
                       b"app: rot keeper show from=%s",
                       b"app: rot keeper hide",
                       b"app: rot keeper passthru cls=%s off=%d",
@@ -1799,6 +1814,12 @@ def main():
                       b"app: rot land auto skip cls=%s why=notap",
                       b"app: rot land enter method=%ld desc=%s cls=%s",
                       b"app: rot pinch call sel=%s a0=%ld a1=%ld obj=%s cls=%s",
+                      b"app: rot pinch hook n=%d miss=%d",
+                      b"app: rot pinch look cls=%s state=%ld en=%d view=%s targets=%lu leaf=%s",
+                      b"app: rot pinch g=%s gcls=%s state=%ld scale=%.2f n=%lu cls=%s",
+                      b"app: rot pinch dest=%ld cls=%s",
+                      b"app: rot pinch miss why=nogesture leaf=%s",
+                      b"app: rot pinch fire round=%d scale=%.2f ok=%d world=%.0fx%.0f",
                       b"app: rot feed hold land page",
                       b"app: rot turn n=%d world=%.0fx%.0f door=%d hookn=%d",
                       b"app: rot turn ok n=%d world=%.0fx%.0f",

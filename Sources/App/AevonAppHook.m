@@ -7909,11 +7909,24 @@ static void AevonLandEnterHookInstall(void) {
 typedef void (*AevonPinchCfgIMP)(id, SEL, id);
 typedef void (*AevonPinchBool2IMP)(id, SEL, intptr_t, intptr_t);
 typedef void (*AevonPlayPhaseIMP)(id, SEL);
+typedef void (*AevonPinchGestIMP)(id, SEL, id);
+typedef void (*AevonPinchDestIMP)(id, SEL, long);
 
 static AevonPinchCfgIMP AevonPinchCfgOld = NULL;
 static AevonPinchBool2IMP AevonPinchBool2Old = NULL;
 static AevonPlayPhaseIMP AevonPlayWillOld = NULL;
 static AevonPlayPhaseIMP AevonPlayExitOld = NULL;
+static AevonPinchGestIMP AevonPinchBeginOld = NULL;
+static AevonPinchGestIMP AevonPinchChangeOld = NULL;
+static AevonPinchGestIMP AevonPinchHandleOld = NULL;
+static AevonPinchDestIMP AevonPinchDestOld = NULL;
+
+/// 0.4.85 — 装上的钩子条数，直接打进日志。
+/// 362 的「整份日志一条 `rot pinch` 都没有」有**两种**互斥解释：用户没捏，
+/// 或者钩子压根没命中（`method_setImplementation` 只改基类那一份，子类
+/// 覆写就走不到 —— 这是老陷阱）。没有这个计数，就永远分不清是哪一种，
+/// 下一版只能继续猜。
+static int AevonPinchHookN = 0;
 
 static void AevonPinchLog(const char *what, id self, long a0, long a1, id obj) {
     NSString *cn = (self != nil) ? NSStringFromClass([self class]) : nil;
@@ -7953,39 +7966,314 @@ static void AevonPlayExitNew(id self, SEL _cmd) {
     if (AevonPlayExitOld != NULL) AevonPlayExitOld(self, _cmd);
 }
 
+/// 0.4.85 — 捏合手势本体上的每一个回调都要看见。
+///
+/// 362 的 `rot look cls` 已经把 `AWEAwemeBaseViewController` 的整个 flexPinch
+/// 族摊开了：`flexPinchGesture`（拿手势）、`flexPinch_addGestureIfNeeded`、
+/// `flexPinch_gestureBegin:` / `flexPinch_gestureChanged:` /
+/// `flexPinch_didEndPinchAnimationWithDestinationType:`。
+/// 最后那个带 `DestinationType` —— **这就是「捏完之后去哪」的枚举**，
+/// 只有真捏一次才看得到值。0.4.84 装的四个钩子里没有它，这是漏的。
+static void AevonPinchGestLog(const char *what, id self, id g) {
+    NSString *cn = (self != nil) ? NSStringFromClass([self class]) : nil;
+    NSString *gn = (g != nil) ? NSStringFromClass([g class]) : nil;
+    long st = -1;
+    double sc = 0.0;
+    unsigned long nt = 0;
+    BOOL isGest = (g != nil) && [g isKindOfClass:[UIGestureRecognizer class]];
+    if (isGest) {
+        st = (long)[(UIGestureRecognizer *)g state];
+        nt = (unsigned long)[(UIGestureRecognizer *)g numberOfTouches];
+    }
+    if (g != nil && [g isKindOfClass:[UIPinchGestureRecognizer class]]) {
+        sc = (double)[(UIPinchGestureRecognizer *)g scale];
+    }
+    char line[288];
+    snprintf(line, sizeof(line),
+             "app: rot pinch g=%s gcls=%s state=%ld scale=%.2f n=%lu cls=%s\n",
+             what, (gn.length > 0) ? [gn UTF8String] : "-", st, sc, nt,
+             (cn.length > 0) ? [cn UTF8String] : "-");
+    AevonAppLogWrite(line);
+}
+
+static void AevonPinchBeginNew(id self, SEL _cmd, id g) {
+    @autoreleasepool {
+        AevonPinchGestLog("begin", self, g);
+    }
+    if (AevonPinchBeginOld != NULL) AevonPinchBeginOld(self, _cmd, g);
+}
+
+static void AevonPinchChangeNew(id self, SEL _cmd, id g) {
+    @autoreleasepool {
+        // changed 每帧都来一次，全打会把日志刷爆 —— 只在整数级 scale 变化时记。
+        static double lastScale = 0.0;
+        double sc = 0.0;
+        if (g != nil && [g isKindOfClass:[UIPinchGestureRecognizer class]]) {
+            sc = (double)[(UIPinchGestureRecognizer *)g scale];
+        }
+        if (sc >= lastScale + 0.1 || sc <= lastScale - 0.1 || lastScale == 0.0) {
+            lastScale = sc;
+            AevonPinchGestLog("changed", self, g);
+        }
+    }
+    if (AevonPinchChangeOld != NULL) AevonPinchChangeOld(self, _cmd, g);
+}
+
+/// `handlePinchGesture:` 是捏合的总入口（`flexPinch_*` 是它的内部分支），
+/// 单独留一个回调而不是复用 begin：两者的原实现不是同一个 IMP，
+/// 共用槽会在回调时调到错的那一份。
+static void AevonPinchHandleNew(id self, SEL _cmd, id g) {
+    @autoreleasepool {
+        AevonPinchGestLog("handle", self, g);
+    }
+    if (AevonPinchHandleOld != NULL) AevonPinchHandleOld(self, _cmd, g);
+}
+
+/// `flexPinch_didEndPinchAnimationWithDestinationType:` —— 捏合动画收尾时
+/// 抖音自己说「这次捏到哪去了」。**这是全链路唯一一个把目的地写成数字的地方**，
+/// 也是 0.4.86 敢直接驱动的唯一依据。
+static void AevonPinchDestNew(id self, SEL _cmd, long dest) {
+    @autoreleasepool {
+        NSString *cn = (self != nil) ? NSStringFromClass([self class]) : nil;
+        char line[224];
+        snprintf(line, sizeof(line), "app: rot pinch dest=%ld cls=%s\n",
+                 dest, (cn.length > 0) ? [cn UTF8String] : "-");
+        AevonAppLogWrite(line);
+    }
+    if (AevonPinchDestOld != NULL) AevonPinchDestOld(self, _cmd, dest);
+}
+
+/// 0.4.85 — 装一个钩子，**按类逐个查**。
+///
+/// 0.4.84 只对 `AWEAwemeBaseViewController` 做过一次 `class_getInstanceMethod`。
+/// 这有两个坑：①如果某个子类（比如叶子 `AWEPlayInteractionViewController`）
+/// 覆写了同名方法，它会有一份独立的 Method，基类那一份改了也走不到；②反过来，
+/// 如果方法只在父类，只查一次基类是对的。所以正确做法是**把链上每个类都查一遍**
+/// ——`class_getInstanceMethod` 会返回该类的**最深实现**，重复查到的同一个
+/// Method 用 `cur == newImp` 判掉，既不漏也不重复装。
+static int AevonPinchHookOne(Class c, const char *selName, IMP newImp, IMP *oldSlot) {
+    if (c == Nil || selName == NULL) return 0;
+    Method m = class_getInstanceMethod(c, sel_registerName(selName));
+    if (m == NULL) return 0;
+    IMP cur = method_getImplementation(m);
+    if (cur == newImp) return 0;
+    if (oldSlot != NULL && *oldSlot != NULL && *oldSlot != cur) {
+        // 已经有**另一个类**实现过同一个选择子。再装就得能分别调回各自的原实现，
+        // 而我们只有一个槽 ⇒ 这里宁可不装（漏一条日志），也不能让 A 类的实例
+        // 调到 B 类的实现上 —— 那是会改行为的事故，不是漏记。
+        return 0;
+    }
+    if (oldSlot != NULL) *oldSlot = cur;
+    method_setImplementation(m, newImp);
+    return 1;
+}
+
+typedef struct {
+    const char *sel;
+    IMP newImp;
+    IMP *oldSlot;
+} AevonPinchSpec;
+
 static void AevonPinchHookInstall(void) {
     static int done = 0;
     if (done) return;
     done = 1;
-    Class base = objc_getClass("AWEAwemeBaseViewController");
-    if (base != Nil) {
-        Method m = class_getInstanceMethod(
-            base, sel_registerName("pinch_configBeforeEnterLandscapeWithCurrentModel:"));
-        if (m != NULL) {
-            AevonPinchCfgOld = (AevonPinchCfgIMP)method_setImplementation(
-                m, (IMP)AevonPinchCfgNew);
+    static const char *const kClasses[] = {
+        "AWEAwemeBaseViewController",
+        "AWEPlayInteractionViewController",
+        "AWEFeedCellViewController",
+        "AWEFeedTableViewController",
+        "AWEFeedContainerViewController",
+        "AWEFeedRootViewController",
+        "AWEHPChannelPageViewController"
+    };
+    AevonPinchSpec specs[8];
+    int ns = 0;
+    specs[ns].sel = "flexPinch_gestureBegin:";
+    specs[ns].newImp = (IMP)AevonPinchBeginNew;
+    specs[ns].oldSlot = (IMP *)&AevonPinchBeginOld;
+    ns += 1;
+    specs[ns].sel = "flexPinch_gestureChanged:";
+    specs[ns].newImp = (IMP)AevonPinchChangeNew;
+    specs[ns].oldSlot = (IMP *)&AevonPinchChangeOld;
+    ns += 1;
+    specs[ns].sel = "flexPinch_didEndPinchAnimationWithDestinationType:";
+    specs[ns].newImp = (IMP)AevonPinchDestNew;
+    specs[ns].oldSlot = (IMP *)&AevonPinchDestOld;
+    ns += 1;
+    specs[ns].sel = "handlePinchGesture:";
+    specs[ns].newImp = (IMP)AevonPinchHandleNew;
+    specs[ns].oldSlot = (IMP *)&AevonPinchHandleOld;
+    ns += 1;
+    specs[ns].sel = "pinch_configBeforeEnterLandscapeWithCurrentModel:";
+    specs[ns].newImp = (IMP)AevonPinchCfgNew;
+    specs[ns].oldSlot = (IMP *)&AevonPinchCfgOld;
+    ns += 1;
+    specs[ns].sel = "configBeforEnterToLandscapeFeedWithShouldCheck:fromPinch:";
+    specs[ns].newImp = (IMP)AevonPinchBool2New;
+    specs[ns].oldSlot = (IMP *)&AevonPinchBool2Old;
+    ns += 1;
+    specs[ns].sel = "playInteractionWillEnterLandscape";
+    specs[ns].newImp = (IMP)AevonPlayWillNew;
+    specs[ns].oldSlot = (IMP *)&AevonPlayWillOld;
+    ns += 1;
+    specs[ns].sel = "playInteractionDidExitLandscape";
+    specs[ns].newImp = (IMP)AevonPlayExitNew;
+    specs[ns].oldSlot = (IMP *)&AevonPlayExitOld;
+    ns += 1;
+
+    int hit = 0;
+    int miss = 0;
+    int i, k;
+    for (i = 0; i < ns; i++) {
+        int got = 0;
+        for (k = 0; k < (int)(sizeof(kClasses) / sizeof(kClasses[0])); k++) {
+            Class c = objc_getClass(kClasses[k]);
+            if (c == Nil) continue;
+            got += AevonPinchHookOne(c, specs[i].sel, specs[i].newImp, specs[i].oldSlot);
         }
-        m = class_getInstanceMethod(
-            base, sel_registerName("configBeforEnterToLandscapeFeedWithShouldCheck:fromPinch:"));
-        if (m != NULL) {
-            AevonPinchBool2Old = (AevonPinchBool2IMP)method_setImplementation(
-                m, (IMP)AevonPinchBool2New);
+        if (got > 0) hit += 1;
+        else miss += 1;
+    }
+    AevonPinchHookN = hit;
+    char line[192];
+    snprintf(line, sizeof(line), "app: rot pinch hook n=%d miss=%d\n", AevonPinchHookN, miss);
+    AevonAppLogWrite(line);
+}
+
+/// 0.4.85 — 本轮是否已经排过「替用户捏合」的三拍。
+/// `AevonRotApplyWant` 的 want 上升沿清零 —— 不放在 `AevonRotPinchTry` 里
+/// 自排程，是为了让三拍的时间点集中在一处（`AevonRotPursue` 的 land 分支），
+/// 与点击那档并列，读日志时两条线的时序一眼能对上。
+static int AevonRotPinchScheduled = 0;
+
+/// 从视图树上找一枚真的捏合手势（`flexPinchGesture` 拿不到时的兜底）。
+static UIGestureRecognizer *AevonFindPinch(UIView *v, int depth) {
+    if (v == nil || depth > 22) return nil;
+    for (UIGestureRecognizer *g in [v gestureRecognizers]) {
+        if ([g isKindOfClass:[UIPinchGestureRecognizer class]]) return g;
+    }
+    for (UIView *s in [v subviews]) {
+        UIGestureRecognizer *r = AevonFindPinch(s, depth + 1);
+        if (r != nil) return r;
+    }
+    return nil;
+}
+
+/// 0.4.85 — **替用户捏一次**。
+///
+/// 到 362 为止，能试的两条路都走完了：
+///   · 按钮（`AWELandscapeFeedEntryView`）：362 全程 `0,0 0x0 ctl=0 tap=1
+///     win=0 hid=1`，六轮 `how=tap ok=0` —— 它是个隐藏的零尺寸空壳，
+///     从来没在 window 上，连手指都碰不到。**这条路到此为止，不再试。**
+///   · 六轮自动点 + 5 秒等待：已经证明等布局结算再点是白等。
+/// 剩下的唯一入口就是捏合（`configBeforEnterToLandscapeFeedWithShouldCheck:
+/// fromPinch:` 的方法名里写着 `fromPinch`）。
+///
+/// 做法是**驱动抖音自己那枚手势**，而不是猜某个方法名去调：
+///   ① 先问它要：`flexPinchGesture`（argc=2，返回手势对象）；
+///   ② 拿不到就从视图树上找真的 `UIPinchGestureRecognizer`；
+///   ③ 改 `scale`（KVC 写 `_scale`，只读属性的唯一入口），再用私有的
+///      `setState:` 走 Began → Changed → Ended —— **UIKit 自己会去调
+///      target/action**，等于抖音收到了一个真的捏合。我们不碰它任何方法。
+///
+/// 三道闸（这一版宁可不灵，也不许出乱子）：
+///   ① 只在「世界已经横 + 链上没有横版页」时动手；
+///   ② 每轮最多三拍（1.8 / 2.2 / 2.6，全部「张开」），排程在
+///      `AevonRotPursue` 的 land 分支（1.6 / 3.1 / 5.0 s），三拍全失败就收手；
+///      三次都用「张开」不用「捏小」—— 捏小是抖音的**双列**入口
+///      （`awe_pinchToC2Feed`），会把界面切成双列，那是副作用。
+///   ③ 每步 `@try`，任一步抛异常就记 `throw` 停手，不改几何、不改状态。
+static void AevonRotPinchTry(int round) {
+    if (![NSThread isMainThread]) {
+        int r0 = round;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonRotPinchTry(r0);
+        });
+        return;
+    }
+    if (AevonRotWantSeen != 1) return;
+    CGSize w = AevonRotWorld();
+    if (w.width <= w.height + 40.0) return;
+    if (AevonChainHasLandscape()) {
+        AevonSawLandPage = 1;
+        AevonAppLogWrite("app: rot pinch seen\n");
+        return;
+    }
+    UIWindow *kw = AevonKeyWindow();
+    UIViewController *top = (kw != nil) ? [kw rootViewController] : nil;
+    if (top == nil) return;
+    UIViewController *leaf = AevonOrientLeaf(top);
+    if (leaf == nil) return;
+
+    // ① 抖音自己那枚手势。`flexPinchGesture` 是 getter，拿到的才是**真的**
+    // target 载体；另外 new 一个没有 target，驱动它等于往空气里捏。
+    UIGestureRecognizer *g = nil;
+    SEL gsel = sel_registerName("flexPinchGesture");
+    if ([leaf respondsToSelector:gsel]) {
+        @try {
+            id own = ((id (*)(id, SEL))objc_msgSend)(leaf, gsel);
+            if (own != nil && [own isKindOfClass:[UIGestureRecognizer class]]) {
+                g = (UIGestureRecognizer *)own;
+            }
+        } @catch (NSException *e) {
+            g = nil;
         }
     }
-    Class pi = objc_getClass("AWEPlayInteractionViewController");
-    if (pi != Nil) {
-        Method m = class_getInstanceMethod(
-            pi, sel_registerName("playInteractionWillEnterLandscape"));
-        if (m != NULL) {
-            AevonPlayWillOld = (AevonPlayPhaseIMP)method_setImplementation(
-                m, (IMP)AevonPlayWillNew);
-        }
-        m = class_getInstanceMethod(pi, sel_registerName("playInteractionDidExitLandscape"));
-        if (m != NULL) {
-            AevonPlayExitOld = (AevonPlayPhaseIMP)method_setImplementation(
-                m, (IMP)AevonPlayExitNew);
-        }
+    if (g == nil) g = AevonFindPinch(leaf.view, 0);
+    NSString *ln = NSStringFromClass([leaf class]);
+    if (g == nil) {
+        char line[224];
+        snprintf(line, sizeof(line), "app: rot pinch miss why=nogesture leaf=%s\n",
+                 (ln.length > 0) ? [ln UTF8String] : "-");
+        AevonAppLogWrite(line);
+        return;
     }
+    NSString *gn = NSStringFromClass([g class]);
+    UIView *gv = [g view];
+    NSString *vn = (gv != nil) ? NSStringFromClass([gv class]) : nil;
+    @try {
+        NSArray *ts = [g valueForKey:@"_targets"];
+        char line[352];
+        snprintf(line, sizeof(line),
+                 "app: rot pinch look cls=%s state=%ld en=%d view=%s targets=%lu leaf=%s\n",
+                 (gn.length > 0) ? [gn UTF8String] : "-",
+                 (long)[g state], [g isEnabled] ? 1 : 0,
+                 (vn.length > 0) ? [vn UTF8String] : "-",
+                 (unsigned long)ts.count,
+                 (ln.length > 0) ? [ln UTF8String] : "-");
+        AevonAppLogWrite(line);
+    } @catch (NSException *e) {
+        AevonAppLogWrite("app: rot pinch look throw\n");
+    }
+
+    // ② 驱动。`scale` 是只读属性，KVC 会落到 `_scale` ivar 上；写不进去也
+    // 不要紧 —— 抖音的 handler 至少会看到 state 变了。
+    static const double kScale[3] = {1.8, 2.2, 2.6};
+    int idx = (round >= 1 && round <= 3) ? (round - 1) : 0;
+    double target = kScale[idx];
+    BOOL fired = NO;
+    @try {
+        @try {
+            [g setValue:@(target) forKey:@"scale"];
+        } @catch (NSException *e2) {
+            // 只读 ivar 不在就跳过：state 变化仍然会分发。
+        }
+        SEL ss = sel_registerName("setState:");
+        if ([g respondsToSelector:ss]) {
+            ((void (*)(id, SEL, long))objc_msgSend)(g, ss, 1);   // Began
+            ((void (*)(id, SEL, long))objc_msgSend)(g, ss, 2);   // Changed
+            ((void (*)(id, SEL, long))objc_msgSend)(g, ss, 3);   // Ended
+            fired = YES;
+        }
+    } @catch (NSException *e) {
+        AevonAppLogWrite("app: rot pinch throw\n");
+        return;
+    }
+    char line[256];
+    snprintf(line, sizeof(line), "app: rot pinch fire round=%d scale=%.2f ok=%d world=%.0fx%.0f\n",
+             round, target, fired ? 1 : 0, w.width, w.height);
+    AevonAppLogWrite(line);
 }
 
 /// 0.4.83 — 候选打分。360 的证据是**两头都出现过**：
@@ -8373,6 +8661,26 @@ static void AevonRotPursue(void) {
                 });
             }
         }
+        // 0.4.85 — **与点击并行的第二条线：替用户捏。**
+        // 362 已经把那枚「按钮」判死了（全程 `hid=1 win=0 0x0`，六轮 ok=0），
+        // 但点击那六拍照旧留着 —— 它 miss 没有副作用，而且这是唯一的对照实验
+        // （万一某天抖音改回真按钮，日志会立刻告诉我们）。
+        // 捏合三拍：1.6 / 3.1 / 5.0 s，scale 递增 1.8 / 2.2 / 2.6，全部「张开」。
+        // 为什么不是更早：0.8 s 前抖音自己的转场动画还没结算完，那时改手势
+        // 状态可能被它自己的 animator 盖掉（361 的 16:29:04 那次是转横后
+        // 十几秒才自己进去的）。三次都失败也不再试 —— 见交付页的判读表。
+        if (AevonRotPinchScheduled == 0) {
+            AevonRotPinchScheduled = 1;
+            static const double kPinchAt[3] = {1.6, 3.1, 5.0};
+            int i;
+            for (i = 0; i < 3; i++) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                             (int64_t)(kPinchAt[i] * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    AevonRotPinchTry(i + 1);
+                });
+            }
+        }
         return;
     }
     if (AevonRotPursueTick >= 6) {
@@ -8523,6 +8831,8 @@ static void AevonRotApplyWant(void) {
         // 反复长按，几张卡片会同时收到「点全屏」）。
         AevonRotLandAutoN = 0;
         AevonRotLandAutoCycle += 1;
+        // 0.4.85 — 捏合那条路同理：新一轮从「一次都没捏」重来。
+        AevonRotPinchScheduled = 0;
         AevonRotFeedHoldNotes = 0;
         AevonRotLookPaneRuns = 0;
     }
