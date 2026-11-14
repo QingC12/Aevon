@@ -1009,10 +1009,21 @@ def main():
                   b"win: landscape ask now=%.0fx%.0f want=%.0fx%.0f o=%ld slot=%d n=%d",
                   b"win: landscape exit slot=%d o=%ld b=%s",
                   b"win: orientation -> %ld slot=%d geo=%.0fx%.0f",
-                  b"win: card landscape %d canvas=%.0fx%.0f card=%.0fx%.0f@%.0f,%.0f vid=%.0fx%.0f@%.0f,%.0f door=%d b=%@",
+                  b"win: card landscape %d canvas=%.0fx%.0f card=%.0fx%.0f@%.0f,%.0f vid=%.0fx%.0f@%.0f,%.0f fake=%d door=%d b=%@",
                   b"win: card landscape entered by app vid=%.0fx%.0f@%.0f,%.0f b=%@",
                   b"win: card landscape left by app b=",
                   b"win: card landscape reset to %.0fx%.0f at %.0f,%.0f",
+                  # 0.4.73 — 假横（TrollOpen 式宿主转置）：长按不再求 App（350：信息流
+                  # supportedInterfaceOrientations=portrait，rot ask 六次全被拒）。判据：
+                  #   `landscape toggle host-transpose` ⇒ 长按进了宿主转置这条路；
+                  #   `card landscape 1 … fake=1 door=0` ⇒ 卡片转了、scene frame 没写
+                  #        （door=0 是假横的本分，写了=跨进程重排=黑屏）；
+                  #   `card landscape promote fake door=` ⇒ App 世界后来真转了（用户
+                  #        点全屏），假横升级成真横；
+                  #   `landscape toggle off fake` ⇒ 假横本地退，不等 App。
+                  b"win: landscape toggle host-transpose b=",
+                  b"win: card landscape promote fake door=%d b=%@",
+                  b"win: landscape toggle off fake b=",
                   # 0.4.66 — **App 自己转、宿主跟随**这条路的三个证词：
                   #   rot follow N world=WxH vid=…   App 报了新世界 + 视频区，卡片跟着变
                   #   landscape ask sent b=     长按把「请转一次」发给 App 了

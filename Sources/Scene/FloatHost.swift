@@ -1088,6 +1088,20 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 派生量会在中间态读错），但**画布必须跟着转** —— 见 `setLandscape`。
     private var landscape: Bool { landscapeOn }
     private var landscapeOn = false
+    /// 0.4.73 — **假横**（TrollOpen 式宿主转置）。
+    ///
+    /// 350 判决：信息流页 `supportedInterfaceOrientations` 只支持 portrait，
+    /// 长按发的 `rot ask 1` 六次全被 App 自己拒绝（`app: rot ask failed 所有已
+    /// 请求的方向均不受视图控制器支持`）。求 App 是求不动的。TrollOpen 根本
+    /// 不求：它转**自己的窗口**（`_rotateWindowToOrientation:`），App 世界纹丝
+    /// 不动。所以长按改成宿主自己转：画布转置 + 卡片转横 + **canvas 整体转
+    /// 90°**——App 世界保持竖版 430x717，scene frame 一个字节不写 ⇒ 没有系统
+    /// 重排 ⇒ 没有黑屏。App 世界若之后真转了（用户点全屏按钮），探针 on=1
+    /// 把假横升级成真横（`card landscape promote fake`）。
+    private var landscapeFake = false
+    /// 0.4.73 — 转场动画的截止时刻。动画中 `reapplyPlacement` 不对账
+    ///（0.2.43 的教训：动画中途硬赋值 = 撤动画提前跳终点，闪一下）。
+    private var lsAnimUntil: CFAbsoluteTime = 0
     /// App 报上来的「视频区」（App 世界坐标）。`.null` = 没量到。
     ///
     /// 0.4.68 — **只当证词，不再参与几何**。0.4.67 拿它做「把视频区搬到卡片中心」
@@ -1107,23 +1121,30 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 横版画布当成竖版画布再转置一次（430x717 → 717x430 → 又转成 430x717）。
     private var portraitNatural: CGSize?
 
-    /// 0.4.65 — 长按左下侧（`bottomLeftSide`）= 横竖切换。
+    /// 0.4.73 — 长按左下侧 = 横竖切换，按**三个状态**分流。
     ///
-    /// 母版的手势矩阵里这一格是「边中 · 长按 = 切换横竖」，Aevon 的边中已经被
-    /// 「按住上滑关闭」占着，0.1.0 就把这一格单独分出来留给横屏；现在接上。
+    /// 0.4.66 的写法是「替用户按一下 App 自己的横屏按钮」，350 判死：抖音
+    /// 信息流页只支持 portrait，`rot ask 1` 六次全被拒（`rot ask failed`），
+    /// 用户按了六次没有一次有反应。改 TrollOpen 模式：
+    ///
+    ///   · 竖 → 横：**宿主自己转置**（假横），顺手仍发一次 ask —— 个别 App
+    ///     真支持横屏的话，世界转过去后探针会把假横升级成真横；
+    ///   · 假横 → 竖：App 世界根本没动，本地直接退，不等 App；
+    ///   · 真横 → 竖：走 0.4.71/72 的退出链路（App 发布 0 → 解钉 → 收卡）。
     func toggleLandscape() {
-        // 0.4.66 — 长按**不再是「我们切」**，而是「替用户按一下 App 自己那个横屏
-        // 按钮」：宿主把 `AevonRotWant` 写进 App 的偏好域并叫醒它，App 在自己的
-        // 进程里调 `requestGeometryUpdateWithPreferences:`，转成功之后它把新尺寸
-        // 报回来，卡片才跟着变（`AevonRotSweep` → `setLandscape`）。
-        //
-        // 为什么不直接 `setLandscape(!landscape)`：343 证明宿主写进去的方向与 frame
-        // 对已建好的托管 scene 一个字都不生效 —— 那样切出来的卡片是横的、画面
-        // 还是竖的，比没反应更糟。这里只发出请求，成败由 App 与系统决定，
-        // 转不成就是原地不动，日志里留一行 `app: rot ask failed`。
-        Log.write("win: landscape ask sent b=" + bundle
-                  + (landscape ? " want=0" : " want=1"))
-        AevonRotAsk(bundle, landscape ? 0 : 1)
+        if landscapeOn && landscapeFake {
+            Log.write("win: landscape toggle off fake b=" + bundle)
+            setLandscape(false)
+            return
+        }
+        if !landscapeOn {
+            Log.write("win: landscape toggle host-transpose b=" + bundle)
+            setLandscape(true, fake: true)
+            AevonRotAsk(bundle, 1)
+            return
+        }
+        Log.write("win: landscape ask sent b=" + bundle + " want=0")
+        AevonRotAsk(bundle, 0)
     }
 
     /// 0.4.65 — 这张卡现在是横的还是竖的。只读出口给 `SceneProbe` 那条回调判重。
@@ -1173,11 +1194,29 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 自己的守护循环把它写回去的**：`AevonSceneFrameSet` 的目标表里一直是
     /// 430x717（因为 `natural` 没变），intercept 每一拍都把 drift 纠回旧值。
     /// 这一版 `natural` 和推给系统的 frame 是同一个数，守护循环纠的就是它自己。
-    func setLandscape(_ on: Bool, video: CGRect = .null) {
+    func setLandscape(_ on: Bool, video: CGRect = .null, fake: Bool = false) {
         guard let card = card, let window = window else { return }
         // 已经在横屏：只更新证词。世界在横屏中再变（切下一集）不重摆 ——
         // 那需要重新读 scene 尺寸，而 `AevonRotPoll` 只在 on 值翻转时才叫我们。
         if on && landscapeOn {
+            if landscapeFake && !fake {
+                // 0.4.73 — 假横升级真横：App 世界真转过去了（用户点了全屏按钮）。
+                // 撤转置、登记 + 推 frame、画布回「纯缩放」。卡片尺寸两态一样
+                //（430x258），只换 content 的 frame —— 不再包动画，同一拍完成。
+                landscapeFake = false
+                canvasOverrideSize = nil
+                canvasDirtyUntil = CFAbsoluteTimeGetCurrent() + 2.5
+                landscapeVideo = video
+                AevonSceneFrameSet(bundle, 0, 0, Double(natural.width), Double(natural.height))
+                var pdoor: Int = 0
+                if let sc = window.windowScene {
+                    pdoor = Int(AevonPushSceneFrameStrict(sc))
+                }
+                followContent()
+                Log.write(String(format: "win: card landscape promote fake door=%d b=%@",
+                                 pdoor, bundle))
+                return
+            }
             landscapeVideo = video
             Log.write(String(format: "win: card landscape aim vid=%.0fx%.0f@%.0f,%.0f b=%@",
                              video.width, video.height, video.minX, video.minY, bundle))
@@ -1209,6 +1248,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             portraitFrame = card.frame
             portraitNatural = natural
             landscapeVideo = video
+            // 0.4.73 — 假横从这一行起与真横分叉；几何完全同构（卡片、画布尺寸
+            // 都一样），分叉只在「写不写 scene frame」与「canvas 要不要转置」。
+            landscapeFake = fake
             let size = FloatHost.landscapeCard(in: bounds)
             let c = card.center
             frame = CGRect(x: (c.x - size.width * 0.5).rounded(),
@@ -1229,31 +1271,46 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             landscapeVideo = .null
             portraitFrame = nil
             portraitNatural = nil
+            landscapeFake = false
             // 0.4.72 — 退出完成：看门狗旁路撤掉，目标回到 `natural`（竖版）。
             canvasOverrideSize = nil
             canvasDirtyUntil = 0
         }
-        // 2. 登记画布（两个方向都登记）。横屏登记的是转置后的那一个 —— 守护循环
-        //    此后纠的就是 717x430，不会把 App 按回竖屏。
-        AevonSceneFrameSet(bundle, 0, 0, Double(natural.width), Double(natural.height))
+        // 2. 登记画布。0.4.73 — 真横登记转置值（守护循环此后纠 717x430）；
+        //    **假横一个字节不写**：App 世界还是竖版，登记表与看门狗目标都必须
+        //    留在 430x717（用 `canvasOverrideSize` 压住），写了就是一次跨进程
+        //    系统重排 = 用户看到的黑屏。
+        if !fake {
+            AevonSceneFrameSet(bundle, 0, 0, Double(natural.width), Double(natural.height))
+        } else {
+            canvasOverrideSize = portraitNatural
+        }
 
-        // 3. 同一拍：推场景 + 落卡片。
-        settleEnter()
+        // 3. 同一拍：推场景 + 落卡片。0.4.73 — 卡片与画布的变化包一条 0.26 s
+        //    动画（TrollOpen 录屏实测过渡 0.30 s）：假横是纯宿主操作，配得上一条
+        //    顺滑转场；真横的 scene frame 推在动画外（跨进程写，不等动画）。
+    //    动画中 `reapplyPlacement` 被领门（`lsAnimUntil`），不会中途硬赋值。
         var door: Int = 0
-        if let sc = window.windowScene {
+        if !fake, let sc = window.windowScene {
             door = Int(AevonPushSceneFrameStrict(sc))
         }
-        card.bounds = CGRect(origin: .zero, size: frame.size)
-        card.center = CGPoint(x: frame.midX, y: frame.midY)
-        applyGlow()
-        followContent()
+        settleEnter()
+        lsAnimUntil = CFAbsoluteTimeGetCurrent() + 0.30
+        UIView.animate(withDuration: 0.26, delay: 0,
+                       options: [.beginFromCurrentState, .curveEaseInOut]) {
+            card.bounds = CGRect(origin: .zero, size: frame.size)
+            card.center = CGPoint(x: frame.midX, y: frame.midY)
+            self.applyGlow()
+            self.followContent()
+        }
         syncGrip()
-        Log.write(String(format: "win: card landscape %d canvas=%.0fx%.0f card=%.0fx%.0f@%.0f,%.0f vid=%.0fx%.0f@%.0f,%.0f door=%d b=%@",
+        Log.write(String(format: "win: card landscape %d canvas=%.0fx%.0f card=%.0fx%.0f@%.0f,%.0f vid=%.0fx%.0f@%.0f,%.0f fake=%d door=%d b=%@",
                          on ? 1 : 0, natural.width, natural.height,
                          frame.width, frame.height,
                          frame.minX, frame.minY,
                          landscapeVideo.width, landscapeVideo.height,
-                         landscapeVideo.minX, landscapeVideo.minY, door, bundle))
+                         landscapeVideo.minX, landscapeVideo.minY,
+                         fake ? 1 : 0, door, bundle))
     }
 
     /// 0.4.71 — 退出的第一拍：**只解钉 scene frame，卡片保持横屏**。
@@ -4104,15 +4161,31 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 顶栏裁切只属于竖版：横版画布没有顶栏那一条。
         let crop = landscape ? CGFloat(0) : (cropTop + kbTopCrop)
         if let canvas = canvasView {
-            // 0.4.50 — 承载面在画布里的位置**恒定**：铺满、单位阵。系统重设它时
-            // 写的正是这组值（见属性上那段），所以这里只在真的被改成别的值时
-            // 才落笔 —— 写一次 `frame` 就是一次跨进程合成重排，不能每拍来一发。
-            if content.transform != .identity { content.transform = .identity }
-            if content.frame != want { content.frame = want }
-            if canvas.bounds != want { canvas.bounds = want }
-            canvas.center = CGPoint(x: card.bounds.midX - shift.x * scale,
-                                    y: card.bounds.midY - shift.y * scale - crop * scale / 2)
-            canvas.transform = CGAffineTransform(scaleX: scale, y: scale)
+            if landscapeFake {
+                // 0.4.73 — 假横：canvas 装**竖版**画布（430x717），整块转 90°。
+                // App 世界没有动，content 的 frame 必须保持竖版 —— 系统按竖版
+                // scene 重设 `_UIScenePresentationView` 时写的正是这一组值，两边
+                // 一致才不会闪。旋转写在 canvas（我们自己的视图）上，系统永不
+                // 重设它；写在 content（系统托管）上会被抹掉。
+                let pn = portraitNatural ?? CGSize(width: natural.height, height: natural.width)
+                let pwant = CGRect(origin: .zero, size: pn)
+                if content.transform != .identity { content.transform = .identity }
+                if content.frame != pwant { content.frame = pwant }
+                if canvas.bounds != pwant { canvas.bounds = pwant }
+                canvas.center = CGPoint(x: card.bounds.midX, y: card.bounds.midY)
+                canvas.transform = CGAffineTransform(rotationAngle: -.pi / 2)
+                    .scaledBy(x: scale, y: scale)
+            } else {
+                // 0.4.50 — 承载面在画布里的位置**恒定**：铺满、单位阵。系统重设它时
+                // 写的正是这组值（见属性上那段），所以这里只在真的被改成别的值时
+                // 才落笔 —— 写一次 `frame` 就是一次跨进程合成重排，不能每拍来一发。
+                if content.transform != .identity { content.transform = .identity }
+                if content.frame != want { content.frame = want }
+                if canvas.bounds != want { canvas.bounds = want }
+                canvas.center = CGPoint(x: card.bounds.midX - shift.x * scale,
+                                        y: card.bounds.midY - shift.y * scale - crop * scale / 2)
+                canvas.transform = CGAffineTransform(scaleX: scale, y: scale)
+            }
         } else {
             content.center = CGPoint(x: card.bounds.midX - shift.x * scale,
                                      y: card.bounds.midY - shift.y * scale - crop * scale / 2)
@@ -4887,6 +4960,8 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     @discardableResult
     func reapplyPlacement(_ why: String) -> Bool {
         guard let card = card, let content = content, visible.height > 16 else { return false }
+        // 0.4.73 — 转场动画中不对账（0.2.43：动画中途硬赋值 = 撤动画跳终点）。
+        if CFAbsoluteTimeGetCurrent() < lsAnimUntil { return false }
         // 0.4.70 — 与 `followContent` / `applyBars` 同一个源：横屏 fill、竖屏 fit。
         //
         // 347 的「视频内容小、左右大块黑边」就是这里漏改的：0.4.69 只把
@@ -4907,11 +4982,23 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         if let canvas = canvasView, content.superview !== canvas {
             content.removeFromSuperview()
             content.transform = .identity
-            content.frame = CGRect(origin: .zero, size: natural)
+            // 0.4.73 — 假横时 content 的 frame 是竖版画布（同 `followContent`）。
+            let restSize = landscapeFake
+                ? (portraitNatural ?? CGSize(width: natural.height, height: natural.width))
+                : natural
+            content.frame = CGRect(origin: .zero, size: restSize)
             canvas.insertSubview(content, at: 0)
         }
         let at = subject.transform
-        let off = abs(at.a - scale) > 0.004 || abs(at.d - scale) > 0.004
+        // 0.4.73 — 假横的期望变换是「旋转 · 缩放」，不能拿纯缩放对账 —— 否则
+        // 就是 0.4.70 的翻版：rotate·scale 的 a=0、d=0，每一拍都被判成「被抹了」
+        // 写回纯 scale，转置画面每 200 ms 弹回竖放一次。
+        let wantT = landscapeFake
+            ? CGAffineTransform(rotationAngle: -.pi / 2)
+                .scaledBy(x: scale, y: scale)
+            : CGAffineTransform(scaleX: scale, y: scale)
+        let off = abs(at.a - wantT.a) > 0.004 || abs(at.d - wantT.d) > 0.004
+            || abs(at.b - wantT.b) > 0.004 || abs(at.c - wantT.c) > 0.004
             || abs(subject.center.x - center.x) > 0.5
             || abs(subject.center.y - center.y) > 0.5
         guard off else { return false }
@@ -4931,8 +5018,9 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
         // 之后，那个无条件写会在动画中途把 transform 重新赋值一次 —— UIKit 对待
         // 动画中属性的硬赋值是「撤掉动画、直接到终点」，于是画面会提前跳到终点
         // 尺寸。修一个字反而闪一下，那不值得。
-        if abs(at.a - scale) > 0.004 || abs(at.d - scale) > 0.004 {
-            subject.transform = CGAffineTransform(scaleX: scale, y: scale)
+        if abs(at.a - wantT.a) > 0.004 || abs(at.d - wantT.d) > 0.004
+            || abs(at.b - wantT.b) > 0.004 || abs(at.c - wantT.c) > 0.004 {
+            subject.transform = wantT
         }
         if abs(dC.x) > 0.5 || abs(dC.y) > 0.5 {
             subject.center = center
