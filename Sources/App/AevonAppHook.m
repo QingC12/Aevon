@@ -8594,10 +8594,10 @@ static void AevonRotEnterFullscreen(void) {
     }
 
     // 主路：363 里用户手点全屏那一拍，present 就是从它发出的，参数 `desc=click`。
-    SEL real = sel_registerName("realEnterLandscapeFeedWithEnterMethod:");
+    SEL selReal = sel_registerName("realEnterLandscapeFeedWithEnterMethod:");
     @try {
-        if ([vc respondsToSelector:real]) {
-            ((void (*)(id, SEL, id))objc_msgSend)(vc, real, @"click");
+        if ([vc respondsToSelector:selReal]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(vc, selReal, @"click");
             AevonAppLogWrite("app: rot enter fire realEnterLandscapeFeedWithEnterMethod:\n");
             return;
         }
@@ -8606,10 +8606,12 @@ static void AevonRotEnterFullscreen(void) {
     }
     // 退路：无参版（0.4.86 押在它上面，但那要求 controller 已经建好；这里
     // 换成宿主 VC 上试一次 —— 它自己转发也好、没有也好，日志会说话）。
-    SEL auto = sel_registerName("autoEnterLandscapeFeed");
+    // ⛔ 变量名不能叫 `auto`：Clang 在这个语言模式下把它当关键字，
+    // `((void (*)(id, SEL))objc_msgSend)(vc, auto)` 那一行会报 `expected expression`。
+    SEL selAuto = sel_registerName("autoEnterLandscapeFeed");
     @try {
-        if ([vc respondsToSelector:auto]) {
-            ((void (*)(id, SEL))objc_msgSend)(vc, auto);
+        if ([vc respondsToSelector:selAuto]) {
+            ((void (*)(id, SEL))objc_msgSend)(vc, selAuto);
             AevonAppLogWrite("app: rot enter fire autoEnterLandscapeFeed\n");
             return;
         }
