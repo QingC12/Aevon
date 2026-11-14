@@ -1757,9 +1757,25 @@ def main():
                       #        （1.6 / 2.8 / 4.0 s，每拍先查链上有没有横版页）；
                       #   `app: rot land auto fire cls=X how=tap ok=N at=x,y wxh` ⇒
                       #        **点的是哪个、多大**：0x0 也照点（不走 hit-test）；
-                      #   `app: rot land enter method=N cls=X` ⇒ 抖音自己那条
-                      #        `realEnterLandscapeFeedWithEnterMethod:` 的入参值
+                      #   `app: rot land enter method=N desc=X cls=Y` ⇒ 抖音自己那条
+                      #        `realEnterLandscapeFeedWithEnterMethod:` 的入参
                       #        （只记后原样调回去）—— 自动点失败时下一版的直接调依据。
+                      #
+                      # 0.4.84 — 361 把「按钮」判死了：用户明说「视频中没有点击全屏
+                      # 按钮」，而 `AWELandscapeFeedEntryView` 三次证据都支持「它不
+                      # 是可点的按钮」—— 转横那两拍 `0,0 90x32` 但 `v.window == nil`
+                      # （0.4.83 的收集门槛就死在这一句），1.6 s 后连 dump 都扫不到
+                      # （`miss n=0` ×3），用户肉眼也看不到。
+                      #   `app: rot look pane cls=X … win=N hid=N a=F ten=N kid=…` ⇒
+                      #        这一版新加的四列：在不在窗上 / 隐没 / 透明度 / tap
+                      #        手势是否 enabled —— 判「是不是用户能点的按钮」只看位置
+                      #        不够，361 就是这么误判的；
+                      #   `app: rot land auto start leaf=X round=N` ⇒ 现在第 1 拍在
+                      #        转横**同一拍**就跑（0.35/0.8/1.6/3.0/5.0 s 五拍随后）：
+                      #        361 证明这个入口只在转场窗口里存在，等 1.6 s 就是白等；
+                      #   `app: rot pinch call sel=X a0=N a1=N obj=Y cls=Z` ⇒ 捏合那条
+                      #        路的**只读**记录（pinch_config / config_before_enter /
+                      #        play_will_enter / play_did_exit 四个点，记完原样调回）。
                       b"app: rot keeper show from=%s",
                       b"app: rot keeper hide",
                       b"app: rot keeper passthru cls=%s off=%d",
@@ -1781,7 +1797,8 @@ def main():
                       b"app: rot land auto fire cls=%s how=ctl",
                       b"app: rot land auto fire cls=%s how=tap ok=%d at=%.0f,%.0f %.0fx%.0f",
                       b"app: rot land auto skip cls=%s why=notap",
-                      b"app: rot land enter method=%ld cls=%s",
+                      b"app: rot land enter method=%ld desc=%s cls=%s",
+                      b"app: rot pinch call sel=%s a0=%ld a1=%ld obj=%s cls=%s",
                       b"app: rot feed hold land page",
                       b"app: rot turn n=%d world=%.0fx%.0f door=%d hookn=%d",
                       b"app: rot turn ok n=%d world=%.0fx%.0f",

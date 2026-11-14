@@ -7502,7 +7502,13 @@ static void AevonRotKeeperHide(void);
 /// 全是只读：一个几何都不改，一个方法都不调。
 static const char *const AevonLookWords[] = {
     "fullscreen", "FullScreen", "landscape", "Landscape",
-    "enterFull", "switchScreen", "rotateTo"
+    "enterFull", "switchScreen", "rotateTo",
+    // 0.4.84 — `pinch` 这一族是这版加的。359 只所以能看到 `pinch_enableLandscape`
+    // 是因为它名字里带 Landscape；真正的**手势 handler** 多半只叫 `pinch*`
+    // （例如 `- handlePinch:` / `- pinchGestureChanged:`），不含 landscape 就
+    // 从来没被打出来过。361 已经排除按钮、只剩捏合这一条路，词表必须补全，
+    // 否则下一版还得靠猜。
+    "pinch", "Pinch"
 };
 
 /// 打一个类**自己**实现的方法里命中关键词的那些（不含父类，父类由调用方逐层走）。
@@ -7598,11 +7604,28 @@ static void AevonRotLookPanes(UIView *v, int depth, int *budget, int *visited,
                         break;
                     }
                 }
+                // 0.4.84 — `win=/hid=/a=/ten=` 是这版加的。361 的 `miss n=0` 与
+                // 用户「视频中没有全屏按钮」是同一条证据的两面：这个 view 转横
+                // 那一拍是 `0,0 90x32`，但**没在 window 上**（`v.window == nil`），
+                // 1.6 s 后连 dump 都扫不到 ⇒ 它既不是用户能看见的按钮，也不是
+                // 可以留到下一拍再点的入口。可见性必须和位置一起记，否则下次还是
+                // 只能靠猜。`ten=` 是第一个 tap 手势的 enabled（0 就是手势被关了，
+                // 那种情况下 `_targets` 摸到了也不会生效）。
+                int ten = -1;
+                for (UIGestureRecognizer *gg in [v gestureRecognizers]) {
+                    if ([gg isKindOfClass:[UITapGestureRecognizer class]]) {
+                        ten = gg.enabled ? 1 : 0;
+                        break;
+                    }
+                }
                 char line[420];
                 snprintf(line, sizeof(line),
-                         "app: rot look pane cls=%s %.0f,%.0f %.0fx%.0f ctl=%d tap=%lu int=%d kid=%s\n",
+                         "app: rot look pane cls=%s %.0f,%.0f %.0fx%.0f ctl=%d tap=%lu int=%d"
+                         " win=%d hid=%d a=%.1f ten=%d kid=%s\n",
                          c, r.origin.x, r.origin.y, r.size.width, r.size.height,
                          ctl ? 1 : 0, (unsigned long)g, v.userInteractionEnabled ? 1 : 0,
+                         v.window != nil ? 1 : 0, v.hidden ? 1 : 0,
+                         (double)v.alpha, ten,
                          used > 0 ? kid : "-");
                 AevonAppLogWrite(line);
                 *budget -= 1;
@@ -7612,8 +7635,15 @@ static void AevonRotLookPanes(UIView *v, int depth, int *budget, int *visited,
             // 于是 `rot land auto miss n=0` —— 明明抓到了入口，却当没有。
             // 0x0 也照点：我们调的是手势的 target/action（`_targets`），不经过
             // hit-test，尺寸只影响手指，不影响这一发。
-            if (out != NULL && outN != NULL && *outN < cap
-                && AevonPaneStrong(cn) && v.window != nil) {
+            //
+            // ⛔ 0.4.84 — **`v.window != nil` 这道门槛同样是错的**，而且它是
+            // 361 `miss n=0` 的直接原因：同一拍 dump 明明打出
+            // `AWELandscapeFeedEntryView 0,0 90x32 ctl=0 tap=1`，auto 三轮却
+            // 一个候选都没收到 —— 差别只有这一句。抖音在转场里先建 view、后上窗，
+            // 「还没上窗」恰恰是它已经在路上的证据，不是不该点的理由。
+            // 走 gesture target/action 本来就不经过 hit-test，window 在不在都
+            // 不影响这一发；真正会失效的是手势 enabled，那一点由 `ten=` 记着。
+            if (out != NULL && outN != NULL && *outN < cap && AevonPaneStrong(cn)) {
                 // 只在同一拍里用（auto 扫完立刻点），不跨时间保存：非 ARC 下
                 // 裸指针存起来就会悬垂。
                 out[*outN] = v;
@@ -7816,9 +7846,29 @@ static void AevonLandEnterNew(id self, SEL _cmd, long method) {
     if (notes < 4) {
         notes += 1;
         NSString *cn = (self != nil) ? NSStringFromClass([self class]) : nil;
-        char line[192];
-        snprintf(line, sizeof(line), "app: rot land enter method=%ld cls=%s\n",
-                 method, cn.length > 0 ? [cn UTF8String] : "-");
+        // 0.4.84 — 361 的 `method=11511957048` = `0x2ae2a8638`，是堆地址 ⇒ 这个
+        // 入参**不是整数枚举，是对象**（`NSNumber`/`NSString` 包着的 enterMethod）。
+        // 之前按 `%ld` 打只留下一个地址，等于白记。这里按对象读出 description：
+        // 以后要直接调这个方法，需要的就是这个值。
+        // 保护：只有看起来像堆对象的指针才去问（iOS 上 malloc 段以 0x1/0x2/0x3
+        // 开头）；`@try` 兜 NSException，非法指针会崩，所以先用地址段收窄。
+        char desc[96];
+        desc[0] = 0;
+        if (method > 0x100000000L) {
+            id arg = (id)method;
+            @try {
+                NSString *d = [arg description];
+                if (d.length > 0) {
+                    snprintf(desc, sizeof(desc), "%.64s", [d UTF8String]);
+                }
+            } @catch (NSException *e) {
+                desc[0] = 0;
+            }
+        }
+        char line[288];
+        snprintf(line, sizeof(line), "app: rot land enter method=%ld desc=%s cls=%s\n",
+                 method, desc[0] != 0 ? desc : "-",
+                 cn.length > 0 ? [cn UTF8String] : "-");
         AevonAppLogWrite(line);
     }
     if (AevonLandEnterOld != NULL) AevonLandEnterOld(self, _cmd, method);
@@ -7834,6 +7884,108 @@ static void AevonLandEnterHookInstall(void) {
     if (m == NULL) return;
     AevonLandEnterOld = (AevonLandEnterIMP)method_setImplementation(m, (IMP)AevonLandEnterNew);
     done = 1;
+}
+
+/// 0.4.84 — 横屏入口的**第二套证词：捏合**。
+///
+/// 361 把「按钮」这条路彻底判死了：用户明说「视频中没有点击全屏按钮」，而
+/// `AWELandscapeFeedEntryView` 三处证据都不支持它是个可点的按钮：
+///   · 转横那两拍 `0,0 90x32`，`v.window == nil`（0.4.83 的收集门槛正是死在这里）；
+///   · 1.6 s 后连 dump 都扫不到（`rot land auto miss n=0` ×3）；
+///   · 用户肉眼看不到。
+/// 与此同时 359 的 `rot look cls` 早就点名了另一条路 —— `AWEAwemeBaseViewController`
+/// 上三个 `pinch_*` 方法 + `configBeforEnterToLandscapeFeedWithShouldCheck:fromPinch:`，
+/// 后者的 `fromPinch:` 直说「从捏合进来的」。361 的 16:29:04 也确实进了横屏播放器
+/// （`rot land enter` + `AWELandscapeNavigationController` + `vid=717x430@0,0`），
+/// 但那一拍我们没有任何钩子能看到是**谁**把他叫进去的。
+///
+/// 这一版只装**只读**记录（记完原样调回去），不调任何抖音方法、不改状态。
+/// 目的：用户再捏一次，日志就能给出完整顺序与参数 —— 0.4.85 才有资格谈「替他捏」。
+/// 四个点按「转场前 → 转场中 → 进场 → 退场」排：
+///   `pinch_configBeforeEnterLandscapeWithCurrentModel:` (argc=3，带 model)
+///   `configBeforEnterToLandscapeFeedWithShouldCheck:fromPinch:` (argc=4，两个 BOOL)
+///   `playInteractionWillEnterLandscape` (argc=2)
+///   `playInteractionDidExitLandscape` (argc=2)
+typedef void (*AevonPinchCfgIMP)(id, SEL, id);
+typedef void (*AevonPinchBool2IMP)(id, SEL, intptr_t, intptr_t);
+typedef void (*AevonPlayPhaseIMP)(id, SEL);
+
+static AevonPinchCfgIMP AevonPinchCfgOld = NULL;
+static AevonPinchBool2IMP AevonPinchBool2Old = NULL;
+static AevonPlayPhaseIMP AevonPlayWillOld = NULL;
+static AevonPlayPhaseIMP AevonPlayExitOld = NULL;
+
+static void AevonPinchLog(const char *what, id self, long a0, long a1, id obj) {
+    NSString *cn = (self != nil) ? NSStringFromClass([self class]) : nil;
+    NSString *on = (obj != nil) ? NSStringFromClass([obj class]) : nil;
+    char line[288];
+    snprintf(line, sizeof(line), "app: rot pinch call sel=%s a0=%ld a1=%ld obj=%s cls=%s\n",
+             what, a0, a1, on.length > 0 ? [on UTF8String] : "-",
+             cn.length > 0 ? [cn UTF8String] : "-");
+    AevonAppLogWrite(line);
+}
+
+static void AevonPinchCfgNew(id self, SEL _cmd, id model) {
+    @autoreleasepool {
+        AevonPinchLog("pinch_config", self, 0, 0, model);
+    }
+    if (AevonPinchCfgOld != NULL) AevonPinchCfgOld(self, _cmd, model);
+}
+
+static void AevonPinchBool2New(id self, SEL _cmd, intptr_t shouldCheck, intptr_t fromPinch) {
+    @autoreleasepool {
+        AevonPinchLog("config_before_enter", self, (long)shouldCheck, (long)fromPinch, nil);
+    }
+    if (AevonPinchBool2Old != NULL) AevonPinchBool2Old(self, _cmd, shouldCheck, fromPinch);
+}
+
+static void AevonPlayWillNew(id self, SEL _cmd) {
+    @autoreleasepool {
+        AevonPinchLog("play_will_enter", self, 0, 0, nil);
+    }
+    if (AevonPlayWillOld != NULL) AevonPlayWillOld(self, _cmd);
+}
+
+static void AevonPlayExitNew(id self, SEL _cmd) {
+    @autoreleasepool {
+        AevonPinchLog("play_did_exit", self, 0, 0, nil);
+    }
+    if (AevonPlayExitOld != NULL) AevonPlayExitOld(self, _cmd);
+}
+
+static void AevonPinchHookInstall(void) {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    Class base = objc_getClass("AWEAwemeBaseViewController");
+    if (base != Nil) {
+        Method m = class_getInstanceMethod(
+            base, sel_registerName("pinch_configBeforeEnterLandscapeWithCurrentModel:"));
+        if (m != NULL) {
+            AevonPinchCfgOld = (AevonPinchCfgIMP)method_setImplementation(
+                m, (IMP)AevonPinchCfgNew);
+        }
+        m = class_getInstanceMethod(
+            base, sel_registerName("configBeforEnterToLandscapeFeedWithShouldCheck:fromPinch:"));
+        if (m != NULL) {
+            AevonPinchBool2Old = (AevonPinchBool2IMP)method_setImplementation(
+                m, (IMP)AevonPinchBool2New);
+        }
+    }
+    Class pi = objc_getClass("AWEPlayInteractionViewController");
+    if (pi != Nil) {
+        Method m = class_getInstanceMethod(
+            pi, sel_registerName("playInteractionWillEnterLandscape"));
+        if (m != NULL) {
+            AevonPlayWillOld = (AevonPlayPhaseIMP)method_setImplementation(
+                m, (IMP)AevonPlayWillNew);
+        }
+        m = class_getInstanceMethod(pi, sel_registerName("playInteractionDidExitLandscape"));
+        if (m != NULL) {
+            AevonPlayExitOld = (AevonPlayPhaseIMP)method_setImplementation(
+                m, (IMP)AevonPlayExitNew);
+        }
+    }
 }
 
 /// 0.4.83 — 候选打分。360 的证据是**两头都出现过**：
@@ -7869,10 +8021,15 @@ static int AevonLandPaneScore(UIView *v) {
 ///   `rot look pane cls=AWELandscapeFeedEntryView 175,871 81x29 ctl=0 tap=1 int=1`
 ///   —— 类名直说「横屏信息流入口」，非 UIControl、挂 1 个 tap 手势。
 ///   0.4.82 只在 1.6 s 那一拍扫一次，而那一刻它是 `0,0 0x0`（尺寸门槛把它筛掉）
-///   ⇒ `miss n=0`。这一版去掉尺寸门槛、改三轮、按名字+尺寸打分。
+///   ⇒ `miss n=0`。0.4.83 去掉尺寸门槛、改三轮。
+///
+/// ⛔ 0.4.84 — 361 把原因定死了：这个入口**只存在于转场窗口里**（转横那一两秒）。
+/// 三处证据：转横那两拍 `0,0 90x32` 但 `v.window == nil`；1.6 s 后三轮全
+/// `miss n=0`；用户肉眼「视频中没有点击全屏按钮」。
+/// ⇒ 第 1 拍就在转横**同一拍**跑，后面 0.35 / 0.8 / 1.6 / 3.0 / 5.0 s 兜底。
 ///
 /// 三条硬约束（宁可不灵，也不许出乱子）：
-///   ① 一轮 want 最多点**三拍**（1.6 / 2.8 / 4.0 s），每拍先查链上有没有横版页，
+///   ① 一轮 want 最多点**六拍**，每拍先查链上有没有横版页，
 ///      进了就 `seen` 收手 —— 绝不点第二下（第二下可能把刚起来的全屏点回去）；
 ///   ② 只点类名带 FullScreen / Landscape / SwitchScreen 的强特征视图
 ///      （`AevonPaneStrong`）—— 宁可漏，不能误触点赞/评论/分享；
@@ -7899,6 +8056,8 @@ static void AevonRotLandAuto(int round) {
     }
     // 0.4.83 — 横屏入口方法的取证钩子（只记参数后原样调回去，幂等）。
     AevonLandEnterHookInstall();
+    // 0.4.84 — 同上，捏合那条路的只读记录；两个安装都有 done 闸，重复调无害。
+    AevonPinchHookInstall();
     UIWindow *kw = AevonKeyWindow();
     UIViewController *top = (kw != nil) ? [kw rootViewController] : nil;
     if (top == nil) return;
@@ -8189,24 +8348,28 @@ static void AevonRotPursue(void) {
         //   ② 排自动点全屏。
         // 359 证明抖音在横屏世界下**不会**自己进横版播放器，这一下是唯一的缺口。
         //
-        // ⛔ 0.4.83 — **一拍改成三轮**（1.6 / 2.8 / 4.0 s）。360 的第一次尝试里
-        // `AWELandscapeFeedEntryView` 在 1.6 s 那一拍还是 `0,0 0x0`（16:08:44
-        // 与 16:08:46 两次 dump 都是），单拍就是白等；而 16:09:04 那次它已经有
-        // `175,871 81x29` —— 布局什么时候结算完不确定，只能多等几拍。
-        // 每轮进来先查「链上有没有横版页」，进了就 `seen` 收手，绝不点第二下
+        // ⛔ 0.4.84 — **第一拍就在转场里**，不再等 1.6 s。
+        // 361 把 0.4.83 的假设证伪了：`AWELandscapeFeedEntryView` 只在转横
+        // 那两秒里存在于控件树上（dump 16:28:17/18 两次都是 `0,0 90x32`），
+        // 等到 1.6 / 2.8 / 4.0 s 三轮进来，它连扫都扫不到了 ⇒ `miss n=0` ×3。
+        // 也就是说这个入口**是转场过程的一部分**，要么当场点，要么永远点不到。
+        // 六拍：第 0 拍在这一拍同步跑，其余 0.35 / 0.8 / 1.6 / 3.0 / 5.0 s。
+        // 每拍进来先查「链上有没有横版页」，进了就 `seen` 收手，绝不点第二下
         // （第二下可能把抖音刚起来的全屏又点回去）。
-        // `cycle` 是轮次令牌：want 一翻（用户长按退出/重进），旧的三拍全部作废。
+        // `cycle` 是轮次令牌：want 一翻（用户长按退出/重进），旧的拍全部作废。
         AevonRotLookDump(YES);
         if (AevonRotLandAutoN == 0) {
-            AevonRotLandAutoN = 3;
+            AevonRotLandAutoN = 6;
             int cycle = ++AevonRotLandAutoCycle;
+            AevonRotLandAuto(1);
+            static const double kAt[5] = {0.35, 0.8, 1.6, 3.0, 5.0};
             int r;
-            for (r = 0; r < 3; r++) {
+            for (r = 0; r < 5; r++) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                             (int64_t)((1.6 + 1.2 * r) * NSEC_PER_SEC)),
+                                             (int64_t)(kAt[r] * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
                     if (cycle != AevonRotLandAutoCycle) return;
-                    AevonRotLandAuto(r + 1);
+                    AevonRotLandAuto(r + 2);
                 });
             }
         }
@@ -8222,6 +8385,9 @@ static void AevonRotPursue(void) {
     // ① 装 hook（root 没建好就会 skip，下一拍再来）；② 才立 keeper。
     // ⛔ 这个顺序是 356 闪退换来的硬约束，不许调（见 `AevonRotApplyWant` want==1 段）。
     AevonOrientHookInstall();
+    // 0.4.84 — 捏合入口的只读记录，越早越好：抖音这套 `pinch_*` 可能在
+    // 「准备进横屏」时就被调，晚一拍就漏。装的是只读替身，不影响任何行为。
+    AevonPinchHookInstall();
     // 0.4.81 — 取证放在「hook 已经装上」那一拍：冷启动第 2 秒时链是空的
     // （357 `rot hook skip why=root`），那一拍 dump 出来什么都看不到。
     // 0.4.82 — 这一拍只打类方法列表（`withPanes=NO`）：竖屏这时的控件树跟
