@@ -1014,14 +1014,17 @@ def main():
                   b"win: card landscape left by app b=",
                   b"win: card landscape reset to %.0fx%.0f at %.0f,%.0f",
                   # 0.4.73 — 假横（TrollOpen 式宿主转置）：长按不再求 App（350：信息流
-                  # supportedInterfaceOrientations=portrait，rot ask 六次全被拒）。判据：
-                  #   `landscape toggle host-transpose` ⇒ 长按进了宿主转置这条路；
-                  #   `card landscape 1 … fake=1 door=0` ⇒ 卡片转了、scene frame 没写
-                  #        （door=0 是假横的本分，写了=跨进程重排=黑屏）；
-                  #   `card landscape promote fake door=` ⇒ App 世界后来真转了（用户
-                  #        点全屏），假横升级成真横；
+                  # supportedInterfaceOrientations=portrait，rot ask 六次全被拒）。
+                  # 0.4.90 — **第一态换做法**：竖屏长按不再由宿主造横屏，改为把请求
+                  # 递到 App 进程（`AevonRotAskEnter` → `tmp/aevon-enter` → 抖音自己的
+                  # `realEnterLandscapeFeedWithEnterMethod:`）。判据：
+                  #   `landscape ask enter app` ⇒ 长按走的是「请抖音进全屏」这条路；
+                  #   `card landscape 1 … fake=0` ⇒ 抖音接住了（真横）；
+                  #   `landscape enter timeout` ⇒ 3 s 内抖音没转，**不退回假横**；
+                  #   `card landscape promote fake door=` ⇒ App 世界后来真转了；
                   #   `landscape toggle off fake` ⇒ 假横本地退，不等 App。
-                  b"win: landscape toggle host-transpose b=",
+                  b"win: landscape ask enter app b=",
+                  b"win: landscape enter timeout b=",
                   b"win: card landscape promote fake door=%d b=%@",
                   b"win: landscape toggle off fake b=",
                   # 0.4.66 — **App 自己转、宿主跟随**这条路的三个证词：
@@ -1858,16 +1861,27 @@ def main():
                       b"app: rot land hold world=%.0fx%.0f vid=%.0fx%.0f why=%s gate=%s n=%d",
                       b"app: rot land have cls=%s",
                       b"app: rot auto enter seen",
-                      b"app: rot auto enter miss",
-                      # 0.4.89 — 366 的两拍都是 `miss`：竖屏时
-                      # `AWEPlayInteractionLandscapeFeedController` 还没被建出来。
-                      # 退一步直接调宿主 `AWEPlayInteractionViewController` 的
-                      # `realEnterLandscapeFeedWithEnterMethod:`（363 用户手点全屏
-                      # 时 present 就是从它发出的）。`block door` = App 门那一刻
-                      # 不含横屏，这一发**不发**（0.4.79 那条 SIGABRT 的前提）。
-                      b"app: rot auto enter by=vc realEnterLandscapeFeedWithEnterMethod:",
-                      b"app: rot auto enter block door",
-                      b"app: rot auto enter vc throw",
+                      # 0.4.90 — 366/367 的 `miss` 根因找到了：协商链有 **10 环**，
+                      # `AevonFindInstance` 深度上限 8，走到第 8 环就停 ⇒ 同一个 miss
+                      # 连着出现两版。现在改走 `AevonOrientFind`（与 `AevonOrientChain`
+                      # 同一套走法，它早就走通过这 10 环）。
+                      # 判据：
+                      #   `rot enter vc=… hops=9 view=WxH door=N` ⇒ 找到了播放页，
+                      #        hops 是它在链上的深度、door 是那一刻 App 的方向门；
+                      #   `rot enter fire realEnterLandscapeFeedWithEnterMethod:` ⇒ 发出去了；
+                      #   `rot enter no player hops=-1` ⇒ 不在视频页（消息/我/搜索），
+                      #        这就是「只在有视频播放时才触发」的那条闸；
+                      #   `rot enter small view=0x0` ⇒ 播放页 VC 还在、视图是空的。
+                      b"app: rot auto enter via vc",
+                      b"app: rot enter vc=%s hops=%d view=%.0fx%.0f door=%lu",
+                      b"app: rot enter fire realEnterLandscapeFeedWithEnterMethod:",
+                      b"app: rot enter fire autoEnterLandscapeFeed",
+                      b"app: rot enter no player hops=%d",
+                      b"app: rot enter small view=%.0fx%.0f",
+                      b"app: rot enter stale age=%.1f",
+                      b"app: rot enter nosel",
+                      b"app: rot enter real throw",
+                      b"app: rot enter auto throw",
                       b"app: rot auto enter fire cls=%s how=%s",
                       b"app: rot auto enter nosel cls=%s",
                       b"app: rot auto enter throw",

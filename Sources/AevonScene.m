@@ -2012,6 +2012,49 @@ void AevonRotAsk(const char *bundle, int on) {
     });
 }
 
+/// 0.4.90 — 长按左下 = **请 App 自己进全屏**（等价于用户点播放页上的全屏按钮）。
+///
+/// 367 的两条读数分岔得很干净：
+///   · 19:15:20 用户手点全屏 —— 抖音自己把世界转成 717x430
+///     （`rot turn ok n=0 world=932x430` → `rot follow 1 world=717x430 vid=717x430@0,0`），
+///     卡片 406x228 里画面正放、铺满；
+///   · 19:15:39 长按左下 —— 走的是我们自己的 `landscape toggle host-transpose`
+///     （`card landscape 1 canvas=717x430 card=406x228 vid=0x0@inf,inf fake=1`）。
+///     App 仍在竖屏排版，我们只把画布转了 90°，于是 16:9 横窗里一半是躺倒的
+///     竖版画面、另一半是黑的 —— 用户连着两版报的就是这一半黑。
+/// ⇒ 长按不该由我们在宿主里造一个横屏，而是把这一下接到抖音自己的入口上。
+///
+/// 与 `AevonRotAsk` 分两条通道，谁也别当谁用：
+///   · `AevonRotWant` 是**持久状态**（0/1），判重靠「值变了没」；
+///   · 这一格是**事件**：每按一次刷新文件时间，App 侧按「文件比上次新」执行一次。
+///     若塞进 want，第二次长按会因为值还是 1 而被判重吞掉。
+/// 复用同一个 band 通知名 —— 名字一多，下一份日志就要多对一次账。
+void AevonRotAskEnter(const char *bundle) {
+    if (bundle == NULL || bundle[0] == '\0') return;
+    char *bid = strdup(bundle);
+    if (bid == NULL) return;
+    dispatch_async(AevonBandQueueGet(), ^{
+        @autoreleasepool {
+            NSString *identifier = [NSString stringWithUTF8String:bid];
+            free(bid);
+            if (identifier.length == 0) return;
+            // 与 `AevonRotAsk` 同一个容器目录：App 那一侧读 `NSTemporaryDirectory()`，
+            // 偏好域那条路 344 已经判死过一次（`app: rot ask` 零行）。
+            NSString *dir = AevonAppContainer(identifier);
+            if (dir != nil) {
+                NSString *path = [dir stringByAppendingPathComponent:@"tmp/aevon-enter"];
+                [@"1" writeToFile:path
+                       atomically:YES
+                         encoding:NSUTF8StringEncoding
+                            error:NULL];
+            }
+            NSString *name = [NSString stringWithFormat:@"com.aevon.band.%@", identifier];
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                 (CFStringRef)name, NULL, NULL, true);
+        }
+    });
+}
+
 /// 0.4.71 — 退出横屏的分流口。世界还横 ⇒ 先只解钉（phase1）+ 挂起，等世界
 /// 回竖再收卡（sweep 的 phase2）；世界已竖或没有读数 ⇒ 照旧全量退出。
 ///

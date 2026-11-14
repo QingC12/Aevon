@@ -1163,14 +1163,22 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
     /// 横版画布当成竖版画布再转置一次（430x717 → 717x430 → 又转成 430x717）。
     private var portraitNatural: CGSize?
 
-    /// 0.4.73 — 长按左下侧 = 横竖切换，按**三个状态**分流。
+    /// 0.4.90 — 长按左下侧 = **请抖音自己进全屏**，等价于用户点播放页上的全屏按钮。
     ///
-    /// 0.4.66 的写法是「替用户按一下 App 自己的横屏按钮」，350 判死：抖音
-    /// 信息流页只支持 portrait，`rot ask 1` 六次全被拒（`rot ask failed`），
-    /// 用户按了六次没有一次有反应。改 TrollOpen 模式：
+    /// 367 把两条路分得很干净：
+    ///   · 19:15:20 用户手点全屏 —— 抖音自己把世界转成 717x430
+    ///     （`rot turn ok n=0 world=932x430` → `rot follow 1 world=717x430 vid=717x430@0,0`），
+    ///     卡片 406x228 里画面正放、铺满；
+    ///   · 19:15:39 长按左下 —— 走我们自己的假横
+    ///     （`landscape toggle host-transpose`、`fake=1`、`vid=0x0@inf,inf`）。
+    ///     App 仍在竖屏排版，只有画布被转了 90°，于是 16:9 横窗里一半是躺倒的
+    ///     竖版画面、另一半是黑的 —— 用户连着两版报的就是这一半黑。
+    /// ⇒ 这一下不再由我们造横屏，改为把请求递给 App 进程，让它走自己的入口。
     ///
-    ///   · 竖 → 横：**宿主自己转置**（假横），顺手仍发一次 ask —— 个别 App
-    ///     真支持横屏的话，世界转过去后探针会把假横升级成真横；
+    /// 三态仍然保留，但第一态换了做法：
+    ///   · 竖 → 横：**请求 App 进全屏**（`AevonRotAskEnter`，事件通道）。抖音接住
+    ///     会自己转横 + present 横版页，宿主下一拍收到 `rot follow 1` 再走
+    ///     `setLandscape(on, fake: false)` —— 这条路 19:15:20 已经跑通过；
     ///   · 假横 → 竖：App 世界根本没动，本地直接退，不等 App；
     ///   · 真横 → 竖：走 0.4.71/72 的退出链路（App 发布 0 → 解钉 → 收卡）。
     func toggleLandscape() {
@@ -1185,9 +1193,16 @@ final class FloatHost: NSObject, UIGestureRecognizerDelegate {
             return
         }
         if !landscapeOn {
-            Log.write("win: landscape toggle host-transpose b=" + bundle)
-            setLandscape(true, fake: true)
-            AevonRotAsk(bundle, 1)
+            Log.write("win: landscape ask enter app b=" + bundle)
+            AevonRotAskEnter(bundle)
+            // 请求已递出。⛔ 这里**不做假横兜底**：假横正是用户报的那一半黑屏，
+            // 拿一个坏结果冒充「有反应」比没反应更难查。3 s 内没等到 `rot follow 1`
+            // 就只留一行证词，卡片保持竖屏原样。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                guard let self = self else { return }
+                if self.landscape { return }
+                Log.write("win: landscape enter timeout b=" + self.bundle)
+            }
             return
         }
         Log.write("win: landscape ask sent b=" + bundle + " want=0")

@@ -136,6 +136,16 @@ long AevonFrameOrphanCount(void);
 /// 「卡片横了、画面还是竖的」。
 void AevonRotAsk(const char *_Nullable bundle, int on);
 
+/// 0.4.90 — 长按左下 = **请 App 自己进全屏**（等价于用户点播放页上的全屏按钮）。
+///
+/// 只写一行「事件文件」`tmp/aevon-enter` + 发那通 band 通知，App 侧读到文件比
+/// 上次新就去调它自己的 `realEnterLandscapeFeedWithEnterMethod:`。与 `AevonRotAsk`
+/// 分开：want 是持久状态（0/1），这个是事件（每按一次都要能再来一次）。
+///
+/// ⛔ 这里同样不碰任何几何 —— 抖音接住之后它自己转横、自己 present 横版页，
+/// 宿主下一拍收到 `rot follow 1` 再走 `setLandscape`。
+void AevonRotAskEnter(const char *_Nullable bundle);
+
 /// 主动推一次。返回门编号：3 = transition，1 = 普通，0 = 没写成或没有门。
 /// 主线程、且不能从钩子里面调（与 push foreground 同一条纪律）。
 ///

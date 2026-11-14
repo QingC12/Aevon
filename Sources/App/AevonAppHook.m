@@ -6383,6 +6383,8 @@ static void AevonBandDropAllHighlights(void) {
 /// 「转横 / 转竖」写在同一份偏好域里、用同一通 Darwin 通知叫醒我们，所以这里
 /// 只提前声明一下，回调里照着叫一声。
 static void AevonRotApplyWant(void);
+/// 0.4.90 — 同一通 band 里可能还夹着一条「请进全屏」事件（`tmp/aevon-enter`）。
+static void AevonRotApplyEnter(void);
 /// 0.4.66 — 同一通 band 里还要答一次「我现在是横的还是竖的」（见 `AevonRotForce`）。
 static void AevonRotForce(void);
 
@@ -6401,6 +6403,9 @@ static void AevonBandNote(CFNotificationCenterRef __unused center,
     // 0.4.66 — 同一通通知里宿主可能还夹了一个「转横 / 转竖」（`AevonRotWant`）。
     // 读数与判重都在 `AevonRotApplyWant` 里，这里只负责「来了一通就问一次」。
     AevonRotApplyWant();
+    // 0.4.90 — 长按左下走的是另一条：请求抖音自己进全屏（`AevonRotEnter` 事件）。
+    // 两条都在同一通 band 里送达，谁有活谁干。
+    AevonRotApplyEnter();
     // 0.4.66 — 开卡那一拍宿主会发一次 band：顺手把当前横竖答回去（暖启动的 App
     // 不会再报「变化」，见 `AevonRotForce`）。
     AevonRotForce();
@@ -8485,6 +8490,135 @@ static id AevonFindInstance(Class want, id root, int depth, int *budget) {
     return nil;
 }
 
+/// 0.4.90 — 沿**协商链**找第一个属于 `target` 的实例（presented 优先，再容器，
+/// 再 `lastObject`，与 `AevonOrientChain` 逐条对齐，keeper 跳过）。
+///
+/// 为什么不复用 `AevonFindInstance`：366/367 两版都是 `rot auto enter miss`，
+/// 而同一份日志的 `rot chain` 明明列着
+/// `…>AWEFeedCellViewController>AWEPlayInteractionViewController` —— 那条链有
+/// **10 环**，`AevonFindInstance` 的深度上限是 8，走到第 8 环就停了。换成链走法
+/// 之后 `hops=9` 直接命中（367 的 `rot chain` 就是 `AevonOrientChain` 打出来的，
+/// 它早就走通过这 10 环）。
+static UIViewController *AevonOrientFind(Class target, int *hopsOut) {
+    if (hopsOut != NULL) *hopsOut = -1;
+    if (target == Nil) return nil;
+    UIWindow *kw = AevonKeyWindow();
+    UIViewController *v = (kw != nil) ? [kw rootViewController] : nil;
+    int hops = 0;
+    while (v != nil && hops <= 12) {
+        if ([v isKindOfClass:target]) {
+            if (hopsOut != NULL) *hopsOut = hops;
+            return v;
+        }
+        UIViewController *next = AevonSkipKeeper([v presentedViewController]);
+        if (next == nil && [v isKindOfClass:[UITabBarController class]]) {
+            next = [(UITabBarController *)v selectedViewController];
+        }
+        if (next == nil && [v isKindOfClass:[UINavigationController class]]) {
+            next = [(UINavigationController *)v topViewController];
+        }
+        if (next == nil) {
+            NSArray *kids = [v childViewControllers];
+            if (kids.count > 0) next = [kids lastObject];
+        }
+        if (next == nil || next == v) break;
+        v = next;
+        hops += 1;
+    }
+    return nil;
+}
+
+/// 0.4.90 — **请抖音自己进全屏**（等价于用户点播放页上的全屏按钮）。
+///
+/// 这是 367 之后唯一还值得走的路，也是用户自己指定的做法：把左下长按接到
+/// 「点全屏」上，而不是由宿主造一个假横。
+///
+/// 判据「只在有视频播放时触发」= 协商链上**此刻**有 `AWEPlayInteractionViewController`。
+/// 它是信息流里每一条视频的播放页（367 `rot chain` 的末环）；不在视频页（消息 /
+/// 我 / 搜索 / 直播间外）这个类不在链上 ⇒ 一律不动，日志留 `no player`。
+/// 再加一道视图几何闸：那个 VC 的 view 宽高都得 ≥ 80（回收中的 cell 也带 VC，
+/// 但视图是 0x0）。⛔ 「量不到」不等于「没问题」，但这里量不到就是不该发。
+///
+/// 门（`AevonAppOrientNow`）**只记不拦**。0.4.79 那次 `UIApplicationInvalidInterfaceOrientation`
+/// 的前提是**我们自己** present 一个只答横屏的 keeper；这里是抖音自己的方法、
+/// 抖音自己的 present（用户手点全屏走的就是它），它内部会先把门打开。拦下来
+/// 反而会挡住唯一正确的路 —— 367 里 `rot auto enter miss` 之前从没走到门那一步，
+/// 所以这条闸到底会不会误伤，这一版用日志回答（`door=`）。
+static void AevonRotEnterFullscreen(void) {
+    static CFAbsoluteTime lastAt = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastAt < 0.6) return;      // 连按限频：长按抖动不该连发
+    lastAt = now;
+
+    Class hostCls = objc_getClass("AWEPlayInteractionViewController");
+    if (hostCls == Nil) {
+        AevonAppLogWrite("app: rot enter no cls\n");
+        return;
+    }
+    int hops = -1;
+    UIViewController *vc = AevonOrientFind(hostCls, &hops);
+    if (vc == nil) {
+        char line[96];
+        snprintf(line, sizeof(line), "app: rot enter no player hops=%d\n", hops);
+        AevonAppLogWrite(line);
+        return;
+    }
+    CGSize vs = [vc isViewLoaded] ? [[vc view] bounds].size : CGSizeZero;
+    if (vs.width < 80 || vs.height < 80) {
+        char line[128];
+        snprintf(line, sizeof(line), "app: rot enter small view=%.0fx%.0f\n",
+                 vs.width, vs.height);
+        AevonAppLogWrite(line);
+        return;
+    }
+    UIWindow *kw = AevonKeyWindow();
+    NSUInteger door = (kw != nil) ? AevonAppOrientNow(kw) : 0;
+    NSString *clsName = NSStringFromClass([vc class]);
+    char cn[96] = {0};
+    snprintf(cn, sizeof(cn), "%s", clsName.length > 0 ? [clsName UTF8String] : "-");
+    char line[256];
+    snprintf(line, sizeof(line),
+             "app: rot enter vc=%s hops=%d view=%.0fx%.0f door=%lu\n",
+             cn, hops, vs.width, vs.height, (unsigned long)door);
+    AevonAppLogWrite(line);
+
+    // 方法族取证：这一版第一次走到这里就把 `AWEPlayInteractionViewController`
+    // 上带 enter / landscape / fullscreen 的选择子列一遍（预算 40）。367 的
+    // `rot look` 预算被前面五个类吃完了，这个类一条都没 dump 到 —— 下一版若要
+    // 换方法，得先有这张表。
+    static int dumped = 0;
+    if (!dumped) {
+        dumped = 1;
+        int budget = 40;
+        AevonRotLookClass(hostCls, &budget);
+    }
+
+    // 主路：363 里用户手点全屏那一拍，present 就是从它发出的，参数 `desc=click`。
+    SEL real = sel_registerName("realEnterLandscapeFeedWithEnterMethod:");
+    @try {
+        if ([vc respondsToSelector:real]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(vc, real, @"click");
+            AevonAppLogWrite("app: rot enter fire realEnterLandscapeFeedWithEnterMethod:\n");
+            return;
+        }
+    } @catch (NSException *e) {
+        AevonAppLogWrite("app: rot enter real throw\n");
+    }
+    // 退路：无参版（0.4.86 押在它上面，但那要求 controller 已经建好；这里
+    // 换成宿主 VC 上试一次 —— 它自己转发也好、没有也好，日志会说话）。
+    SEL auto = sel_registerName("autoEnterLandscapeFeed");
+    @try {
+        if ([vc respondsToSelector:auto]) {
+            ((void (*)(id, SEL))objc_msgSend)(vc, auto);
+            AevonAppLogWrite("app: rot enter fire autoEnterLandscapeFeed\n");
+            return;
+        }
+    } @catch (NSException *e) {
+        AevonAppLogWrite("app: rot enter auto throw\n");
+    }
+    AevonAppLogWrite("app: rot enter nosel\n");
+}
+
 /// 0.4.86 — **转横之后，直接叫抖音自己进横屏播放器。**
 ///
 /// 三条已判死的路（都留了证词，这一版不再靠它们）：
@@ -8527,42 +8661,13 @@ static void AevonRotAutoEnter(void) {
         how = @"saved";
     }
     if (inst == nil) {
-        // 0.4.89 — 366 的两拍都是 `rot auto enter miss`：竖屏时
-        // `AWEPlayInteractionLandscapeFeedController` **根本还没被建出来**，
-        // 对象图里搜不到。363 的证据说这个动作真正的发起者是它的宿主
-        // `AWEPlayInteractionViewController`（用户手点全屏那一拍，present 就是从
-        // `realEnterLandscapeFeedWithEnterMethod:` 发出的，参数 `desc=click`），
-        // 而那个 VC 竖屏时一直在链上（`rot hook cls=AWEPlayInteractionViewController`）。
-        //
-        // 所以退一步：直接调宿主那个方法，参数按 363 读到的 `click` 传字符串。
-        // ⛔ 0.4.79 的闪退前提必须排掉：present 的 VC 若只答横屏、而 App 门不含
-        // 横屏 ⇒ `UIApplicationInvalidInterfaceOrientation` 直接 SIGABRT。这里
-        // 先读门（`AevonAppOrientNow`），不含横屏就只记 `block`、不发这一发。
-        Class act = objc_getClass("AWEPlayInteractionViewController");
-        SEL realSel = sel_registerName("realEnterLandscapeFeedWithEnterMethod:");
-        UIWindow *kw = (act != Nil) ? AevonKeyWindow() : nil;
-        UIViewController *top = (kw != nil) ? [kw rootViewController] : nil;
-        if (act != Nil && top != nil) {
-            NSUInteger door = AevonAppOrientNow(kw);
-            NSUInteger land = UIInterfaceOrientationMaskLandscapeLeft |
-                              UIInterfaceOrientationMaskLandscapeRight;
-            if ((door & land) == 0) {
-                AevonAppLogWrite("app: rot auto enter block door\n");
-                return;
-            }
-            int budget2 = 900;
-            id vc = AevonFindInstance(act, top, 0, &budget2);
-            if (vc != nil && [vc respondsToSelector:realSel]) {
-                @try {
-                    AevonAppLogWrite("app: rot auto enter by=vc realEnterLandscapeFeedWithEnterMethod:\n");
-                    ((void (*)(id, SEL, id))objc_msgSend)(vc, realSel, @"click");
-                    return;
-                } @catch (NSException *e) {
-                    AevonAppLogWrite("app: rot auto enter vc throw\n");
-                }
-            }
-        }
-        AevonAppLogWrite("app: rot auto enter miss\n");
+        // 0.4.90 — `AWEPlayInteractionLandscapeFeedController` 竖屏时确实没建出来
+        // （366/367 各两拍 `miss`）。而它的宿主 `AWEPlayInteractionViewController`
+        // 一直在链上 —— 0.4.89 用 `AevonFindInstance`（深度 8）找它，可那条链有
+        // **10 环**，走到第 8 环就停了，于是同一个 `miss` 又出现一次。
+        // 现在统一交给 `AevonRotEnterFullscreen`（沿链 find，门只记不拦）。
+        AevonAppLogWrite("app: rot auto enter via vc\n");
+        AevonRotEnterFullscreen();
         return;
     }
     SEL sel = sel_registerName("autoEnterLandscapeFeed");
@@ -9065,6 +9170,47 @@ static CFAbsoluteTime AevonRotProcStart(void) {
     return cached;
 }
 
+/// 0.4.90 — 宿主长按左下写下的「请进全屏」事件（`tmp/aevon-enter`）。
+///
+/// 与 `AevonRotApplyWant` 的两点不同，别混用：
+///   · want 读**值**（0/1，判重靠值变化），这里读**文件时间**（每按一次都变，
+///     所以连着按两次都能各走一遍）；
+///   · 陈旧请求守卫照抄：文件早于本进程启动 = 上一轮留下的，丢掉并记一行账，
+///     否则冷启动就会自己弹一次全屏（0.4.80 在 want 上踩过这个坑）。
+///
+/// 只做「有没有新事件」这一件事，真正发请求在 `AevonRotEnterFullscreen`。
+static void AevonRotApplyEnter(void) {
+    // Darwin 通知的回调不保证在主线程（见 `AevonBandNote` 上面那段）。
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonRotApplyEnter();
+        });
+        return;
+    }
+    static CFAbsoluteTime seen = 0;
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"aevon-enter"];
+    struct stat st;
+    if (stat([path fileSystemRepresentation], &st) != 0) return;
+    // 978307200 = 1970-01-01 与 2001-01-01 的秒差（与 `AevonRotProcStart` 同一条换算）。
+    CFAbsoluteTime at = (CFAbsoluteTime)st.st_mtimespec.tv_sec
+        + (CFAbsoluteTime)st.st_mtimespec.tv_nsec / 1000000000.0 - 978307200.0;
+    if (at <= seen) return;
+    seen = at;
+    CFAbsoluteTime started = AevonRotProcStart();
+    if (started > 0 && at < started - 0.2) {
+        static CFAbsoluteTime notedEnter = 0;
+        if (notedEnter < started) {
+            notedEnter = started;
+            char line[128];
+            snprintf(line, sizeof(line), "app: rot enter stale age=%.1f\n",
+                     started - at);
+            AevonAppLogWrite(line);
+        }
+        return;
+    }
+    AevonRotEnterFullscreen();
+}
+
 /// 读一次宿主要求（`AevonRotWant`）。值和上一次一样就什么都不做。
 static void AevonRotApplyWant(void) {
     // 0.4.78 — 整条路（present / dismiss / method_setImplementation / UIKit 查询）
@@ -9468,6 +9614,9 @@ static void AevonRotTick(void) {
     }
     AevonRotTicks += 1;
     if (AevonRotTicks % 10 == 1) AevonRotApplyWant();
+    // 0.4.90 — 兜底那一半：通知丢了也不能让长按永远没下文（0.4.67 在 want
+    // 上踩过「偏好域写不进去、只有文件到得了」）。每拍一次 stat，代价可忽略。
+    AevonRotApplyEnter();
     busy = 0;
 }
 
