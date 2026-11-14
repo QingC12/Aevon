@@ -1055,6 +1055,12 @@ def main():
                   # 判据：这一行 `card` 报的是**视觉**尺寸 —— 430x932@0,0 才算铺满；
                   # 再出现 430x258 就是退回横条了。
                   b"win: landscape full=1 rot=-90 card=%.0fx%.0f@%.0f,%.0f b=%@",
+                  # 0.4.88 — 365 的第二条：整屏转置把手势环推到屏幕外，用户
+                  # 「四边手势贴近屏幕、无法操作」。这一版横屏卡四边留 12 pt
+                  # （`landscapeSize`：bounds 908x406 → 视觉 406x908@12,12），
+                  # 并在 band 层加一个 46 pt 圆钮当出口。两条日志都在宿主这边。
+                  b"win: landscape exit btn at %.0f,%.0f",
+                  b"win: landscape exit tap b=%@",
                   b"win: card landscape exit phase1 b=",
                   b"win: card landscape exit phase2 world=%.0fx%.0f waited=%.1f b=%s",
                   b"win: keyboard fill ignored in landscape b=",
@@ -1851,11 +1857,8 @@ def main():
                       #     视图树上此刻有没有一块横着的横版视图。365 的 18:33:13
                       #     世界读到 430x717、链上还没有 Landscape 页，只有这条能
                       #     答对（同一份日志 `k1=AWELandscapeMediumVideoPlaye:0,717x430`）。
-                      #   · `landscape exit btn/tap`：横屏卡四边留 12 pt 后多出来的
-                      #     那个 46 pt 圆钮 —— 365 用户「四边手势贴屏幕、无法操作」。
+                      #     （横屏卡那两条 `win: landscape exit …` 在宿主那组。）
                       b"app: rot land hold world=%.0fx%.0f vid=%.0fx%.0f why=%s gate=%s n=%d",
-                      b"win: landscape exit btn at %.0f,%.0f",
-                      b"win: landscape exit tap b=%@",
                       b"app: rot land have cls=%s",
                       b"app: rot auto enter seen",
                       b"app: rot auto enter miss",
