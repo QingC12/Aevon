@@ -1664,12 +1664,8 @@ def main():
                       #   `app: rot keeper passthru cls=类名 off=1` ⇒ 转场容器
                       #        交互已关（触摸穿透到承载页）；off=0 表示 superview
                       #        是 window、宁可不穿透也没动它；
-                      #   `app: rot keeper spin world=WxH door=D hookn=N` ⇒ 立起来
-                      #        1.2 s 后世界的形状。**717x430 = UIKit 真转了；
-                      #        430x717 = 没转**（door=0 是门没开，door=1 是开了
-                      #        但 presentation 不触发旋转）；
-                      #   `app: rot keeper wait n=N` / `give up` ⇒ 找不到可 present
-                      #        的顶层 VC（转场中），重试三次后放弃；
+                      #   `app: rot keeper wait n=N` ⇒ 找不到可 present 的顶层
+                      #        VC（转场中）；0.4.80 起由追击重拍，不再自己排队。
                       #   `app: rot ask retired n=2`       ⇒ 直发请求连续被拒两次，
                       #        自动退场不再刷日志（守门 VC 那条路不依赖它）。
                       # 0.4.79 — 防崩三道闸（356 血案：`rot keeper show` 之后紧跟
@@ -1683,19 +1679,36 @@ def main():
                       #        `preferredInterfaceOrientationForPresentation` 读
                       #        `AevonRotKeeperDoorOpen`，门没开就答竖屏（交集永不为空）；
                       #   闸二：`AevonRotKeeperShow` 用 `AevonAppOrientNow()` 先问门，
-                      #        不含横屏就不 present —— `rot keeper block` 两拍后
-                      #        `rot keeper hold`（本进程不再试）；
+                      #        不含横屏就不 present —— `rot keeper block`；
                       #   闸三：`@try/@catch` 接住 NSException（不是崩溃信号，接得住
                       #        进程就活着）—— `rot keeper abort`。
+                      # 0.4.80 — 判死位收窄 + 切横追击（357：不崩了，但世界没转）。
+                      # 357 物证：首次请求落在抖音冷启动第 2 秒 —— `rot hook skip
+                      # why=root` + `rot keeper wait n=1` + `block appmask=2`，
+                      # 三次之后 `hold` 并置判死位；1.2 s 后 hook 才装成
+                      # （`rot hook n=5 app=1`），可判死位是粘性的 ⇒ 整轮再没
+                      # present 过 ⇒ 长按零反应、世界永远 430x717。
+                      #   `app: rot turn n=N world=WxH door=D hookn=N` ⇒ 追击每一拍：
+                      #        世界形状 / 门开没开 / 挂了几份 Method。**hookn=0 表示
+                      #        根本没装上（取窗/链问题），hookn>0 而 door=0 表示有
+                      #        hook 但 App 门仍答竖屏**；
+                      #   `app: rot turn ok n=N world=717x430` ⇒ 世界真转了（判据）；
+                      #   `app: rot turn end n=6 world=430x717` ⇒ 六拍（≈2.1 s）追完
+                      #        仍竖 ⇒ presentation 这条路不触发旋转，下一版换
+                      #        UINavigationController 包装 / FullScreen；
+                      #   `app: rot want stale age=N` ⇒ 宿主那条 want=1 早于本进程
+                      #        启动（上一轮会话的残留，357 里它让冷启动第 2 秒就去
+                      #        转屏）⇒ 丢掉，不当成用户这一轮的要求。
                       b"app: rot keeper show from=%s",
                       b"app: rot keeper hide",
                       b"app: rot keeper passthru cls=%s off=%d",
-                      b"app: rot keeper spin world=%.0fx%.0f door=%d hookn=%d",
                       b"app: rot keeper wait n=%d",
-                      b"app: rot keeper give up",
-                      b"app: rot keeper block appmask=%lu n=%d",
-                      b"app: rot keeper hold appmask=%lu",
+                      b"app: rot keeper block appmask=%lu hookn=%d n=%d",
                       b"app: rot keeper abort %s",
+                      b"app: rot turn n=%d world=%.0fx%.0f door=%d hookn=%d",
+                      b"app: rot turn ok n=%d world=%.0fx%.0f",
+                      b"app: rot turn end n=%d world=%.0fx%.0f",
+                      b"app: rot want stale age=%.1f",
                       b"app: rot hook skip why=root",
                       b"app: rot hook skip why=chain",
                       b"app: rot ask retired n=2",

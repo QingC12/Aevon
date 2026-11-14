@@ -84,6 +84,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <time.h>
 #include <unistd.h>
 #include <dispatch/dispatch.h>
@@ -7305,10 +7306,14 @@ static NSUInteger AevonAppOrientNow(UIWindow *win) {
 /// 存在，传 nil 会问出另一套答案。进门之前算一次，两个方法只读结果。
 static int AevonRotKeeperDoorOpen = 0;
 
-/// 1 = 本进程里「present 守门 VC」这条路已被判死（抛过异常 / 门打不开），
-/// 不再尝试。⛔ 粘性开关必须有同寿命刷新源：只由 `AevonRotWantSeen` 的
-/// 0 → 1 上升沿清零（见 `AevonRotApplyWant` 开头），不靠心跳、不靠计时。
-static int AevonRotKeeperBan = 0;
+/// 1 = 「present 守门 VC」这条路已被判死（UIKit **真抛过**方向异常），不再尝试。
+/// ⛔ 0.4.80 — 只有异常能置这个位。357 把「门关着」这条判死线证伪了：那次门关
+/// 是因为 hook 还没装上（首次请求落在冷启动第 2 秒，`rot hook skip why=root`
+/// + `rot keeper wait n=1`），1.2 s 后 hook 装成（`rot hook n=5 app=1`）门就开了；
+/// 可 0.4.79 把「门关」也写进这个粘性位，同一轮里 `hold` 之后再也不 present
+/// ⇒ 长按完全没反应、世界永远竖着。
+/// ⛔ 粘性开关必须有同寿命刷新源：只由 `AevonRotWantSeen` 的 0 → 1 上升沿清零。
+static int AevonRotKeeperDead = 0;
 
 /// 0.4.78 — **透明横屏守门 VC：复刻抖音自己那条路。**
 ///
@@ -7402,10 +7407,13 @@ static int AevonRotKeeperBan = 0;
 @end
 
 static AevonRotKeeper *AevonRotKeeperVC = nil;
-static int AevonRotKeeperTries = 0;
-/// 门闸重试计数（与上面的「present 前置」计数分开：两件事失败原因不同，
-/// 共用一个计数器会让 `hold` 提前触发）。
-static int AevonRotKeeperBlockTries = 0;
+/// 本轮 want=1 的证词配额（`wait` / `block` 各最多 3 行）：追击每 0.35 s 一拍，
+/// 不限就把日志灌满。
+static int AevonRotKeeperWaitNotes = 0;
+static int AevonRotKeeperBlockNotes = 0;
+/// 追击拍数与本轮是否已补发过直发请求（`AevonRotPursue`）。
+static int AevonRotPursueTick = 0;
+static int AevonRotPursueAsked = 0;
 
 /// 把守门 VC 立起来。presenter 取 key window 的 presented 链顶层 —— present
 /// 到非顶层会被 UIKit 转投到顶层，日志里就分不清是谁presented的。
@@ -7416,9 +7424,10 @@ static void AevonRotKeeperShow(void) {
         });
         return;
     }
-    // ⛔ 0.4.79 — 本进程这条路已被判死（抛过方向异常 / 门打不开）：一个字都不做。
+    // ⛔ 0.4.79/0.4.80 — 只有 UIKit 真抛过方向异常才算判死：一个字都不做。
     // 356 里同一份日志连崩三次（信息流、安全模式页各来一遍），重试没有意义。
-    if (AevonRotKeeperBan == 1) return;
+    // 「门关着」不进这里（357：那只是 hook 还没装上），交给追击再走一遍。
+    if (AevonRotKeeperDead == 1) return;
     if (AevonRotKeeperVC != nil) {
         if (AevonRotKeeperVC.presentingViewController != nil) {
             // 已经挂着：只叫系统重算一遍（窗口期页面可能换过，缓存老了）。
@@ -7446,24 +7455,16 @@ static void AevonRotKeeperShow(void) {
         hops += 1;
     }
     // present 的三条前置：有 VC、它的 view 已经在窗上、它自己不在转场里。
+    // ⛔ 0.4.80 — 这里不自己排队重试了：追击（`AevonRotPursue`）每 0.35 s 会再叫
+    // 一次；两套定时器叠在一起，只会在抖音长转场里堆出十几发 present。
     if (from == nil || from.view.window == nil
         || from.isBeingPresented || from.isBeingDismissed) {
-        if (AevonRotKeeperTries < 3) {
-            AevonRotKeeperTries += 1;
+        if (AevonRotKeeperWaitNotes < 3) {
+            AevonRotKeeperWaitNotes += 1;
             char line[96];
             snprintf(line, sizeof(line), "app: rot keeper wait n=%d\n",
-                     AevonRotKeeperTries);
+                     AevonRotKeeperWaitNotes);
             AevonAppLogWrite(line);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                         (int64_t)(0.45 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                AevonRotKeeperShow();
-            });
-        } else {
-            AevonAppLogWrite("app: rot keeper give up\n");
-            // 计数归零：下一次 `ApplyWant`（band 通知那一拍）还能再试三轮 ——
-            // 抖音正在做长转场时，present 会连着失败好几次。
-            AevonRotKeeperTries = 0;
         }
         return;
     }
@@ -7476,29 +7477,19 @@ static void AevonRotKeeperShow(void) {
                           UIInterfaceOrientationMaskLandscapeRight;
     if ((appMask & landMask) == 0) {
         AevonRotKeeperDoorOpen = 0;
-        char note[144];
-        snprintf(note, sizeof(note), "app: rot keeper block appmask=%lu n=%d\n",
-                 (unsigned long)appMask, AevonRotKeeperBlockTries);
-        AevonAppLogWrite(note);
-        // 两拍重试：hook 刚换上时抖音可能还在用缓存的旧回答，第一问会读到
-        // 「只竖屏」；0.3 s 后系统重算完就开了。
-        if (AevonRotKeeperBlockTries < 2) {
-            AevonRotKeeperBlockTries += 1;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                         (int64_t)(0.30 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                AevonRotKeeperShow();
-            });
-        } else {
-            AevonRotKeeperBlockTries = 0;
-            AevonRotKeeperBan = 1;
-            snprintf(note, sizeof(note), "app: rot keeper hold appmask=%lu\n",
-                     (unsigned long)appMask);
+        // ⛔ 0.4.80 — **不设判死位**。357：门关是因为 hook 还没装上（首次请求落在
+        // 冷启动第 2 秒，`rot hook skip why=root`），装好之后门就开了。`hookn=`
+        // 就是用来一眼分开「根本没 hook」和「有 hook 但门仍答竖屏」的取证读数。
+        if (AevonRotKeeperBlockNotes < 3) {
+            AevonRotKeeperBlockNotes += 1;
+            char note[176];
+            snprintf(note, sizeof(note),
+                     "app: rot keeper block appmask=%lu hookn=%d n=%d\n",
+                     (unsigned long)appMask, AevonHookN, AevonRotKeeperBlockNotes);
             AevonAppLogWrite(note);
         }
         return;
     }
-    AevonRotKeeperBlockTries = 0;
     // 门开了：keeper 的两个方向方法照这个值答横屏（也是防崩第一道的数据源）。
     AevonRotKeeperDoorOpen = 1;
     AevonRotKeeper *k = [[AevonRotKeeper alloc] init];
@@ -7516,11 +7507,11 @@ static void AevonRotKeeperShow(void) {
     // 情况下到不了这里）。
     @try {
         [from presentViewController:k animated:NO completion:^{
-            AevonRotKeeperTries = 0;
+            // 落地了才说明这拍成功；失败的那几秒由追击继续推。
         }];
     } @catch (NSException *e) {
         AevonRotKeeperDoorOpen = 0;
-        AevonRotKeeperBan = 1;
+        AevonRotKeeperDead = 1;
         AevonRotKeeperVC = nil;
 #if !__has_feature(objc_arc)
         [k release];
@@ -7546,7 +7537,9 @@ static void AevonRotKeeperHide(void) {
     // 竖屏（`WantSeen` 已经是 0，这里把第一道闸的数据源也一起归零）。
     AevonRotKeeperDoorOpen = 0;
     AevonRotKeeperVC = nil;
-    AevonRotKeeperTries = 0;
+    AevonRotPursueTick = 0;
+    AevonRotKeeperWaitNotes = 0;
+    AevonRotKeeperBlockNotes = 0;
     UIViewController *p = k.presentingViewController;
     if (p != nil) {
         [p dismissViewControllerAnimated:NO completion:nil];
@@ -7556,6 +7549,85 @@ static void AevonRotKeeperHide(void) {
     [k release];
 #endif
     AevonSioNudgeAll();
+}
+
+/// 0.4.80 — **切横追击：每 0.35 s 重走一遍「装 hook → 问门 → 立 keeper」，
+/// 最多 6 拍（≈2.1 s），世界一转横立刻收手。**
+///
+/// 为什么必须有这一层（357 的全部证据）：
+/// 首次请求落在抖音冷启动第 2 秒 —— `rot hook skip why=root`（root VC 还没建）、
+/// `rot keeper wait n=1`（没有可 present 的顶层）、`rot keeper block appmask=2`
+/// （门当然答竖屏）。1.2 s 后那次重试才把 hook 装成（`rot hook n=5 app=1`），
+/// 可 0.4.79 的判死位是粘性的 ⇒ 整轮再没试过第二次 ⇒ 长按零反应。
+/// 这版把「一次成不成」换成「看着世界量」：只要世界还是竖的，就继续推。
+///
+/// ⛔ 上限是硬要求：抖音在长转场里 present 会一直失败，无限追 = 无限 present。
+static void AevonRotPursue(void) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AevonRotPursue();
+        });
+        return;
+    }
+    if (AevonRotWantSeen != 1) return;
+    CGSize w = AevonRotWorld();
+    BOOL land = (w.width > w.height + 40.0);
+    char line[144];
+    if (land) {
+        // 判据：这一行出现就等于「世界真转了」，视频由 App 自己按横版重排。
+        snprintf(line, sizeof(line), "app: rot turn ok n=%d world=%.0fx%.0f\n",
+                 AevonRotPursueTick, w.width, w.height);
+        AevonAppLogWrite(line);
+        return;
+    }
+    if (AevonRotPursueTick >= 6) {
+        snprintf(line, sizeof(line), "app: rot turn end n=%d world=%.0fx%.0f\n",
+                 AevonRotPursueTick, w.width, w.height);
+        AevonAppLogWrite(line);
+        return;
+    }
+    AevonRotPursueTick += 1;
+    // ① 装 hook（root 没建好就会 skip，下一拍再来）；② 才立 keeper。
+    // ⛔ 这个顺序是 356 闪退换来的硬约束，不许调（见 `AevonRotApplyWant` want==1 段）。
+    AevonOrientHookInstall();
+    AevonRotKeeperShow();
+    snprintf(line, sizeof(line),
+             "app: rot turn n=%d world=%.0fx%.0f door=%d hookn=%d\n",
+             AevonRotPursueTick, w.width, w.height,
+             AevonRotKeeperDoorOpen, AevonHookN);
+    AevonAppLogWrite(line);
+    // 第二拍补一次直发请求：keeper 在场时校验对象变成顶层那个「答横屏」的 VC，
+    // 这一发有机会放行（355 判死的失败是**没有 keeper** 时测的）。
+    if (AevonRotPursueTick == 2 && AevonRotPursueAsked == 0) {
+        AevonRotPursueAsked = 1;
+        AevonRotAsk(YES);
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        AevonRotPursue();
+    });
+}
+
+/// 0.4.80 — 本进程的启动墙钟（`CFAbsoluteTime`）。判「宿主那条请求是不是上一轮
+/// 留下的」用。取不到就返回 0（调用点一律把请求当新的）：吞掉真请求比多转一次
+/// 严重得多。
+static CFAbsoluteTime AevonRotProcStart(void) {
+    static CFAbsoluteTime cached = -1;
+    if (cached >= 0) return cached;
+    cached = 0;
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+    struct kinfo_proc info;
+    size_t size = sizeof(info);
+    memset(&info, 0, sizeof(info));
+    if (sysctl(mib, 4, &info, &size, NULL, 0) == 0 && size > 0) {
+        struct timeval tv = info.kp_proc.p_starttime;
+        if (tv.tv_sec > 0) {
+            // 978307200 = 1970-01-01 与 2001-01-01 的秒差。
+            cached = (CFAbsoluteTime)tv.tv_sec
+                     + (CFAbsoluteTime)tv.tv_usec / 1000000.0 - 978307200.0;
+        }
+    }
+    return cached;
 }
 
 /// 读一次宿主要求（`AevonRotWant`）。值和上一次一样就什么都不做。
@@ -7592,6 +7664,33 @@ static void AevonRotApplyWant(void) {
     }
     if (text[0] == '\0') return;
     int want = (text[0] == '1') ? 1 : 0;
+    // ⛔ 0.4.80 — **陈旧请求守卫**。357 的物证：抖音 13:56:14 冷启动，13:56:16 就读到
+    // want=1（紧接着 `rot hook skip why=root` + `rot keeper wait n=1`），而用户真正
+    // 的长按在 13:56:23 —— 那个 1 是**上一轮会话**留下的（宿主只在长按里写这个值，
+    // 没有任何地方会清）。0.4.79 因为这些尝试全都失败而无害；0.4.80 的追击会真的
+    // 把它转起来 ⇒ 卡片一开就自己变横。所以：请求文件的 mtime 早于本进程启动
+    // = 不是给这一轮的，丢掉。
+    if (want == 1) {
+        NSString *rp = [NSTemporaryDirectory()
+                        stringByAppendingPathComponent:@"aevon-rot"];
+        struct stat st;
+        CFAbsoluteTime started = AevonRotProcStart();
+        if (started > 0 && stat([rp fileSystemRepresentation], &st) == 0) {
+            CFAbsoluteTime asked = (CFAbsoluteTime)st.st_mtimespec.tv_sec
+                + (CFAbsoluteTime)st.st_mtimespec.tv_nsec / 1000000000.0 - 978307200.0;
+            if (asked < started - 0.2) {
+                static CFAbsoluteTime noted = 0;
+                if (noted < started) {
+                    noted = started;
+                    char line[128];
+                    snprintf(line, sizeof(line), "app: rot want stale age=%.1f\n",
+                             started - asked);
+                    AevonAppLogWrite(line);
+                }
+                return;
+            }
+        }
+    }
     // 0.4.74 — 判重放宽：351 里 10:37:55 的一次 ask 把 `AevonRotWantSeen` 置 1，
     // 10:37:59 用户的长按（want=1）被 `want == WantSeen` 直接吞掉 —— App 侧零
     // 动作零日志。切横的重试条件改成「同一状态 1.2 s 内不重发」（限频防
@@ -7603,10 +7702,16 @@ static void AevonRotApplyWant(void) {
     int wantOld = AevonRotWantSeen;
     AevonRotWantSeen = want;
     AevonWantTryAt = fsNow;
-    // ⛔ 0.4.79 — `AevonRotKeeperBan` 的同寿命刷新源：want 的 0 → 1 上升沿。
+    // ⛔ 0.4.79 — `AevonRotKeeperDead` 的同寿命刷新源：want 的 0 → 1 上升沿。
     // 一次长按是一轮新尝试（进程内最多被 @try/@catch 兜一次），但不许在
     // 同一轮里反复撞同一堵墙 —— 356 就是这样连崩三次的。
-    if (want == 1 && wantOld == 0) AevonRotKeeperBan = 0;
+    if (want == 1 && wantOld == 0) {
+        AevonRotKeeperDead = 0;
+        AevonRotPursueTick = 0;
+        AevonRotPursueAsked = 0;
+        AevonRotKeeperWaitNotes = 0;
+        AevonRotKeeperBlockNotes = 0;
+    }
     // ⛔ 0.4.79 — 0.4.78 在这里就 `AevonRotKeeperShow()`，那一行是 356 闪退的
     // 直接原因：守门 VC 立在 `AevonOrientHookInstall()` **之前**，present 那一刻
     // App 级方向门还是抖音原生的「只竖屏」，与只答横屏的 keeper 交集为空 ⇒
@@ -7615,7 +7720,14 @@ static void AevonRotApplyWant(void) {
     // 现在只在这里立，顺序固定为 **先装 hook → 再 show**（见下面 want==1 段）。
     // 已经在这个状态上就不再发：`requestGeometryUpdate` 每发一次都要走一趟系统
     // 协商，重复发等于让窗口闪一下。
-    if (AevonRotSent == want && !retry) return;
+    // ⛔ 0.4.80 — 「已发过同一状态」不再等于「已经到位」：发过 1 而世界仍是竖的
+    // （上一次转失败、或发布之后又被系统掰回竖）时，长按必须还能再推一轮，
+    // 否则就是「按了没反应」的另一种成因。
+    if (AevonRotSent == want && !retry) {
+        CGSize w0 = AevonRotWorld();
+        BOOL land0 = (w0.width > w0.height + 40.0);
+        if ((want == 1) == land0) return;
+    }
     // 0.4.70 — 再要转横先把上一轮的退出锁存清掉，否则「长按切竖再切横」的第二
     // 次请求会被锁存吞成又一次退出。
     if (want == 1) {
@@ -7643,37 +7755,21 @@ static void AevonRotApplyWant(void) {
         }
         return;
     }
-    // 0.4.79 — 切横主路，**这两步的顺序是硬约束，不许调**：
+    // 0.4.80 — 切横主路：交给追击，一拍拍推着量。
+    //
+    // ⛔ 追击内部的那个顺序仍是硬约束、不许调（356 闪退换来的）：
     //   ① `AevonOrientHookInstall()`：整条协商链 + AppDelegate 方向门换成「答放行」；
     //   ② `AevonRotKeeperShow()`：才 present 那个只答横屏的透明 VC。
-    // 调过来就是 356 的闪退 —— present 时门还没开，交集为空，UIKit 抛异常杀进程。
-    // 0.4.77 的整链 hook 保留：它保证世界转过去之后，底下那十层 VC 不会立刻
-    // 把方向掰回竖屏（`shouldAutorotate` 也一起换了）。
-    // 0.4.74 的 tap 全屏按钮已删：352 七连 miss，且 sheet 全屏页链路本身
-    // 就要 1~2 s —— 慢的来源。
-    AevonOrientHookInstall();
-    AevonRotKeeperShow();
-    // 备用杠杆：守门 VC 已在场时，系统对 `requestGeometryUpdate` 的校验对象变成
-    // 「顶层那个答横屏的 VC」，这一发有机会放行。真放行了也就不需要 UIKit 自己
-    // 那一次；失败满两次自动退场（`AevonRotAskFails`）。
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (AevonRotWantSeen == 1) AevonRotAsk(YES);
-    });
-    // 判据：守门 VC 立起来 1.2 s 后世界是什么形状。`717x430` ⇒ UIKit 真替我们
-    // 要到了那一次几何（长按就该直接转）；`430x717` ⇒ presentation 没触发旋转，
-    // 下一版改 presentation 风格 / 换成包一个 UINavigationController。
-    // `door=` 是那一刻 App 级方向门里有没有横屏，`hookn=` 是 hook 表里挂了几份
-    // Method —— 两行一起看才知道是「门没开」还是「开了但 presentation 不转」。
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (AevonRotWantSeen != 1) return;
-        CGSize w = AevonRotWorld();
-        char line[160];
-        snprintf(line, sizeof(line), "app: rot keeper spin world=%.0fx%.0f door=%d hookn=%d\n",
-                 w.width, w.height, AevonRotKeeperDoorOpen, AevonHookN);
-        AevonAppLogWrite(line);
-    });
+    // 调过来就是「present 时门还没开 ⇒ 交集为空 ⇒ UIKit 抛异常杀进程」。
+    //
+    // 为什么不能只试一次（357）：首次请求落在抖音冷启动第 2 秒，那一刻
+    // `rot hook skip why=root` + `rot keeper wait n=1`，门必然答竖屏；
+    // 1.2 s 后 hook 才装成（`rot hook n=5 app=1`），而 0.4.79 的判死位是粘性的
+    // ⇒ 整轮再没 present 过 ⇒ 长按零反应、世界永远 430x717。
+    // 0.4.77 的整链 hook 保留：它保证世界转过去后，底下十层不会立刻把方向掰回竖。
+    AevonRotPursueTick = 0;
+    AevonRotPursueAsked = 0;
+    AevonRotPursue();
 }
 
 /// 0.4.66 — 宿主刚给这张卡发过 band：**把当前横竖重报一次**，判重放行。
