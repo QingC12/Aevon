@@ -6993,70 +6993,106 @@ static void AevonRotAsk(BOOL on) {
 #endif
 }
 
-/// 0.4.74 — 长按切横的真通路：**替用户按一下抖音自己的全屏按钮**。
+/// 0.4.75 — 长按切横的真通路：**临时改掉 `supportedInterfaceOrientations`
+/// 的回答，让 `requestGeometryUpdate` 放行**。
 ///
-/// 351 判决：假横只是 canvas 的视觉转置，App 世界纹丝不动（`rot probe on=0
-/// world=430x717`），视频永远是竖版画面横躺 —— 用户要的是「视频跟着转」。
-/// App 世界转横的唯一通路是抖音自己进全屏页（351 实证：点全屏按钮 →
-/// `page sheet AWELandscapeNavigationController` → 世界 717x430 →
-/// `AWELandscapeMediumVideoPlaye` 横版播放器 → sweep 跟随、退出还原全链正常）。
-/// `requestGeometryUpdate` 求不动（350 六次 + 351 一次，全被
-/// `supportedInterfaceOrientations: portrait` 拒）。
+/// 352 判决了两件事：① 0.4.74 的 tap 全屏按钮 7 连 `miss`（按钮不叫这个名，
+/// 或不是 UIControl），且 sheet 全屏页链路本身就要 1~2 s —— 慢的来源；
+/// ② 用户实测「关掉系统方向锁后转设备，抖音视频会自动旋转」—— 说明
+/// **Autorotate 检查路径放行横屏**，挡住我们的只是 `requestGeometryUpdate`
+/// 时顶层 VC 对 `supportedInterfaceOrientations` 回答的 `portrait`。
 ///
-/// 找法：DFS 遍历 key window（上限 600 个视图），类名（小写化）含
-/// `fullscreen` 的 UIControl，可见（enabled、alpha、尺寸）才 tap。命中打
-/// `app: fullscreen tap hit=类名`；没找到打 `app: fullscreen tap miss` ——
-/// 宿主侧假横继续兜底（假横先转、本函数命中后 promote 升真横），不受影响。
-/// 0.4.74 — 上一次 tap 的时刻。限频用：同一值 1.2 s 内不重复 tap（判重
-/// 放宽后 band 通知可能连着来），但 sendActions 无效也每次都重试 ——
-/// 用户长按的意图就是转横，不能被上一次的失败堵死。
-static CFAbsoluteTime AevonFullscreenTryAt = 0;
+/// 做法：want=1 到达时，把 key window 的顶层 VC（root → presented 链）的
+/// **类**的 `supportedInterfaceOrientations` 实现临时换成「答
+/// AllButUpsideDown」，全链调一遍 `setNeedsUpdateOfSupportedInterfaceOrientations`
+/// 叫系统重算缓存，然后正常发 `requestGeometryUpdate` —— 系统来问，我们答
+/// 「都支持」，放行，世界亚秒级转横。want=0 时换回原实现并再叫一遍 —— 顺带
+/// 把「退出时世界迟迟不回竖」也治了（原来只能等抖音自己退）。
+///
+/// ⚠️ 只换顶层那个**类**：子类 override 的话 method 就是子类的，只影响它；
+/// 没子类实现的话拿到的是基类 Method，窗口期所有 VC 都答 all —— 窗口由
+/// `AevonRotWantSeen` 把守，want=0 一到立刻还原，不影响抖音日常。
+/// 0.4.75 — 上一次 hook 的类与原实现。换回用。
+static IMP AevonOriSIOImp = NULL;
+static Class AevonHookedCls = Nil;
 
-static BOOL AevonTapFullscreen(void) {
-    // ⛔ 同 `AevonRotAsk`：DFS + `sendActions` 全是 UIKit，只主线程。
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            AevonTapFullscreen();
-        });
-        return NO;
+static NSUInteger AevonHookSIO(id self, SEL _cmd) {
+    if (AevonRotWantSeen == 1) {
+        return UIInterfaceOrientationMaskAllButUpsideDown;
     }
+    if (AevonOriSIOImp != NULL) {
+        return ((NSUInteger (*)(id, SEL))AevonOriSIOImp)(self, _cmd);
+    }
+    return UIInterfaceOrientationMaskPortrait;
+}
+
+/// 把 setNeedsUpdate 沿 presented 链全叫一遍（`AevonRotAsk` 只叫 root，不够
+/// —— 系统缓存的是顶层那层的答案）。
+static void AevonSioNudgeAll(void) {
     UIWindow *kw = AevonKeyWindow();
-    if (kw == nil) {
-        AevonAppLogWrite("app: fullscreen tap miss (no window)\n");
-        return NO;
+    if (kw == nil) return;
+    UIViewController *v = [kw rootViewController];
+    int hops = 0;
+    SEL nudge = sel_registerName("setNeedsUpdateOfSupportedInterfaceOrientations");
+    while (v != nil && hops < 8) {
+        if ([v respondsToSelector:nudge]) {
+            ((void (*)(id, SEL))objc_msgSend)(v, nudge);
+        }
+        v = [v presentedViewController];
+        hops += 1;
     }
-    NSMutableArray *stack = [NSMutableArray arrayWithObject:kw];
-    int seen = 0;
-    UIControl *hit = nil;
-    while (stack.count > 0 && seen < 600 && hit == nil) {
-        UIView *v = [stack lastObject];
-        [stack removeLastObject];
-        seen += 1;
-        if (v == nil) continue;
-        for (UIView *s in [v subviews]) [stack addObject:s];
-        if (![v isKindOfClass:[UIControl class]]) continue;
-        UIControl *c = (UIControl *)v;
-        if (!c.isEnabled || c.hidden || c.alpha < 0.05) continue;
-        CGSize sz = [c bounds].size;
-        if (sz.width < 8.0 || sz.height < 8.0) continue;
-        NSString *name = NSStringFromClass([c class]);
-        if (name.length == 0) continue;
-        NSRange r = [[name lowercaseString] rangeOfString:@"fullscreen"];
-        if (r.location == NSNotFound) continue;
-        hit = c;
+}
+
+static void AevonOrientHookInstall(void) {
+    // ⛔ 全是 UIKit / objc runtime，只主线程（调用点在 ApplyWant 主线程段）。
+    UIWindow *kw = AevonKeyWindow();
+    UIViewController *top = [kw rootViewController];
+    int hops = 0;
+    while (top != nil && [top presentedViewController] != nil && hops < 6) {
+        top = [top presentedViewController];
+        hops += 1;
     }
-    if (hit != nil) {
-        NSString *name = NSStringFromClass([hit class]);
-        [hit sendActionsForControlEvents:UIControlEventTouchUpInside];
-        char line[128];
-        snprintf(line, sizeof(line), "app: fullscreen tap hit=%s\n", [name UTF8String]);
-        AevonAppLogWrite(line);
-        AevonFullscreenTryAt = CFAbsoluteTimeGetCurrent();
-        return YES;
+    if (top == nil) return;
+    Class cls = [top class];
+    if (cls == Nil) return;
+    if (cls == AevonHookedCls) {
+        // 同一个类已挂着：只需叫系统重算（窗口期间页面可能没变但缓存老了）。
+        AevonSioNudgeAll();
+        return;
     }
-    AevonFullscreenTryAt = CFAbsoluteTimeGetCurrent();
-    AevonAppLogWrite("app: fullscreen tap miss\n");
-    return NO;
+    // 类换了（用户切了页面）：先还原旧的再挂新的。
+    if (AevonHookedCls != Nil && AevonOriSIOImp != NULL) {
+        Method om = class_getInstanceMethod(AevonHookedCls,
+                                            @selector(supportedInterfaceOrientations));
+        if (om != NULL) method_setImplementation(om, AevonOriSIOImp);
+        AevonHookedCls = Nil;
+        AevonOriSIOImp = NULL;
+    }
+    Method m = class_getInstanceMethod(cls, @selector(supportedInterfaceOrientations));
+    if (m == NULL) return;
+    AevonOriSIOImp = method_setImplementation(m, (IMP)AevonHookSIO);
+    AevonHookedCls = cls;
+    AevonSioNudgeAll();
+    NSString *name = NSStringFromClass(cls);
+    char line[128];
+    snprintf(line, sizeof(line), "app: rot hook cls=%s\n",
+             name.length > 0 ? [name UTF8String] : "-");
+    AevonAppLogWrite(line);
+}
+
+static void AevonOrientHookRestore(void) {
+    if (AevonHookedCls == Nil || AevonOriSIOImp == NULL) return;
+    Method m = class_getInstanceMethod(AevonHookedCls,
+                                       @selector(supportedInterfaceOrientations));
+    if (m != NULL) method_setImplementation(m, AevonOriSIOImp);
+    NSString *name = NSStringFromClass(AevonHookedCls);
+    char line[128];
+    snprintf(line, sizeof(line), "app: rot hook restore cls=%s\n",
+             name.length > 0 ? [name UTF8String] : "-");
+    AevonAppLogWrite(line);
+    AevonHookedCls = Nil;
+    AevonOriSIOImp = NULL;
+    AevonSioNudgeAll();
 }
 
 /// 读一次宿主要求（`AevonRotWant`）。值和上一次一样就什么都不做。
@@ -7086,15 +7122,14 @@ static void AevonRotApplyWant(void) {
     int want = (text[0] == '1') ? 1 : 0;
     // 0.4.74 — 判重放宽：351 里 10:37:55 的一次 ask 把 `AevonRotWantSeen` 置 1，
     // 10:37:59 用户的长按（want=1）被 `want == WantSeen` 直接吞掉 —— App 侧零
-    // 动作零日志。切横的重试条件改成「距上次 tap > 1.2 s」：tap 命中后 App 自己
-    // 转横、不需要重发；miss（页面没有全屏按钮）⇒ 用户切到有按钮的页面再按
-    // 一次必须真的尝试。
+    // 动作零日志。切横的重试条件改成「同一状态 1.2 s 内不重发」（限频防
+    // band 通知连发），超过就真的再试一次。
+    static CFAbsoluteTime AevonWantTryAt = 0;
     CFAbsoluteTime fsNow = CFAbsoluteTimeGetCurrent();
-    int retry = (want == 1
-                 && (AevonFullscreenTryAt == 0
-                     || fsNow - AevonFullscreenTryAt > 1.2));
+    int retry = (fsNow - AevonWantTryAt > 1.2);
     if (want == AevonRotWantSeen && !retry) return;
     AevonRotWantSeen = want;
+    AevonWantTryAt = fsNow;
     // 已经在这个状态上就不再发：`requestGeometryUpdate` 每发一次都要走一趟系统
     // 协商，重复发等于让窗口闪一下。
     if (AevonRotSent == want && !retry) return;
@@ -7115,6 +7150,10 @@ static void AevonRotApplyWant(void) {
             });
             return;
         }
+        // 0.4.75 — 先还原 0.4.74 的方向回答窗口（`supportedInterfaceOrientations`
+        // 换回原实现 + 全链 setNeedsUpdate）：系统重算后 VC 重答 portrait，
+        // 世界自己转回竖 —— 不再需要等宿主解钉或抖音自己退。
+        AevonOrientHookRestore();
         CGSize w2 = AevonRotWorld();
         if (w2.width > w2.height + 40.0) {
             AevonRotFeedExit = 1;
@@ -7123,12 +7162,13 @@ static void AevonRotApplyWant(void) {
             return;
         }
     }
-    // 0.4.74 — 切横先试「按抖音自己的全屏按钮」（351 实证的唯一真通路）：
-    // 命中 ⇒ App 自己进全屏横播页、世界转横、探针/sweep 全链跟随，到此为止；
-    // 没命中（当前页面没有全屏按钮，如评论区/个人页）⇒ 才发
-    // `requestGeometryUpdate` 兜底（几乎必被拒，但一行日志留下证据）。
-    if (want == 1) {
-        if (AevonTapFullscreen()) return;
+    // 0.4.75 — 切横主路：把顶层 VC 类的 `supportedInterfaceOrientations`
+    // 临时换成「答 AllButUpsideDown」（352 实证：转设备能自动旋转 = Autorotate
+    // 路径放行横屏，挡住 requestGeometryUpdate 的只是这个回答），然后正常
+    // 发 `requestGeometryUpdate`。0.4.74 的 tap 全屏按钮已删：352 七连 miss，
+    // 且 sheet 全屏页链路本身就要 1~2 s —— 慢的来源。
+    if (want == 1 && [NSThread isMainThread]) {
+        AevonOrientHookInstall();
     }
     AevonRotAsk(want == 1);
 }
